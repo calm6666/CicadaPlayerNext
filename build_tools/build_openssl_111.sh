@@ -158,14 +158,13 @@ function build_openssl_111(){
         ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
 
         if [[ "$1" == "Android" ]]; then
-            # 用带 API 级别的 NDK clang 包装器替换裸 clang，并去掉不带 API 的
-            # -target 参数：包装器会根据自身名字注入正确的 sysroot 与
-            # crtbegin_so.o/crtend_so.o 等运行时目标文件路径，保证 .so 链接成功。
-            # 同时把 --sysroot 统一改为现代 NDK 的统一 sysroot：
-            # 旧 platforms/ 路径下没有 usr/include/<triple>/asm 等架构头文件，
-            # 会导致 #include <asm/types.h> 找不到（OpenSSL 3.0 的 conf 在
-            # 裸 clang 场景会回退到旧 platforms 路径，而 1.1.1 的 shim 又让它
-            # 误判该路径存在）。
+            # 用带 API 级别的 NDK clang 包装器替换裸 clang，并去掉任何裸 -target
+            # 参数：包装器根据自身名字提供 target 与 API 级别，并注入
+            # crtbegin_so.o/crtend_so.o 等运行时目标文件路径。
+            # 同时把 --sysroot 统一改为现代 NDK 的统一 sysroot，并显式补充
+            # 架构头文件目录（usr/include/<triple>/asm 等），避免
+            # #include <asm/types.h> 找不到的问题（不依赖 clang 驱动是否
+            # 自动加入 multiarch 目录）。
             local wrapper="${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
             local ndk_host
             case "$(uname -s)" in
@@ -173,14 +172,26 @@ function build_openssl_111(){
                 *)       ndk_host=linux-x86_64 ;;
             esac
             local unified_sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
-            if command -v "${wrapper}" >/dev/null 2>&1; then
-                sed -i "s#^CC=clang\$#CC=${wrapper}#; s#^CC= clang\$#CC=${wrapper}#" Makefile
-                sed -i 's# -target armv7a-linux-androideabi##g; s# -target aarch64-linux-android##g; s# -target arm-linux-androideabi##g; s# -target x86_64-linux-android##g; s# -target i686-linux-android##g' Makefile
-                echo "openssl Android: use NDK wrapper compiler ${wrapper}"
-            fi
+
             if [[ -d "${unified_sysroot}" ]]; then
                 sed -i "s#--sysroot=[^ ]*#--sysroot=${unified_sysroot}#g" Makefile
                 echo "openssl Android: use unified sysroot ${unified_sysroot}"
+            fi
+
+            # 删除任何显式 -target（包装器按名字自带 target+API）
+            sed -i 's# -target [^ ]*##g' Makefile
+
+            if command -v "${wrapper}" >/dev/null 2>&1; then
+                sed -i "s#^CC=clang\$#CC=${wrapper}#; s#^CC= clang\$#CC=${wrapper}#" Makefile
+                echo "openssl Android: use NDK wrapper compiler ${wrapper}"
+            fi
+
+            # 显式补充架构头文件 include 目录（armv7a -> arm-linux-androideabi）
+            local tri_inc="${CROSS_COMPILE}"
+            [[ "${tri_inc}" == "armv7a-linux-androideabi" ]] && tri_inc="arm-linux-androideabi"
+            if [[ -d "${unified_sysroot}/usr/include/${tri_inc}" ]]; then
+                sed -i "s#^CNF_CFLAGS=.*#& -isystem ${unified_sysroot}/usr/include/${tri_inc}#" Makefile
+                echo "openssl Android: add arch include ${unified_sysroot}/usr/include/${tri_inc}"
             fi
 
             if [[ "${openssl_major}" -lt 3 ]]; then
