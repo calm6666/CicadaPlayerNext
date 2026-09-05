@@ -72,6 +72,10 @@ source external/china_mirror_env.sh     # gitee 镜像预设
 
 ## FFmpeg 9.0 + 对象清单播放（本仓库升级要点）
 
+> 📖 **全新构建流程请先看 [`docs/BUILD_GUIDE.md`](docs/BUILD_GUIDE.md)**：
+> 环境准备（autotools/NDK r25c）、CRLF 与权限免疫、国内镜像、各平台一键构建、
+> 常见问题排查表。国内镜像配置分析见 [`docs/ChinaMirrors.md`](docs/ChinaMirrors.md)。
+
 - **FFmpeg 9.0**：全部依赖升级至 FFmpeg n9.0，旧版 API 全部迁移（详见
   [`docs/FFmpeg9_Upgrade.md`](docs/FFmpeg9_Upgrade.md)）。
 - **Android 最低版本 7.0 (API 24)**：全部 gradle/cmake/CI 已升级（详见

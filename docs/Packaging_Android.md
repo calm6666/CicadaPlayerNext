@@ -1,14 +1,18 @@
 # Android 打包流程（minSdk 24 / Android 7.0+，FFmpeg 9.0）
 
+> 全新环境从零开始请先看 [`docs/BUILD_GUIDE.md`](BUILD_GUIDE.md)
+> （环境准备、CRLF/权限免疫、国内镜像、常见问题排查）。
+
 ## 1. 环境要求
 
 | 组件 | 版本 |
 |---|---|
 | JDK | 17 |
 | Android SDK | compileSdk 34（build-tools 34.x） |
-| Android NDK | **r25c**（或更高；FFmpeg 9 需要 C11 工具链，gcc/gnustl 已移除） |
+| Android NDK | **r25c 推荐**（r25~r27 可用，脚本已 shim 新 NDK 布局） |
 | CMake | 3.15+（AGP 自带或系统安装） |
-| 主机 | Linux / macOS（建议 Ubuntu 22.04） |
+| 主机 | Linux / macOS（建议 Ubuntu 22.04）；需安装 autoconf/automake/libtool/pkg-config |
+| 换行符 | 脚本必须 LF（Windows 检出需清理，见 BUILD_GUIDE 第 1.3 节） |
 
 ## 2. 一键编译脚本（GitHub Actions 同款流程）
 
@@ -17,16 +21,29 @@
 export ANDROID_NDK=~/android-env/android-ndk-r25c
 export ANDROID_NDK_HOME=$ANDROID_NDK
 
-# 1) 拉取并编译外部库（FFmpeg n9.0 等）
+# 1) 加载环境（定义 build_Android 等函数）
 . setup.env
+
+# 2)（可选）国内镜像
+source external/china_mirror_env.sh     # gitee 镜像预设（详见 docs/ChinaMirrors.md）
+export USE_CHINA_MIRROR=true            # gradle 走阿里云 Maven
+
+# 3) 拉取并编译外部库（FFmpeg n9.0 等）
 cd external
 ./build_external.sh Android
 # 产物: external/install/ffmpeg/Android/{armeabi-v7a,arm64-v8a}/libalivcffmpeg.so + include
 
-# 2) 编译 SDK 与 Demo APK
+# 4) 编译 SDK 与 Demo APK
 cd ../platform/Android/source
 export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libalivcffmpeg.so; false: 由宿主 APP 提供
 ./gradlew assembleDebug assembleRelease
+```
+
+或一步到位（含产物收集到 `output/`）：
+
+```bash
+. setup.env
+build_Android
 ```
 
 产物：
@@ -41,15 +58,21 @@ export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libalivcffmpeg.so; fals
 `external/build_external.sh Android` 依次执行：
 
 ```
-player_git_source_list.sh   → clone FFmpeg n9.0（FFMPEG_BRANCH=n9.0，补丁默认关闭）
-player_ffmpeg_config.sh     → FFmpeg 9.0 组件清单（解码器/解析器/bsf/协议/滤镜）
-../build_tools/build_Android.sh → 对每个 ABI:
-   build_static_lib (libxml2/boost/openssl/curl/fdk-aac/x264/dav1d/ffmpeg)
-   link_shared_lib_Android      → clang/lld 把全部 .a 合并为 libalivcffmpeg.so
+load_source（player_git_source_list.sh）
+ ├─ clone FFmpeg n9.0 / openssl 1.1.1g / curl / libxml2 / nghttp2（镜像→回退 github）
+ ├─ 源码树 EOL 归一化（LF）+ 补丁 CRLF 免疫
+ └─ git am 打补丁：libxml2 / openssl / curl（失败自动 abort，不中断构建）
+build_tools/build_Android.sh → 对每个 ABI:
+   build_static_lib（统一补齐 configure/autogen.sh 可执行位后逐库编译）
+     libxml2 → boost* → cares* → openssl → nghttp2 → curl → fdk-aac* → x264* → dav1d* → ffmpeg
+     * 可选：无源码目录则跳过（打印 not found 警告，非致命）
+   link_shared_lib_Android → clang/lld 把全部 .a 合并为 libalivcffmpeg.so
 ```
 
 关键变量（`build_tools/AndroidConfig.sh`）：`ANDROID_API_LEVEL=24`（默认），NDK llvm clang
 `--target=aarch64-linux-android24` / `armv7a-linux-androideabi24`。
+OpenSSL 1.1.1g 的旧 NDK 目录校验由 `build_openssl_111.sh` 内置的
+`platforms/android-<api>/arch-*` 符号链接 shim 兼容（r25/r26/r27 均可用）。
 
 ### 3.2 native 层（premierlibrary）
 
@@ -93,5 +116,14 @@ sourceSets.main.jniLibs.srcDirs = ['../../../../external/install/ffmpeg/Android'
 
 - **`avresample` 配置失败**：确认使用新 `ffmpeg_commands.sh`（已移除该选项）。
 - **NDK r25 以下报 clang 缺失**：FFmpeg 9 与播放器 API 24 要求 NDK r25+。
+- **`$ANDROID_NDK_HOME=... is invalid`（OpenSSL 1.1.1g）**：新版 `build_openssl_111.sh`
+  已自动 shim；手工排查时确认 NDK 内有
+  `toolchains/llvm/prebuilt/<host>/sysroot/usr/include`。
+- **`clang: unknown argument: '-gcc-toolchain'`（OpenSSL 编译期）**：1.1.1 传了旧版
+  gcc-4.9 工具链路径，新版脚本会在 Configure 后自动从 Makefile 删除该参数。
+- **`bash\r` / `patch does not apply` / `Permission denied`**：Windows 检出的
+  CRLF 与权限问题，处理与免疫机制见 `BUILD_GUIDE.md` 第 1.3 节。
+- **`autoreconf: command not found`**：`apt-get install autoconf automake libtool pkg-config`。
+- **依赖下载慢**：`source external/china_mirror_env.sh` + `USE_CHINA_MIRROR=true`。
 - **`libc++_shared.so` 冲突**：premierlibrary 使用 `c++_static`，宿主 App 无需额外处理。
 - **ExoPlayer 旧版本**：`ExternPlayerExo` 仍为 2.9.6；如需现代 Exo/Media3 请自行升级该模块（不影响核心库）。

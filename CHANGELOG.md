@@ -1,5 +1,17 @@
 # [Unreleased] FFmpeg 9.0 + HarmonyOS + Object Playback (2025)
 
+## Build system hardening
+- 构建脚本对 Windows 检出免疫：补丁 CRLF 归一化、源码树 EOL 统一 LF、
+  自动补齐 `configure/autogen.sh/Configure` 可执行位、子脚本用 `bash` 显式执行
+  （`external/build_external.sh`、`build_tools/common_build.sh`、`build_libxml2.sh`）。
+- OpenSSL 1.1.1g 兼容新 NDK 布局（r25/r26/r27）：`build_openssl_111.sh` 自动创建
+  `platforms/android-<api>/arch-*` 符号链接指向统一 sysroot。
+- 国内镜像支持：`external/china_mirror_env.sh` 预设 + `GIT_MIRROR_PREFIX` 统一前缀 +
+  失败自动回退 github（`docs/ChinaMirrors.md`）；gradle 阿里云 Maven（`USE_CHINA_MIRROR`）；
+  CI NDK 镜像（`ANDROID_NDK_URL`）。
+- 新增 `.gitattributes` 强制 `*.sh/*.patch/*.env` 等文件 LF。
+- 新增构建总文档 `docs/BUILD_GUIDE.md`。
+
 ## Major upgrades
 
 ### FFmpeg 9.0

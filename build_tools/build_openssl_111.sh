@@ -135,6 +135,14 @@ function build_openssl_111(){
 
         ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
 
+        # OpenSSL 1.1.1 会给 clang 传入旧版 gcc-4.9 工具链路径
+        # （-gcc-toolchain $ndk/toolchains/<triarch>-4.9/prebuilt/<host>），
+        # 现代 NDK 已无该目录，且 NDK clang 自带 sysroot 不需要它。
+        # Configure 生成 Makefile 后统一去掉该参数。
+        if [[ "$1" == "Android" ]]; then
+            sed -i 's# -gcc-toolchain [^ ]*##g' Makefile
+        fi
+
         make -j8 V=1 || exit 1
         make  install_sw ||exit 1
 
