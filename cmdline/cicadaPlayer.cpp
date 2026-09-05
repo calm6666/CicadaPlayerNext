@@ -1,5 +1,7 @@
 #include <MediaPlayer.h>
+#include <fstream>
 #include <memory>
+#include <sstream>
 #include <utils/timer.h>
 
 #ifdef ENABLE_SDL
@@ -136,9 +138,18 @@ static void changeAudioFormat()
 int main(int argc, char *argv[])
 {
     string url;
+    string manifestJson;
     setProperty("protected.network.http.http2", "ON");
 
-    if (argc > 1) {
+    // Usage:
+    //   cicadaPlayer <url>            classic URL playback
+    //   cicadaPlayer -m <file.json>   object-based playback (MediaManifest JSON, DRM)
+    if (argc > 2 && string(argv[1]) == "-m") {
+        std::ifstream manifestFile(argv[2]);
+        std::stringstream buffer;
+        buffer << manifestFile.rdbuf();
+        manifestJson = buffer.str();
+    } else if (argc > 1) {
         url = argv[1];
     } else {
         url = "https://player.alicdn.com/video/aliyunmedia.mp4";
@@ -174,7 +185,12 @@ int main(int argc, char *argv[])
     NetWorkEventReceiver netWorkEventReceiver(eListener);
     player->SetListener(pListener);
     player->SetDefaultBandWidth(1000 * 1000);
-    player->SetDataSource(url.c_str());
+    if (!manifestJson.empty()) {
+        // Object-based playback: unified MediaManifest JSON (DRM-capable).
+        player->SetDataSource(manifestJson);
+    } else {
+        player->SetDataSource(url.c_str());
+    }
     player->SetAutoPlay(true);
     player->SetLoop(true);
     player->SetIPResolveType(IpResolveWhatEver);

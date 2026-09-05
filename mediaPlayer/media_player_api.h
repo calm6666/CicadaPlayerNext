@@ -3,6 +3,7 @@
 
 #include "native_cicada_player_def.h"
 #include <cacheModule/cache/CacheConfig.h>
+#include <demuxer/manifest/MediaManifest.h>
 #include <drm/DrmHandler.h>
 #include <render/video/IVideoRender.h>
 #include <utils/AFMediaType.h>
@@ -75,6 +76,18 @@ void CicadaClearScreen(playerHandle *player);
  *set play url source
  */
 void CicadaSetDataSourceWithUrl(playerHandle *player, const char *url);
+
+/*
+ * 对象模式播放：传入统一的 MediaManifest 清单对象
+ * （对应 hili-player 的 MediaManifest JSON 结构），无需 m3u8/mpd 文本。
+ * 支持 AES-128 分段加密与 DRM（Widevine/FairPlay/ClearKey）。
+ */
+void CicadaSetDataSourceWithManifestObject(playerHandle *player, const Cicada::Manifest::MediaManifest &manifest);
+
+/*
+ * 对象模式播放：传入 MediaManifest 结构的 JSON 文本。
+ */
+void CicadaSetDataSourceWithManifest(playerHandle *player, const char *jsonManifest);
 
 /*
  * switch stream by stream index

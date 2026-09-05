@@ -113,6 +113,16 @@
     [player setUrlSource:source];
 }
 
+- (void)setDataSourceManifest:(NSArray *)arr
+{
+    FlutterMethodCall *call = arr.firstObject;
+    CicadaPlayer *player = arr[2];
+    NSString *json = [call arguments];
+    // Object-based playback: unified MediaManifest JSON, DRM-capable.
+    CicadaManifestSource *source = [[CicadaManifestSource alloc] manifestWithJson:json];
+    [player setManifestSource:source];
+}
+
 - (void)prepare:(NSArray *)arr
 {
     CicadaPlayer *player = arr[2];

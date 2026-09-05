@@ -56,7 +56,10 @@ https://github.com/Kitware/CMake/releases/download/v3.16.0/cmake-3.16.0-Linux-x8
     copy the files under to a same dir to windows pc
      - **cicadaPlayer.exe** in build dir
      - **libgcc_s_seh-1.dll,  libstdc++-6.dll, libwinpthread-1.dll**, find it in mingw install dir
-     - **avcodec-58.dll, avfilter-7.dll, avformat-58.dll,avresample-4.dll, avutil-56.dll, swresample-3.dll, swscale-5.dll**, find in external/install/ffmpeg/win32/x86_64/bin/
+     - FFmpeg 9.0 DLLs (**avcodec-61.dll, avfilter-10.dll, avformat-61.dll, avutil-59.dll,
+       swresample-5.dll, swscale-8.dll** — exact numbers depend on the n9.0 build),
+       find in external/install/ffmpeg/win32/x86_64/bin/
+       (FFmpeg 9.0 no longer ships libavresample — `avresample-4.dll` was removed in FFmpeg 5.0.)
      - **SDL2.dll** find in sdl download dir
 
      double click **cicadaPlayer.exe**

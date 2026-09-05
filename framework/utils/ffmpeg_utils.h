@@ -84,9 +84,13 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
                          uint8_t** pps_data, int* pps_data_size,
                          int* nal_length_size);
 
+// Vendored av_compute_pkt_fields is only provided for FFmpeg < 5.9; since
+// FFmpeg 7.0 av_read_frame() computes packet fields internally.
+#if LIBAVFORMAT_VERSION_MAJOR < 59
 void av_compute_pkt_fields(AVFormatContext *s, AVStream *st,
         AVCodecParserContext *pc, AVPacket *pkt,
         int64_t next_dts, int64_t next_pts);
+#endif
 
 #ifdef __cplusplus
 };

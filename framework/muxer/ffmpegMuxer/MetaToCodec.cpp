@@ -59,8 +59,12 @@ void MetaToCodec::audioMetaToStream(AVStream *st, Stream_meta *meta)
     st->codecpar->codec_type = AVMEDIA_TYPE_AUDIO;
     st->codecpar->codec_id = static_cast<AVCodecID>(CodecID2AVCodecID(meta->codec));
     st->codecpar->sample_rate = meta->samplerate;
-    st->codecpar->channel_layout = (uint64_t) av_get_channel_layout_nb_channels(static_cast<uint64_t>(meta->channels));
-    st->codecpar->channels = meta->channels;
+    /* AVChannelLayout replaced channel_layout/channels in FFmpeg 5.1. */
+    if (meta->channel_layout != 0) {
+        av_channel_layout_from_mask(&st->codecpar->ch_layout, meta->channel_layout);
+    } else {
+        av_channel_layout_default(&st->codecpar->ch_layout, meta->channels);
+    }
     /* take first format from list of supported formats */
     st->codecpar->format = (enum AVSampleFormat) meta->sample_fmt;
     st->time_base = {1, st->codecpar->sample_rate};

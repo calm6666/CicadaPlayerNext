@@ -48,6 +48,8 @@ public:
 
     static void java_SetDataSource(JNIEnv *env, jobject instance, jstring urlSource);
 
+    static void java_SetDataSourceManifest(JNIEnv *env, jobject instance, jstring jsonManifest);
+
     static void java_AddExtSubtitle(JNIEnv *env, jobject instance, jstring url);
 
     static void java_SelectExtSubtitle(JNIEnv *env, jobject instance, jint index, jboolean select);

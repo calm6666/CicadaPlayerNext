@@ -39,7 +39,8 @@ ffmpeg_disable_all_config="--disable-everything \
   --disable-hwaccels \
   --disable-bzlib    \
   --disable-videotoolbox"
-ffmpeg_config_default="--enable-avresample --enable-pic"
+# libavresample was removed in FFmpeg 5.0; the resampling library is libswresample.
+ffmpeg_config_default="--enable-pic"
 
 ffmpeg_config_debug="--disable-optimizations \
   --disable-asm \

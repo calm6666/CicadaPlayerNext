@@ -18,6 +18,7 @@
 #include <memory>
 #include <utils/CicadaType.h>
 #include "sample_decrypt/ISampleDecryptor.h"
+#include <demuxer/manifest/MediaManifest.h>
 #define GEN_STREAM_ID(index, subId) (((subId) << 16) + (index))
 #define GEN_SUB_STREAM_ID(index) (index >> 16)
 #define GEN_STREAM_INDEX(index) (index & 0xFF)
@@ -48,6 +49,13 @@ namespace Cicada {
         };
 
         int createDemuxer(demuxer_type type);
+
+        /**
+         * Object-based playback: hand a unified MediaManifest object to the
+         * demuxer service. After this call, createDemuxer(demuxer_type_manifest)
+         * instantiates the manifest demuxer (no probing, no URL required).
+         */
+        void setManifestSource(std::unique_ptr<Manifest::MediaManifest> manifest);
 
         int initOpen(demuxer_type type = demuxer_type_unknown);
 
@@ -145,6 +153,8 @@ namespace Cicada {
         bool mNoFile = false;
 
         ISampleDecryptor *mSDec = nullptr;
+
+        std::unique_ptr<Manifest::MediaManifest> mManifestSource{nullptr};
 
         std::unique_ptr<Cicada::DemuxerMeta> mDemuxerMeta;
     };

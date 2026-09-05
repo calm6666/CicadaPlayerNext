@@ -15,6 +15,11 @@ if (${CMAKE_SYSTEM_NAME} MATCHES Windows)
     set(TARGET_PLATFORM windows)
 endif ()
 
+if (CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    message("build HarmonyOS/OpenHarmony")
+    set(TARGET_PLATFORM HarmonyOS)
+endif ()
+
 
 if (TARGET_PLATFORM)
 else ()
@@ -82,7 +87,6 @@ set(SOURCE_FILES
         system_refer_clock.cpp
         player_types.cpp
         ICicadaPlayer.h
-        player_types.cpp
         player_types.h
         player_notifier.cpp
         player_notifier.h

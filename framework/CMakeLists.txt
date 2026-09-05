@@ -1,4 +1,4 @@
-﻿cmake_minimum_required(VERSION 3.6)
+cmake_minimum_required(VERSION 3.6)
 project(framework)
 
 set(CMAKE_VERBOSE_MAKEFILE ON)
@@ -11,6 +11,11 @@ endif ()
 
 if (ANDROID)
     set(TARGET_PLATFORM Android)
+endif ()
+
+if (CMAKE_SYSTEM_NAME STREQUAL "OHOS" OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    message("build HarmonyOS/OpenHarmony")
+    set(TARGET_PLATFORM HarmonyOS)
 endif ()
 
 if (${CMAKE_SYSTEM_NAME} MATCHES Windows)

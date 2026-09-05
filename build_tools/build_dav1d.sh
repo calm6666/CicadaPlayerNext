@@ -45,12 +45,13 @@ function build_dav1d(){
             return;
         fi
         cross_compile_set_platform_Android  $2
-        DAV1D_C=""${CROSS_COMPILE}"-gcc"
-        DAV1D_CPP=""${CROSS_COMPILE}"-g++"
-        DAV1D_AR=""${CROSS_COMPILE}"-ar"
-        DAV1D_LD=""${CROSS_COMPILE}"-ld"
-        DAV1D_STRIP=""${CROSS_COMPILE}"-strip"
-        DAV1D_ARGS="--sysroot=${SYSTEM_ROOT}"
+        # NDK r25+: use the llvm clang wrappers (gcc toolchains were removed).
+        DAV1D_C=""${CROSS_PREFIX}"clang"
+        DAV1D_CPP=""${CROSS_PREFIX}"clang++"
+        DAV1D_AR=""${CROSS_PREFIX}"ar"
+        DAV1D_LD=""${CROSS_PREFIX}"ld"
+        DAV1D_STRIP=""${CROSS_PREFIX}"strip"
+        DAV1D_ARGS="--target=${CROSS_COMPILE}${ANDROID_API_LEVEL:-24} --sysroot=${SYSTEM_ROOT}"
         DAV1D_SYSTEM="linux"
         DAV1D_CPU_FAMILY="aarch64"
         DAV1D_CPU="arm"

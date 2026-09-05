@@ -19,7 +19,7 @@ namespace Cicada {
         mCtx = avformat_alloc_context();
         mCtx->interrupt_callback.callback = interrupt_cb;
         mCtx->interrupt_callback.opaque = this;
-        mCtx->correct_ts_overflow = 0;
+        // correct_ts_overflow was removed in FFmpeg 7.0 (0 is the default).
         mCtx->flags |= AVFMT_FLAG_KEEP_SIDE_DATA;
     }
 
@@ -34,7 +34,7 @@ namespace Cicada {
             return 0;
         }
 
-        AVInputFormat *in_fmt = nullptr;
+        const AVInputFormat *in_fmt = nullptr;
         bool use_filename = false;
 
         if (mReadCb != nullptr) {
@@ -204,7 +204,6 @@ namespace Cicada {
         }
 
         AVPacket *pkt = av_packet_alloc();
-        av_init_packet(pkt);
         int err;
         err = av_read_frame(mCtx, pkt);
 
@@ -281,7 +280,7 @@ namespace Cicada {
         memset(pbBuffer + size, 0, AVPROBE_PADDING_SIZE);
         AVProbeData pd = {uri.c_str(), const_cast<unsigned char *>(pbBuffer), static_cast<int>(size)};
         int score = AVPROBE_SCORE_RETRY;
-        AVInputFormat *fmt = av_probe_input_format2(&pd, 1, &score);
+        const AVInputFormat *fmt = av_probe_input_format2(&pd, 1, &score);
         av_freep(&pbBuffer);
 
         if (fmt && (strcmp(fmt->name, "webvtt") == 0 || strcmp(fmt->name, "srt") == 0 || strcmp(fmt->name, "ass") == 0)) {

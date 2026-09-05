@@ -1,0 +1,33 @@
+# 统一换行符策略：文本文件按 git 自动处理，但脚本/构建文件强制 LF。
+# 防止 Windows 检出（core.autocrlf=true）把 shell 脚本转成 CRLF，
+# 导致 WSL/CI 中 "bash\r: No such file or directory" 之类的错误。
+* text=auto
+
+# Shell 脚本与构建配置必须始终是 LF
+*.sh text eol=lf
+*.env text eol=lf
+*.cmake text eol=lf
+CMakeLists.txt text eol=lf
+*.jam text eol=lf
+*.json5 text eol=lf
+*.patch text eol=lf
+*.pl text eol=lf
+
+# 二进制文件不做换行/文本转换
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.svg binary
+*.ico binary
+*.jar binary
+*.aar binary
+*.apk binary
+*.so binary
+*.a binary
+*.dll binary
+*.dylib binary
+*.framework binary
+*.keystore binary
+*.zip binary
+*.bz2 binary

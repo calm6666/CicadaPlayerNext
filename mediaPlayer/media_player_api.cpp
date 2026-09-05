@@ -147,6 +147,24 @@ void CicadaSetDataSourceWithUrl(playerHandle *pHandle, const char *url)
     }
 }
 
+void CicadaSetDataSourceWithManifestObject(playerHandle *pHandle, const Manifest::MediaManifest &manifest)
+{
+    GET_PLAYER;
+
+    if (player) {
+        return player->SetDataSource(manifest);
+    }
+}
+
+void CicadaSetDataSourceWithManifest(playerHandle *pHandle, const char *jsonManifest)
+{
+    GET_PLAYER;
+
+    if (player && jsonManifest != nullptr) {
+        return player->SetDataSource(std::string(jsonManifest));
+    }
+}
+
 
 float CicadaGetVideoRenderFps(playerHandle *pHandle)
 {

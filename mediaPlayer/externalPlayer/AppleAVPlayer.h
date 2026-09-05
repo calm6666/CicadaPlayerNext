@@ -30,6 +30,11 @@ namespace Cicada {
 
         void SetDataSource(const char *url) override;
 
+        // Object-based playback is not supported by the AVPlayer wrapper.
+        void SetDataSource(const Manifest::MediaManifest &manifest) override;
+
+        void SetDataSource(const std::string &jsonManifest) override;
+
         void Prepare() override;
 
         void Start() override;

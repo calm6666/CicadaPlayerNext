@@ -8,6 +8,7 @@
 #include <cassert>
 #include <utils/errors/framework_error.h>
 #include <demuxer/sample_decrypt/SampleDecryptDemuxer.h>
+#include <demuxer/manifest/ManifestDemuxer.h>
 #include "demuxer_service.h"
 
 #define  MAX_PROBE_SIZE 1024
@@ -65,6 +66,12 @@ namespace Cicada {
             SampleDecryptDemuxer *demuxer = new SampleDecryptDemuxer();
             demuxer->setDecryptor(mSDec);
             mDemuxerPtr = std::unique_ptr<IDemuxer>(demuxer);
+        }
+
+        if (mDemuxerPtr == nullptr && type == demuxer_type_manifest && mManifestSource != nullptr) {
+            // Object-based playback: the manifest is converted in-process, no
+            // URL probing or manifest network I/O is performed.
+            mDemuxerPtr = std::unique_ptr<IDemuxer>(new ManifestDemuxer(std::move(mManifestSource)));
         }
 
         if (mDemuxerPtr == nullptr) {
@@ -133,6 +140,11 @@ namespace Cicada {
         }
 
         return 0;
+    }
+
+    void demuxer_service::setManifestSource(std::unique_ptr<Manifest::MediaManifest> manifest)
+    {
+        mManifestSource = std::move(manifest);
     }
 
     int demuxer_service::initOpen(demuxer_type type)

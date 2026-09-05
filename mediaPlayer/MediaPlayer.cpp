@@ -269,6 +269,20 @@ namespace Cicada {
         CicadaSetDataSourceWithUrl(handle, playUrl.c_str());
     }
 
+    void MediaPlayer::SetDataSource(const Manifest::MediaManifest &manifest)
+    {
+        GET_PLAYER_HANDLE
+        mPlayUrl = "";
+        CicadaSetDataSourceWithManifestObject(handle, manifest);
+    }
+
+    void MediaPlayer::SetDataSource(const std::string &jsonManifest)
+    {
+        GET_PLAYER_HANDLE
+        mPlayUrl = "";
+        CicadaSetDataSourceWithManifest(handle, jsonManifest.c_str());
+    }
+
     void MediaPlayer::SelectTrack(int index)
     {
         std::lock_guard<std::mutex> lock(mMutexAbr);

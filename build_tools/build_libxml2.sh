@@ -4,8 +4,10 @@ function build_libxml2(){
     if [[ ! -f ${LIBXML2_SOURCE_DIR}/configure ]]
     then
         cd ${LIBXML2_SOURCE_DIR}
-        ./autogen.sh
-        make distclean
+        # Windows 检出可能丢失可执行位：先补上再用 sh 兜底执行
+        chmod +x autogen.sh configure 2>/dev/null
+        sh ./autogen.sh
+        make distclean 2>/dev/null
         if [[ -n "$MTL" ]]
         then
             cp ${BUILD_TOOLS_DIR}/automake_config/config.guess ./
@@ -52,7 +54,7 @@ function build_libxml2(){
      if [[ "${BUILD}" != "False" ]];then
         cd ${build_dir}
         if [[ "$native_build" == "yes" ]];then
-        ${LIBXML2_SOURCE_DIR}/configure \
+        sh ${LIBXML2_SOURCE_DIR}/configure \
             ${shared_opt}            \
             --with-pic=yes \
             --without-lzma \
@@ -65,7 +67,7 @@ function build_libxml2(){
             CPPFLAGS="${CPU_FLAGS}" \
             LDFLAGS="${CPU_LDFLAGS}"
         else
-        ${LIBXML2_SOURCE_DIR}/configure \
+        sh ${LIBXML2_SOURCE_DIR}/configure \
             --host="${CROSS_COMPILE}"     \
             ${shared_opt}            \
             --with-pic=yes  \

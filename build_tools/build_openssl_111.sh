@@ -38,8 +38,29 @@ function build_openssl_111(){
     then
         cross_compile_set_platform_Android  $2
         config_platform="android-${CPU_ARCH}"
-        local cross_compile_opt="-D__ANDROID_API__=${NDK_V}"
+        # NDK r25+ 由 AndroidConfig.sh 提供 ANDROID_API_LEVEL（默认 24）
+        local cross_compile_opt="-D__ANDROID_API__=${ANDROID_API_LEVEL:-24}"
         config_opt="${config_opt} no-shared no-asm"
+
+        # OpenSSL 1.1.1 的 15-android.conf 校验旧的 NDK 目录结构
+        # ($ndk/platforms/android-<api>/arch-<arch>)，而 NDK r23+ 已移除
+        # platforms/，改用统一 sysroot。用符号链接把旧路径指到统一 sysroot
+        # （两者目录结构一致：usr/include、usr/lib），让 1.1.1 的检查与
+        # --sysroot 推导在新 NDK (r25/r26/r27) 上同样成立。
+        local ndk_host
+        case "$(uname -s)" in
+            Darwin*) ndk_host=darwin-x86_64 ;;
+            *)       ndk_host=linux-x86_64 ;;
+        esac
+        local api=${ANDROID_API_LEVEL:-24}
+        local sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
+        local plat_dir="${ANDROID_NDK}/platforms/android-${api}"
+        if [[ -d "${sysroot}" ]]; then
+            mkdir -p "${plat_dir}"
+            for a in arch-arm arch-arm64 arch-x86 arch-x86_64; do
+                [[ -e "${plat_dir}/$a" ]] || ln -s "${sysroot}" "${plat_dir}/$a"
+            done
+        fi
     elif [[ "$1" == "iOS" ]]
     then
         cross_compile_set_platform_iOS $2

@@ -12,6 +12,7 @@
 #include <codec/decoderFactory.h>
 #include <data_source/dataSourcePrototype.h>
 #include <demuxer/IDemuxer.h>
+#include <demuxer/manifest/MediaManifestParser.h>
 #include <render/renderFactory.h>
 #include <utils/AFMediaType.h>
 #include <utils/af_string.h>
@@ -141,6 +142,31 @@ void SuperMediaPlayer::SetDataSource(const char *url)
     dataSourceParam.url = new string(url ? url : "");
     param.dataSourceParam = dataSourceParam;
     putMsg(MSG_SETDATASOURCE, param);
+}
+
+void SuperMediaPlayer::SetDataSource(const Manifest::MediaManifest &manifest)
+{
+    MsgParam param;
+    MsgManifestParam manifestParam{};
+    manifestParam.manifest = new Manifest::MediaManifest(manifest);
+    param.msgManifestParam = manifestParam;
+    putMsg(MSG_SETMANIFESTSOURCE, param);
+}
+
+void SuperMediaPlayer::SetDataSource(const std::string &jsonManifest)
+{
+    std::string error;
+    auto *manifest = new Manifest::MediaManifest();
+    if (!Manifest::MediaManifestParser::parse(jsonManifest, *manifest, error)) {
+        AF_LOGE("SetDataSource(json): manifest parse error: %s\n", error.c_str());
+        delete manifest;
+        return;
+    }
+    MsgParam param;
+    MsgManifestParam manifestParam{};
+    manifestParam.manifest = manifest;
+    param.msgManifestParam = manifestParam;
+    putMsg(MSG_SETMANIFESTSOURCE, param);
 }
 
 void SuperMediaPlayer::Prepare()

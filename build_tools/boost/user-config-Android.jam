@@ -1,6 +1,9 @@
 #
 # Put this in your home directory!
 #
+# NDK r25+ (clang/llvm) variant: no gcc toolchains, no gnu-libstdc++ — the
+# unified sysroot provides libc++.
+#
 
 import os ;
 
@@ -8,7 +11,9 @@ import os ;
 ########################################################################
 ########################################################################
 
-local NDK_PLATFORM = [ os.environ NDK_V ] ;
+local NDK_PLATFORM = [ os.environ ANDROID_API_LEVEL ] ;
+if ! $(NDK_PLATFORM) { NDK_PLATFORM = 24 ; }
+
 local NDK_ROOT = [ os.environ NDK_ROOT ] ;
 local HOST = [ os.environ HOST ] ;
 local ABI = [ os.environ ABI ] ;
@@ -17,25 +22,23 @@ local CROSS_COMPILE = [ os.environ CROSS_COMPILE ] ;
 local ABI_NAME = [ os.environ ABI_NAME ] ;
 local CPU_ARCH = [ os.environ CPU_ARCH ] ;
 
-
-
 local NDK_HOST_PLATFORM = $(HOST)-x86_64 ;
 local NDK_ARCH = $(ABI) ;
 local NDK_TOOLCHAIN = $(CROSS_COMPILE) ;
-local NDK_TOOLCHAIN_PREFIX = $(CROSS_COMPILE) ;
-local NDK_GCC_VERSION = 4.9 ;
-local NDK_GCC = $(NDK_ROOT)/toolchains/$(NDK_TOOLCHAIN)-$(NDK_GCC_VERSION)/prebuilt/$(NDK_HOST_PLATFORM)/bin/$(NDK_TOOLCHAIN_PREFIX)-g++ ;
-local NDK_AR = $(NDK_ROOT)/toolchains/$(NDK_TOOLCHAIN)-$(NDK_GCC_VERSION)/prebuilt/$(NDK_HOST_PLATFORM)/bin/$(NDK_TOOLCHAIN_PREFIX)-ar ;
-local NDK_RANLIB = $(NDK_ROOT)/toolchains/$(NDK_TOOLCHAIN)-$(NDK_GCC_VERSION)/prebuilt/$(NDK_HOST_PLATFORM)/bin/$(NDK_TOOLCHAIN_PREFIX)-ranlib ;
-local NDK_SYSROOT = $(NDK_ROOT)/platforms/android-$(NDK_PLATFORM)/arch-$(CPU_ARCH) ;
+local NDK_LLVM = $(NDK_ROOT)/toolchains/llvm/prebuilt/$(NDK_HOST_PLATFORM)/bin ;
+local NDK_CXX = $(NDK_LLVM)/$(NDK_TOOLCHAIN)$(NDK_PLATFORM)-clang++ ;
+local NDK_AR = $(NDK_LLVM)/llvm-ar ;
+local NDK_RANLIB = $(NDK_LLVM)/llvm-ranlib ;
+local NDK_SYSROOT = $(NDK_ROOT)/toolchains/llvm/prebuilt/$(NDK_HOST_PLATFORM)/sysroot ;
 
+local TARGET = $(NDK_TOOLCHAIN)$(NDK_PLATFORM) ;
 
-using gcc : android_$(NDK_PLATFORM)_armeabi_v7a :
-  $(NDK_GCC) :
+using clang : android_$(NDK_PLATFORM)_$(ABI_NAME) :
+  $(NDK_CXX) :
   <archiver>$(NDK_AR)
   <ranlib>$(NDK_RANLIB)
+  <compileflags>--target=$(TARGET)
   <compileflags>--sysroot=$(NDK_SYSROOT)
-  <compileflags>-D__GLIBC__
   <compileflags>-std=c++11
   <compileflags>-MMD
   <compileflags>-MP
@@ -45,51 +48,14 @@ using gcc : android_$(NDK_PLATFORM)_armeabi_v7a :
   <compileflags>-funwind-tables
   <compileflags>-fstack-protector
   <compileflags>-no-canonical-prefixes
-  <compileflags>-march=armv5te
-  <compileflags>-mtune=xscale
-  <compileflags>-msoft-float
-  <compileflags>-mthumb
   <compileflags>-Os
   <compileflags>-DNDEBUG
   <compileflags>-fomit-frame-pointer
   <compileflags>-fno-strict-aliasing
-  <compileflags>-finline-limit=64
   <compileflags>-DANDROID
   <compileflags>-Wa,--noexecstack
   <compileflags>-Wformat
   <compileflags>-Werror=format-security
-  <compileflags>-I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/$(NDK_GCC_VERSION)/include
-  <compileflags>-I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/$(NDK_GCC_VERSION)/libs/$(NDK_ARCH)/include
-  <compileflags>-DBOOST_FILESYSTEM_VERSION=3
-  ;
-
-using gcc : android_$(NDK_PLATFORM)_arm64_v8a :
-  $(NDK_GCC) :
-  <archiver>$(NDK_AR)
-  <ranlib>$(NDK_RANLIB)
-  <compileflags>--sysroot=$(NDK_SYSROOT)
-  <compileflags>-D__GLIBC__
-  <compileflags>-std=c++11
-  <compileflags>-MMD
-  <compileflags>-MP
-  <compileflags>-MF
-  <compileflags>-fpic
-  <compileflags>-ffunction-sections
-  <compileflags>-funwind-tables
-  <compileflags>-fstack-protector
-  <compileflags>-no-canonical-prefixes
-  <compileflags>-Os
-  <compileflags>-DNDEBUG
-  <compileflags>-fomit-frame-pointer
-  <compileflags>-fstrict-aliasing
-  <compileflags>-funswitch-loops
-  <compileflags>-finline-limit=300
-  <compileflags>-DANDROID
-  <compileflags>-Wa,--noexecstack
-  <compileflags>-Wformat
-  <compileflags>-Werror=format-security
-  <compileflags>-I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/$(NDK_GCC_VERSION)/include
-  <compileflags>-I$(NDK_ROOT)/sources/cxx-stl/gnu-libstdc++/$(NDK_GCC_VERSION)/libs/$(NDK_ARCH)/include
   <compileflags>-DBOOST_FILESYSTEM_VERSION=3
   ;
 ############################################################################

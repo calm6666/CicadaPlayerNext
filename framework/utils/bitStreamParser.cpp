@@ -14,9 +14,9 @@ namespace Cicada {
     typedef struct parserContent_t {
 
         AVCodecParserContext *parser;
-        AVCodec *codec;
+        const AVCodec *codec;
         AVCodecContext *c;
-        AVPacket out_pkt;
+        AVPacket *out_pkt;      // heap-allocated since FFmpeg 7 (av_init_packet removed)
         enum AFCodecID mId;
 
     } parserContent;
@@ -31,7 +31,7 @@ namespace Cicada {
     {
         avcodec_free_context(&mCont->c);
         av_parser_close(mCont->parser);
-        av_packet_unref(&mCont->out_pkt);
+        av_packet_free(&mCont->out_pkt);
         free(mCont);
     }
 
@@ -54,13 +54,13 @@ namespace Cicada {
             memcpy(mCont->c->extradata, meta->extradata, meta->extradata_size);
         }
 
-        av_init_packet(&mCont->out_pkt);
+        mCont->out_pkt = av_packet_alloc();
         return 0;
     }
 
     int bitStreamParser::parser(uint8_t *data, int size)
     {
-        int ret = av_parser_parse2(mCont->parser, mCont->c, &mCont->out_pkt.data, &mCont->out_pkt.size,
+        int ret = av_parser_parse2(mCont->parser, mCont->c, &mCont->out_pkt->data, &mCont->out_pkt->size,
                                    data, size,
                                    AV_NOPTS_VALUE, AV_NOPTS_VALUE, 0);
         return ret;

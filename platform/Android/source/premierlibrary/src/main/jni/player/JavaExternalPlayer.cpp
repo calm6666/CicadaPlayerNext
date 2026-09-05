@@ -569,6 +569,15 @@ void JavaExternalPlayer::SetDataSource(const char *url) {
     jCallRvPs("SetDataSource", string(url));
 }
 
+void JavaExternalPlayer::SetDataSource(const Cicada::Manifest::MediaManifest &manifest) {
+    // Object-based playback is handled by SuperMediaPlayer (native pipeline).
+    (void) manifest;
+}
+
+void JavaExternalPlayer::SetDataSource(const std::string &jsonManifest) {
+    (void) jsonManifest;
+}
+
 void JavaExternalPlayer::Prepare() {
     jCallRvPv("Prepare");
 }

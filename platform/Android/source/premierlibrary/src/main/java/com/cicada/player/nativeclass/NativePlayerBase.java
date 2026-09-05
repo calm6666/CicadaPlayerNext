@@ -150,6 +150,15 @@ public class NativePlayerBase {
         nSetDataSource(url);
     }
 
+    /**
+     * 对象模式播放：传入统一的 MediaManifest 清单 JSON（无需 m3u8/mpd），
+     * 支持 AES-128 与 DRM 内容保护。
+     */
+    public void setDataSourceManifest(String mediaManifestJson) {
+        Logger.v(TAG, "setDataSourceManifest json = " + mediaManifestJson);
+        nSetDataSourceManifest(mediaManifestJson);
+    }
+
     public void prepare() {
         Logger.v(TAG, "prepare ");
         nPrepare();
@@ -471,6 +480,7 @@ public class NativePlayerBase {
     protected native void nSetSurface(Surface surface);
 
     protected native void nSetDataSource(String url);
+    protected native void nSetDataSourceManifest(String mediaManifestJson);
 
     protected native void nAddExtSubtitle(String url);
 

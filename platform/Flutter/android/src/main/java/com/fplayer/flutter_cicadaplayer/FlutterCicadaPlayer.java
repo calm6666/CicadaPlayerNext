@@ -302,6 +302,11 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 String url = methodCall.arguments.toString();
                 setDataSource(url);
                 break;
+            case "setDataSourceManifest":
+                // Object-based playback: unified MediaManifest JSON (DRM-capable).
+                String manifestJson = methodCall.arguments.toString();
+                setDataSourceManifest(manifestJson);
+                break;
             case "prepare":
                 prepare();
                 break;
@@ -545,6 +550,14 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
     {
         if (mCicadaPlayer != null) {
             mCicadaPlayer.setDataSource(url);
+        }
+    }
+
+    private void setDataSourceManifest(String mediaManifestJson)
+    {
+        if (mCicadaPlayer != null) {
+            // Object-based playback: unified MediaManifest JSON (DRM-capable).
+            mCicadaPlayer.setDataSourceManifest(mediaManifestJson);
         }
     }
 

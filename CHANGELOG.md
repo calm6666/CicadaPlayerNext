@@ -1,3 +1,45 @@
+# [Unreleased] FFmpeg 9.0 + HarmonyOS + Object Playback (2025)
+
+## Major upgrades
+
+### FFmpeg 9.0
+- FFmpeg dependency upgraded from `n4.3.1` to **`n9.0`** (FFmpeg 9.0 "Lei").
+- Removed `--enable-avresample`; migrated all deprecated C APIs
+  (`av_init_packet`, `avcodec_close`, `av_register_all`, `av_lockmgr_register`,
+  `av_compute_pkt_fields`, `AVStream::parser`, `channels/channel_layout` fields,
+  `av_get_default_channel_layout` etc.) to the FFmpeg 9.0 API surface.
+- Old FFmpeg 4.3 private patches disabled by default (`FFMPEG_NEED_PATCH=FALSE`);
+  HEVC-in-FLV etc. are upstream since FFmpeg 5.0. See `docs/FFmpeg9_Upgrade.md`.
+
+### HarmonyOS / OpenHarmony hardware acceleration (API 12+)
+- New `framework/HarmonyOS.cmake` platform + `OhosAVCodecDecoder` (OH_AVCodec
+  hardware decode, surface-mode zero-copy via `OH_NativeWindow_CreateNativeWindowFromSurfaceId`,
+  NV12 buffer-mode fallback), `OhosAudioRender` (OHAudio), `OhosDrmHandler`
+  (DRM Kit: `OH_MediaKeySystem`/`OH_MediaKeySession` + `OH_AVCodec_SetMediakeySessionConfig`).
+- NAPI wrapper + ArkTS XComponent demo app under `platform/HarmonyOS/`.
+- External build support: `build_tools/OHOSConfig.sh`, `build_tools/build_ohos.sh`,
+  `external/build_external.sh OHOS`. See `docs/Packaging_HarmonyOS.md`.
+
+### Android minimum version: 7.0 (API 24)
+- All `minSdkVersion` bumped to 24 (paasApp, premierlibrary, Exo lib, zxing, Flutter).
+- Build toolchain modernized: NDK r25+ clang (gcc-4.9/gnustl removed) in
+  `build_tools/AndroidConfig.sh`, `common_build.sh`, boost jam, dav1d, CI workflows.
+
+### Object-based playback with DRM (no more URL-only)
+- New unified `MediaManifest` C++ object model + JSON parser
+  (`framework/demuxer/manifest/`), mirroring hili-player's
+  `manifest-to-hls.ts` / `manifest-to-dash.ts` semantics.
+- `ManifestDemuxer` converts the object into the internal playList model in one
+  shot (template/list/single segment modes, live config, multi-CDN baseUrl).
+- DRM: AES-128 segment encryption and CENC ContentProtection
+  (Widevine/FairPlay/PlayReady/ClearKey) flow into the existing DrmManager chain;
+  PSSH/KID carried through `Stream_meta.drmPssh/drmKeyId`.
+- APIs: C++ `MediaPlayer::SetDataSource(MediaManifest|json)`, C API
+  `CicadaSetDataSourceWithManifest(Json)`, Java `CicadaPlayer.setDataSource(JSONObject)`,
+  ObjC `CicadaManifestSource`/`setManifestSource:`, Flutter
+  `setDataSourceManifest(json)`, HarmonyOS NAPI `setDataSourceManifest`.
+- See `docs/ObjectManifestPlayback.md` and `docs/ARCHITECTURE.md`.
+
 # [](https://github.com/alibaba/CicadaPlayer/compare/v0.2.1...v) (2020-10-29)
 
 

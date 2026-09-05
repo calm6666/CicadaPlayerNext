@@ -12,6 +12,10 @@
 #include <render/video/AVFoundation/AVFoundationVideoRender.h>
 #endif
 
+#ifdef __OHOS__
+    #include "audio/OHOS/OhosAudioRender.h"
+#endif
+
 
 #if TARGET_OS_OSX
 
@@ -57,6 +61,8 @@ std::unique_ptr<IAudioRender> AudioRenderFactory::create()
 #endif
 #ifdef __APPLE__
     return std::unique_ptr<IAudioRender>(new AFAudioQueueRender());
+#elif defined(__OHOS__)
+    return std::unique_ptr<IAudioRender>(new OhosAudioRender());
 #elif defined(ENABLE_SDL)
     return std::unique_ptr<IAudioRender>(new SdlAFAudioRender2());
 #endif
@@ -74,6 +80,12 @@ unique_ptr<IVideoRender> videoRenderFactory::create(uint64_t flags)
         return nullptr;
 #endif
     }
+#if defined(__OHOS__) && !defined(ENABLE_GLRENDER)
+    // Surface-mode OH_AVCodec hardware decode renders straight into the
+    // XComponent window; the pipeline uses a dummy video render.
+    return std::unique_ptr<IVideoRender>(new DummyVideoRender());
+#endif
+
 #if defined(__APPLE__) && !defined(ENABLE_SDL) && !defined(ENABLE_CHEAT_RENDER)
     return std::unique_ptr<IVideoRender>(new AVFoundationVideoRender());
 #endif

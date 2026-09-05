@@ -25,64 +25,6 @@
 
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static pthread_mutex_t *creat_mutex()
-{
-    pthread_mutex_t *pMute = (pthread_mutex_t *) malloc(sizeof(pthread_mutex_t));
-
-    if (pMute == NULL) {
-        return NULL;
-    }
-
-    pthread_mutex_init(pMute, NULL);
-    return pMute;
-}
-
-static int lock_mutex(pthread_mutex_t *pMute)
-{
-    return -pthread_mutex_lock(pMute);
-}
-
-static int unlock_mutex(pthread_mutex_t *pMute)
-{
-    return pthread_mutex_unlock(pMute);
-}
-
-static void destroy_mutex(pthread_mutex_t **pMute)
-{
-    pthread_mutex_destroy(*pMute);
-    free(*pMute);
-    *pMute = NULL;
-}
-
-static int lockmgr(void **mtx, enum AVLockOp op)
-{
-    switch (op) {
-        case AV_LOCK_CREATE:
-            *mtx = creat_mutex();
-
-            if (!*mtx) {
-                return 1;
-            }
-
-            return 0;
-
-        case AV_LOCK_OBTAIN:
-            return lock_mutex(*mtx) != 0;
-
-        case AV_LOCK_RELEASE:
-            return unlock_mutex(*mtx) != 0;
-
-        case AV_LOCK_DESTROY:
-            destroy_mutex((pthread_mutex_t **) mtx);
-            return 0;
-
-        default:
-            break;
-    }
-
-    return 1;
-}
-
 static void ffmpeg_log_back(void *ptr, int level, const char *fmt, va_list vl)
 {
     static char line[1024];
@@ -101,10 +43,11 @@ static void ffmpeg_log_back(void *ptr, int level, const char *fmt, va_list vl)
 static void ffmpeg_init_once()
 {
     AF_LOGI("Ffmpeg version %s", av_version_info());
-    av_lockmgr_register(lockmgr);
+    // av_lockmgr_register / av_register_all were removed in FFmpeg 5.0:
+    // FFmpeg is thread-safe by default and all demuxers/decoders are
+    // self-registered.
     av_log_set_level(AV_LOG_INFO);
     av_log_set_callback(ffmpeg_log_back);
-    av_register_all();
     avformat_network_init();
 }
 
@@ -116,7 +59,6 @@ void ffmpeg_init()
 
 void ffmpeg_deinit()
 {
-    av_lockmgr_register(NULL);
     avformat_network_deinit();
 }
 
@@ -454,7 +396,7 @@ int set_stream_meta(struct AVStream *pStream, Stream_meta *meta)
 
         case STREAM_TYPE_AUDIO:
             if (meta->channels > 0) {
-                codecpar->channels = meta->channels;
+                codecpar->ch_layout.nb_channels = meta->channels;
             }
 
             if (meta->samplerate > 0) {
@@ -560,15 +502,10 @@ int get_stream_meta(const struct AVStream *pStream, Stream_meta *meta)
             meta->interlaced = InterlacedType_NO;
         }
 
-        if (pStream->parser && meta->interlaced == InterlacedType_UNKNOWN) {
-            if (pStream->parser->field_order == AV_FIELD_PROGRESSIVE
-                    || pStream->parser->picture_structure == AV_PICTURE_STRUCTURE_FRAME) {
-                meta->interlaced = InterlacedType_NO;
-            } else if (pStream->parser->picture_structure != AV_PICTURE_STRUCTURE_UNKNOWN
-                       || pStream->parser->field_order != AV_FIELD_UNKNOWN) {
-                meta->interlaced = InterlacedType_YES;
-            }
-        }
+        // FFmpeg 7.0 removed AVStream::parser (interlaced probing via the
+        // stream parser). InterlacedType_UNKNOWN is handled by the renderer
+        // as progressive, which is correct for the overwhelming majority of
+        // modern H.264 content.
 
         entry = av_dict_get(pStream->metadata, "rotate", NULL, 0);
 
@@ -601,8 +538,10 @@ int get_stream_meta(const struct AVStream *pStream, Stream_meta *meta)
         meta->type = STREAM_TYPE_AUDIO;
 //            if (pStream->codecpar->codec_id == AV_CODEC_ID_AAC)
 //                get_aac_profile(pStream->codecpar);
-        meta->channels = pStream->codecpar->channels;
-        meta->channel_layout = pStream->codecpar->channel_layout;
+        meta->channels = pStream->codecpar->ch_layout.nb_channels;
+        meta->channel_layout =
+                (pStream->codecpar->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) ?
+                pStream->codecpar->ch_layout.u.mask : 0;
         meta->samplerate = pStream->codecpar->sample_rate;
         meta->frame_size = pStream->codecpar->frame_size;
         meta->profile = pStream->codecpar->profile;
@@ -666,7 +605,7 @@ int getPCMDataLen(int channels, enum AVSampleFormat format, int nb_samples)
 int getPCMFrameLen(const AVFrame *frame)
 {
     int sampleSize = av_get_bytes_per_sample((enum AVSampleFormat) (frame->format));
-    return frame->channels * sampleSize * frame->nb_samples;
+    return frame->ch_layout.nb_channels * sampleSize * frame->nb_samples;
 }
 
 int getPCMFrameDuration(const AVFrame *frame)
@@ -687,13 +626,14 @@ void copyPCMData(const AVFrame *frame, uint8_t *buffer)
 
     if (av_sample_fmt_is_planar((enum AVSampleFormat) frame->format)) {
         for (int i = 0; i < frame->nb_samples; i++) {
-            for (int ch = 0; ch < frame->channels; ch++) {
+            for (int ch = 0; ch < frame->ch_layout.nb_channels; ch++) {
                 memcpy(buffer + offset, frame->data[ch] + sampleSize * i, sampleSize);
                 offset += sampleSize;
             }
         }
     } else {
-        memcpy(buffer, frame->extended_data[0], ((size_t) sampleSize * frame->nb_samples * frame->channels));
+        memcpy(buffer, frame->extended_data[0],
+               ((size_t) sampleSize * frame->nb_samples * frame->ch_layout.nb_channels));
     }
 }
 
@@ -703,12 +643,12 @@ size_t copyPCMDataWithOffset(const AVFrame *frame, int frameOffset, uint8_t *out
     int totalWriteSize = 0;
 
     if (av_sample_fmt_is_planar((enum AVSampleFormat) frame->format)) {
-        int samplesOffset = frameOffset / (frame->channels * sampleSize);
-        int channelsOffset = (frameOffset % (frame->channels * sampleSize)) / frame->channels;
+        int samplesOffset = frameOffset / (frame->ch_layout.nb_channels * sampleSize);
+        int channelsOffset = (frameOffset % (frame->ch_layout.nb_channels * sampleSize)) / frame->ch_layout.nb_channels;
         int writeOffset = (frameOffset % sampleSize);
 
         for (int i = samplesOffset; i < frame->nb_samples; i++) {
-            for (; channelsOffset < frame->channels; channelsOffset++) {
+            for (; channelsOffset < frame->ch_layout.nb_channels; channelsOffset++) {
                 if (outSize == totalWriteSize) {
                     *frameClear = false;
                     return outSize;
@@ -730,8 +670,8 @@ size_t copyPCMDataWithOffset(const AVFrame *frame, int frameOffset, uint8_t *out
         *frameClear = true;
         return totalWriteSize;
     } else {
-        if (outSize >= (sampleSize * frame->nb_samples * frame->channels - frameOffset)) {
-            totalWriteSize = (sampleSize * frame->nb_samples * frame->channels - frameOffset);
+        if (outSize >= (sampleSize * frame->nb_samples * frame->ch_layout.nb_channels - frameOffset)) {
+            totalWriteSize = (sampleSize * frame->nb_samples * frame->ch_layout.nb_channels - frameOffset);
             *frameClear = true;
         } else {
             totalWriteSize = outSize;
@@ -749,7 +689,7 @@ void copyPCMData2(const AVFrame *frame, fillBufferCallback fillCallback, void *a
 
     if (av_sample_fmt_is_planar((enum AVSampleFormat) frame->format)) {
         for (int i = 0; i < frame->nb_samples; i++) {
-            for (int ch = 0; ch < frame->channels; ch++) {
+            for (int ch = 0; ch < frame->ch_layout.nb_channels; ch++) {
                 if (fillCallback != NULL) {
                     fillCallback(args, frame->data[ch] + sampleSize * i, sampleSize);
                 }
@@ -757,7 +697,8 @@ void copyPCMData2(const AVFrame *frame, fillBufferCallback fillCallback, void *a
         }
     } else {
         if (fillCallback != NULL) {
-            fillCallback(args, frame->extended_data[0], ((size_t) sampleSize * frame->nb_samples * frame->channels));
+            fillCallback(args, frame->extended_data[0],
+                         ((size_t) sampleSize * frame->nb_samples * frame->ch_layout.nb_channels));
         }
     }
 }
@@ -871,12 +812,12 @@ int parse_h264_extraData(enum AVCodecID codecId, const uint8_t* extraData,int ex
                          int* nal_length_size
                          )
 {
-    AVCodec *codec = avcodec_find_decoder(codecId);
+    const AVCodec *codec = avcodec_find_decoder(codecId);
     if (codec == NULL) {
         return -1;
     }
 
-    AVCodecContext *avctx = avcodec_alloc_context3((const AVCodec *) codec);
+    AVCodecContext *avctx = avcodec_alloc_context3(codec);
     if (avctx == NULL) {
         return -1;
     }
@@ -936,12 +877,12 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
                          int* nal_length_size)
 {
 #ifdef ENABLE_CODEC_HEVC
-    AVCodec *codec = avcodec_find_decoder(codecId);
+    const AVCodec *codec = avcodec_find_decoder(codecId);
     if (codec == NULL) {
         return -1;
     }
 
-    AVCodecContext *avctx = avcodec_alloc_context3((const AVCodec *) codec);
+    AVCodecContext *avctx = avcodec_alloc_context3(codec);
     if (avctx == NULL) {
         return -1;
     }
@@ -950,7 +891,12 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
     int ret;
 
     HEVCParamSets ps;
+#if (LIBAVCODEC_VERSION_MAJOR >= 60)
+    // FFmpeg 7.0+: HEVCSEI is heap-allocated.
+    HEVCSEI *sei = ff_hevc_sei_alloc();
+#else
     HEVCSEI sei;
+#endif
 
     const HEVCVPS *vps = NULL;
     const HEVCPPS *pps = NULL;
@@ -958,9 +904,11 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
     int is_nalff = 0;
 
     memset(&ps, 0, sizeof(ps));
+#if (LIBAVCODEC_VERSION_MAJOR < 60)
     memset(&sei, 0, sizeof(sei));
+#endif
 
-    ret = ff_hevc_decode_extradata(extradata, extradata_size, &ps, &sei, &is_nalff, nal_length_size, 0, 1, avctx);
+    ret = ff_hevc_decode_extradata(extradata, extradata_size, &ps, sei, &is_nalff, nal_length_size, 0, 1, avctx);
     if (ret < 0) {
         goto done;
     }
@@ -998,12 +946,24 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
 
     done:
     ff_hevc_ps_uninit(&ps);
+#if (LIBAVCODEC_VERSION_MAJOR >= 60)
+    ff_hevc_sei_free(&sei);
+#endif
     avcodec_free_context(&avctx);
     return ret;
 #else
     return -ENOSYS;
 #endif
 }
+
+/*
+ * The function below is a vendored copy of FFmpeg 4.3's internal
+ * av_compute_pkt_fields(). It pokes into AVStreamInternal, AVStream::parser
+ * and avpriv_h264_has_num_reorder_frames(), all of which were removed from
+ * the public API in FFmpeg 7.0. FFmpeg >= 5.9 computes packet fields itself
+ * inside av_read_frame(), so the workaround is no longer needed.
+ */
+#if LIBAVFORMAT_VERSION_MAJOR < 59
 #define RELATIVE_TS_BASE (INT64_MAX - (1LL<<48))
 
 static int is_relative(int64_t ts) {
@@ -1408,3 +1368,4 @@ void av_compute_pkt_fields(AVFormatContext *s, AVStream *st,
             FF_ENABLE_DEPRECATION_WARNINGS
 #endif
 }
+#endif /* LIBAVFORMAT_VERSION_MAJOR < 59 */

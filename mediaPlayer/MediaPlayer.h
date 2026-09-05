@@ -18,6 +18,7 @@ class AbrManager;
 class AbrAlgoStrategy;
 
 #include <cacheModule/CacheManager.h>
+#include <demuxer/manifest/MediaManifest.h>
 #include <drm/DrmHandler.h>
 #include <mutex>
 #include <render/video/IVideoRender.h>
@@ -107,6 +108,18 @@ namespace Cicada {
          * set player url source
          */
         void SetDataSource(const char *url);
+
+        /*
+         * 对象模式播放：传入统一的 MediaManifest 清单对象
+         * （对应 hili-player 的 MediaManifest JSON 结构），无需 m3u8/mpd 文本。
+         * 支持 AES-128 分段加密与 DRM（Widevine/FairPlay/ClearKey）。
+         */
+        void SetDataSource(const Manifest::MediaManifest &manifest);
+
+        /*
+         * 对象模式播放：传入 MediaManifest 结构的 JSON 文本。
+         */
+        void SetDataSource(const std::string &jsonManifest);
 
         /*
         * when play url not equals SetDataSource , will callback.

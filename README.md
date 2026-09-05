@@ -29,13 +29,23 @@ export OPENSSL_GIT=https://gitee.com/mirrors/openssl.git
 export CURL_GIT=https://gitee.com/mirrors/curl.git
 ```
 
+国内镜像一键预设（构建时传入，不传则默认 github；镜像失败自动回退）：
+
+```bash
+source external/china_mirror_env.sh     # gitee 镜像预设
+# 或 export GIT_MIRROR_PREFIX=https://gitclone.com   # 实时代理式镜像
+```
+
+完整说明（含 gradle/NDK/brew/Flutter 镜像）见 [`docs/ChinaMirrors.md`](docs/ChinaMirrors.md)。
+
 - [1. compile iOS](doc/compile_ios.md)
 - [2. compile Android](doc/compile_Android.md)
 - [3. compile_Linux](doc/compile_Linux.md)
 - [4. compile_Windows (cross compile)](doc/compile_Windows.md)
 - [5.compile_Windows(msvc)](doc/compile_Windows_msvc.md)
 - [6. compile_MacOS](doc/compile_mac.md)
-- 7.webAssembly coming soon
+- [7. compile HarmonyOS / OpenHarmony](docs/Packaging_HarmonyOS.md)
+- 8.webAssembly coming soon
 
 
 ## How to use
@@ -43,7 +53,8 @@ export CURL_GIT=https://gitee.com/mirrors/curl.git
 - [1. cmdline (Windows/MacOS/Linux)](cmdline/README.md)
 - [2. Android](platform/Android/README.md)
 - [3. iOS/MacOS](platform/Apple/README.md)
-- 4.webAssembly coming soon
+- [4. HarmonyOS Demo (ArkTS + XComponent)](platform/HarmonyOS/README.md)
+- 5.webAssembly coming soon
 
 
 ## Features
@@ -51,13 +62,27 @@ export CURL_GIT=https://gitee.com/mirrors/curl.git
 - MPEG-DASH
 - WideVine
 - ABR
-- hardware decode on Android and Apple platform
+- hardware decode on Android, Apple and HarmonyOS (OH_AVCodec) platforms
 - HEVC support
 - OpenGL render
 - HDR render
 - change volume by software
 - speed playback
 - snapshot
+
+## FFmpeg 9.0 + 对象清单播放（本仓库升级要点）
+
+- **FFmpeg 9.0**：全部依赖升级至 FFmpeg n9.0，旧版 API 全部迁移（详见
+  [`docs/FFmpeg9_Upgrade.md`](docs/FFmpeg9_Upgrade.md)）。
+- **Android 最低版本 7.0 (API 24)**：全部 gradle/cmake/CI 已升级（详见
+  [`docs/Packaging_Android.md`](docs/Packaging_Android.md)）。
+- **HarmonyOS NEXT 硬件加速**：OH_AVCodec 硬解（surface 零拷贝）、OH_AudioRenderer、
+  DRM Kit、NAPI + XComponent Demo（详见 [`docs/Packaging_HarmonyOS.md`](docs/Packaging_HarmonyOS.md)）。
+- **对象模式播放（不再只能传 URL）**：与 Web 端 hili-player 的
+  `manifest-to-hls.ts`/`manifest-to-dash.ts` 同款语义 —— 直接传入
+  `MediaManifest` 对象/JSON（模板/列表/单文件分片、直播、AES-128、Widevine/FairPlay/ClearKey DRM），
+  详见 [`docs/ObjectManifestPlayback.md`](docs/ObjectManifestPlayback.md)。
+- **架构与各平台打包流程**：[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)。
 - subtitle title and external subtitle title
 - on playing cache
 - background video playback

@@ -9,33 +9,39 @@ on:
 jobs:
   build:
 
-    runs-on: ubuntu-18.04
+    runs-on: ubuntu-22.04
 
     steps:
-      - uses: actions/checkout@v2
-      - shell: bash
-        run: mkdir ~/android-env/
-      - name: specify NDK
-        run: |
-          wget -q "https://dl.google.com/android/repository/android-ndk-r14b-linux-x86_64.zip"
-          unzip -q android-ndk-r14b-linux-x86_64.zip -d ~/android-env/
+      - uses: actions/checkout@v4
+      - name: Setup JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
 
-      - name: build exteranl
+      - name: Setup Android SDK + NDK
+        uses: android-actions/setup-android@v3
+
+      - name: specify NDK
+        shell: bash
+        run: |
+          # NDK r25+ is required for FFmpeg 9.0 (C11 toolchain) and API 24 minimum.
+          # 国内镜像可覆盖 ANDROID_NDK_URL，例如：
+          #   https://registry.npmmirror.com/-/binary/android-ndk/android-ndk-r25c-linux.zip
+          NDK_URL=${ANDROID_NDK_URL:-https://dl.google.com/android/repository/android-ndk-r25c-linux.zip}
+          wget -q "$NDK_URL"
+          unzip -q android-ndk-r25c-linux.zip -d ~/android-env/
+          echo "ANDROID_NDK=$HOME/android-env/android-ndk-r25c" >> $GITHUB_ENV
+          echo "ANDROID_NDK_HOME=$HOME/android-env/android-ndk-r25c" >> $GITHUB_ENV
+
+      - name: build external
+        shell: bash
         run: |
           git config --global user.email "you@example.com"
           git config --global user.name "Your Name"
-          export ANDROID_NDK=~/android-env/android-ndk-r14b
           . setup.env
           cd external/
           ./build_external.sh Android
-
-      - name: set up JDK 1.8
-        uses: actions/setup-java@v1
-        with:
-          java-version: 1.8
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v2
 
       - name: Build debug APK
         run: |
@@ -44,8 +50,7 @@ jobs:
           bash ./gradlew assembleDebug --stacktrace
 
       - name: Upload apk
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           name: CicadaPlayerDemo_debug.apk
           path: platform/Android/source/paasApp/build/outputs/apk/debug/CicadaPlayerDemo_debug.apk
-

@@ -15,9 +15,8 @@ function ffmpeg_cross_compile_set_Android(){
     cross_compile_set_platform_Android "$1";
     ffmpeg_cross_compile_config_add "--target-os=linux"
     ffmpeg_cross_compile_config_add "--arch=${CPU_ARCH}"
-    ffmpeg_cross_compile_config_add "--cross-prefix="${CROSS_COMPILE}-""
+    ffmpeg_cross_compile_config_add "--cross-prefix="${CROSS_PREFIX}""
     ffmpeg_cross_compile_config_add "--disable-linux-perf"
-    ffmpeg_cross_compile_config_add "--toolchain=hardened"
     if [ "${NEON_SUPPORT}" == "TRUE" ]
     then
          ffmpeg_cross_compile_config_add "--enable-neon"
@@ -52,6 +51,23 @@ function ffmpeg_cross_compile_set_win32(){
     then
          ffmpeg_cross_compile_config_add "--enable-neon"
          ffmpeg_cross_compile_config_add "--enable-thumb"
+    fi
+}
+
+function ffmpeg_cross_compile_set_OHOS(){
+    cross_compile_set_platform_OHOS "$1" || return 1
+    ffmpeg_cross_compile_config_add "--target-os=linux"
+    ffmpeg_cross_compile_config_add "--arch=${CPU_ARCH}"
+    ffmpeg_cross_compile_config_add "--disable-linux-perf"
+    # OHOS NDK has no pkg-config and no glibc-specific headers
+    ffmpeg_cross_compile_config_add "--disable-symver"
+    if [ "${NEON_SUPPORT}" == "TRUE" ]
+    then
+         ffmpeg_cross_compile_config_add "--enable-neon"
+    fi
+    # Optional: disable hand-written asm when bringing up on a new toolchain
+    if [[ "${OHOS_DISABLE_ASM}" == "TRUE" ]];then
+         ffmpeg_cross_compile_config_add "--disable-asm"
     fi
 }
 function ffmpeg_native_compile_set_macOS(){

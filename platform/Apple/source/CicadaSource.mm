@@ -50,3 +50,24 @@
 
 @end
 
+@interface CicadaManifestSource ()
+@end
+
+@implementation CicadaManifestSource
+@synthesize mediaManifestJson;
+
+- (instancetype)init{
+    if (self = [super init]) {
+        self.mediaManifestJson = nil;
+    }
+    return self;
+}
+
+-(instancetype)manifestWithJson:(NSString *)json
+{
+    self.mediaManifestJson = json;
+    return self;
+}
+
+@end
+

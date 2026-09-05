@@ -33,6 +33,17 @@ function build_static_lib(){
     export TARGET_ARCH=$2
     cd ${CWD}
 
+    # Windows 检出/拷贝会丢失脚本可执行位，统一补齐常见构建入口
+    # （configure / autogen.sh / buildconf / OpenSSL 的 Configure）
+    local src
+    for src in "${LIBXML2_SOURCE_DIR}" "${OPEN_SSL_SOURCE_DIR}" "${CURL_SOURCE_DIR}" \
+               "${NGHTTP2_SOURCE_DIR}" "${FDK_AAC_SOURCE_DIR}" "${X264_SOURCE_DIR}" \
+               "${FFMPEG_SOURCE_DIR}" "${ARES_SOURCE_DIR}"; do
+        if [[ -n "$src" && -d "$src" ]]; then
+            chmod +x "$src/configure" "$src/autogen.sh" "$src/buildconf" "$src/Configure" 2>/dev/null
+        fi
+    done
+
     local build_xml="true"
     if [[ "$1" == "iOS" ]] || [[ "$1" == "Darwin" ]] || [[ "$1" == "maccatalyst" ]];then
         if [[ "${XML_USE_NATIVE}" == "TRUE" ]];then
@@ -165,6 +176,9 @@ function build_libs(){
        if [[ "$1" == "Android" ]];then
            link_shared_lib_Android $1 ${arch}
        fi
+       if [[ "$1" == "OHOS" ]];then
+           link_shared_lib_OHOS $1 ${arch}
+       fi
        if [[ "$1" == "win32" ]];then
            link_shared_lib_win32 $1 ${arch}
        fi
@@ -250,11 +264,21 @@ function link_shared_lib_Android(){
     cp ${BUILD_TOOLS_DIR}/src/build_version.cpp ./
     sh ${BUILD_TOOLS_DIR}/gen_build_version.sh > version.h
 
-    ${CROSS_COMPILE}-gcc -std=c++11 build_version.cpp -lm -lz -shared --sysroot=${SYSTEM_ROOT} -I${FFMPEG_INSTALL_DIR}/include \
-     -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS}  -landroid -llog -Wl,-soname,lib${LIB_NAME}.so \
-    ${objs} \
-    -o ${install_dir}/lib${LIB_NAME}.so \
-    -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
+    # NDK r25+: link with clang instead of the removed gcc toolchain.
+    local ndk_host
+    case "$(uname -s)" in
+        Darwin*) ndk_host=darwin-x86_64 ;;
+        *)       ndk_host=linux-x86_64 ;;
+    esac
+    local toolchain=${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}
+    local TARGET=${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}
+
+    ${toolchain}/bin/clang -target ${TARGET} --sysroot=${SYSTEM_ROOT} -fuse-ld=lld \
+      -std=c++11 build_version.cpp -lm -lz -shared -I${FFMPEG_INSTALL_DIR}/include \
+      -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS}  -landroid -llog -Wl,-soname,lib${LIB_NAME}.so \
+      ${objs} \
+      -o ${install_dir}/lib${LIB_NAME}.so \
+      -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
 
     rm build_version.cpp version.h
 }
@@ -333,6 +357,70 @@ function link_shared_lib_win32(){
     -o ${install_dir}/lib${LIB_NAME}.dll \
     -Wl,--kill-at,--out-implib=${install_dir}/lib${LIB_NAME}.lib   \
     -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 -lws2_32 -lbcrypt -lcrypt32
+
+    rm build_version.cpp version.h
+}
+
+function link_shared_lib_OHOS(){
+    if [[ "$1" != "OHOS" ]];then
+        return;
+    fi
+    local install_dir=${CWD}/install/ffmpeg/OHOS/$2/
+    cross_compile_set_platform_OHOS  $2 || return 1
+    local cup_arch;
+    cup_arch=${CPU_ARCH}
+
+    if [[ -z "${LIB_NAME}" ]];then
+        export LIB_NAME=alivcffmpeg
+    fi
+
+    echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
+
+    local objs="${FFMPEG_BUILD_DIR}/compat/*.o";
+    local libraries="libavcodec libswresample libavformat libavutil libswscale libavfilter"
+    local library
+
+    for library in ${libraries};
+    do
+        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/" ]]; then
+            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/*o""
+        fi
+        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}" ]]; then
+            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}/*.o""
+        fi
+        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/neon" ]]; then
+            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/neon/*.o""
+        fi
+    done
+
+    local ldflags=""
+
+    if [[ -d "${OPENSSL_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lssl -lcrypto -L${OPENSSL_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${DAV1D_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -ldav1d -L${DAV1D_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${NGHTTP2_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lnghttp2 -L${NGHTTP2_INSTALL_DIR}/lib/"
+    fi
+
+    cp ${BUILD_TOOLS_DIR}/src/build_version.cpp ./
+    sh ${BUILD_TOOLS_DIR}/gen_build_version.sh > version.h
+
+    # Link with the OHOS NDK clang; the target triple is already in $CC.
+    local clang="${OHOS_SDK}/native/llvm/bin/clang"
+    if [[ -z "${OHOS_SDK}" ]];then
+        clang="${OHOS_SDK_HOME}/native/llvm/bin/clang"
+    fi
+
+    ${clang} --target=${TARGET_TRIPLE} --sysroot=${SYSTEM_ROOT} -fuse-ld=lld \
+      -std=c++11 build_version.cpp -lm -lz -shared -I${FFMPEG_INSTALL_DIR}/include \
+      -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS} \
+      -Wl,-soname,lib${LIB_NAME}.so \
+      ${objs} \
+      -o ${install_dir}/lib${LIB_NAME}.so \
+      -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
 
     rm build_version.cpp version.h
 }

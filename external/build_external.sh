@@ -1,15 +1,27 @@
 #!/usr/bin/env bash
 
-BUILD_TOOLS_DIR=$(cd $(dirname ${BASH_SOURCE[0]}); pwd)
+BUILD_TOOLS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+REPO_ROOT=$(cd "${BUILD_TOOLS_DIR}/.." && pwd)
 export TOP_DIR=${PWD}
 PATH=$PATH:${BUILD_TOOLS_DIR}
-source ../build_tools/utils.sh
+# 用绝对路径 source，避免 CRLF/工作目录不同导致函数加载失败
+source "${REPO_ROOT}/build_tools/utils.sh"
 source user_env.sh
 
 function git_am_patch() {
-    git am $1
-    if [ $? -ne 0 ]; then
-        print_warning "patch error, may be patched"
+    local patch=$1
+    local tmp_patch
+    tmp_patch=$(mktemp /tmp/cicada-patch-XXXXXX.patch)
+    # 补丁或源码可能是 Windows 检出(CRLF)：统一转 LF 后再打，避免上下文不匹配
+    tr -d '\r' < "${patch}" > "${tmp_patch}"
+    git config core.autocrlf false
+    git am --abort 2>/dev/null      # 清理上一次失败残留的 am 状态
+    git checkout -- . 2>/dev/null   # 把 CRLF worktree 还原成仓库内的 LF 内容
+    git -c core.whitespace=cr-at-eol am "${tmp_patch}"
+    local ret=$?
+    rm -f "${tmp_patch}"
+    if [ ${ret} -ne 0 ]; then
+        print_warning "patch error, may be patched (${patch})"
         git am --abort
     fi
 }
@@ -51,7 +63,7 @@ function git_apply_patch() {
 function patch_dav1d() {
     cd ${DAV1D_SOURCE_DIR}
     if [[ "$TARGET_PLATFORM" == "iOS" ]];then
-        git_apply_patch ${TOP_DIR}/CicadaPlayer/external/contribute/dav1d/0001-chore-enable-bitcode.patch
+        git_apply_patch ${REPO_ROOT}/external/contribute/dav1d/0001-chore-enable-bitcode.patch
     else
         git reset --hard HEAD #reset the ios patch
     fi
@@ -73,6 +85,17 @@ function load_source() {
         done
     fi
 
+    # 统一修复 Windows 检出问题：源码树行尾统一为 LF
+    # （core.autocrlf=false + checkout 会按仓库内容重写 worktree）
+    local src_dir
+    for src_dir in "${FFMPEG_SOURCE_DIR}" "${OPEN_SSL_SOURCE_DIR}" "${NGHTTP2_SOURCE_DIR}" \
+                   "${CURL_SOURCE_DIR}" "${LIBXML2_SOURCE_DIR}" "${DAV1D_SOURCE_DIR}"; do
+        if [[ -n "${src_dir}" && -d "${src_dir}/.git" ]]; then
+            echo "normalize EOL for ${src_dir}"
+            (cd "${src_dir}" && git config core.autocrlf false && git checkout -- . 2>/dev/null || true)
+        fi
+    done
+
     if [[ ${FFMPEG_NEED_PATCH} == "TRUE" ]];then
         patch_ffmpeg
     fi
@@ -93,18 +116,8 @@ function load_source() {
 }
 
 function check_android_tools() {
-    if [[ `which aarch64-linux-android-gcc` ]];then
+    if [[ `which aarch64-linux-android-clang` ]];then
         return 0;
-    fi
-
-    UNAME=$(uname)
-    if [[ "$UNAME" = "Darwin" ]]
-    then
-        echo Darwin
-        export HOST=darwin
-    else
-        echo Linux
-        export HOST=linux
     fi
 
     if  [ -z "${ANDROID_NDK}" ];then
@@ -113,8 +126,13 @@ function check_android_tools() {
         ANDROID_NDK_HOME=$ANDROID_NDK
     fi
     echo ANDROID_NDK is ${ANDROID_NDK}
-    PATH=$PATH:${ANDROID_NDK}:${ANDROID_NDK}/toolchains/arm-linux-androideabi-4.9/prebuilt/${HOST}-x86_64/bin
-    PATH=$PATH:${ANDROID_NDK}/toolchains/aarch64-linux-android-4.9/prebuilt/${HOST}-x86_64/bin
+    # NDK r25+: toolchain lives in toolchains/llvm/prebuilt/<host>/bin
+    local ndk_host
+    case "$(uname -s)" in
+        Darwin*) ndk_host=darwin-x86_64 ;;
+        *)       ndk_host=linux-x86_64 ;;
+    esac
+    PATH=$PATH:${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin
 }
 
 function apply_config() {
@@ -134,8 +152,9 @@ function check_cmake(){
         if [ ! `which brew` ]
         then
             echo 'Homebrew not found. Trying to install...'
-            ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)" \
-            || exit 1
+            # 国内可用 HOMEBREW_INSTALL_URL 覆盖安装脚本地址
+            local install_url=${HOMEBREW_INSTALL_URL:-https://raw.githubusercontent.com/Homebrew/install/master/install}
+            ruby -e "$(curl -fsSL ${install_url})" || exit 1
         fi
         echo 'Trying to install cmake...'
         brew install cmake || exit 1
@@ -193,8 +212,9 @@ function check_yasm(){
         if [ ! `which brew` ]
         then
             echo 'Homebrew not found. Trying to install...'
-            ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)" \
-            || exit 1
+            # 国内可用 HOMEBREW_INSTALL_URL 覆盖安装脚本地址
+            local install_url=${HOMEBREW_INSTALL_URL:-https://raw.githubusercontent.com/Homebrew/install/master/install}
+            ruby -e "$(curl -fsSL ${install_url})" || exit 1
         fi
         echo 'Trying to install yasm...'
         brew install yasm
@@ -238,26 +258,29 @@ export TARGET_PLATFORM=$1
 
 if [[ "$1" == "Android" ]];then
     if  [[ -z "${ANDROID_NDK}" ]];then
-        export ANDROID_NDK=~/Android-env/android-ndk-r14b/
+        export ANDROID_NDK=~/Android-env/android-ndk-r25c/
     fi
     check_android_tools
     check_dav1d
-    ../build_tools/build_Android.sh
+    # 用 bash 显式执行，避免脚本丢失可执行位时报 Permission denied
+    bash ${REPO_ROOT}/build_tools/build_Android.sh
 
 elif [[ "$1" == "iOS" ]];then
     #export HOMEBREW_NO_AUTO_UPDATE=true
     check_cmake
     check_yasm
     check_dav1d
-    ../build_tools/build_iOS.sh
+    bash ${REPO_ROOT}/build_tools/build_iOS.sh
 elif [[ "$1" == "macOS" ]];then
-    ../build_tools/build_native.sh 
+    bash ${REPO_ROOT}/build_tools/build_native.sh
 elif [[ "$1" == "Linux" ]];then
-    ../build_tools/build_native.sh
+    bash ${REPO_ROOT}/build_tools/build_native.sh
 elif [[ "$1" == "Windows" ]];then
-    ../build_tools/build_win32.sh
+    bash ${REPO_ROOT}/build_tools/build_win32.sh
 elif [[ "$1" == "maccatalyst" ]];then
-    ../build_tools/build_maccatalyst.sh
+    bash ${REPO_ROOT}/build_tools/build_maccatalyst.sh
+elif [[ "$1" == "OHOS" ]];then
+    bash ${REPO_ROOT}/build_tools/build_ohos.sh
 fi
 
 

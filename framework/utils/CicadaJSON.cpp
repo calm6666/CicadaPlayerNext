@@ -83,6 +83,18 @@ std::string CicadaJSONItem::getString(const std::string &name) const
     return getString(name, "");
 }
 
+std::string CicadaJSONItem::getStringValue(const std::string &defaultString) const
+{
+    if (nullptr == mJSON) {
+        return defaultString;
+    }
+    char *str = cJSON_GetStringValue(mJSON);
+    if (str) {
+        return str;
+    }
+    return defaultString;
+}
+
 int CicadaJSONItem::getInt(const std::string &name, int defaultValue) const
 {
     if (nullptr == mJSON) {

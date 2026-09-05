@@ -5,6 +5,7 @@
 #ifdef __APPLE__
 #include <TargetConditionals.h>
 #include <render/audio/Apple/AFAudioSessionWrapper.h>
+#include <media_player_error_def.h>
 #endif
 
 #import <AVFoundation/AVFoundation.h>
@@ -99,6 +100,22 @@ void AppleAVPlayer::SetDataSource(const char *url)
     }
     //    NSLog(@"SetDataSource url : %@", urlString);
     UpdatePlayerStatus(PLAYER_INITIALZED);
+}
+
+void AppleAVPlayer::SetDataSource(const Manifest::MediaManifest &manifest)
+{
+    // Object-based playback is implemented by SuperMediaPlayer; the AVPlayer
+    // wrapper only supports URL sources.
+    UpdatePlayerStatus(PLAYER_ERROR);
+    if (mListener.ErrorCallback) {
+        mListener.ErrorCallback(MEDIA_PLAYER_ERROR_DATASOURCE_EMPTYURL,
+                                "manifest playback not supported by AppleAVPlayer", mListener.userData);
+    }
+}
+
+void AppleAVPlayer::SetDataSource(const std::string &jsonManifest)
+{
+    SetDataSource(Manifest::MediaManifest{});
 }
 
 void AppleAVPlayer::UpdatePlayerStatus(PlayerStatus status)

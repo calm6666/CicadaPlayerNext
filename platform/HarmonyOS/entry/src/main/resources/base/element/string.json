@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "CicadaPlayerNext HarmonyOS demo module"
+    },
+    {
+      "name": "EntryAbility_desc",
+      "value": "CicadaPlayerNext demo"
+    },
+    {
+      "name": "EntryAbility_label",
+      "value": "CicadaPlayer"
+    }
+  ]
+}

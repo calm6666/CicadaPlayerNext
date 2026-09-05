@@ -7,8 +7,10 @@
 
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
+#include <demuxer/manifest/MediaManifest.h>
 #include "ICicadaPlayer.h"
 #include "playerOptions.h"
 #include <atomic>
@@ -29,6 +31,9 @@ namespace Cicada {
         int64_t maxBufferDuration = 0;
         uint64_t lowMemSize = 0;
         std::string url;
+        // Object-based playback: unified manifest (takes precedence over url
+        // when set; also indicates manifest mode in Prepare()).
+        std::unique_ptr<Manifest::MediaManifest> manifest;
         std::string refer;
         std::string userAgent;
         int timeout_ms{15000};

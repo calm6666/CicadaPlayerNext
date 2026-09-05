@@ -81,7 +81,7 @@ int parser_extradata(const uint8_t *pData, int size, parserInfo *pInfo, enum AFC
 {
     int ret = -EINVAL, i;
     enum AVCodecID avCodecId = CodecID2AVCodecID(codecId);
-    AVCodec *codec = avcodec_find_decoder(avCodecId);
+    const AVCodec *codec = avcodec_find_decoder(avCodecId);
 
     if (codec == NULL) {
         return -EINVAL;
@@ -133,6 +133,9 @@ int parser_extradata(const uint8_t *pData, int size, parserInfo *pInfo, enum AFC
         HEVCParamSets ps;
 #if (LIBAVCODEC_VERSION_MAJOR < 58)
         HEVCSEIContext sei;
+#elif (LIBAVCODEC_VERSION_MAJOR >= 60)
+        // FFmpeg 7.0+: HEVCSEI is heap-allocated.
+        HEVCSEI *sei = ff_hevc_sei_alloc();
 #else
         HEVCSEI sei;
 #endif
@@ -140,12 +143,17 @@ int parser_extradata(const uint8_t *pData, int size, parserInfo *pInfo, enum AFC
         int is_nalff = 0;
         int nal_length_size = 0;
         memset(&ps, 0, sizeof(ps));
+#if (LIBAVCODEC_VERSION_MAJOR < 60)
         memset(&sei, 0, sizeof(sei));
+#endif
         ret = ff_hevc_decode_extradata(pData, size,
-                                       &ps, &sei, &is_nalff, &nal_length_size, 0, 1, avctx);
+                                       &ps, sei, &is_nalff, &nal_length_size, 0, 1, avctx);
         avcodec_free_context(&avctx);
 
         if (ret < 0) {
+#if (LIBAVCODEC_VERSION_MAJOR >= 60)
+            ff_hevc_sei_free(&sei);
+#endif
             return -EINVAL;
         }
 
@@ -159,6 +167,9 @@ int parser_extradata(const uint8_t *pData, int size, parserInfo *pInfo, enum AFC
             ret = -EINVAL;
 
         ff_hevc_ps_uninit(&ps);
+#if (LIBAVCODEC_VERSION_MAJOR >= 60)
+        ff_hevc_sei_free(&sei);
+#endif
 #else
         ret = -EINVAL;
 #endif
@@ -177,7 +188,7 @@ static CFDataRef ff_videotoolbox_avcc_extradata_create(const uint8_t *pData, int
     int nal_length_size = 0;
     int i;
     memset(&ps, 0, sizeof(ps));
-    AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_H264);
     AVCodecContext *avctx = avcodec_alloc_context3(codec);
     ret = ff_h264_decode_extradata(pData, size, &ps, &is_avc, &nal_length_size, 0, avctx);
     avcodec_free_context(&avctx);
@@ -241,6 +252,9 @@ static CFDataRef ff_videotoolbox_hvcc_extradata_create(const uint8_t *pData, int
     HEVCParamSets ps;
 #if (LIBAVCODEC_VERSION_MAJOR < 58)
     HEVCSEIContext sei;
+#elif (LIBAVCODEC_VERSION_MAJOR >= 60)
+    // FFmpeg 7.0+: HEVCSEI is heap-allocated.
+    HEVCSEI *sei = ff_hevc_sei_alloc();
 #else
     HEVCSEI sei;
 #endif
@@ -250,11 +264,13 @@ static CFDataRef ff_videotoolbox_hvcc_extradata_create(const uint8_t *pData, int
     int is_nalff = 0;
     int nal_length_size = 0;
     memset(&ps, 0, sizeof(ps));
+#if (LIBAVCODEC_VERSION_MAJOR < 60)
     memset(&sei, 0, sizeof(sei));
-    AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
+#endif
+    const AVCodec *codec = avcodec_find_decoder(AV_CODEC_ID_HEVC);
     AVCodecContext *avctx = avcodec_alloc_context3(codec);
     ret = ff_hevc_decode_extradata(pData, size,
-                                   &ps, &sei, &is_nalff, &nal_length_size, 0, 1, avctx);
+                                   &ps, sei, &is_nalff, &nal_length_size, 0, 1, avctx);
     avcodec_free_context(&avctx);
     vps = (const HEVCVPS *) ps.vps_list[0]->data;
     sps = (const HEVCSPS *) ps.sps_list[0]->data;
@@ -396,6 +412,11 @@ static CFDataRef ff_videotoolbox_hvcc_extradata_create(const uint8_t *pData, int
     av_assert0(p - vt_extradata == vt_extradata_size);
     data = CFDataCreate(kCFAllocatorDefault, vt_extradata, vt_extradata_size);
     av_free(vt_extradata);
+
+    ff_hevc_ps_uninit(&ps);
+#if (LIBAVCODEC_VERSION_MAJOR >= 60)
+    ff_hevc_sei_free(&sei);
+#endif
 
     if (pInfo) {
         pInfo->width = sps->width;

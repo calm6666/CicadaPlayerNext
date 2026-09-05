@@ -28,6 +28,7 @@ namespace Cicada {
         demuxer_type_playlist,
         demuxer_type_bit_stream,
         demuxer_type_webvtt,
+        demuxer_type_manifest,  // object-based playback (MediaManifest JSON/struct)
     } demuxer_type;
 
     typedef enum header_type {

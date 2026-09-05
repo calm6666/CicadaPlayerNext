@@ -155,16 +155,16 @@ void testFrame()
 
 void testPacket()
 {
-    AVPacket opkt;
-    av_init_packet(&opkt);
-    opkt.pts = 100;
-    opkt.duration = 10;
-    opkt.flags = 1;
-    opkt.data = static_cast<uint8_t *>(av_malloc(10));
-    opkt.size = 10;
-    memset(opkt.data, 0x11, 10);
-    opkt.buf = av_buffer_create(opkt.data, opkt.size, av_buffer_free, nullptr, 0);
-    AVAFPacket avafPacket{opkt};
+    AVPacket *opkt = av_packet_alloc();
+    opkt->pts = 100;
+    opkt->duration = 10;
+    opkt->flags = 1;
+    opkt->data = static_cast<uint8_t *>(av_malloc(10));
+    opkt->size = 10;
+    memset(opkt->data, 0x11, 10);
+    opkt->buf = av_buffer_create(opkt->data, opkt->size, av_buffer_free, nullptr, 0);
+    AVAFPacket avafPacket{*opkt};
+    av_packet_free(&opkt);
     //  av_packet_unref(&opkt);
     std::unique_ptr<IAFPacket> clone_pkt = avafPacket.clone();
     AF_DUMP_INT(clone_pkt->getInfo().duration);

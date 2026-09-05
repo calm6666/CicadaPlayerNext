@@ -166,6 +166,14 @@ class FlutterCicadaPlayer {
     return channel.invokeMethod('setUrl', url);
   }
 
+  /// 对象模式播放：传入统一的 MediaManifest 清单 JSON（与 hili-player Web 端
+  /// MediaManifest 结构一致），无需 m3u8/mpd URL。支持 AES-128 与
+  /// Widevine/FairPlay/ClearKey DRM 内容保护。
+  Future<void> setDataSourceManifest(String mediaManifestJson) async {
+    assert(mediaManifestJson != null);
+    return channel.invokeMethod('setDataSourceManifest', mediaManifestJson);
+  }
+
   Future<void> prepare() async {
     return channel.invokeMethod('prepare');
   }

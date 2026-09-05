@@ -45,7 +45,8 @@ function build_x264(){
             --extra-cflags="${CPU_FLAGS}"   \
             --extra-ldflags="${CPU_LDFLAGS}"
 
-        [ "$1" == "Android" ] && [ "${NDK_V}" -lt 19 ] && (sed -i -- 's/HAVE_LOG2F 1/HAVE_LOG2F 0/g' config.h)
+        # 仅 API < 19 的旧平台需要去掉 log2f（本项目最低 API 24，恒为假）
+        [ "$1" == "Android" ] && [ "${ANDROID_API_LEVEL:-24}" -lt 19 ] && (sed -i -- 's/HAVE_LOG2F 1/HAVE_LOG2F 0/g' config.h)
         if [ "$1" == "iOS" ]
         then
             local GAS_PREPROCESSOR=$(which gas-preprocessor.pl)

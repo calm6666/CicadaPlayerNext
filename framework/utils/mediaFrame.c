@@ -47,6 +47,16 @@ void releaseMeta(Stream_meta *pMeta)
         pMeta->keyFormat = NULL;
     }
 
+    if (pMeta->drmPssh) {
+        free(pMeta->drmPssh);
+        pMeta->drmPssh = NULL;
+    }
+
+    if (pMeta->drmKeyId) {
+        free(pMeta->drmKeyId);
+        pMeta->drmKeyId = NULL;
+    }
+
     Source_meta *meta = pMeta->meta;
     releaseSourceMeta(meta);
 

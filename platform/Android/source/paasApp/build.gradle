@@ -1,11 +1,11 @@
 apply plugin: 'com.android.application'
 
 android {
-    compileSdkVersion 27
+    compileSdkVersion 34
     defaultConfig {
         applicationId "com.cicada.player.demo"
-        minSdkVersion 18
-        targetSdkVersion 27
+        minSdkVersion 24
+        targetSdkVersion 34
         versionCode 1
         versionName "1.0"
         multiDexEnabled true

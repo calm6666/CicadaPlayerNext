@@ -1371,6 +1371,8 @@ namespace Cicada {
 
         meta->keyUrl = mCurrentEncryption.keyUrl.empty() ? nullptr : strdup(mCurrentEncryption.keyUrl.c_str());
         meta->keyFormat = mCurrentEncryption.keyFormat.empty() ? nullptr : strdup(mCurrentEncryption.keyFormat.c_str());
+        meta->drmPssh = mCurrentEncryption.pssh.empty() ? nullptr : strdup(mCurrentEncryption.pssh.c_str());
+        meta->drmKeyId = mCurrentEncryption.keyId.empty() ? nullptr : strdup(mCurrentEncryption.keyId.c_str());
 
         return 0;
     }

@@ -108,7 +108,7 @@ namespace Cicada {
         static avFormatDemuxer se;
 
     protected:
-        int open(AVInputFormat *in_fmt);
+        int open(const AVInputFormat *in_fmt);
 
     private:
         static int interrupt_cb(void *opaque);

@@ -6,7 +6,7 @@ function build_boost() {
     if [ "$1" == "Android" ];then
         cross_compile_set_platform_Android  $2
         export CROSS_COMPILE=${CROSS_COMPILE}
-        export NDK_V=${NDK_V}
+        export ANDROID_API_LEVEL=${ANDROID_API_LEVEL:-24}
         export HOST=${HOST}
         export ABI=${ABI}
         export CPU_ARCH=${CPU_ARCH}
@@ -15,6 +15,8 @@ function build_boost() {
            export ABI_NAME=armeabi_v7a
        elif [ "$ABI" == "arm64-v8a" ];then
            export ABI_NAME=arm64_v8a
+       elif [ "$ABI" == "x86_64" ];then
+           export ABI_NAME=x86_64
     fi
     elif [ "$1" == "iOS" ];then
         cross_compile_set_platform_iOS $2
@@ -46,7 +48,7 @@ function build_boost() {
         ./b2 -a link=static \
         debug-symbols=off \
         optimization=space \
-        toolset=gcc-android_${NDK_V}_${ABI_NAME} \
+        toolset=clang-android_${ANDROID_API_LEVEL}_${ABI_NAME} \
         --build-dir=${build_dir}  \
         --stagedir=${install_dir}
 

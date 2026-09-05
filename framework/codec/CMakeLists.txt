@@ -48,6 +48,14 @@ if (APPLE AND ENABLE_VTB_DECODER)
             )
 endif ()
 
+if ((OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS") AND ENABLE_OHOS_AVCODEC_DECODER)
+    target_compile_definitions(videodec PRIVATE ENABLE_OHOS_AVCODEC_DECODER)
+    target_sources(videodec PRIVATE
+            OHOS/OhosAVCodecDecoder.h
+            OHOS/OhosAVCodecDecoder.cpp
+            )
+endif ()
+
 if (IOS)
     target_sources(videodec PRIVATE
             utils_ios.mm
@@ -72,6 +80,11 @@ endif ()
 
 
 target_link_libraries(videodec PRIVATE ${LINNK_LIBRARYS})
+
+if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    target_link_libraries(videodec PRIVATE ${OHOS_SYSTEM_LIBS})
+endif ()
+
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations")
 
 if (HAVE_COVERAGE_CONFIG)

@@ -827,6 +827,14 @@ static int logOutput = 1;
     }
 }
 
+-(void)setManifestSource:(CicadaManifestSource *)source
+{
+    if (self.player && source && source.mediaManifestJson) {
+        // Object-based playback: unified MediaManifest JSON, DRM-capable.
+        self.player->SetDataSource(std::string([source.mediaManifestJson UTF8String]));
+    }
+}
+
 -(NSString *) getCacheFilePath:(NSString *)URL
 {
     if (self.player && (nil != URL)) {

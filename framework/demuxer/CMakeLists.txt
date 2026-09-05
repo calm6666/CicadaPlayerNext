@@ -36,7 +36,6 @@ target_sources(demuxer PRIVATE
         sample_decrypt/ISampleDecryptor.h
         sample_decrypt/SampleDecryptDemuxer.cpp
         sample_decrypt/SampleDecryptDemuxer.h
-        sample_decrypt/sampleDecryptDec.c
         sample_decrypt/ISampleDecrypt2c.cpp
         sample_decrypt/ISampleDecrypt2c.h
         decrypto/IAESDecrypt.h
@@ -85,7 +84,12 @@ if (ENABLE_HLS_DEMUXER)
             play_list/segment_decrypt/SegDecryptorFactory.cpp
             play_list/segment_decrypt/AES_128Decrypter.cpp
             play_list/segment_decrypt/ISegDecryptorPrototype.cpp
-            play_list/segment_decrypt/ISegDecryptorPrototype.h)
+            play_list/segment_decrypt/ISegDecryptorPrototype.h
+            manifest/MediaManifest.h
+            manifest/MediaManifestParser.cpp
+            manifest/MediaManifestParser.h
+            manifest/ManifestDemuxer.cpp
+            manifest/ManifestDemuxer.h)
 endif ()
 
 if (ENABLE_DASH_DEMUXER)

@@ -37,7 +37,6 @@ void AVAFPacket::copyInfo()
 AVAFPacket::AVAFPacket(AVPacket &pkt, bool isProtected) : mIsProtected(isProtected)
 {
     mpkt = av_packet_alloc();
-    av_init_packet(mpkt);
     av_packet_ref(mpkt, &pkt);
     copyInfo();
 }
@@ -45,7 +44,6 @@ AVAFPacket::AVAFPacket(AVPacket &pkt, bool isProtected) : mIsProtected(isProtect
 AVAFPacket::AVAFPacket(AVPacket *pkt, bool isProtected) : mIsProtected(isProtected)
 {
     mpkt = av_packet_alloc();
-    av_init_packet(mpkt);
     av_packet_ref(mpkt, pkt);
     copyInfo();
 }
@@ -161,7 +159,6 @@ bool AVAFPacket::getEncryptionInfo(IAFPacket::EncryptionInfo *dst)
 AVAFPacket::AVAFPacket(const AVAFPacket &pkt) : IAFPacket(pkt)
 {
     mpkt = av_packet_alloc();
-    av_init_packet(mpkt);
     av_packet_ref(mpkt, pkt.mpkt);
     copyInfo();
     mIsProtected = pkt.mIsProtected;
@@ -175,11 +172,11 @@ AVAFFrame::AVAFFrame(const IAFFrame::AFFrameInfo &info, const uint8_t **data, co
     AVFrame *avFrame = av_frame_alloc();
     if (type == FrameType::FrameTypeAudio) {
         audioInfo aInfo = info.audio;
-        avFrame->channels = aInfo.channels;
+        avFrame->ch_layout.nb_channels = aInfo.channels;
         avFrame->sample_rate = aInfo.sample_rate;
         avFrame->format = aInfo.format;
         int sampleSize = av_get_bytes_per_sample((enum AVSampleFormat)(avFrame->format));
-        avFrame->nb_samples = (int) (lineSize[0] / (avFrame->channels * sampleSize));
+        avFrame->nb_samples = (int) (lineSize[0] / (avFrame->ch_layout.nb_channels * sampleSize));
     } else if (type == FrameType::FrameTypeVideo) {
         videoInfo vInfo = info.video;
         avFrame->width = vInfo.width;
@@ -236,9 +233,10 @@ void AVAFFrame::copyInfo()
         mInfo.video.colorRange = AVColorRange2AF(mAvFrame->color_range);
         mInfo.video.format = AVPixFmt2Cicada((enum AVPixelFormat) mAvFrame->format);
     } else if (mType == FrameTypeAudio) {
-        mInfo.audio.channels = mAvFrame->channels;
+        mInfo.audio.channels = mAvFrame->ch_layout.nb_channels;
         mInfo.audio.nb_samples = mAvFrame->nb_samples;
-        mInfo.audio.channel_layout = mAvFrame->channel_layout;
+        mInfo.audio.channel_layout =
+                (mAvFrame->ch_layout.order == AV_CHANNEL_ORDER_NATIVE) ? mAvFrame->ch_layout.u.mask : 0;
         mInfo.audio.sample_rate = mAvFrame->sample_rate;
         mInfo.audio.format = (enum AFSampleFormat) mAvFrame->format;
     }
@@ -273,7 +271,7 @@ IAFFrame::FrameType AVAFFrame::getType()
         return FrameTypeVideo;
     }
 
-    if (mAvFrame->nb_samples > 0 && mAvFrame->channels > 0) {
+    if (mAvFrame->nb_samples > 0 && mAvFrame->ch_layout.nb_channels > 0) {
         return FrameTypeAudio;
     }
 

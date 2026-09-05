@@ -28,7 +28,7 @@ ffmpegVideoFilter::ffmpegVideoFilter() : IVideoFilter()
 ffmpegVideoFilter::ffmpegVideoFilter(const IAFFrame::videoInfo &srcFormat, const IAFFrame::videoInfo &dstFormat, bool active)
     : IVideoFilter(srcFormat, dstFormat, active)
 {
-    avfilter_register_all();
+    // avfilter_register_all was removed in FFmpeg 5.0 (filters self-register).
 }
 
 ffmpegVideoFilter::~ffmpegVideoFilter()

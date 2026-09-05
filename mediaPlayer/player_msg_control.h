@@ -4,8 +4,10 @@
 #include "native_cicada_player_def.h"
 #include <condition_variable>
 #include <deque>
+#include <memory>
 #include <mutex>
 #include <string>
+#include <demuxer/manifest/MediaManifest.h>
 
 using namespace std;
 
@@ -13,6 +15,7 @@ namespace Cicada {
     typedef enum PlayMsgType {
         MSG_INVALID = -1,
         MSG_SETDATASOURCE = 0,
+        MSG_SETMANIFESTSOURCE,
         MSG_SETVIEW,
         MSG_PREPARE,
         MSG_START,
@@ -61,6 +64,12 @@ namespace Cicada {
         std::string *url;
     } MsgDataSourceParam;
 
+    // Owns the manifest object; freed by recycleMsg() when the message is
+    // replaced/cleared, or transferred to the listener when processed.
+    typedef struct MsgManifestParam {
+        Manifest::MediaManifest *manifest;
+    } MsgManifestParam;
+
     typedef struct MsgBitStreamParam {
         readCB read;
         seekCB seek;
@@ -101,6 +110,7 @@ namespace Cicada {
     typedef union MsgParam {
         MsgViewParam viewParam;
         MsgDataSourceParam dataSourceParam;
+        MsgManifestParam msgManifestParam;
         MsgBitStreamParam msgBitStreamParam;
         MsgSeekParam seekParam;
         MsgChangeStreamParam streamParam;
@@ -142,8 +152,9 @@ namespace Cicada {
 
         virtual void ProcessSetDataSourceMsg(const std::string &url) = 0;
 
-        virtual void ProcessSetBitStreamMsg(readCB read, seekCB seekCb, void *arg) = 0;
+        virtual void ProcessSetManifestDataSourceMsg(std::unique_ptr<Manifest::MediaManifest> manifest) = 0;
 
+        virtual void ProcessSetBitStreamMsg(readCB read, seekCB seekCb, void *arg) = 0;
         virtual void ProcessPauseMsg() = 0;
 
         virtual void ProcessSeekToMsg(int64_t seekPos, bool bAccurate) = 0;

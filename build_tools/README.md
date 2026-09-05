@@ -1,5 +1,5 @@
 ## 1.仓库介绍
-本仓库是一个编译和交叉编译开源库的工具包，目前支持了ffmpeg在Android和iOS平台的交叉编译,使用MinGW 交叉编译Windows, Mac的native编译
+本仓库是一个编译和交叉编译开源库的工具包，目前支持了ffmpeg在Android和iOS平台的交叉编译,使用MinGW 交叉编译Windows, Mac的native编译，以及 OpenHarmony (HarmonyOS NEXT) 的交叉编译。
 ffmpeg目前支持fdk-aac和x264的外部编译。
 支持curl librtmp opessl 的编译。
 
@@ -22,7 +22,7 @@ user_env.sh，编译系统会自动执行该脚本
     DAV1D_SOURCE_DIR=$TOP_DIR/external/dav1d
     RTMPDUMP_SOURCE_DIR=$TOP_DIR/external/rtmpdump/
     ANDROID_NDK=$ANDROID_NDK_HOME
-    
+
 如果某些源码不需要编译，则可以不设置源码目录地址，目前支持x264的可选编译，其他工程理论上都支持，但是未测试。
 
 env.sh 脚本中的BUILD变量是用于调试用，设置成False后将不会做任何编译，只进行最后的链接工作
@@ -47,9 +47,9 @@ env.sh 脚本中的BUILD变量是用于调试用，设置成False后将不会做
 如
 
 单独编译新版本播放器的时候 将player_ffmpeg_config.sh拷贝到编译目录
-    
+
 单独编译短视频播放器的时候 将videoEditor_ffmpeg_config.sh拷贝到编译目录
-    
+
 编译的ffmpeg希望可以同时满足短视频和播放的需求时将videoEditor_ffmpeg_config.sh 和player_ffmpeg_config.sh
 都拷贝到编译工作目录下
 
@@ -57,7 +57,7 @@ env.sh 脚本中的BUILD变量是用于调试用，设置成False后将不会做
 ### 2.编译
 ```
 cd path/to/your/build/dir
-path/to/build_iOS(Android/win32/native).sh
+path/to/build_iOS(Android/win32/native/ohos).sh
 ```
 
 在编译目录用户可以自己创建一个ffmpeg的配置文件，编译系统会自动将该配置文件的内容添加到配置中
@@ -65,7 +65,7 @@ path/to/build_iOS(Android/win32/native).sh
 
 如播放器中的使用：
 
-build_external_android.sh 
+build_external_android.sh
 
     #!/usr/bin/env bash
     cp $TOP_DIR/build_tools/configs/player_ffmpeg_config.sh ./
@@ -112,9 +112,9 @@ export FFMPEG_INSTALL_DIR_ANDROID=$PWD/install/ffmpeg/Android/
 
 ```
 include_directories($ENV{FFMPEG_INSTALL_DIR_ANDROID}/${ANDROID_ABI}/include)
-``` 
+```
   此处后面应该会改为直接引用变量的方式，而非环境变量，此变量的值可以通过cmake 传递进来，方便在Android studio中编译。
-  
+
 4.由于播放器自有代码 Android目前使用gradle 进行编译，并考虑到使用Android studio去编译，所以在gradle中
 做了以下配置
 
@@ -122,14 +122,13 @@ include_directories($ENV{FFMPEG_INSTALL_DIR_ANDROID}/${ANDROID_ABI}/include)
 def rootPath  = rootProject.getRootDir().getAbsolutePath()
 externalNativeBuild {
    cmake {
-       arguments '-DANDROID_PLATFORM=android-18',
-             '-DANDROID_TOOLCHAIN=gcc', '-DANDROID_STL=gnustl_static'
-              '-DANDROID_TOOLCHAIN=gcc', '-DANDROID_STL=gnustl_static',
+       arguments '-DANDROID_PLATFORM=android-24',
+              '-DANDROID_TOOLCHAIN=clang', '-DANDROID_STL=c++_static',
               "-DFFMPEG_INSTALL_DIR_ANDROID=$rootPath/../../apsaraPlayer/external/install/ffmpeg/Android/",
               "-DEXTERN_INSTALL_DIR_ANDROID=$rootPath/../../apsaraPlayer/external/install/"
    }
 }
-```    
+```
 将安装的目录设置给cmake，这样在cmake中就可以引用这些变量了，注意必须使用""，单引号不会把$rootPath 展开
 
 5.摩天轮编译player和svideo的
@@ -149,4 +148,3 @@ cd mtl
 ## 4.后续工作
 1. 更好的支持调试方式，改动一个文件不需要整体都编译，目前也能支持，不过要手动改改才行。
 2. Android 编译单独的动态库。
-  

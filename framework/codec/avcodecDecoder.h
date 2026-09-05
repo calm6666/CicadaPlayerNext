@@ -21,7 +21,7 @@ namespace Cicada{
     private:
         struct decoder_handle_v {
             AVCodecContext *codecCont;
-            AVCodec *codec;
+            const AVCodec *codec;
             AVFrame *avFrame;
             video_info vInfo;
 //            struct SwsContext *img_convert_ctx;

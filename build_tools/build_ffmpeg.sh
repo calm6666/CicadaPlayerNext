@@ -38,6 +38,10 @@ function build_ffmpeg(){
         ffmpeg_native_compile_set_macOS $2
     elif [[ "$1" == "Linux" ]];then
         local native_build=yes
+    elif [[ "$1" == "OHOS" ]];then
+        # HarmonyOS / OpenHarmony cross-compile via the OHOS NDK clang toolchain
+        ffmpeg_cross_compile_set_OHOS $2
+        use_openssl="FALSE"
     elif [ "$1" == "maccatalyst" ];then
       if [[ "${SSL_USE_NATIVE}" != "TRUE" ]];then
           ffmpeg_config_add_user "--disable-securetransport"
@@ -66,6 +70,8 @@ function build_ffmpeg(){
 #    fi
     if [[ -n "${FDK_AAC_INSTALL_DIR}" ]]; then
         ffmpeg_config_add_user "--enable-libfdk-aac"
+        # libfdk-aac is nonfree-gated since FFmpeg 5.1; enable it explicitly.
+        ffmpeg_config_add_user "--enable-nonfree"
         ffmpeg_config_add_extra_cflags "-I${FDK_AAC_INSTALL_DIR}/include"
         ffmpeg_config_add_extra_ldflags "-L${FDK_AAC_INSTALL_DIR}/lib"
         if [[ "$1" == "Android" ]];then

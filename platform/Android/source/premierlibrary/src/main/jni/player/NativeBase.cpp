@@ -800,6 +800,24 @@ void NativeBase::java_SetDataSource(JNIEnv *env, jobject instance, jstring urlSo
     }
 }
 
+void NativeBase::java_SetDataSourceManifest(JNIEnv *env, jobject instance, jstring jsonManifest)
+{
+    AF_TRACE;
+
+    if (jsonManifest == nullptr) {
+        return;
+    }
+
+    MediaPlayer *player = getPlayer(env, instance);
+
+    if (player != nullptr) {
+        GetStringUTFChars tmpJson(env, jsonManifest);
+        char *chJson = tmpJson.getChars();
+        // Object-based playback: unified MediaManifest JSON, DRM-capable.
+        player->SetDataSource(std::string(chJson));
+    }
+}
+
 void NativeBase::java_AddExtSubtitle(JNIEnv *env, jobject instance, jstring url)
 {
     if (url == nullptr) {
@@ -1058,6 +1076,7 @@ static JNINativeMethod nativePlayer_method_table[] = {
         {"nEnableHardwareDecoder", "(Z)V", (void *) NativeBase::java_EnableHardwareDecoder},
         {"nSetSurface", "(Landroid/view/Surface;)V", (void *) NativeBase::java_SetView},
         {"nSetDataSource", "(Ljava/lang/String;)V", (void *) NativeBase::java_SetDataSource},
+        {"nSetDataSourceManifest", "(Ljava/lang/String;)V", (void *) NativeBase::java_SetDataSourceManifest},
         {"nAddExtSubtitle", "(Ljava/lang/String;)V", (void *) NativeBase::java_AddExtSubtitle},
         {"nSelectExtSubtitle", "(IZ)V", (void *) NativeBase::java_SelectExtSubtitle},
         {"nSetStreamDelayTime", "(II)V", (void *) NativeBase::java_SetStreamDelayTime},

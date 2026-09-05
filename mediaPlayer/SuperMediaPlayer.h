@@ -179,6 +179,10 @@ namespace Cicada {
 
         void SetDataSource(const char *url) override;
 
+        void SetDataSource(const Manifest::MediaManifest &manifest) override;
+
+        void SetDataSource(const std::string &jsonManifest) override;
+
         void setBitStreamCb(readCB read, seekCB seek, void *arg) override;
 
         void Prepare() override;

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-BUILD_TOOLS_DIR=$(cd $(dirname ${BASH_SOURCE[0]}); pwd)
+BUILD_TOOLS_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 PATH=$PATH:${BUILD_TOOLS_DIR}
 
 
@@ -8,8 +8,11 @@ function check_brew() {
     if [[ ! `which brew` ]]
     then
         echo 'Homebrew not found. Trying to install...'
-        ruby -e "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/master/install)" \
-        || exit 1
+        # 国内可用镜像覆盖，如：
+        #   export HOMEBREW_INSTALL_URL=https://mirrors.tuna.tsinghua.edu.cn/git/homebrew/install.git
+        # （该地址需 git clone 后执行 install.sh，代理式直链可用 gitee 的 HomebrewCN 脚本）
+        local install_url=${HOMEBREW_INSTALL_URL:-https://raw.githubusercontent.com/Homebrew/install/master/install}
+        ruby -e "$(curl -fsSL ${install_url})" || exit 1
     fi
 }
 
@@ -33,26 +36,14 @@ function check_cmake(){
     else
         local major=`cmake -version | head -1 | cut -d ' ' -f3 | cut -d '-' -f1 | cut -d '.' -f1`
         local minor=`cmake -version | head -1 | cut -d ' ' -f3 | cut -d '-' -f1 | cut -d '.' -f2`
-        if [[ ${major} -ge 3  &&  ${minor} -ge 14 ]];then
+        # require cmake >= 3.14 (handles 4.x too)
+        if [[ ${major} -gt 3 ]] || [[ ${major} -eq 3 && ${minor} -ge 14 ]];then
             echo cmake version is ok ${major}.${minor}
         else
             brew upgrade cmake
         fi
     fi
 }
-
-#function Android_build_Asan(){
-#    if [ -n "$MTL" ];then
-#        export ANDROID_NDK_HOME=/home/admin/software/android-ndk-r18b
-#        echo "ANDROID_NDK_HOME is ${ANDROID_NDK_HOME}"
-#    fi
-#    cd motuAsan/
-#    sh gradlew build --refresh-dependencies --stacktrace -DALIYUN_APP_VERSION=$SAASPLAYERSDK_VERSION $JAVA_HOME_OPT
-#    mkdir -p $TOP_DIR/output
-#    cp app/build/outputs/apk/debug/CicadaDemo_debug.apk $TOP_DIR/output/
-#    cp -r premierlibrary/build/intermediates/cmake/corePlayer/release/obj/armeabi-v7a $TOP_DIR/output
-#}
-
 
 function build_Android(){
 
@@ -67,36 +58,34 @@ function build_Android(){
 
     cd ${TOP_DIR}/external
     ./build_external.sh Android
+    if [ $? -ne 0 ]; then
+        echo "build_external Android break"
+        return 1
+    fi
     export EXTERN_INSTALL_DIR_ANDROID=$PWD/install/
     export FFMPEG_INSTALL_DIR_ANDROID=$PWD/install/ffmpeg/Android/
+
+    cd ${TOP_DIR}/platform/Android
+    cd source/
+    sh gradlew clean
+    export ANDROID_FULL_PACKAGE='true'
+    sh gradlew assembleRelease --refresh-dependencies --stacktrace $JAVA_HOME_OPT
     if [ $? -ne 0 ]; then
-        echo "build_external break"
+        echo "gradlew assembleRelease break"
         return 1
     fi
 
     cd ${TOP_DIR}/platform/Android
-#    if [ -n "$BUILD_ASAN" ];then
-#       Android_build_Asan
-#       return 0
-#    fi
-    cd source/
-    sh gradlew clean
-    # sh gradlew build --refresh-dependencies --stacktrace -DALIYUN_APP_VERSION=$SAASPLAYERSDK_VERSION $JAVA_HOME_OPT
-    #   #run twice for copy aar
-    export ANDROID_FULL_PACKAGE='true'
-    sh gradlew assembleRelease --refresh-dependencies --stacktrace $JAVA_HOME_OPT
-
-    cd ${TOP_DIR}/platform/Android
     ./package.sh
-    # ./apsaraPlayer_Android/build_demo.sh
-
-
 
     cd $TOP_DIR
-    mkdir output
-    cp `find platform/Android -name "*.apk"` output
-    cp `find platform/Android/source/releaseLibs/ -name "*.aar"` output
-    cp `find platform/Android/release -name "*.zip"` output
+    mkdir -p output
+    local apks=`find platform/Android -name "*.apk"`
+    local aars=`find platform/Android/source/releaseLibs/ -name "*.aar"`
+    local zips=`find platform/Android/release -name "*.zip"`
+    [[ -n "${apks}" ]] && cp ${apks} output
+    [[ -n "${aars}" ]] && cp ${aars} output
+    [[ -n "${zips}" ]] && cp ${zips} output
 
     mkdir -p output/armeabi-v7a/
     mkdir -p output/arm64-v8a/
@@ -109,6 +98,47 @@ function build_Android(){
 
     cd output
     tree
+}
+
+# ============================================================================
+# HarmonyOS / OpenHarmony 编译入口
+# 用法: . setup.env && build_OHOS
+# 要求: export OHOS_SDK=/path/to/ohos-sdk (含 native/llvm 与 native/sysroot)
+# 详见 docs/Packaging_HarmonyOS.md
+# ============================================================================
+function build_OHOS(){
+    if [[ -z "${OHOS_SDK}" ]] && [[ -z "${OHOS_SDK_HOME}" ]]; then
+        echo "OHOS_SDK not set"
+        echo "  e.g. export OHOS_SDK=/path/to/ohos-sdk   # must contain native/llvm + native/sysroot"
+        return 1
+    fi
+
+    # 1. 交叉编译外部库 (FFmpeg 9.0 等) -> external/install/ffmpeg/OHOS/<abi>/
+    cd ${TOP_DIR}/external
+    ./build_external.sh OHOS
+    if [ $? -ne 0 ]; then
+        echo "build_external OHOS break"
+        return 1
+    fi
+
+    # 2. 编译 HarmonyOS Demo hap (可选, 需要 DevEco 命令行工具 hvigorw)
+    cd ${TOP_DIR}/platform/HarmonyOS
+    if command -v hvigorw >/dev/null 2>&1; then
+        hvigorw assembleHap --mode module -p product=default
+        if [ $? -ne 0 ]; then
+            echo "hvigorw assembleHap break"
+            return 1
+        fi
+    else
+        echo "hvigorw not found, skip demo hap build (native libraries are already built)"
+    fi
+
+    # 3. 收集产物
+    cd ${TOP_DIR}
+    mkdir -p output
+    cp -r external/install/ffmpeg/OHOS output/ffmpeg-OHOS
+    find platform/HarmonyOS -name "*.hap" -exec cp {} output/ \; 2>/dev/null
+    echo "OHOS build done, artifacts in ${TOP_DIR}/output"
 }
 
 function packet_iOS(){
@@ -152,16 +182,6 @@ function packet_iOS(){
     cp -rf ${CicadaSDK_ARM}/*.framework ${nobit_path}
     xcrun bitcode_strip ${nobit_path}/CicadaPlayerSDK.framework/CicadaPlayerSDK -r -o ${nobit_path}/CicadaPlayerSDK.framework/CicadaPlayerSDK
     xcrun bitcode_strip ${nobit_path}/alivcffmpeg.framework/alivcffmpeg -r -o ${nobit_path}/alivcffmpeg.framework/alivcffmpeg
-
-    #build app without SDK
-#    mv CicadaPlayerSDK.xcodeproj CicadaPlayerSDKBak.xcodeproj
-#    cd ${DEMO_SOURCE_DIR_IOS}/CicadaDemo
-#    sh packetIPA.sh
-#    cp ./build/Release-iphoneos/CicadaDemo.ipa ${TOP_DIR}/output
-#    cd ./build/Release-iphoneos/CicadaDemo.xcarchive/dSYMs
-#    tar -cjvf ${TOP_DIR}/output/CicadaDemo.app.dSYM.bz2 ./CicadaDemo.app.dSYM
-#    cd ${DEMO_SOURCE_DIR_IOS}/SDK/
-#    mv CicadaPlayerSDKBak.xcodeproj CicadaPlayerSDK.xcodeproj
 
     cd ${TOP_DIR}/output/
     tar -cjvf ${TOP_DIR}/output/CicadaPlayerSDK_${MUPP_BUILD_ID}.bz2 CicadaPlayerSDK/
@@ -268,4 +288,3 @@ function build_mac(){
 
     cd ${TOP_DIR}
 }
-

@@ -57,6 +57,20 @@ OBJC_EXPORT
 - (void)setUrlSource:(CicadaUrlSource*)source;
 
 /**
+ @brief 对象清单播放（Object-based Playback）
+ 传入统一的 MediaManifest 清单 JSON（与 Web 端 hili-player 的 MediaManifest
+ 结构一致），无需 m3u8/mpd 文本。支持 AES-128 分段加密与 DRM 内容保护。
+ @param source CicadaManifestSource的输入类型
+ @see CicadaManifestSource
+ */
+/****
+ @brief Object-based playback with a unified MediaManifest JSON object.
+ @param source CicadaManifestSource type.
+ @see CicadaManifestSource
+ */
+- (void)setManifestSource:(CicadaManifestSource*)source;
+
+/**
  @brief 播放准备，异步
  */
 /****

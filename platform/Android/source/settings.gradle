@@ -1,2 +1,18 @@
+// 国内镜像（可选）：export USE_CHINA_MIRROR=true 时优先走阿里云 Maven 镜像
+def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
+
+pluginManagement {
+    repositories {
+        if (useChinaMirror) {
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+        }
+        gradlePluginPortal()
+        google()
+        mavenCentral()
+    }
+}
+
 include ':ExternalPlayerExoLibrary'
 include ':paasApp', ':premierlibrary', ':zxing'

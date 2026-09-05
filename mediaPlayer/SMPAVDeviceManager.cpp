@@ -51,6 +51,12 @@ int SMPAVDeviceManager::setUpDecoder(uint64_t decFlag, const Stream_meta *meta, 
         drmInfo.format = meta->keyFormat;
         drmInfo.uri = meta->keyUrl == nullptr ? "" : meta->keyUrl;
     }
+    if (meta->drmPssh != nullptr) {
+        drmInfo.pssh = meta->drmPssh;
+    }
+    if (meta->drmKeyId != nullptr) {
+        drmInfo.keyId = meta->drmKeyId;
+    }
 
     if (decoderHandle->decoder) {
         if (decoderHandle->match(meta, decFlag, device, dstFormat, drmInfo) && decoderHandle->decoder->supportReuse()) {// reuse decoder

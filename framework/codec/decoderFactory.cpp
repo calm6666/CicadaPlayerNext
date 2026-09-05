@@ -17,6 +17,12 @@
 
 #endif
 
+#ifdef __OHOS__
+
+    #include "OHOS/OhosAVCodecDecoder.h"
+
+#endif
+
 #include "avcodecDecoder.h"
 
 using namespace Cicada;
@@ -50,6 +56,17 @@ unique_ptr<IDecoder> decoderFactory::createBuildIn(const AFCodecID &codec, uint6
             return unique_ptr<IDecoder>(new AFVTBDecoder());
         }
 
+#endif
+#endif
+#ifdef __OHOS__
+#ifdef ENABLE_OHOS_AVCODEC_DECODER
+        // OH_AVCodec hardware decode (surface or buffer mode); unsupported
+        // codecs fall through to the software decoder below.
+        if (codec == AF_CODEC_ID_H264 || codec == AF_CODEC_ID_HEVC
+                || codec == AF_CODEC_ID_MPEG4 || codec == AF_CODEC_ID_VP9
+                || codec == AF_CODEC_ID_AV1 || codec == AF_CODEC_ID_AAC) {
+            return std::unique_ptr<IDecoder>(new OhosAVCodecDecoder());
+        }
 #endif
 #endif
     }

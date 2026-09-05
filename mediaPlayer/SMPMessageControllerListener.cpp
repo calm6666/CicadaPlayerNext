@@ -60,7 +60,9 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     AF_LOGD("ProcessPrepareMsg start");
     int ret;
 
-    if (mPlayer.mSet->url.empty() && mPlayer.mBSReadCb == nullptr) {
+    bool manifestMode = mPlayer.mSet->manifest != nullptr;
+
+    if (mPlayer.mSet->url.empty() && mPlayer.mBSReadCb == nullptr && !manifestMode) {
         AF_LOGD("ProcessPrepareMsg url is empty");
         mPlayer.ChangePlayerStatus(PLAYER_ERROR);
         mPlayer.mPNotifier->NotifyError(MEDIA_PLAYER_ERROR_DATASOURCE_EMPTYURL, "Prepare url is empty");
@@ -76,7 +78,26 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     bool noFile = false;
 
     if (!(mPlayer.mBSReadCb != nullptr && mPlayer.mBSSeekCb != nullptr && mPlayer.mBSCbArg != nullptr)) {
-        if (!mPlayer.mSet->url.empty()) {
+        if (manifestMode) {
+            // Object-based playback: segments are fetched through the playlist
+            // pipeline which opens the data source lazily per segment URL.
+            IDataSource::SourceConfig config{};
+            config.low_speed_time_ms = mPlayer.mSet->timeout_ms;
+            config.low_speed_limit = 1;
+            config.connect_time_out_ms = mPlayer.mSet->timeout_ms;
+            config.http_proxy = mPlayer.mSet->http_proxy;
+            config.refer = mPlayer.mSet->refer;
+            config.userAgent = mPlayer.mSet->userAgent;
+            config.customHeaders = mPlayer.mSet->customHeaders;
+            config.listener = mPlayer.mSourceListener.get();
+
+            std::lock_guard<std::mutex> locker(mPlayer.mCreateMutex);
+            mPlayer.mDataSource = dataSourcePrototype::create("https://", &(mPlayer.mSet->mOptions), DS_NEED_CACHE);
+            if (mPlayer.mDataSource != nullptr) {
+                mPlayer.mDataSource->Set_config(config);
+                mPlayer.mDataSource->setUrlToUniqueIdCallback(mPlayer.mUrlHashCb, mPlayer.mUrlHashCbUserData);
+            }
+        } else if (!mPlayer.mSet->url.empty()) {
             ret = openUrl();
 
             if (ret < 0) {
@@ -137,7 +158,14 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
 #endif
 
     AF_LOGD("initOpen start");
-    ret = mPlayer.mDemuxerService->createDemuxer((mPlayer.mBSReadCb || noFile) ? demuxer_type_bit_stream : demuxer_type_unknown);
+    demuxer_type demuxerType = (mPlayer.mBSReadCb || noFile) ? demuxer_type_bit_stream : demuxer_type_unknown;
+
+    if (manifestMode) {
+        mPlayer.mDemuxerService->setManifestSource(std::move(mPlayer.mSet->manifest));
+        demuxerType = demuxer_type_manifest;
+    }
+
+    ret = mPlayer.mDemuxerService->createDemuxer(demuxerType);
 
     // TODO: video tool box HW decoder not merge the header
     if (mPlayer.mDemuxerService->getDemuxerHandle()) {
@@ -161,7 +189,7 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
 
 
     //step2: Demuxer init and getstream index
-    ret = mPlayer.mDemuxerService->initOpen((mPlayer.mBSReadCb || noFile) ? demuxer_type_bit_stream : demuxer_type_unknown);
+    ret = mPlayer.mDemuxerService->initOpen(demuxerType);
 
     if (ret < 0) {
         if (ret != FRAMEWORK_ERR_EXIT && !mPlayer.mCanceled) {
@@ -459,6 +487,16 @@ void SMPMessageControllerListener::ProcessSetDataSourceMsg(const std::string &ur
 {
     if (mPlayer.mPlayStatus == PLAYER_IDLE || mPlayer.mPlayStatus == PLAYER_STOPPED) {
         mPlayer.mSet->url = url;
+        mPlayer.mSet->manifest.reset();
+        mPlayer.ChangePlayerStatus(PLAYER_INITIALZED);
+    }
+}
+
+void SMPMessageControllerListener::ProcessSetManifestDataSourceMsg(std::unique_ptr<Manifest::MediaManifest> manifest)
+{
+    if (mPlayer.mPlayStatus == PLAYER_IDLE || mPlayer.mPlayStatus == PLAYER_STOPPED) {
+        mPlayer.mSet->manifest = std::move(manifest);
+        mPlayer.mSet->url = "";
         mPlayer.ChangePlayerStatus(PLAYER_INITIALZED);
     }
 }

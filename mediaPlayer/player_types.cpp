@@ -30,6 +30,7 @@ namespace Cicada {
         highLevelBufferDuration = HIGH_BUFFERING_LEVEL_DEFAULT;
         maxBufferDuration = MAX_BUFFER_DURATION_DEFAULT;
         url = "";
+        manifest.reset();
         refer = "";
         timeout_ms = 15000;
         mIpType = static_cast<IpResolveType>(globalSettings::getSetting().getIpResolveType());

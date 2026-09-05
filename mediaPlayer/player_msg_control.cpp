@@ -15,6 +15,7 @@ namespace Cicada {
     {
         switch (type) {
             case MSG_SETDATASOURCE:
+            case MSG_SETMANIFESTSOURCE:
             case MSG_SET_BITSTREAM:
             case MSG_SETVIEW:
             case MSG_PREPARE:
@@ -67,6 +68,9 @@ namespace Cicada {
            ) {
             delete msg.msgParam.dataSourceParam.url;
             msg.msgParam.dataSourceParam.url = nullptr;
+        } else if (MSG_SETMANIFESTSOURCE == msg.msgType) {
+            delete msg.msgParam.msgManifestParam.manifest;
+            msg.msgParam.msgManifestParam.manifest = nullptr;
         }
     }
 
@@ -170,6 +174,14 @@ namespace Cicada {
 
         for (auto &it : processQueue) {
             OnPlayerMsgProcessor(it.msgType, it.msgParam);
+
+            if (it.msgType == MSG_SETMANIFESTSOURCE) {
+                // Ownership of the manifest was transferred to the listener
+                // (wrapped in a unique_ptr); prevent recycleMsg from
+                // double-freeing it.
+                it.msgParam.msgManifestParam.manifest = nullptr;
+            }
+
             recycleMsg(it);
 
             if (it.msgType < MSG_INTERNAL_FIRST) {
@@ -217,6 +229,11 @@ namespace Cicada {
 
             case MSG_SETDATASOURCE:
                 mProcessor.ProcessSetDataSourceMsg(*(msgContent.dataSourceParam.url));
+                break;
+
+            case MSG_SETMANIFESTSOURCE:
+                mProcessor.ProcessSetManifestDataSourceMsg(
+                        std::unique_ptr<Manifest::MediaManifest>(msgContent.msgManifestParam.manifest));
                 break;
 
             case MSG_SET_BITSTREAM:

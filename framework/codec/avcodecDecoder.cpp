@@ -78,7 +78,8 @@ namespace Cicada {
 #endif
 
         if (mPDecoder->codecCont != nullptr) {
-            avcodec_close(mPDecoder->codecCont);
+            // avcodec_close was removed in FFmpeg 6.0; avcodec_free_context()
+            // closes and frees the context in one call.
 #ifdef ENABLE_HWDECODER
 
             if (mPDecoder->hwaccel_uninit) {
@@ -115,7 +116,7 @@ namespace Cicada {
         }
 
         if (isAudio) {
-            mPDecoder->codecCont->channels = meta->channels;
+            mPDecoder->codecCont->ch_layout.nb_channels = meta->channels;
             mPDecoder->codecCont->sample_rate = meta->samplerate;
         }
 
@@ -157,7 +158,8 @@ namespace Cicada {
         }
 
 #endif
-        av_opt_set_int(mPDecoder->codecCont, "refcounted_frames", 1, 0);
+        // "refcounted_frames" was removed in FFmpeg 5.0: frames are always
+        // refcounted in the modern send/receive API.
         int threadcount = (AFGetCpuCount() > 0 ? AFGetCpuCount() + 1 : 0);
 
         if ((flags & DECFLAG_OUTPUT_FRAME_ASAP)
@@ -192,7 +194,7 @@ namespace Cicada {
 #ifdef ENABLE_HWDECODER
         mPDecoder->hwDeviceType_set = CICADA_HWDEVICE_TYPE_UNKNOWN;
 #endif
-        avcodec_register_all();
+        // avcodec_register_all was removed in FFmpeg 5.0 (decoders self-register).
         mFlags |= DECFLAG_PASSTHROUGH_INFO;
     }
 

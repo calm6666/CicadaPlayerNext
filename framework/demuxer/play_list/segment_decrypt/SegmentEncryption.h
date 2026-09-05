@@ -25,6 +25,10 @@ public:
     std::vector<uint8_t> iv;
     std::string keyFormat;
     bool ivStatic = false;
+    // DRM init data (base64 PSSH) and default key id for CENC systems,
+    // populated from ContentProtection by the manifest demuxer.
+    std::string pssh;
+    std::string keyId;
 };
 
 

@@ -372,6 +372,10 @@ typedef struct {
     //add for stand drm(WideVine,FairPlay...)
     char* keyUrl;
     char* keyFormat;
+    // DRM init data (base64 PSSH) and default key id from ContentProtection,
+    // populated for object-based (manifest) playback.
+    char* drmPssh;
+    char* drmKeyId;
 
     float ptsTimeBase;
 

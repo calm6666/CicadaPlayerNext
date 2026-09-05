@@ -12,22 +12,39 @@ namespace Cicada {
     public:
         std::string uri;
         std::string format;
+        // Optional DRM init data: base64 PSSH box and/or default key id,
+        // populated from ContentProtection in object-based playback.
+        std::string pssh;
+        std::string keyId;
 
         bool operator==(const DrmInfo &drmInfo) const {
             return uri == drmInfo.uri &&
-                   format == drmInfo.format;
+                   format == drmInfo.format &&
+                   pssh == drmInfo.pssh &&
+                   keyId == drmInfo.keyId;
         }
 
         bool empty() const {
             return uri.empty() &&
-                   format.empty();
+                   format.empty() &&
+                   pssh.empty() &&
+                   keyId.empty();
         }
 
         struct DrmInfoCompare
         {
             bool operator() (const DrmInfo& lhs, const DrmInfo& rhs) const
             {
-                return lhs.format < rhs.format || lhs.uri < rhs.uri;
+                if (lhs.format != rhs.format) {
+                    return lhs.format < rhs.format;
+                }
+                if (lhs.uri != rhs.uri) {
+                    return lhs.uri < rhs.uri;
+                }
+                if (lhs.pssh != rhs.pssh) {
+                    return lhs.pssh < rhs.pssh;
+                }
+                return lhs.keyId < rhs.keyId;
             }
         };
     };

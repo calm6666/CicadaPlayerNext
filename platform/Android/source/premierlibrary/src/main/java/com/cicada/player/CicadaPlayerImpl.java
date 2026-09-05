@@ -978,6 +978,11 @@ import java.lang.ref.WeakReference;
     }
 
     @Override
+    public void setDataSourceManifest(String mediaManifestJson) {
+        mCorePlayer.setDataSourceManifest(mediaManifestJson);
+    }
+
+    @Override
     public void setOnLoadingStatusListener(OnLoadingStatusListener l) {
         mOutOnLoadingStatusListener = l;
     }

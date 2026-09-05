@@ -110,6 +110,11 @@ public:
 
     void SetDataSource(const char *url) override;
 
+    // Object-based playback is handled by SuperMediaPlayer; the ExoPlayer
+    // wrapper keeps URL-only behaviour.
+    void SetDataSource(const Cicada::Manifest::MediaManifest &manifest) override;
+
+    void SetDataSource(const std::string &jsonManifest) override;
 
     void Prepare() override;
 

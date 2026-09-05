@@ -39,6 +39,8 @@ public:
 
     std::string getString(const std::string& name) const;
     std::string getString(const std::string& name, const std::string& defaultString) const;
+    /** Value of a string-typed node (the item itself, not a child by key). */
+    std::string getStringValue(const std::string& defaultString) const;
     int getInt(const std::string& name, int defaultValue) const;
     int64_t getInt64(const std::string& name, int64_t defaultValue) const;
     double getDouble(const std::string& name, double defaultValue) const;

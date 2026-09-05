@@ -59,6 +59,13 @@ if (ANDROID)
             )
 endif ()
 
+if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    list(APPEND SRC_FILES
+            audio/OHOS/OhosAudioRender.cpp
+            audio/OHOS/OhosAudioRender.h
+            )
+endif ()
+
 
 if (APPLE)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-arc")
@@ -156,6 +163,11 @@ endif ()
 add_library(render STATIC ${SRC_FILES})
 
 target_include_directories(render PUBLIC ${COMMON_INC_DIR})
+
+if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    target_link_libraries(render PRIVATE ${OHOS_SYSTEM_LIBS})
+endif ()
+
 if (ENABLE_SDL)
     target_compile_definitions(render PUBLIC ENABLE_SDL)
 if (NOT MSVC)

@@ -221,7 +221,6 @@ void testFrame()
 void testPacket()
 {
     AVPacket* opkt = av_packet_alloc();
-    av_init_packet(opkt);
     opkt->pts = 100;
     opkt->duration = 10;
     opkt->flags = 1;

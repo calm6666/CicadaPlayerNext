@@ -84,7 +84,6 @@ namespace Cicada {
     AFAVBSF::AFAVBSF()
     {
         mPkt = av_packet_alloc();
-        av_init_packet(mPkt);
     }
 
     AFAVBSF::~AFAVBSF()

@@ -34,7 +34,7 @@ namespace Cicada {
         mCtx = avformat_alloc_context();
         mCtx->interrupt_callback.callback = interrupt_cb;
         mCtx->interrupt_callback.opaque = this;
-        mCtx->correct_ts_overflow = 0;
+        // correct_ts_overflow was removed in FFmpeg 7.0 (0 is the default).
         mCtx->flags |= AVFMT_FLAG_KEEP_SIDE_DATA;
 #if AF_HAVE_PTHREAD
         mPthread = NEW_AF_THREAD(readLoop);
@@ -72,7 +72,7 @@ namespace Cicada {
         return open(nullptr);
     }
 
-    int avFormatDemuxer::open(AVInputFormat *in_fmt)
+    int avFormatDemuxer::open(const AVInputFormat *in_fmt)
     {
         if (bOpened) {
             return 0;
@@ -115,7 +115,7 @@ namespace Cicada {
 
         if (!use_filename) {
             if (CicadaUtils::startWith(mPath, {"http://", "https://"})) {
-                AVInputFormat *mp4Format = av_find_input_format("mp4");
+                const AVInputFormat *mp4Format = av_find_input_format("mp4");
 
                 if (mp4Format && av_match_ext(filename, mp4Format->extensions)) {
                     filename = "http://xxx";
@@ -205,9 +205,9 @@ namespace Cicada {
         }
 
         int probeStream_nbFrames = 0;
-        for(int i = 0 ; i < mCtx->nb_streams; i++) {
-            probeStream_nbFrames += mCtx->streams[i]->codec_info_nb_frames;
-        }
+        // AVStream::codec_info_nb_frames moved to private AVStreamInternal in
+        // FFmpeg 5.0; report the context-wide frame counter instead.
+        probeStream_nbFrames = mCtx->nb_frames;
 
         /*
          * this flag is only affect on mp3 and flac
@@ -267,7 +267,6 @@ namespace Cicada {
 
         AVPacket *pkt = av_packet_alloc();
         int err;
-        av_init_packet(pkt);
 
         do {
             err = av_read_frame(mCtx, pkt);
@@ -326,11 +325,15 @@ namespace Cicada {
             av_packet_unref(pkt);
         } while (true);
 
+        // FFmpeg >= 5.9 computes packet fields inside av_read_frame() itself;
+        // the vendored av_compute_pkt_fields workaround is only for old FFmpeg.
+#if LIBAVFORMAT_VERSION_MAJOR < 59
         if (mNedParserPkt) {
             int old_duration = pkt->duration;
             av_compute_pkt_fields(mCtx, mCtx->streams[pkt->stream_index], nullptr, pkt, AV_NOPTS_VALUE, AV_NOPTS_VALUE);
             assert(old_duration <= 0 || pkt->duration > 0);
         }
+#endif
 
         if (pkt->pts == AV_NOPTS_VALUE) {
             AF_LOGW("pkt pts error\n");
@@ -806,7 +809,7 @@ namespace Cicada {
         memset(pbBuffer + size, 0, AVPROBE_PADDING_SIZE);
         AVProbeData pd = {uri.c_str(), const_cast<unsigned char *>(pbBuffer), static_cast<int>(size)};
         int score = AVPROBE_SCORE_RETRY;
-        AVInputFormat *fmt = av_probe_input_format2(&pd, 1, &score);
+        const AVInputFormat *fmt = av_probe_input_format2(&pd, 1, &score);
         av_freep(&pbBuffer);
 
         if (fmt && (strcmp(fmt->name, "hls,applehttp") == 0 || strcmp(fmt->name, "webvtt") == 0 || strcmp(fmt->name, "srt") == 0 ||

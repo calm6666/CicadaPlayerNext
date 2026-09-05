@@ -2,12 +2,11 @@
 // Created by moqi on 2019/11/7.
 //
 
-#include "SampleDecryptDemuxer.h"
+#define LOG_TAG "SampleDecryptDemuxer"
 
-extern "C" {
-#include <libavformat/avformat.h>
-extern AVInputFormat sampleDecrypt_demuxer;
-};
+#include "SampleDecryptDemuxer.h"
+#include <base/media/AVAFPacket.h>
+#include <utils/frame_work_log.h>
 
 namespace Cicada {
     SampleDecryptDemuxer SampleDecryptDemuxer::se(0);
@@ -23,17 +22,44 @@ namespace Cicada {
 
     int SampleDecryptDemuxer::Open()
     {
-        if (mDecryptor) {
-            av_dict_set_int(&mInputOpts, "Decryptor", (int64_t) mDecryptor, 0);
-        } else {
+        if (mDecryptor == nullptr) {
             return -EINVAL;
         }
+        // FFmpeg 6.1+ removed custom AVInputFormat registration: demux with the
+        // standard avFormatDemuxer and decrypt packets in ReadPacket() below.
+        return avFormatDemuxer::Open();
+    }
 
-        return avFormatDemuxer::open(&sampleDecrypt_demuxer);
+    int SampleDecryptDemuxer::ReadPacket(std::unique_ptr<IAFPacket> &packet, int index)
+    {
+        int ret = avFormatDemuxer::ReadPacket(packet, index);
+
+        if (ret > 0 && mDecryptor != nullptr && packet != nullptr) {
+            auto *avafPacket = dynamic_cast<AVAFPacket *>(packet.get());
+            if (avafPacket != nullptr) {
+                AVPacket *pkt = avafPacket->ToAVPacket();
+                if (pkt != nullptr && pkt->stream_index >= 0 && pkt->stream_index < mCtx->nb_streams) {
+                    int size = SampleDecryptDec(mDecryptor,
+                                                mCtx->streams[pkt->stream_index]->codecpar->codec_id,
+                                                pkt->data, pkt->size);
+                    if (size > 0) {
+                        pkt->size = size;
+                        ret = size;
+                    } else {
+                        AF_LOGE("SampleDecryptDec error\n");
+                        ret = -EINVAL;
+                    }
+                }
+            }
+        }
+
+        return ret;
     }
 
     SampleDecryptDemuxer::SampleDecryptDemuxer(int dummy) : avFormatDemuxer(dummy)
     {
-        av_register_input_format(&sampleDecrypt_demuxer);
+        // FFmpeg 6.1+ removed av_register_input_format; the custom demuxer
+        // (sampleDecryptDec.c) is no longer used — decryption happens in
+        // ReadPacket() instead.
     }
 }

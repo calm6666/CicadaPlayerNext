@@ -1,20 +1,21 @@
 #!/usr/bin/env bash
 
-#ffmpeg_config_add_decoder libfdk_aac
-#ffmpeg_config_add_decoder h264
-#source build_ffmpeg.sh
+# Fallback FFmpeg component configuration (used only when the build directory
+# has no *_ffmpeg_config.sh). The real configuration is
+# external/player_ffmpeg_config.sh.
 
-ffmpeg_config_add_decoders libfdk_aac h264
-
+# NOTE: libfdk_aac requires --enable-libfdk-aac --enable-nonfree; the native
+# AAC decoder does not. Use the native decoders here so the fallback always
+# configures cleanly on FFmpeg 9.0.
+ffmpeg_config_add_decoders aac h264
 
 ffmpeg_config_add_encoders aac
-
 
 #ffmpeg_config_add_demuxers flv
 
 ffmpeg_config_add_muxers mp4
 
-ffmpeg_config_add_parsers h264
+ffmpeg_config_add_parsers h264 aac
 #ffmpeg_config_add_protocols http
 
 ffmpeg_config_add_bsfs aac_adtstoasc h264_mp4toannexb

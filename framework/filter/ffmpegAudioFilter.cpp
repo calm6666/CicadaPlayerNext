@@ -37,7 +37,7 @@ namespace Cicada {
     ffmpegAudioFilter::ffmpegAudioFilter(const format &srcFormat, const format &dstFormat, bool active)
         : IAudioFilter(srcFormat, dstFormat, active)
     {
-        avfilter_register_all();
+        // avfilter_register_all was removed in FFmpeg 5.0 (filters self-register).
 #ifdef DUMP_PCM
         fd = open("out.pcm", O_CREAT | O_RDWR, 0666);
 #endif
@@ -92,7 +92,7 @@ namespace Cicada {
 
     int ffmpegAudioFilter::createSrcBufferFilter()
     {
-        char ch_layout[64];
+        char ch_layout[64] = {0};
         const AVFilter *abuffer = avfilter_get_by_name("abuffer");
         mAbuffer_ctx = avfilter_graph_alloc_filter(m_pFilterGraph, abuffer, "src");
 
@@ -103,14 +103,18 @@ namespace Cicada {
         AVRational r;
         r.den = 1000000;
         r.num = 1;
-        uint64_t channel_layout = mSrcFormat.channel_layout;
 
-        if (!channel_layout) {
-            channel_layout = av_get_default_channel_layout(mSrcFormat.channels);
+        /* AVChannelLayout replaced channel_layout/channels in FFmpeg 5.1. */
+        AVChannelLayout srcLayout{};
+        if (mSrcFormat.channel_layout != 0) {
+            av_channel_layout_from_mask(&srcLayout, mSrcFormat.channel_layout);
+        } else {
+            av_channel_layout_default(&srcLayout, mSrcFormat.channels);
         }
+        av_channel_layout_describe(&srcLayout, ch_layout, sizeof(ch_layout));
+        av_channel_layout_uninit(&srcLayout);
 
         /* Set the filter options through the AVOptions API. */
-        av_get_channel_layout_string(ch_layout, sizeof(ch_layout), 0, channel_layout);
         av_opt_set(mAbuffer_ctx, "channel_layout", ch_layout, AV_OPT_SEARCH_CHILDREN);
         av_opt_set(mAbuffer_ctx, "sample_fmt", av_get_sample_fmt_name((enum AVSampleFormat) mSrcFormat.format), AV_OPT_SEARCH_CHILDREN);
         av_opt_set_q(mAbuffer_ctx, "time_base", r, AV_OPT_SEARCH_CHILDREN);
@@ -213,11 +217,20 @@ namespace Cicada {
         }
 
         if (needAFormat) {
+            char dstLayoutStr[64] = {0};
+            AVChannelLayout dstLayout{};
+            if (mDstFormat.channel_layout != 0) {
+                av_channel_layout_from_mask(&dstLayout, mDstFormat.channel_layout);
+            } else {
+                av_channel_layout_default(&dstLayout, mDstFormat.channels);
+            }
+            av_channel_layout_describe(&dstLayout, dstLayoutStr, sizeof(dstLayoutStr));
+            av_channel_layout_uninit(&dstLayout);
             snprintf(options_str, sizeof(options_str),
-                     "sample_fmts=%s:sample_rates=%d:channel_layouts=0x%" PRIx64,
+                     "sample_fmts=%s:sample_rates=%d:channel_layouts=%s",
                      av_get_sample_fmt_name((enum AVSampleFormat) mDstFormat.format),
                      mDstFormat.sample_rate,
-                     av_get_default_channel_layout(mDstFormat.channels));
+                     dstLayoutStr);
             addFilter(&current, "aformat", options_str);
         }
 

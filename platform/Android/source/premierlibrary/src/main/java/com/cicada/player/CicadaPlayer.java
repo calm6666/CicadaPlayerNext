@@ -12,6 +12,8 @@ import com.cicada.player.nativeclass.PlayerConfig;
 import com.cicada.player.nativeclass.TrackInfo;
 import com.cicada.player.utils.media.DrmCallback;
 
+import org.json.JSONObject;
+
 /*
  * Copyright (C) 2010-2017 Alibaba Group Holding Limited.
  */
@@ -606,6 +608,32 @@ public interface CicadaPlayer {
       * @param url local or network address.
       */
     void setDataSource(String url);
+
+    /**
+     * 对象模式播放：传入统一的 MediaManifest 清单 JSON（与 Web 端 hili-player
+     * 的 MediaManifest 结构一致），无需 m3u8/mpd 文本与清单网络请求。
+     * 支持 AES-128 分段加密与 DRM（Widevine/FairPlay/ClearKey）。
+     *
+     * @param mediaManifest MediaManifest 结构的 JSON 对象
+     */
+    /****
+     * Object-based playback: pass the unified MediaManifest JSON (same schema as
+     * hili-player's MediaManifest on Web) instead of an m3u8/mpd URL. Supports
+     * AES-128 segment encryption and DRM (Widevine/FairPlay/ClearKey).
+     */
+    default void setDataSource(JSONObject mediaManifest) {
+        setDataSourceManifest(mediaManifest != null ? mediaManifest.toString() : "{}");
+    }
+
+    /**
+     * 对象模式播放：JSON 字符串形式，语义同 {@link #setDataSource(JSONObject)}。
+     */
+    /****
+     * Object-based playback: JSON string form. See setDataSource(JSONObject).
+     */
+    default void setDataSourceManifest(String mediaManifestJson) {
+        throw new UnsupportedOperationException("object-based playback not supported by this player");
+    }
 
     /**
      * 准备。成功结果通过{@link OnPreparedListener}回调，或者失败{@link OnErrorListener}
