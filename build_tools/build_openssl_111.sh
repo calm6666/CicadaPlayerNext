@@ -161,11 +161,26 @@ function build_openssl_111(){
             # 用带 API 级别的 NDK clang 包装器替换裸 clang，并去掉不带 API 的
             # -target 参数：包装器会根据自身名字注入正确的 sysroot 与
             # crtbegin_so.o/crtend_so.o 等运行时目标文件路径，保证 .so 链接成功。
+            # 同时把 --sysroot 统一改为现代 NDK 的统一 sysroot：
+            # 旧 platforms/ 路径下没有 usr/include/<triple>/asm 等架构头文件，
+            # 会导致 #include <asm/types.h> 找不到（OpenSSL 3.0 的 conf 在
+            # 裸 clang 场景会回退到旧 platforms 路径，而 1.1.1 的 shim 又让它
+            # 误判该路径存在）。
             local wrapper="${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
+            local ndk_host
+            case "$(uname -s)" in
+                Darwin*) ndk_host=darwin-x86_64 ;;
+                *)       ndk_host=linux-x86_64 ;;
+            esac
+            local unified_sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
             if command -v "${wrapper}" >/dev/null 2>&1; then
                 sed -i "s#^CC=clang\$#CC=${wrapper}#; s#^CC= clang\$#CC=${wrapper}#" Makefile
                 sed -i 's# -target armv7a-linux-androideabi##g; s# -target aarch64-linux-android##g; s# -target arm-linux-androideabi##g; s# -target x86_64-linux-android##g; s# -target i686-linux-android##g' Makefile
                 echo "openssl Android: use NDK wrapper compiler ${wrapper}"
+            fi
+            if [[ -d "${unified_sysroot}" ]]; then
+                sed -i "s#--sysroot=[^ ]*#--sysroot=${unified_sysroot}#g" Makefile
+                echo "openssl Android: use unified sysroot ${unified_sysroot}"
             fi
 
             if [[ "${openssl_major}" -lt 3 ]]; then
