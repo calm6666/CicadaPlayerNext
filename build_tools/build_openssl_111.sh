@@ -133,12 +133,18 @@ function build_openssl_111(){
     cd ${build_dir}
     if [ "${BUILD}" != "False" ];then
 
+        if [[ "$1" == "Android" ]]; then
+            # 源头修复：OpenSSL 1.1.1 的 15-android.conf 会给 clang 传入旧版
+            # gcc-4.9 工具链路径（-gcc-toolchain），现代 NDK（r23+）没有该目录，
+            # 且 NDK clang 自带 sysroot 不需要它。直接删掉生成该参数的行。
+            # （\$ 是 shell 转义，sed 收到的才是 perl 源码里的字面 $ndk/$triarch/$host）
+            sed -i 's#-gcc-toolchain \$ndk/toolchains/\$triarch-4.9/prebuilt/\$host##g' \
+                "${OPEN_SSL_SOURCE_DIR}/Configurations/15-android.conf"
+        fi
+
         ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
 
-        # OpenSSL 1.1.1 会给 clang 传入旧版 gcc-4.9 工具链路径
-        # （-gcc-toolchain $ndk/toolchains/<triarch>-4.9/prebuilt/<host>），
-        # 现代 NDK 已无该目录，且 NDK clang 自带 sysroot 不需要它。
-        # Configure 生成 Makefile 后统一去掉该参数。
+        # 兜底：Configure 生成 Makefile 后，若仍残留该参数则统一去掉
         if [[ "$1" == "Android" ]]; then
             sed -i 's# -gcc-toolchain [^ ]*##g' Makefile
         fi
