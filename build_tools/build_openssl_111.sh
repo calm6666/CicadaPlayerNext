@@ -42,6 +42,10 @@ function build_openssl_111(){
              no-cmac no-dsa no-ecdh no-ecdsa no-idea no-md4 no-mdc2 no-ocb
              no-poly1305 no-rc2 no-rc4 no-rmd160 no-scrypt no-seed no-siphash no-sm2 no-sm3
              no-sm4 no-whirlpool"
+        # 不需要 RC4/MD4 等 legacy 算法，关闭 legacy provider：
+        # 1) 减小库体积；2) 避免 providers/legacy.so 的动态链接（裸 clang 缺
+        #    crtbegin_so.o/crtend_so.o 的坑只出现在模块链接这一步）
+        config_opt="${config_opt} no-legacy"
     else
         # ---- OpenSSL 1.1.1 配置（历史保留）----
         config_opt="${config_opt} no-afalgeng no-async no-autoalginit no-autoerrinit no-capieng
@@ -153,9 +157,21 @@ function build_openssl_111(){
 
         ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
 
-        if [[ "$1" == "Android" && "${openssl_major}" -lt 3 ]]; then
-            # 1.1.1 兜底：Makefile 若仍残留旧 gcc-toolchain 参数则删除
-            sed -i 's# -gcc-toolchain [^ ]*##g' Makefile
+        if [[ "$1" == "Android" ]]; then
+            # 用带 API 级别的 NDK clang 包装器替换裸 clang，并去掉不带 API 的
+            # -target 参数：包装器会根据自身名字注入正确的 sysroot 与
+            # crtbegin_so.o/crtend_so.o 等运行时目标文件路径，保证 .so 链接成功。
+            local wrapper="${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
+            if command -v "${wrapper}" >/dev/null 2>&1; then
+                sed -i "s#^CC=clang\$#CC=${wrapper}#; s#^CC= clang\$#CC=${wrapper}#" Makefile
+                sed -i 's# -target armv7a-linux-androideabi##g; s# -target aarch64-linux-android##g; s# -target arm-linux-androideabi##g; s# -target x86_64-linux-android##g; s# -target i686-linux-android##g' Makefile
+                echo "openssl Android: use NDK wrapper compiler ${wrapper}"
+            fi
+
+            if [[ "${openssl_major}" -lt 3 ]]; then
+                # 1.1.1 兜底：Makefile 若仍残留旧 gcc-toolchain 参数则删除
+                sed -i 's# -gcc-toolchain [^ ]*##g' Makefile
+            fi
         fi
 
         make -j8 V=1 || exit 1
