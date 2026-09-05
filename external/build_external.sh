@@ -131,23 +131,26 @@ function load_source() {
 }
 
 function check_android_tools() {
-    if [[ `which aarch64-linux-android-clang` ]];then
-        return 0;
-    fi
-
     if  [ -z "${ANDROID_NDK}" ];then
         ANDROID_NDK=$ANDROID_NDK_HOME #mtl's Android ndk
     else
         ANDROID_NDK_HOME=$ANDROID_NDK
     fi
     echo ANDROID_NDK is ${ANDROID_NDK}
-    # NDK r25+: toolchain lives in toolchains/llvm/prebuilt/<host>/bin
+    # NDK r25+: toolchain lives in toolchains/llvm/prebuilt/<host>/bin.
+    # 无条件把 NDK bin 放在 PATH 最前，确保 configure/clang 探测优先使用
+    # NDK 自带的 clang（避免被系统 clang 干扰导致交叉编译问题）。
     local ndk_host
     case "$(uname -s)" in
         Darwin*) ndk_host=darwin-x86_64 ;;
         *)       ndk_host=linux-x86_64 ;;
     esac
-    PATH=$PATH:${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin
+    if [[ -d "${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin" ]]; then
+        PATH=${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin:$PATH
+        echo "prepend NDK clang bin: ${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin"
+    else
+        echo "WARNING: NDK clang bin not found under ${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin"
+    fi
 }
 
 function apply_config() {

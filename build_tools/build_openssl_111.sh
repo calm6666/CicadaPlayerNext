@@ -158,20 +158,21 @@ function build_openssl_111(){
         ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
 
         if [[ "$1" == "Android" ]]; then
-            # 用带 API 级别的 NDK clang 包装器替换裸 clang，并去掉任何裸 -target
-            # 参数：包装器根据自身名字提供 target 与 API 级别，并注入
-            # crtbegin_so.o/crtend_so.o 等运行时目标文件路径。
-            # 同时把 --sysroot 统一改为现代 NDK 的统一 sysroot，并显式补充
-            # 架构头文件目录（usr/include/<triple>/asm 等），避免
-            # #include <asm/types.h> 找不到的问题（不依赖 clang 驱动是否
-            # 自动加入 multiarch 目录）。
-            local wrapper="${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
+            # ★ 关键：必须使用 NDK 自带、带 API 级别的 clang 包装器（完整路径，
+            #   不依赖 PATH 顺序），并删除任何裸 -target：
+            #   - 包装器按名字提供 target + API 级别，clang 驱动才会以正确的
+            #     优先级自动加入 sysroot/usr/include/<triple>（含 asm/ 内核头）
+            #     与 crtbegin_so.o 等运行时目标文件；
+            #   - 系统自带的 clang（如 Ubuntu 的 clang-14）没有 Android 驱动
+            #     逻辑，会导致 asm/types.h 缺失、或内核头与 bionic 头冲突
+            #     （struct sigaction 报错）等一堆怪问题。
             local ndk_host
             case "$(uname -s)" in
                 Darwin*) ndk_host=darwin-x86_64 ;;
                 *)       ndk_host=linux-x86_64 ;;
             esac
             local unified_sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
+            local wrapper="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin/${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
 
             if [[ -d "${unified_sysroot}" ]]; then
                 sed -i "s#--sysroot=[^ ]*#--sysroot=${unified_sysroot}#g" Makefile
@@ -181,17 +182,11 @@ function build_openssl_111(){
             # 删除任何显式 -target（包装器按名字自带 target+API）
             sed -i 's# -target [^ ]*##g' Makefile
 
-            if command -v "${wrapper}" >/dev/null 2>&1; then
+            if [[ -x "${wrapper}" ]]; then
                 sed -i "s#^CC=clang\$#CC=${wrapper}#; s#^CC= clang\$#CC=${wrapper}#" Makefile
                 echo "openssl Android: use NDK wrapper compiler ${wrapper}"
-            fi
-
-            # 显式补充架构头文件 include 目录（armv7a -> arm-linux-androideabi）
-            local tri_inc="${CROSS_COMPILE}"
-            [[ "${tri_inc}" == "armv7a-linux-androideabi" ]] && tri_inc="arm-linux-androideabi"
-            if [[ -d "${unified_sysroot}/usr/include/${tri_inc}" ]]; then
-                sed -i "s#^CNF_CFLAGS=.*#& -isystem ${unified_sysroot}/usr/include/${tri_inc}#" Makefile
-                echo "openssl Android: add arch include ${unified_sysroot}/usr/include/${tri_inc}"
+            else
+                echo "WARNING: NDK wrapper not found: ${wrapper}"
             fi
 
             if [[ "${openssl_major}" -lt 3 ]]; then
