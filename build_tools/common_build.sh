@@ -78,11 +78,10 @@ function build_static_lib(){
     fi
 
     if [[ -d "${OPEN_SSL_SOURCE_DIR}" ]] && [[ "${build_openssl}" == "true" ]];then
-        if [[  "${OPENSSL_VERSION_111}" == "True" ]];then
-            build_openssl_111 $1 ${arch}
-        else
-            build_openssl $1 ${arch}
-        fi
+        # build_openssl_111 已按源码版本自动适配（OpenSSL 3.x 使用新配置清单与
+        # 现代 NDK 布局；1.1.1 回退时自动 shim 旧 NDK 目录）。OPENSSL_VERSION_111
+        # 标志保留为历史兼容，不再影响构建路径。
+        build_openssl_111 $1 ${arch}
         if [[ $? -ne 0 ]]; then
             echo "build_openssl build failed"
             exit -1

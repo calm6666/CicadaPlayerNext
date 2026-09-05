@@ -1,65 +1,87 @@
 #!/usr/bin/env bash
+# ============================================================================
+# OpenSSL 构建脚本（支持 1.1.1 与 3.x，按源码版本自动选择配置）
+#
+#   OpenSSL 3.0 LTS（默认，external/player_git_source_list.sh 固定 openssl-3.0.15）：
+#     - 原生支持现代 NDK 布局（toolchains/llvm/prebuilt/<host>/sysroot），
+#       无需 platforms/ shim 与 -gcc-toolchain 清理
+#     - 3.0 移除了一批旧选项（no-engine/no-async/no-gost 等），配置清单已按
+#       3.x 重写
+#   OpenSSL 1.1.1（通过 OPENSSL_BRANCH=OpenSSL_1_1_1g 回退时）：
+#     - 自动创建 platforms/android-<api>/arch-* 符号链接指向统一 sysroot
+#     - 自动从 15-android.conf / Makefile 删除旧 gcc-4.9 工具链参数
+# ============================================================================
 
 source cross_compile_env.sh
 source native_compile_env.sh
 source utils.sh
+
+# 探测源码版本（1.1.1 -> 1，3.x -> 3）
+function openssl_detect_major() {
+    local major=1
+    if [[ -f "${OPEN_SSL_SOURCE_DIR}/include/openssl/opensslv.h" ]]; then
+        major=$(sed -n 's/^# *define *OPENSSL_VERSION_MAJOR *\([0-9][0-9]*\).*/\1/p' \
+                    "${OPEN_SSL_SOURCE_DIR}/include/openssl/opensslv.h" | head -1)
+    fi
+    echo "${major:-1}"
+}
+
 function build_openssl_111(){
+
+    local openssl_major
+    openssl_major=$(openssl_detect_major)
+    echo "OpenSSL major version: ${openssl_major}"
 
     local config_platform;
     local config_opt="no-tests";
-    config_opt="${config_opt} no-afalgeng no-async no-autoalginit no-autoerrinit no-capieng
-     no-cms no-dynamic-engine no-engine  no-ec2m no-filenames no-gost
-     no-hw-padlock no-nextprotoneg no-ocsp no-psk no-rfc3779 no-srp no-ts" #ec is must for keyless server
-     # no-dgram Don’t build support for datagram based BIOs. Selecting this option will also force the disabling of DTLS.
-     # no-srtp
-     #  no-<prot>        Don't build support for negotiating the specified SSL/TLS
-     #                   protocol (one of ssl, ssl3, tls, tls1, tls1_1, tls1_2,
-     #                   tls1_3, dtls, dtls1 or dtls1_2). If "no-tls" is selected then
-     #                   all of tls1, tls1_1, tls1_2 and tls1_3 are disabled.
-     #                   Similarly "no-dtls" will disable dtls1 and dtls1_2. The
-     #                   "no-ssl" option is synonymous with "no-ssl3". Note this only
-     #                   affects version negotiation. OpenSSL will still provide the
-     #                   methods for applications to explicitly select the individual
-     #                   protocol versions.
-     ### useless for cut the lib size ,enable all
-     config_opt="${config_opt}"
 
-     #  no-<alg> aria, bf, blake2, camellia, cast, chacha,
-     #                   cmac, des, dh, dsa, ecdh, ecdsa, idea, md4, mdc2, ocb,
-     #                   poly1305, rc2, rc4, rmd160, scrypt, seed, siphash, sm2, sm3,
-     #                   sm4 or whirlpool
-     #des dh sock for curl use
-     config_opt="${config_opt} no-aria no-bf no-blake2 no-camellia no-cast no-chacha
+    if [[ "${openssl_major}" -ge 3 ]]; then
+        # ---- OpenSSL 3.x 配置（3.0 已移除 engine/async/gost/ec2m 等旧选项）----
+        config_opt="${config_opt} no-cms no-filenames no-ocsp no-psk no-srp no-ts"
+        config_opt="${config_opt} no-aria no-bf no-blake2 no-camellia no-cast no-chacha
+             no-cmac no-dsa no-ecdh no-ecdsa no-idea no-md4 no-mdc2 no-ocb
+             no-poly1305 no-rc2 no-rc4 no-rmd160 no-scrypt no-seed no-siphash no-sm2 no-sm3
+             no-sm4 no-whirlpool"
+    else
+        # ---- OpenSSL 1.1.1 配置（历史保留）----
+        config_opt="${config_opt} no-afalgeng no-async no-autoalginit no-autoerrinit no-capieng
+         no-cms no-dynamic-engine no-engine  no-ec2m no-filenames no-gost
+         no-hw-padlock no-nextprotoneg no-ocsp no-psk no-rfc3779 no-srp no-ts"
+        config_opt="${config_opt} no-aria no-bf no-blake2 no-camellia no-cast no-chacha
                  no-cmac no-dsa no-ecdh no-ecdsa no-idea no-md4 no-mdc2 no-ocb
                  no-poly1305 no-rc2 no-rc4 no-rmd160 no-scrypt no-seed no-siphash no-sm2 no-sm3
                  no-sm4 no-whirlpool"
+    fi
 
     if [[ "$1" == "Android" ]]
     then
         cross_compile_set_platform_Android  $2
         config_platform="android-${CPU_ARCH}"
         # NDK r25+ 由 AndroidConfig.sh 提供 ANDROID_API_LEVEL（默认 24）
+        # OpenSSL 3.x 同样支持 -D__ANDROID_API__=NN（见其 NOTES-ANDROID.md）
         local cross_compile_opt="-D__ANDROID_API__=${ANDROID_API_LEVEL:-24}"
         config_opt="${config_opt} no-shared no-asm"
 
-        # OpenSSL 1.1.1 的 15-android.conf 校验旧的 NDK 目录结构
-        # ($ndk/platforms/android-<api>/arch-<arch>)，而 NDK r23+ 已移除
-        # platforms/，改用统一 sysroot。用符号链接把旧路径指到统一 sysroot
-        # （两者目录结构一致：usr/include、usr/lib），让 1.1.1 的检查与
-        # --sysroot 推导在新 NDK (r25/r26/r27) 上同样成立。
-        local ndk_host
-        case "$(uname -s)" in
-            Darwin*) ndk_host=darwin-x86_64 ;;
-            *)       ndk_host=linux-x86_64 ;;
-        esac
-        local api=${ANDROID_API_LEVEL:-24}
-        local sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
-        local plat_dir="${ANDROID_NDK}/platforms/android-${api}"
-        if [[ -d "${sysroot}" ]]; then
-            mkdir -p "${plat_dir}"
-            for a in arch-arm arch-arm64 arch-x86 arch-x86_64; do
-                [[ -e "${plat_dir}/$a" ]] || ln -s "${sysroot}" "${plat_dir}/$a"
-            done
+        if [[ "${openssl_major}" -lt 3 ]]; then
+            # 仅 1.1.1 需要：校验/推导旧 NDK 目录结构。
+            # 用符号链接把旧 platforms/ 路径指到统一 sysroot（目录结构一致），
+            # 并删除 15-android.conf 中旧 gcc-4.9 工具链参数。
+            local ndk_host
+            case "$(uname -s)" in
+                Darwin*) ndk_host=darwin-x86_64 ;;
+                *)       ndk_host=linux-x86_64 ;;
+            esac
+            local api=${ANDROID_API_LEVEL:-24}
+            local sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
+            local plat_dir="${ANDROID_NDK}/platforms/android-${api}"
+            if [[ -d "${sysroot}" ]]; then
+                mkdir -p "${plat_dir}"
+                for a in arch-arm arch-arm64 arch-x86 arch-x86_64; do
+                    [[ -e "${plat_dir}/$a" ]] || ln -s "${sysroot}" "${plat_dir}/$a"
+                done
+            fi
+            sed -i 's#-gcc-toolchain \$ndk/toolchains/\$triarch-4.9/prebuilt/\$host##g' \
+                "${OPEN_SSL_SOURCE_DIR}/Configurations/15-android.conf"
         fi
     elif [[ "$1" == "iOS" ]]
     then
@@ -85,10 +107,6 @@ function build_openssl_111(){
             fi
         fi
 
-#        export CROSS_TOP="${platform}/Developer"
-#        export CROSS_SDK="${os}${IPHONEOS_SDK_VERSION}.sdk"
-#        export BUILD_TOOLS="${DEVELOPER}"
-#        export CC="${BUILD_TOOLS}/usr/bin/gcc"
         export CFLAGS="${CFLAGS} -arch ${2}"
         export LDFLAGS=
     elif [ "$1" == "win32" ];then
@@ -100,7 +118,7 @@ function build_openssl_111(){
         fi
         export   CROSS_COMPILE=${CROSS_COMPILE}-
     elif [ "$1" == "Darwin" ];then
-        print_warning "native build openssl111 for $1"
+        print_warning "native build openssl for $1"
         if [ "$2" == "x86_64" ];then
             config_platform="darwin64-x86_64-cc"
         elif [ "$2" == "arm64" ];then
@@ -133,19 +151,10 @@ function build_openssl_111(){
     cd ${build_dir}
     if [ "${BUILD}" != "False" ];then
 
-        if [[ "$1" == "Android" ]]; then
-            # 源头修复：OpenSSL 1.1.1 的 15-android.conf 会给 clang 传入旧版
-            # gcc-4.9 工具链路径（-gcc-toolchain），现代 NDK（r23+）没有该目录，
-            # 且 NDK clang 自带 sysroot 不需要它。直接删掉生成该参数的行。
-            # （\$ 是 shell 转义，sed 收到的才是 perl 源码里的字面 $ndk/$triarch/$host）
-            sed -i 's#-gcc-toolchain \$ndk/toolchains/\$triarch-4.9/prebuilt/\$host##g' \
-                "${OPEN_SSL_SOURCE_DIR}/Configurations/15-android.conf"
-        fi
-
         ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
 
-        # 兜底：Configure 生成 Makefile 后，若仍残留该参数则统一去掉
-        if [[ "$1" == "Android" ]]; then
+        if [[ "$1" == "Android" && "${openssl_major}" -lt 3 ]]; then
+            # 1.1.1 兜底：Makefile 若仍残留旧 gcc-toolchain 参数则删除
             sed -i 's# -gcc-toolchain [^ ]*##g' Makefile
         fi
 

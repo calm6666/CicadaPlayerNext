@@ -71,8 +71,10 @@ build_tools/build_Android.sh → 对每个 ABI:
 
 关键变量（`build_tools/AndroidConfig.sh`）：`ANDROID_API_LEVEL=24`（默认），NDK llvm clang
 `--target=aarch64-linux-android24` / `armv7a-linux-androideabi24`。
-OpenSSL 1.1.1g 的旧 NDK 目录校验由 `build_openssl_111.sh` 内置的
-`platforms/android-<api>/arch-*` 符号链接 shim 兼容（r25/r26/r27 均可用）。
+OpenSSL 默认使用 **3.0.15 (LTS)**（原生支持新 NDK 布局）；如通过
+`OPENSSL_BRANCH=OpenSSL_1_1_1g` 回退旧版，`build_openssl_111.sh` 会自动做
+`platforms/` 目录 shim 与 `-gcc-toolchain` 清理。curl 默认 **8.10.1**
+（7.68 无法与 OpenSSL 3 编译）。
 
 ### 3.2 native 层（premierlibrary）
 
@@ -116,11 +118,9 @@ sourceSets.main.jniLibs.srcDirs = ['../../../../external/install/ffmpeg/Android'
 
 - **`avresample` 配置失败**：确认使用新 `ffmpeg_commands.sh`（已移除该选项）。
 - **NDK r25 以下报 clang 缺失**：FFmpeg 9 与播放器 API 24 要求 NDK r25+。
-- **`$ANDROID_NDK_HOME=... is invalid`（OpenSSL 1.1.1g）**：新版 `build_openssl_111.sh`
-  已自动 shim；手工排查时确认 NDK 内有
-  `toolchains/llvm/prebuilt/<host>/sysroot/usr/include`。
-- **`clang: unknown argument: '-gcc-toolchain'`（OpenSSL 编译期）**：1.1.1 传了旧版
-  gcc-4.9 工具链路径，新版脚本会在 Configure 后自动从 Makefile 删除该参数。
+- **`$ANDROID_NDK_HOME=... is invalid` / `clang: unknown argument: '-gcc-toolchain'`
+  （OpenSSL）**：仅回退到 1.1.1 时会出现，`build_openssl_111.sh` 已内置 shim 与清理；
+  默认的 OpenSSL 3.0.15 原生支持新 NDK，不会遇到这两个问题。
 - **`bash\r` / `patch does not apply` / `Permission denied`**：Windows 检出的
   CRLF 与权限问题，处理与免疫机制见 `BUILD_GUIDE.md` 第 1.3 节。
 - **`autoreconf: command not found`**：`apt-get install autoconf automake libtool pkg-config`。

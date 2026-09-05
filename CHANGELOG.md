@@ -1,5 +1,17 @@
 # [Unreleased] FFmpeg 9.0 + HarmonyOS + Object Playback (2025)
 
+## Dependency upgrades: OpenSSL 3.0 + curl 8.x
+- OpenSSL `1.1.1g`（EOL）→ **`openssl-3.0.15`（3.0 LTS）**：原生支持现代 NDK
+  布局，不再需要 platforms shim / -gcc-toolchain 清理（回退 1.1.1 时脚本仍兼容）。
+- curl `7.68.0` → **`curl-8_10_1`**（7.68 无法与 OpenSSL 3 编译）。
+- `build_tools/build_openssl_111.sh` 按源码版本自动选择配置：
+  3.x 使用新配置清单（移除 `no-engine/no-async/no-gost/no-ec2m` 等已删除选项）；
+  1.1.1 保留旧 NDK shim 与 gcc-toolchain 清理。
+- `build_tools/build_curl.sh`：`--with-ssl=` → `--with-openssl=`（curl 8.x 规范选项）。
+- 补丁按版本跳过（`build_external.sh`）：Apple-silicon 补丁仅 1.1.1；curl m4 补丁仅 7.x。
+- 代码适配：`framework/data_source/opensslthreadlock.c` 按 `OPENSSL_VERSION_NUMBER`
+  分支（3.0 移除全局锁回调 API；≥1.1.0 内部线程安全）。
+
 ## Build system hardening
 - 构建脚本对 Windows 检出免疫：补丁 CRLF 归一化、源码树 EOL 统一 LF、
   自动补齐 `configure/autogen.sh/Configure` 可执行位、子脚本用 `bash` 显式执行

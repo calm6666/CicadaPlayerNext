@@ -197,8 +197,8 @@ external/build_external.sh Android
 |---|---|---|
 | `bash\r: No such file or directory` | 脚本是 CRLF | 第 1.3 节 B 的 `sed -i 's/\r$//'` 清理 |
 | `patch does not apply` / `does not match index` | `.patch` 或源码树 CRLF | 新版 `build_external.sh` 已免疫；手工修复见第 1.3 节 |
-| `$ANDROID_NDK_HOME=... is invalid`（OpenSSL） | NDK 无旧 `platforms/` 目录 | 新版 `build_openssl_111.sh` 已自动 shim；或换 r25c |
-| `clang: unknown argument: '-gcc-toolchain'` + `no such file or directory: ...-4.9/prebuilt/...`（OpenSSL 编译期） | OpenSSL 1.1.1 给 clang 传旧版 gcc-4.9 工具链路径 | 新版 `build_openssl_111.sh` 在 Configure 后自动从 Makefile 删除该参数 |
+| `$ANDROID_NDK_HOME=... is invalid`（OpenSSL） | 仅 1.1.1 回退版本会校验旧 `platforms/` 目录；默认 3.0.15 原生支持新 NDK | 保持默认 3.0.15；回退 1.1.1 时脚本已内置 shim |
+| `clang: unknown argument: '-gcc-toolchain'` + `no such file or directory: ...-4.9/prebuilt/...`（OpenSSL 编译期） | 仅 1.1.1 会传旧版 gcc-4.9 工具链路径；3.0.15 无此问题 | 保持默认 3.0.15；回退 1.1.1 时脚本已自动清理 |
 | `./autogen.sh: Permission denied` | Windows 检出丢可执行位 | `chmod +x`（新版脚本自动补齐） |
 | `autoreconf: command not found` | 缺 autotools | `apt-get install autoconf automake libtool pkg-config` |
 | `boost/cares source not found` | `user_env.sh` 未配置该源码目录 | 非致命警告；需要时按 `build_tools/README.md` 配置 |

@@ -102,7 +102,8 @@ function build_curl(){
     if [ "${BUILD}" != "False" ];then
         cd ${build_dir}
         if [ -z "${ssl_opt}" ] && [ -d "${OPENSSL_INSTALL_DIR}" ];then
-            local ssl_opt="--with-ssl=${OPENSSL_INSTALL_DIR}"
+            # curl 8.x 规范选项 --with-openssl（旧 --with-ssl 为弃用别名）
+            local ssl_opt="--with-openssl=${OPENSSL_INSTALL_DIR}"
         fi
 
         if [ -d "${ARES_INSTALL_DIR}" ];then

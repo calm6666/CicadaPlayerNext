@@ -82,7 +82,10 @@ if [[ -z "${OPENSSL_GIT}" ]];then
     OPENSSL_GIT="https://github.com/openssl/openssl.git"
 fi
 if [[ -z "${OPENSSL_BRANCH}" ]];then
-    OPENSSL_BRANCH="OpenSSL_1_1_1g"
+    # OpenSSL 3.0 LTS（3.0.15 为最后一个 3.0.x 补丁版）。
+    # 1.1.1 已 EOL 且不兼容新 NDK 布局；如需回退用 OPENSSL_BRANCH=OpenSSL_1_1_1g
+    # （构建脚本仍内置旧 NDK 兼容 shim）。
+    OPENSSL_BRANCH="openssl-3.0.15"
 fi
 clone_git_mirror "$OPENSSL_GIT" "$OPENSSL_BRANCH"
 
@@ -98,7 +101,8 @@ if [[ -z "${CURL_GIT}" ]];then
     CURL_GIT="https://github.com/curl/curl.git"
 fi
 if [[ -z "${CURL_BRANCH}" ]];then
-    CURL_BRANCH="curl-7_68_0"
+    # curl 8.x：原生支持 OpenSSL 3.x（7.68 及更早版本无法与 OpenSSL 3 编译）。
+    CURL_BRANCH="curl-8_10_1"
 fi
 clone_git_mirror "$CURL_GIT" "$CURL_BRANCH"
 

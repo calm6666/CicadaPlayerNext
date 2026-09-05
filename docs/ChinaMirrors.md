@@ -21,8 +21,8 @@
 | 依赖 | 默认源 | 获取方式 | 镜像方式 |
 |---|---|---|---|
 | FFmpeg n9.0 | github.com/FFmpeg/FFmpeg.git | git clone（`player_git_source_list.sh`） | `FFMPEG_GIT` / `GIT_MIRROR_PREFIX` |
-| OpenSSL 1.1.1g | github.com/openssl/openssl.git | git clone | `OPENSSL_GIT` / `GIT_MIRROR_PREFIX` |
-| curl 7.68.0 | github.com/curl/curl.git | git clone | `CURL_GIT` / `GIT_MIRROR_PREFIX` |
+| OpenSSL 3.0.15 (LTS) | github.com/openssl/openssl.git | git clone | `OPENSSL_GIT` / `GIT_MIRROR_PREFIX` |
+| curl 8.10.1 | github.com/curl/curl.git | git clone | `CURL_GIT` / `GIT_MIRROR_PREFIX` |
 | libxml2 v2.9.9 | github.com/GNOME/libxml2.git | git clone | `LIBXML2_GIT` / `GIT_MIRROR_PREFIX` |
 | nghttp2 v1.41.0 | github.com/nghttp2/nghttp2.git | git clone | `NGHTTP2_GIT` / `GIT_MIRROR_PREFIX` |
 | dav1d 0.6.0 | github.com/videolan/dav1d.git | git clone（启用时） | `DAV1D_GIT` / `GIT_MIRROR_PREFIX` |

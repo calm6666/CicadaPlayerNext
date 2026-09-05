@@ -14,6 +14,8 @@ NGHTTP2_SOURCE_DIR=$TOP_DIR/external/nghttp2
 #RTMPDUMP_SOURCE_DIR=$TOP_DIR/external/rtmpdump/
 #ANDROID_NDK=$ANDROID_NDK_HOME
 export LIB_NAME=alivcffmpeg
+# 历史兼容标志：build_openssl_111 现在按源码版本自动适配
+# （默认 OpenSSL 3.0.15 / 可回退 1.1.1），此标志不再影响构建路径。
 OPENSSL_VERSION_111="True"
 SSL_USE_NATIVE="TRUE"
 CRYPTO_USE_OPENSSL="TRUE"

@@ -15,13 +15,30 @@
 | 依赖 | 版本 | 说明 |
 |---|---|---|
 | FFmpeg | n9.0 | 解封装 + 软解 + 滤镜 |
-| curl | 7.68.0（可升至 8.x） | http/https 数据源 |
-| openssl | 1.1.1g（建议升 1.1.1w/3.x） | TLS |
+| curl | **8.10.1** | http/https 数据源（7.68 无法与 OpenSSL 3 编译，连带升级） |
+| openssl | **3.0.15 (LTS)** | TLS（1.1.1 已 EOL 且不兼容新 NDK 布局，连带升级） |
 | nghttp2 | 1.41.0 | HTTP/2 |
 | libxml2 | 2.9.9 | DASH MPD 解析 |
 | fdk-aac（可选） | 需 `--enable-nonfree --enable-gpl` | AAC 编解码 |
 | dav1d（可选） | 0.6.0+ | AV1 软解 |
 | x264（可选） | 需 `--enable-nonfree --enable-gpl --enable-version3` | 编码 |
+
+### 2.1 OpenSSL 3.x / curl 8.x 连带升级要点
+
+- `build_tools/build_openssl_111.sh` 按源码版本自动适配：
+  - **OpenSSL 3.x**（默认）：新配置清单（移除 3.0 已删除的
+    `no-engine/no-async/no-gost/no-ec2m` 等选项）、原生使用现代 NDK 统一
+    sysroot（`-D__ANDROID_API__=NN` 依旧有效，见其 NOTES-ANDROID.md）；
+  - **OpenSSL 1.1.1**（`OPENSSL_BRANCH=OpenSSL_1_1_1g` 回退时）：保留旧 NDK
+    目录 shim 与 `-gcc-toolchain` 清理。
+- `build_tools/build_curl.sh`：`--with-ssl=` → 规范选项 `--with-openssl=`。
+- 补丁按版本跳过：Apple-silicon 补丁仅对 1.1.1 应用（3.x 原生支持
+  `darwin64-arm64-cc`）；curl m4 补丁仅对 7.x 应用（8.x 上游已修复）。
+- 代码适配：`framework/data_source/opensslthreadlock.c` 按
+  `OPENSSL_VERSION_NUMBER` 分支（3.0 移除了
+  `CRYPTO_set_locking_callback/CRYPTO_num_locks` 等全局锁回调；≥1.1.0 起
+  OpenSSL 内部线程安全，锁回调本就是空操作）。`OpenSSAESDecrypt/Encrypt`
+  使用的 `<openssl/aes.h>` 低级 AES API 在 3.x 仍可用（deprecated 但未移除）。
 
 ## 3. 已迁移的 FFmpeg 旧 API 清单（代码级）
 

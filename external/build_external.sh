@@ -44,12 +44,27 @@ function patch_ffmpeg() {
 
 function patch_openssl() {
     cd "${OPEN_SSL_SOURCE_DIR}" || exit
-    git_am_patch ../../contribute/openssl/0001-Configuration-darwin64-arm64-cc-for-Apple-silicon.patch
+    local major
+    major=$(sed -n 's/^# *define *OPENSSL_VERSION_MAJOR *\([0-9][0-9]*\).*/\1/p' \
+                 include/openssl/opensslv.h 2>/dev/null | head -1)
+    if [[ "${major:-1}" -lt 3 ]]; then
+        # Apple silicon 补丁仅适用于 1.1.1（OpenSSL 3.x 原生支持 darwin64-arm64-cc）
+        git_am_patch ../../contribute/openssl/0001-Configuration-darwin64-arm64-cc-for-Apple-silicon.patch
+    else
+        echo "openssl ${major}.x: skip 1.1.1-era patch"
+    fi
 }
 
 function patch_curl(){
     cd "${CURL_SOURCE_DIR}" || exit
-    git_am_patch ../../contribute/curl/0001-curl-functions.m4-remove-inappropriate-AC_REQUIRE.patch
+    # m4 AC_REQUIRE 补丁仅适用于 curl 7.68（curl 8.x 上游已修复）
+    local ver
+    ver=$(git describe --tags 2>/dev/null | cut -d- -f1)
+    if [[ "${ver}" == curl-7_* ]]; then
+        git_am_patch ../../contribute/curl/0001-curl-functions.m4-remove-inappropriate-AC_REQUIRE.patch
+    else
+        echo "curl ${ver:-8.x}: skip 7.x-era patch"
+    fi
 }
 
 function git_apply_patch() {
