@@ -38,6 +38,9 @@ source external/china_mirror_env.sh     # gitee 镜像预设
 
 完整说明（含 gradle/NDK/brew/Flutter 镜像）见 [`docs/ChinaMirrors.md`](docs/ChinaMirrors.md)。
 
+> 旧版编译文档（下面前 6 条 `doc/compile_*.md`）已被 `docs/` 系列取代，
+> **优先阅读 [`docs/BUILD_GUIDE.md`](docs/BUILD_GUIDE.md)**。
+
 - [1. compile iOS](doc/compile_ios.md)
 - [2. compile Android](doc/compile_Android.md)
 - [3. compile_Linux](doc/compile_Linux.md)
@@ -78,6 +81,12 @@ source external/china_mirror_env.sh     # gitee 镜像预设
 
 - **FFmpeg 9.0**：全部依赖升级至 FFmpeg n9.0，旧版 API 全部迁移（详见
   [`docs/FFmpeg9_Upgrade.md`](docs/FFmpeg9_Upgrade.md)）。
+- **依赖全面升级（2025 最新稳定版）**：OpenSSL `3.0.17` (LTS) / curl `8.14.1` /
+  libxml2 `2.14.5` / nghttp2 `1.66.0` / dav1d `1.5.1`（可选），版本清单见
+  [`docs/FFmpeg9_Upgrade.md`](docs/FFmpeg9_Upgrade.md)。
+- **国内镜像加速**：gitee 快照 + `GIT_MIRROR_PREFIX` 实时代理 + 阿里云 Maven +
+  npmmirror（NDK/npm）+ Flutter 国内源，全部"构建时传入、失败自动回退"，
+  一键预设 `external/china_mirror_env.sh`（详见 [`docs/ChinaMirrors.md`](docs/ChinaMirrors.md)）。
 - **Android 最低版本 7.0 (API 24)**：全部 gradle/cmake/CI 已升级（详见
   [`docs/Packaging_Android.md`](docs/Packaging_Android.md)）。
 - **HarmonyOS NEXT 硬件加速**：OH_AVCodec 硬解（surface 零拷贝）、OH_AudioRenderer、

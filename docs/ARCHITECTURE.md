@@ -154,16 +154,20 @@ flowchart TB
 ```
 CicadaPlayerNext/
 ├── external/
-│   ├── player_git_source_list.sh        # FFMPEG_BRANCH=n9.0, patch 默认关闭
-│   └── player_ffmpeg_config.sh          # FFmpeg 9 组件清单
+│   ├── player_git_source_list.sh        # FFmpeg n9.0 + OpenSSL 3.0.17 + curl 8.14.1
+│   │                                    #   + nghttp2 1.66.0 + libxml2 2.14.5（国内镜像 + 回退）
+│   ├── china_mirror_env.sh              # 国内镜像预设（gitee / GIT_MIRROR_PREFIX）
+│   └── player_ffmpeg_config.sh          # FFmpeg 9 组件清单（ac3_at/eac3_at 仅 Apple）
 ├── build_tools/
 │   ├── ffmpeg_commands.sh               # 移除 --enable-avresample
 │   ├── ffmpeg_cross_compile_config.sh   # + ffmpeg_cross_compile_set_OHOS
 │   ├── AndroidConfig.sh                 # 现代 NDK clang + API 24
 │   ├── OHOSConfig.sh                    # 鸿蒙 NDK 交叉编译环境
 │   ├── build_ohos.sh                    # 鸿蒙外部库一键编译
-│   ├── common_build.sh                  # clang 链接 + link_shared_lib_OHOS
-│   └── boost/user-config-Android.jam    # clang/libc++ toolset
+│   ├── build_openssl_3.sh               # OpenSSL 3.x/1.1.1 自动适配（原 _111.sh）
+│   ├── common_build.sh                  # clang 链接 + link_shared_lib_OHOS + config.sub shim
+│   ├── boost/user-config-Android.jam    # clang/libc++ toolset
+│   └── boost/user-config-OHOS.jam       # 鸿蒙 clang toolset
 ├── framework/
 │   ├── HarmonyOS.cmake                  # 鸿蒙平台配置
 │   ├── demuxer/manifest/                # ★ 对象清单播放
@@ -179,8 +183,8 @@ CicadaPlayerNext/
 │   ├── SuperMediaPlayer.* / player_msg_control.* / SMPMessageControllerListener.*
 │   └── player_types.h                   # + manifest 成员
 ├── platform/
-│   ├── Android/…                        # minSdk 24 + setDataSourceManifest(JNI)
-│   ├── Flutter/…                        # minSdk 24
+│   ├── Android/…                        # minSdk 24 + setDataSourceManifest(JNI) + 阿里云 Maven 开关
+│   ├── Flutter/…                        # minSdk 24（jcenter→mavenCentral，支持 USE_CHINA_MIRROR）
 │   └── HarmonyOS/                       # ★ 鸿蒙 Demo (hvigor + NAPI)
 └── docs/                                # ★ 本文档集
 ```

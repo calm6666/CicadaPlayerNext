@@ -1,11 +1,19 @@
+// 国内镜像（可选）：export USE_CHINA_MIRROR=true 时优先走阿里云 Maven 镜像
+// jcenter 已停止维护，全部替换为 google() + mavenCentral()
+def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
+
 group 'com.fplayer.flutter_cicadaplayer'
 version '1.0'
 
 buildscript {
     repositories {
+        if (useChinaMirror) {
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+        }
         google()
-        jcenter()
-        maven { url "http://maven.aliyun.com/nexus/content/repositories/releases" }
+        mavenCentral()
     }
 
     dependencies {
@@ -15,9 +23,13 @@ buildscript {
 
 rootProject.allprojects {
     repositories {
+        if (useChinaMirror) {
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+        }
         google()
-        jcenter()
-        maven { url "http://maven.aliyun.com/nexus/content/repositories/releases" }
+        mavenCentral()
     }
 }
 

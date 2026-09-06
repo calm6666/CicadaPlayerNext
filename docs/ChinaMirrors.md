@@ -28,7 +28,8 @@
 | dav1d 1.5.1 | github.com/videolan/dav1d.git | git clone（启用时） | `DAV1D_GIT` / `GIT_MIRROR_PREFIX` |
 | x264 / fdk-aac | 用户本地源码目录（`user_env.sh`） | 无网络下载 | 可从 gitee 镜像自行 clone 后指向目录 |
 | Android NDK r25c（CI） | dl.google.com | wget | `ANDROID_NDK_URL`（npmmirror） |
-| gradle 插件/依赖 | google() / jcenter() | gradle | `USE_CHINA_MIRROR=true` → 阿里云 Maven |
+| gradle 插件/依赖 | google() / mavenCentral() | gradle | `USE_CHINA_MIRROR=true` → 阿里云 Maven |
+| hvigor / DevEco 的 npm 依赖（HarmonyOS） | registry.npmjs.org | npm | `NPM_CONFIG_REGISTRY=https://registry.npmmirror.com` |
 | Homebrew（仅 macOS） | raw.githubusercontent.com | curl 脚本 | `HOMEBREW_INSTALL_URL` + 阿里云 brew 源 |
 | OHOS SDK | 华为官方 / OpenHarmony 官网 | 手工下载 | 官方渠道本身在国内，无需镜像 |
 | Flutter 依赖（如使用） | pub.dev | flutter pub | `PUB_HOSTED_URL=https://pub.flutter-io.cn`、`FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn` |
@@ -65,8 +66,9 @@ export FFMPEG_GIT=https://gitee.com/mirrors/ffmpeg.git
 
 - 优点：gitee 国内速度稳定、长期可用；地址直观。
 - 缺点：`gitee.com/mirrors/*` 是**人工维护的快照仓库**，新 tag 偶尔滞后几天。
-  本项目锁定的 `n9.0` 若镜像尚未同步，clone 会失败——脚本检测到失败后
-  **自动回退 github** 重试，因此最坏情况只是慢，不会断。
+  本项目锁定的 tag（`openssl-3.0.17`、`curl-8_14_1`、`v1.66.0`、`v2.14.5`、
+  `dav1d 1.5.1`）都是 2025 年发布的，若镜像尚未同步，clone 会失败——脚本检测到
+  失败后**自动回退 github** 重试，因此最坏情况只是慢，不会断。
 - 适用：网络能通 github 但较慢、希望大部分流量走国内的环境。
 
 ### 4.2 统一前缀镜像（`GIT_MIRROR_PREFIX`，实时代理）
@@ -106,10 +108,13 @@ export USE_CHINA_MIRROR=true
 生效位置（已按该开关改造）：
 - `platform/Android/source/build.gradle`（buildscript + allprojects）
 - `platform/Android/source/settings.gradle`（pluginManagement）
+- `platform/Flutter/android/build.gradle`、`platform/Flutter/example/android/build.gradle`
+  （Flutter 插件模块，同样支持该开关）
 
 镜像列表（阿里云公共仓库）：
 `maven.aliyun.com/repository/gradle-plugin`、`.../google`、`.../public`。
-顺带修复：**jcenter() 已停止维护**，全部替换为 `google() + mavenCentral()`。
+顺带修复：**jcenter() 已停止维护**，全部替换为 `google() + mavenCentral()`，
+旧的 HTTP 阿里云地址也统一升级为 HTTPS。
 
 ### 5.2 CI / 手工下载 NDK
 
@@ -152,18 +157,31 @@ git clone --depth 1 https://gitee.com/mirrors/fdk-aac.git external/fdk-aac
 ```bash
 export PUB_HOSTED_URL=https://pub.flutter-io.cn
 export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
+export USE_CHINA_MIRROR=true    # 安卓侧 gradle 依赖同样走阿里云 Maven
 ```
+
+### 5.6 HarmonyOS hvigor / DevEco 的 npm 依赖
+
+hvigor 构建会从 npm 拉依赖，国内可切 npmmirror：
+
+```bash
+export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com
+```
+
+（`platform/HarmonyOS/` 的构建产物本身不依赖 github；OHOS SDK 由华为/OpenHarmony
+官方渠道下载，均在国内。）
 
 ## 6. 失败兜底与排障
 
 - 所有 git 依赖：`clone_git_mirror()` 先试镜像、失败自动回退 github；
   日志会打印 `mirror clone failed (xxx), retry with yyy`。
-- 想验证某个镜像是否可用（以 FFmpeg 为例）：
+- 想验证某个镜像是否可用（以 libxml2 的新 tag 为例）：
 
 ```bash
-export FFMPEG_GIT=https://gitee.com/mirrors/ffmpeg.git
-git ls-remote --tags "$FFMPEG_GIT" n9.0     # 输出 tag 哈希即镜像已同步
-git ls-remote --tags "$FFMPEG_GIT"          # 查看镜像当前有哪些 tag
+export LIBXML2_GIT=https://gitee.com/mirrors/libxml2.git
+git ls-remote --tags "$LIBXML2_GIT" v2.14.5   # 输出 tag 哈希即镜像已同步
+git ls-remote --tags "$LIBXML2_GIT"           # 查看镜像当前有哪些 tag
+# 其余同理：openssl-3.0.17 / curl-8_14_1 / v1.66.0 / 1.5.1 / n9.0
 ```
 
 - gitee 镜像缺 tag 时：优先改用 `GIT_MIRROR_PREFIX` 代理模式（实时同步），

@@ -1,7 +1,20 @@
 ## 1.仓库介绍
-本仓库是一个编译和交叉编译开源库的工具包，目前支持了ffmpeg在Android和iOS平台的交叉编译,使用MinGW 交叉编译Windows, Mac的native编译，以及 OpenHarmony (HarmonyOS NEXT) 的交叉编译。
-ffmpeg目前支持fdk-aac和x264的外部编译。
-支持curl librtmp opessl 的编译。
+本仓库是一个编译和交叉编译开源库的工具包，目前支持了 ffmpeg 在 Android、iOS、
+OpenHarmony (HarmonyOS NEXT) 的交叉编译，使用 MinGW 交叉编译 Windows，以及
+macOS / Linux 的 native 编译。
+
+ffmpeg 目前支持 fdk-aac 和 x264 的外部编译；支持 openssl（3.0 LTS，自动适配
+1.1.1 回退）、curl、nghttp2、libxml2、c-ares、librtmp、dav1d、boost 的编译，
+全部库均带 OHOS 分支。
+
+> 📖 本文档为历史说明。**当前权威指南**：
+> - 整体构建流程与环境准备：[`docs/BUILD_GUIDE.md`](../docs/BUILD_GUIDE.md)
+> - 国内镜像配置：[`docs/ChinaMirrors.md`](../docs/ChinaMirrors.md)
+> - 依赖版本与升级细节：[`docs/FFmpeg9_Upgrade.md`](../docs/FFmpeg9_Upgrade.md)
+> - 各平台打包：[`docs/Packaging_Android.md`](../docs/Packaging_Android.md) /
+>   [`docs/Packaging_HarmonyOS.md`](../docs/Packaging_HarmonyOS.md) /
+>   [`docs/Packaging_iOS.md`](../docs/Packaging_iOS.md) /
+>   [`docs/Packaging_macOS_Linux_Windows.md`](../docs/Packaging_macOS_Linux_Windows.md)
 
 ## 2.使用
 ### 1.配置项

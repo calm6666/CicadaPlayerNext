@@ -83,7 +83,8 @@ bash -n setup.env && bash -n build_player.sh && bash -n external/build_external.
 
 ## 2. 依赖源码与国内镜像
 
-依赖源码（FFmpeg n9.0 / OpenSSL 1.1.1g / curl / libxml2 / nghttp2 / dav1d）由
+依赖源码（FFmpeg n9.0 / OpenSSL 3.0.17 / curl 8.14.1 / libxml2 2.14.5 /
+nghttp2 1.66.0 / dav1d 1.5.1 可选）由
 `external/player_git_source_list.sh` 统一 clone，规则：**构建时传入镜像变量则用镜像，
 不传则默认 github；镜像失败自动回退 github**。
 
@@ -101,7 +102,15 @@ export FFMPEG_GIT=https://gitee.com/mirrors/ffmpeg.git
 gradle 依赖镜像（可选）：
 
 ```bash
-export USE_CHINA_MIRROR=true    # 阿里云 Maven 镜像
+export USE_CHINA_MIRROR=true    # 阿里云 Maven 镜像（Android 主工程 + Flutter 模块）
+```
+
+HarmonyOS / Flutter 的其它环节（可选）：
+
+```bash
+export NPM_CONFIG_REGISTRY=https://registry.npmmirror.com   # hvigor/DevEco 的 npm 依赖
+export PUB_HOSTED_URL=https://pub.flutter-io.cn             # Flutter pub
+export FLUTTER_STORAGE_BASE_URL=https://storage.flutter-io.cn
 ```
 
 完整分析（依赖清单、镜像对比、失败回退机制）见 [`docs/ChinaMirrors.md`](ChinaMirrors.md)。
@@ -156,15 +165,17 @@ platform/Android/source/premierlibrary/build/outputs/aar/premierlibrary-corePlay
 external/build_external.sh Android
  ├─ load_source: clone 6 个依赖（镜像→回退 github）
  │   ├─ 源码树 EOL 归一化（LF）+ 补丁 CRLF 免疫
- │   └─ git am 打补丁：libxml2 / openssl / curl（失败自动 abort，不中断）
+ │   └─ git am 打补丁：libxml2 / openssl / curl（按版本+平台条件跳过；
+ │      失败自动 abort，不中断）
  └─ build_tools/build_Android.sh
      └─ 对每个 ABI (armeabi-v7a, arm64-v8a):
          ├─ libxml2  → configure → make
          ├─ boost*   → 可选（无源码目录则跳过）
          ├─ cares*   → 可选
-         ├─ openssl  → Configure android-arm(64)（自动 shim platforms/ 目录）
+         ├─ openssl  → Configure android-arm(64)（3.x 原生支持新 NDK；
+         │             1.1.1 回退时自动 shim platforms/ 目录）
          ├─ nghttp2  → autoreconf → configure
-         ├─ curl     → autoreconf → configure --with-ssl --with-nghttp2
+         ├─ curl     → autoreconf → configure --with-openssl --with-nghttp2
          ├─ fdk-aac* → 可选
          ├─ x264*    → 可选
          ├─ dav1d*   → 可选（默认关闭）

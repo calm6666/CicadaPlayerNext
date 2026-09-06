@@ -26,9 +26,11 @@
 - OHOS 全链路支持：`build_tools/common_build.sh` 内置 config.sub shim
   （自动识别 `*-ohos*` 三元组，系统 automake 的 config.sub 已支持时自动跳过）；
   libxml2 2.14 自带新版 config.sub，无需 shim 即可交叉编译。
-- 国内镜像支持：`external/china_mirror_env.sh` 预设 + `GIT_MIRROR_PREFIX` 统一前缀 +
-  失败自动回退 github（`docs/ChinaMirrors.md`）；gradle 阿里云 Maven（`USE_CHINA_MIRROR`）；
-  CI NDK 镜像（`ANDROID_NDK_URL`）。
+- 国内镜像支持：`external/china_mirror_env.sh` 预设（gitee 快照 + `GIT_MIRROR_PREFIX`
+  实时代理 + 阿里云 Maven + npmmirror NDK/npm + Flutter pub 国内源 + 阿里云 brew）+
+  失败自动回退 github（`docs/ChinaMirrors.md`）；gradle 阿里云 Maven（`USE_CHINA_MIRROR`，
+  Android 主工程与 Flutter 模块均已接入，jcenter/HTTP 旧地址全部替换为
+  `google()+mavenCentral()` 与 HTTPS）；CI NDK 镜像（`ANDROID_NDK_URL`）。
 - 新增 `.gitattributes` 强制 `*.sh/*.patch/*.env` 等文件 LF。
 - 新增构建总文档 `docs/BUILD_GUIDE.md`。
 

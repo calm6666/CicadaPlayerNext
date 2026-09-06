@@ -59,9 +59,11 @@ build_Android
 
 ```
 load_source（player_git_source_list.sh）
- ├─ clone FFmpeg n9.0 / openssl 1.1.1g / curl / libxml2 / nghttp2（镜像→回退 github）
+ ├─ clone FFmpeg n9.0 / openssl 3.0.17 / curl 8.14.1 / libxml2 2.14.5 /
+ │  nghttp2 1.66.0（镜像→回退 github）
  ├─ 源码树 EOL 归一化（LF）+ 补丁 CRLF 免疫
- └─ git am 打补丁：libxml2 / openssl / curl（失败自动 abort，不中断构建）
+ └─ git am 打补丁：libxml2 / openssl / curl（按版本+平台条件跳过，
+    失败自动 abort，不中断构建）
 build_tools/build_Android.sh → 对每个 ABI:
    build_static_lib（统一补齐 configure/autogen.sh 可执行位后逐库编译）
      libxml2 → boost* → cares* → openssl → nghttp2 → curl → fdk-aac* → x264* → dav1d* → ffmpeg
