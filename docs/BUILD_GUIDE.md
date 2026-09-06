@@ -50,7 +50,7 @@ unzip -q android-ndk-r25c-linux.zip
 
 > **为什么推荐 r25c？** OpenSSL 1.1.1g 的 Android 配置按旧目录结构校验 NDK，
 > 新 NDK 已移除 `platforms/` 目录。构建脚本已内置兼容 shim
-> （`build_openssl_111.sh` 会自动创建符号链接指向统一 sysroot），
+> （`build_openssl_3.sh` 会自动创建符号链接指向统一 sysroot），
 > 因此 r25/r26/r27 都能用；r25c 是全 CI 验证过的基线。
 
 ### 1.3 换行符与文件权限（WSL / Windows 检出必看）
@@ -197,8 +197,8 @@ external/build_external.sh Android
 |---|---|---|
 | `bash\r: No such file or directory` | 脚本是 CRLF | 第 1.3 节 B 的 `sed -i 's/\r$//'` 清理 |
 | `patch does not apply` / `does not match index` | `.patch` 或源码树 CRLF | 新版 `build_external.sh` 已免疫；手工修复见第 1.3 节 |
-| `$ANDROID_NDK_HOME=... is invalid`（OpenSSL） | 仅 1.1.1 回退版本会校验旧 `platforms/` 目录；默认 3.0.15 原生支持新 NDK | 保持默认 3.0.15；回退 1.1.1 时脚本已内置 shim |
-| `clang: unknown argument: '-gcc-toolchain'` + `no such file or directory: ...-4.9/prebuilt/...`（OpenSSL 编译期） | 仅 1.1.1 会传旧版 gcc-4.9 工具链路径；3.0.15 无此问题 | 保持默认 3.0.15；回退 1.1.1 时脚本已自动清理 |
+| `$ANDROID_NDK_HOME=... is invalid`（OpenSSL） | 仅 1.1.1 回退版本会校验旧 `platforms/` 目录；默认 3.0.17 原生支持新 NDK | 保持默认 3.0.17；回退 1.1.1 时脚本已内置 shim |
+| `clang: unknown argument: '-gcc-toolchain'` + `no such file or directory: ...-4.9/prebuilt/...`（OpenSSL 编译期） | 仅 1.1.1 会传旧版 gcc-4.9 工具链路径；3.0.17 无此问题 | 保持默认 3.0.17；回退 1.1.1 时脚本已自动清理 |
 | `ld: error: cannot open crtbegin_so.o / crtend_so.o`（OpenSSL 3.x 链接期） | 裸 clang + 不带 API 的 `-target` 找不到 Android 运行时目标文件 | 新版脚本：`no-legacy` 关掉模块链接 + 用 `armv7a-linux-androideabi24-clang` 包装器替换 CC 并去掉裸 `-target` |
 | `./autogen.sh: Permission denied` | Windows 检出丢可执行位 | `chmod +x`（新版脚本自动补齐） |
 | `autoreconf: command not found` | 缺 autotools | `apt-get install autoconf automake libtool pkg-config` |

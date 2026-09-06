@@ -1,0 +1,42 @@
+#
+# Boost.Build user-config for HarmonyOS / OpenHarmony (OHOS SDK clang).
+#
+# Mirrors user-config-Android.jam: clang/libc++ + musl-style sysroot from
+# the OpenHarmony native toolchain.
+#
+
+import os ;
+
+########################################################################
+########################################################################
+########################################################################
+
+local OHOS_SDK = [ os.environ OHOS_SDK ] ;
+local ABI_NAME = [ os.environ ABI_NAME ] ;
+local TARGET_TRIPLE = [ os.environ TARGET_TRIPLE ] ;
+
+local OHOS_LLVM = $(OHOS_SDK)/native/llvm/bin ;
+local OHOS_CXX = $(OHOS_LLVM)/clang++ ;
+local OHOS_AR = $(OHOS_LLVM)/llvm-ar ;
+local OHOS_RANLIB = $(OHOS_LLVM)/llvm-ranlib ;
+local OHOS_SYSROOT = $(OHOS_SDK)/native/sysroot ;
+
+using clang : ohos_$(ABI_NAME) :
+  $(OHOS_CXX) :
+  <archiver>$(OHOS_AR)
+  <ranlib>$(OHOS_RANLIB)
+  <compileflags>--target=$(TARGET_TRIPLE)
+  <compileflags>--sysroot=$(OHOS_SYSROOT)
+  <compileflags>-std=c++11
+  <compileflags>-fpic
+  <compileflags>-ffunction-sections
+  <compileflags>-funwind-tables
+  <compileflags>-fstack-protector
+  <compileflags>-no-canonical-prefixes
+  <compileflags>-Os
+  <compileflags>-DNDEBUG
+  <compileflags>-fomit-frame-pointer
+  <compileflags>-fno-strict-aliasing
+  <compileflags>-DBOOST_FILESYSTEM_VERSION=3
+  ;
+############################################################################

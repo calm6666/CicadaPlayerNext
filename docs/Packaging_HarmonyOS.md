@@ -45,6 +45,18 @@ build_OHOS
 2. `ffmpeg_cross_compile_set_OHOS`：`--target-os=linux --arch=aarch64 --disable-symver`（+ 可选 `--disable-asm` 首启排障）
 3. 每个 ABI：`build_static_lib OHOS <abi>` → `link_shared_lib_OHOS`（clang/lld 合并为 `libalivcffmpeg.so`）
 
+外部依赖链（`build_static_lib` 依序构建，全部已支持 OHOS 分支）：
+- **libxml2 2.14.5**：自带新版 config.sub，原生识别 `*-ohos*` 三元组
+  （2.9.9 的 2015 年 config.sub 会报 "Invalid configuration"）。
+- **OpenSSL 3.0.17**（`build_openssl_3.sh`）：`linux-aarch64`/`linux-armv4`/
+  `linux-x86_64` 目标 + OHOS SDK clang（`no-shared no-asm no-legacy`），
+  Makefile 的 CC/AR/RANLIB 自动改写为 OHOS SDK llvm 工具链。
+- **curl 8.14.1 / nghttp2 1.66.0**：`--host=<ohos 三元组>`；系统 automake 的
+  config.sub 若不认识 ohos，`common_build.sh` 的 `patch_config_sub_for_ohos`
+  会装一个 shim（config.sub 已支持时自动跳过，不做任何改动）。
+- 可选库 ares/fdk-aac/x264/librtmp/dav1d/boost 同样带 OHOS 分支。
+- 所有静态库均 `-fPIC`，与 FFmpeg 合并进 `libalivcffmpeg.so`。
+
 产物：
 ```
 external/install/ffmpeg/OHOS/<abi>/libalivcffmpeg.so

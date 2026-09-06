@@ -32,6 +32,12 @@ function build_ares(){
         cross_compile_set_platform_win32 $2
     elif [ "$1" == "Darwin" ];then
         print_warning "native build ares for $1"
+    elif [ "$1" == "OHOS" ];then
+        cross_compile_set_platform_OHOS $2
+        export CFLAGS="${CFLAGS} -fPIC"
+        # 系统 automake 的 config.sub 可能不认识 ohos 三元组，先装 shim
+        patch_config_sub_for_ohos "${ARES_SOURCE_DIR}" || exit 1
+        CROSS_COMPILE=${TARGET_TRIPLE}
     else
         echo "Unsupported platform"
         exit 1;

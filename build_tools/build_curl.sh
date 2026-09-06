@@ -66,6 +66,14 @@ function build_curl(){
         export CFLAGS="${CPU_FLAGS}"
         export LDFLAGS="${CPU_LDFLAGS}"
         export CC=clang
+    elif [ "$1" == "OHOS" ];then
+        # 鸿蒙走 OpenSSL（不使用任何 darwinssl / Apple 相关选项）
+        cross_compile_set_platform_OHOS  $2
+        export CFLAGS="${CFLAGS} -fPIC"
+        # 系统 automake 的 config.sub 可能不认识 ohos 三元组，先装 shim
+        patch_config_sub_for_ohos "${CURL_SOURCE_DIR}" || exit 1
+        # curl 的 -host 用 TARGET_TRIPLE（OHOSConfig 未定义 CROSS_COMPILE）
+        CROSS_COMPILE=${TARGET_TRIPLE}
     else
         echo "curl Unsupported platform $1"
         exit 1;

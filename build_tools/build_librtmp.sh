@@ -33,6 +33,14 @@ build_librtmp(){
         shared=yes
     elif [ "$1" == "Darwin" ];then
         print_warning "native build librtmp for $1"
+    elif [ "$1" == "OHOS" ];then
+        cross_compile_set_platform_OHOS $2
+        config="$config INC=-I${SYSTEM_ROOT}/usr/include/"
+        config="$config XLDFLAGS=-L${SYSTEM_ROOT}/usr/lib/"
+        config="$config XCFLAGS=-fPIC"
+        # OHOS 的 CC 含空格（clang --target=... --sysroot=...），
+        # 通过 make 命令行变量整体传入（见下方 cc_make_arg）
+        local cc_make_arg="CC=${CC}"
     else
         echo "Unsupported platform"
         exit 1;
@@ -42,7 +50,11 @@ build_librtmp(){
     if [ "${BUILD}" != "False" ];then
         cd ${RTMPDUMP_SOURCE_DIR}/librtmp/
         make clean
-        make ${config} XDEF=-DNO_SSL CRYPTO= SHARED=${shared}  prefix=${install_dir} install
+        if [ -n "${cc_make_arg}" ];then
+            make ${config} "${cc_make_arg}" XDEF=-DNO_SSL CRYPTO= SHARED=${shared}  prefix=${install_dir} install
+        else
+            make ${config} XDEF=-DNO_SSL CRYPTO= SHARED=${shared}  prefix=${install_dir} install
+        fi
         cd -
 	fi
 	LIBRTMP_INSTALL_DIR=${install_dir}

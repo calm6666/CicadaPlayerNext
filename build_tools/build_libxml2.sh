@@ -35,6 +35,12 @@ function build_libxml2(){
     elif [[ "$1" == "Linux" ]];then
         print_warning "native build libxml2 for $1"
         native_build="yes"
+    elif [[ "$1" == "OHOS" ]];then
+        cross_compile_set_platform_OHOS $2
+        # libxml2 2.9.9 自带的 config.sub 不认识 ohos/aarch64 三元组，先装 shim
+        patch_config_sub_for_ohos "${LIBXML2_SOURCE_DIR}" || exit 1
+        # libxml2 的 --host 用 TARGET_TRIPLE（OHOSConfig 未定义 CROSS_COMPILE）
+        CROSS_COMPILE=${TARGET_TRIPLE}
     else
         echo "Unsupported platform"
         exit 1;
@@ -48,6 +54,13 @@ function build_libxml2(){
         shared_opt="--enable-static=no"
     fi
 
+    # libxml2 2.14 已把 Python 绑定拆到独立仓库，configure 不再有
+    # --without-python 选项；2.9.x 则需要它来禁用 python 绑定构建。
+    local python_opt=""
+    if [[ -d "${LIBXML2_SOURCE_DIR}/python" ]];then
+        python_opt="--without-python"
+    fi
+
     local build_dir="build/libxml2/$1/$2"
     local install_dir="$PWD/install/libxml2/$1/$2"
     mkdir -p ${build_dir}/
@@ -58,7 +71,7 @@ function build_libxml2(){
             ${shared_opt}            \
             --with-pic=yes \
             --without-lzma \
-            --without-python \
+            ${python_opt} \
             --without-debug \
             --without-zlib  \
             --without-iconv \
@@ -72,7 +85,7 @@ function build_libxml2(){
             ${shared_opt}            \
             --with-pic=yes  \
             --without-lzma \
-            --without-python \
+            ${python_opt} \
             --without-debug \
             --without-zlib  \
             --without-iconv \

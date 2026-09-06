@@ -82,10 +82,10 @@ if [[ -z "${OPENSSL_GIT}" ]];then
     OPENSSL_GIT="https://github.com/openssl/openssl.git"
 fi
 if [[ -z "${OPENSSL_BRANCH}" ]];then
-    # OpenSSL 3.0 LTS（3.0.15 为最后一个 3.0.x 补丁版）。
+    # OpenSSL 3.0 LTS（3.0.17 为 3.0 线最新补丁版，2025-07）。
     # 1.1.1 已 EOL 且不兼容新 NDK 布局；如需回退用 OPENSSL_BRANCH=OpenSSL_1_1_1g
     # （构建脚本仍内置旧 NDK 兼容 shim）。
-    OPENSSL_BRANCH="openssl-3.0.15"
+    OPENSSL_BRANCH="openssl-3.0.17"
 fi
 clone_git_mirror "$OPENSSL_GIT" "$OPENSSL_BRANCH"
 
@@ -93,7 +93,7 @@ if [[ -z "${NGHTTP2_GIT}" ]];then
     NGHTTP2_GIT="https://github.com/nghttp2/nghttp2.git"
 fi
 if [[ -z "${NGHTTP2_BRANCH}" ]];then
-    NGHTTP2_BRANCH="v1.41.0"
+    NGHTTP2_BRANCH="v1.66.0"
 fi
 clone_git_mirror "${NGHTTP2_GIT}" "${NGHTTP2_BRANCH}"
 
@@ -102,7 +102,7 @@ if [[ -z "${CURL_GIT}" ]];then
 fi
 if [[ -z "${CURL_BRANCH}" ]];then
     # curl 8.x：原生支持 OpenSSL 3.x（7.68 及更早版本无法与 OpenSSL 3 编译）。
-    CURL_BRANCH="curl-8_10_1"
+    CURL_BRANCH="curl-8_14_1"
 fi
 clone_git_mirror "$CURL_GIT" "$CURL_BRANCH"
 
@@ -110,7 +110,10 @@ if [[ -z "${LIBXML2_GIT}" ]];then
     LIBXML2_GIT="https://github.com/GNOME/libxml2.git"
 fi
 if [[ -z "${LIBXML2_BRANCH}" ]];then
-    LIBXML2_BRANCH="v2.9.9"
+    # libxml2 2.14.x（2025）：自带新版 config.sub（原生认识 aarch64/ohos 三元组，
+    # 2.9.9 自带的是 2015 年前的版本，OHOS 交叉编译会报 "Invalid configuration"）。
+    # 播放器仅用 xmlTextReader* / xmlInitParser 等跨版本稳定 API，升级无兼容风险。
+    LIBXML2_BRANCH="v2.14.5"
 fi
 clone_git_mirror "${LIBXML2_GIT}" "${LIBXML2_BRANCH}"
 
@@ -121,7 +124,7 @@ if [[ -z "${DAV1D_EXTERNAL_DIR}" ]];then
             DAV1D_GIT="https://github.com/videolan/dav1d.git"
         fi
         if [[ -z "${DAV1D_BRANCH}" ]];then
-            DAV1D_BRANCH="0.6.0"
+            DAV1D_BRANCH="1.5.1"
         fi
         clone_git_mirror "$DAV1D_GIT" "$DAV1D_BRANCH"
     fi

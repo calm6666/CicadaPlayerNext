@@ -13,6 +13,9 @@ function build_x264(){
     elif [ "$1" == "Darwin" ];then
         print_warning "native build x264 for $1"
         CC=gcc
+    elif [ "$1" == "OHOS" ];then
+        cross_compile_set_platform_OHOS $2
+        CROSS_COMPILE=${TARGET_TRIPLE}
     else
         echo "Unsupported platform"
         exit 1;
@@ -39,7 +42,8 @@ function build_x264(){
     mkdir -p ${build_dir}/
     if [ "${BUILD}" != "False" ];then
         cd ${build_dir}
-        CC=$CC ${X264_SOURCE_DIR}/configure  \
+        # CC 可能含空格（OHOS：clang --target=... --sysroot=...），必须引号保护
+        CC="${CC}" ${X264_SOURCE_DIR}/configure  \
             ${config}                        \
             --extra-asflags="${ASFLAGS}" \
             --extra-cflags="${CPU_FLAGS}"   \

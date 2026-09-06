@@ -57,8 +57,14 @@ function patch_openssl() {
     major=$(sed -n 's/^# *define *OPENSSL_VERSION_MAJOR *\([0-9][0-9]*\).*/\1/p' \
                  include/openssl/opensslv.h 2>/dev/null | head -1)
     if [[ "${major:-1}" -lt 3 ]]; then
-        # Apple silicon 补丁仅适用于 1.1.1（OpenSSL 3.x 原生支持 darwin64-arm64-cc）
-        git_am_patch ../../contribute/openssl/0001-Configuration-darwin64-arm64-cc-for-Apple-silicon.patch
+        # Apple silicon 补丁只对 1.1.1 有意义，且只对 Apple 平台有意义
+        # （darwin64-arm64-cc 是 macOS 配置）；OpenSSL 3.x 原生支持。
+        # 非 Apple 平台（Android/Linux/OHOS/Windows）打它纯属多余。
+        if [[ "$TARGET_PLATFORM" == "iOS" || "$TARGET_PLATFORM" == "Darwin" || "$TARGET_PLATFORM" == "maccatalyst" ]]; then
+            git_am_patch ../../contribute/openssl/0001-Configuration-darwin64-arm64-cc-for-Apple-silicon.patch
+        else
+            echo "openssl 1.1.1 on ${TARGET_PLATFORM}: skip Apple-silicon patch (Apple only)"
+        fi
     else
         echo "openssl ${major}.x: skip 1.1.1-era patch"
     fi
@@ -275,6 +281,8 @@ fi
 
 mkdir external
 cd external
+# TARGET_PLATFORM 必须在 load_source 之前导出：patch_openssl 等按平台打补丁
+export TARGET_PLATFORM=$1
 load_source
 if [[ $? -ne 0 ]]; then
     echo "load_source error break"
@@ -282,8 +290,6 @@ if [[ $? -ne 0 ]]; then
 fi
 
 cd ${TOP_DIR}
-
-export TARGET_PLATFORM=$1
 
 if [[ "$1" == "Android" ]];then
     if  [[ -z "${ANDROID_NDK}" ]];then

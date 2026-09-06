@@ -23,6 +23,13 @@ function build_fdk_aac(){
     elif [ "$1" == "Darwin" ];then
         print_warning "native build fdkaac for $1"
         local native_build=yes
+    elif [ "$1" == "OHOS" ];then
+        cross_compile_set_platform_OHOS $2
+        # 静态库最终要合并进 libalivcffmpeg.so，显式 -fPIC
+        CPU_FLAGS="-fPIC"
+        # 系统 automake 的 config.sub 可能不认识 ohos 三元组，先装 shim
+        patch_config_sub_for_ohos "${FDK_AAC_SOURCE_DIR}" || exit 1
+        CROSS_COMPILE=${TARGET_TRIPLE}
     else
         echo "Unsupported platform"
         exit 1;

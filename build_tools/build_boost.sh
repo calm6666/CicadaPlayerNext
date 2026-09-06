@@ -25,6 +25,21 @@ function build_boost() {
         export CPU_ARCH=${CPU_ARCH}
     elif [ "$1" == "Darwin" ];then
        print_warning "native build boost for $1"
+    elif [ "$1" == "OHOS" ];then
+        cross_compile_set_platform_OHOS $2
+        export TARGET_TRIPLE=${TARGET_TRIPLE}
+        export ABI=${ABI}
+        export OHOS_SDK=${OHOS_SDK}
+        if [ "$ABI" == "arm64-v8a" ];then
+            export ABI_NAME=arm64_v8a
+        elif [ "$ABI" == "armeabi-v7a" ];then
+            export ABI_NAME=armeabi_v7a
+        elif [ "$ABI" == "x86_64" ];then
+            export ABI_NAME=x86_64
+        else
+            echo "boost OHOS unsupported ABI ${ABI}"
+            return 1;
+        fi
     else
         echo "unsupported platform"
         return 1;
@@ -76,6 +91,13 @@ function build_boost() {
             stage \
             cxxflags="${CPU_FLAGS}"
         fi
+    elif [ "$1" == "OHOS" ];then
+        ./b2 -a link=static \
+        debug-symbols=off \
+        optimization=space \
+        toolset=clang-ohos_${ABI_NAME} \
+        --build-dir=${build_dir}  \
+        --stagedir=${install_dir}
     else
         ./b2 --build-dir=${build_dir} --stagedir=${install_dir} link=static stage
     fi

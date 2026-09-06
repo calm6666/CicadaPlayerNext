@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 
 source build_x264.sh
-source build_openssl_111.sh
-source build_openssl.sh
+source build_openssl_3.sh
 source build_curl.sh
 source build_dav1d.sh
 source build_fdk_aac.sh
@@ -78,10 +77,10 @@ function build_static_lib(){
     fi
 
     if [[ -d "${OPEN_SSL_SOURCE_DIR}" ]] && [[ "${build_openssl}" == "true" ]];then
-        # build_openssl_111 已按源码版本自动适配（OpenSSL 3.x 使用新配置清单与
-        # 现代 NDK 布局；1.1.1 回退时自动 shim 旧 NDK 目录）。OPENSSL_VERSION_111
+        # build_openssl_3 已按源码版本自动适配（OpenSSL 3.x 使用新配置清单与
+        # 现代 NDK 布局；1.1.1 回退时自动 shim 旧 NDK 目录）。OPENSSL_VERSION_3
         # 标志保留为历史兼容，不再影响构建路径。
-        build_openssl_111 $1 ${arch}
+        build_openssl_3 $1 ${arch}
         if [[ $? -ne 0 ]]; then
             echo "build_openssl build failed"
             exit -1
@@ -163,6 +162,49 @@ function build_static_lib(){
     cd ${CWD}
 
 }
+# OHOS：给不认识 ohos 三元组的旧版 config.sub 装一个 shim。
+# curl/nghttp2 经 autoreconf 使用的是系统 automake 的 config.sub（Ubuntu 22.04
+# 的版本早于 2021-11，不认识 ohos）；libxml2 已升级到 2.14.5（自带新版
+# config.sub，本函数会自动跳过）。直接传 --host=aarch64-linux-ohos 会报
+# "Invalid configuration"。
+# shim 把 *-ohos* 三元组规范化为对应的 linux-gnu（OHOS sysroot 是 Linux
+# 风格 musl，autoconf 层面按 Linux 处理是正确的），其余输入原样转发。
+function patch_config_sub_for_ohos(){
+    local sub="$1/config.sub"
+    [[ -f "${sub}" ]] || { echo "config.sub not found: ${sub}"; return 1; }
+    if grep -q 'ohos' "${sub}"; then
+        return 0
+    fi
+    if [[ ! -f "${sub}.orig" ]]; then
+        mv "${sub}" "${sub}.orig" || return 1
+    fi
+    cat > "${sub}" <<'CONFIG_SUB_SHIM'
+#!/bin/sh
+# config.sub shim (CicadaPlayerNext OHOS build):
+# map *-ohos* / *-linux-ohos* triples to the matching linux-gnu triple,
+# delegate everything else to the original config.sub.
+arg=${1:-}
+case "$arg" in
+  *-ohos*)
+    cpu=${arg%%-*}
+    case "$cpu" in
+      aarch64|arm64) echo "aarch64-unknown-linux-gnu" ;;
+      arm*)          echo "arm-unknown-linux-gnu" ;;
+      x86_64|amd64)  echo "x86_64-unknown-linux-gnu" ;;
+      i?86)          echo "i686-unknown-linux-gnu" ;;
+      *)             echo "${cpu}-unknown-linux-gnu" ;;
+    esac
+    ;;
+  *)
+    exec "$(dirname "$0")/config.sub.orig" "$@"
+    ;;
+esac
+CONFIG_SUB_SHIM
+    chmod +x "${sub}" "${sub}.orig" 2>/dev/null || true
+    echo "patched config.sub for OHOS: ${sub}"
+    return 0
+}
+
 function build_libs(){
     if [[ -d ${FFMPEG_SOURCE_DIR} ]];then
         ffmpeg_init_vars
@@ -280,7 +322,7 @@ function link_shared_lib_Android(){
     ${toolchain}/bin/clang -target ${TARGET} --sysroot=${SYSTEM_ROOT} -fuse-ld=lld \
       -std=c++11 build_version.cpp -lm -lz -shared -I${FFMPEG_INSTALL_DIR}/include \
       -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS}  -landroid -llog \
-      -Wl,--allow-multiple-definition \
+      -Wl,--allow-multiple-definition -Wl,-Bsymbolic \
       -Wl,-soname,lib${LIB_NAME}.so \
       ${objs} \
       -o ${install_dir}/lib${LIB_NAME}.so \
@@ -362,7 +404,7 @@ function link_shared_lib_win32(){
     sh ${BUILD_TOOLS_DIR}/gen_build_version.sh > version.h
 
     ${CROSS_COMPILE}-gcc -std=c++11 ${CPU_FLAGS} build_version.cpp -static-libgcc  -static -lm  -shared  -I${FFMPEG_INSTALL_DIR}/include \
-     -Wl,--no-undefined  ${CPU_LD_FLAGS}  -Wl,--allow-multiple-definition -Wl,-soname,lib${LIB_NAME}.so \
+     -Wl,--no-undefined  ${CPU_LD_FLAGS}  -Wl,--allow-multiple-definition -Wl,-Bsymbolic -Wl,-soname,lib${LIB_NAME}.so \
     ${objs} \
     -o ${install_dir}/lib${LIB_NAME}.dll \
     -Wl,--kill-at,--out-implib=${install_dir}/lib${LIB_NAME}.lib   \
@@ -432,7 +474,7 @@ function link_shared_lib_OHOS(){
     ${clang} --target=${TARGET_TRIPLE} --sysroot=${SYSTEM_ROOT} -fuse-ld=lld \
       -std=c++11 build_version.cpp -lm -lz -shared -I${FFMPEG_INSTALL_DIR}/include \
       -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS} \
-      -Wl,--allow-multiple-definition \
+      -Wl,--allow-multiple-definition -Wl,-Bsymbolic \
       -Wl,-soname,lib${LIB_NAME}.so \
       ${objs} \
       -o ${install_dir}/lib${LIB_NAME}.so \

@@ -75,6 +75,24 @@ function build_dav1d(){
     then
         echo "native build dav1d for $1"
         nativeBuild=true;
+    elif [[ "$1" == "OHOS" ]]
+    then
+        if [[ "$2" != "arm64-v8a" ]]; then
+            echo "Only enable arm64-v8a for av1 at present, break $2"
+            return;
+        fi
+        cross_compile_set_platform_OHOS $2
+        local ohos_bin="${OHOS_SDK}/native/llvm/bin"
+        DAV1D_C="${ohos_bin}/clang"
+        DAV1D_CPP="${ohos_bin}/clang++"
+        DAV1D_AR="${ohos_bin}/llvm-ar"
+        # OHOS native toolchain 自带 lld；若缺失会由 meson 报出明确错误
+        DAV1D_LD="${ohos_bin}/ld.lld"
+        DAV1D_STRIP="${ohos_bin}/llvm-strip"
+        DAV1D_ARGS="--target=${TARGET_TRIPLE} --sysroot=${SYSTEM_ROOT}"
+        DAV1D_SYSTEM="linux"
+        DAV1D_CPU_FAMILY="aarch64"
+        DAV1D_CPU="arm"
     else
         echo "Unsupported platform"
         return;

@@ -1,14 +1,19 @@
 # [Unreleased] FFmpeg 9.0 + HarmonyOS + Object Playback (2025)
 
-## Dependency upgrades: OpenSSL 3.0 + curl 8.x
-- OpenSSL `1.1.1g`（EOL）→ **`openssl-3.0.15`（3.0 LTS）**：原生支持现代 NDK
+## Dependency upgrades: OpenSSL 3.0 + curl 8.x + libxml2 2.14 + nghttp2 1.66
+- OpenSSL `1.1.1g`（EOL）→ **`openssl-3.0.17`（3.0 LTS）**：原生支持现代 NDK
   布局，不再需要 platforms shim / -gcc-toolchain 清理（回退 1.1.1 时脚本仍兼容）。
-- curl `7.68.0` → **`curl-8_10_1`**（7.68 无法与 OpenSSL 3 编译）。
-- `build_tools/build_openssl_111.sh` 按源码版本自动选择配置：
+- curl `7.68.0` → **`curl-8_14_1`**（7.68 无法与 OpenSSL 3 编译）。
+- libxml2 `v2.9.9` → **`v2.14.5`**：自带新版 config.sub，原生识别
+  aarch64/ohos 三元组（2.9.9 的 2015 年 config.sub 会拒绝 OHOS 交叉编译）。
+- nghttp2 `v1.41.0` → **`v1.66.0`**；dav1d（可选）`0.6.0` → **`1.5.1`**。
+- `build_tools/build_openssl_3.sh`（原 `build_openssl_111.sh`，已按当前 OpenSSL
+  版本重命名；旧名保留为兼容转发）按源码版本自动选择配置：
   3.x 使用新配置清单（移除 `no-engine/no-async/no-gost/no-ec2m` 等已删除选项）；
   1.1.1 保留旧 NDK shim 与 gcc-toolchain 清理。
 - `build_tools/build_curl.sh`：`--with-ssl=` → `--with-openssl=`（curl 8.x 规范选项）。
-- 补丁按版本跳过（`build_external.sh`）：Apple-silicon 补丁仅 1.1.1；curl m4 补丁仅 7.x。
+- 补丁按版本跳过（`build_external.sh`）：Apple-silicon 补丁仅 Apple 平台 1.1.1；
+  curl m4 补丁仅 7.x。
 - 代码适配：`framework/data_source/opensslthreadlock.c` 按 `OPENSSL_VERSION_NUMBER`
   分支（3.0 移除全局锁回调 API；≥1.1.0 内部线程安全）。
 
@@ -16,8 +21,11 @@
 - 构建脚本对 Windows 检出免疫：补丁 CRLF 归一化、源码树 EOL 统一 LF、
   自动补齐 `configure/autogen.sh/Configure` 可执行位、子脚本用 `bash` 显式执行
   （`external/build_external.sh`、`build_tools/common_build.sh`、`build_libxml2.sh`）。
-- OpenSSL 1.1.1g 兼容新 NDK 布局（r25/r26/r27）：`build_openssl_111.sh` 自动创建
+- OpenSSL 1.1.1g 兼容新 NDK 布局（r25/r26/r27）：`build_openssl_3.sh` 自动创建
   `platforms/android-<api>/arch-*` 符号链接指向统一 sysroot。
+- OHOS 全链路支持：`build_tools/common_build.sh` 内置 config.sub shim
+  （自动识别 `*-ohos*` 三元组，系统 automake 的 config.sub 已支持时自动跳过）；
+  libxml2 2.14 自带新版 config.sub，无需 shim 即可交叉编译。
 - 国内镜像支持：`external/china_mirror_env.sh` 预设 + `GIT_MIRROR_PREFIX` 统一前缀 +
   失败自动回退 github（`docs/ChinaMirrors.md`）；gradle 阿里云 Maven（`USE_CHINA_MIRROR`）；
   CI NDK 镜像（`ANDROID_NDK_URL`）。
