@@ -116,6 +116,18 @@ function build_ffmpeg(){
         echo build error
         exit 1;
     fi
+
+    # 强制 PIC：合并 libalivcffmpeg.so 要求所有对象位置无关。
+    # --enable-pic 只作用于 C 代码；汇编(.S)需要在 ASFLAGS 里带 -fPIC
+    # 才会生成 GOT 寻址（否则链接报 R_AARCH64_ADR_PREL_PG_HI21 /
+    # R_ARM_REL32 "recompile with -fPIC"）。
+    if [[ "$1" == "Android" || "$1" == "OHOS" ]]; then
+        if [[ -f ffbuild/config.mak ]]; then
+            sed -i 's#^CFLAGS=#CFLAGS=-fPIC #; s#^ASFLAGS=#ASFLAGS=-fPIC #' ffbuild/config.mak
+            echo "ffmpeg $1: force -fPIC in CFLAGS/ASFLAGS"
+        fi
+    fi
+
     ffmpeg_build
     if [[ $? -eq 0 ]]
     then
