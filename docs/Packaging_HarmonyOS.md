@@ -42,7 +42,9 @@ build_OHOS
 
 内部流程：
 1. `build_tools/OHOSConfig.sh` 初始化：`clang --target=aarch64-linux-ohos --sysroot=...`
-2. `ffmpeg_cross_compile_set_OHOS`：`--target-os=linux --arch=aarch64 --disable-symver`（+ 可选 `--disable-asm` 首启排障）
+2. `ffmpeg_cross_compile_set_OHOS`：`--target-os=linux --arch=aarch64 --disable-symver --disable-vulkan`
+   （OHOS SDK 的 vulkan 头不完整——`vulkan.h` 引用缺失的 `vulkan_beta.h`，而播放器
+   鸿蒙硬解走 OH_AVCodec 不用 FFmpeg vulkan，故直接禁用；+ 可选 `--disable-asm` 首启排障）
 3. 每个 ABI：`build_static_lib OHOS <abi>` → `link_shared_lib_OHOS`（clang/lld 合并为 `libalivcffmpeg.so`）
 
 外部依赖链（`build_static_lib` 依序构建，全部已支持 OHOS 分支）：

@@ -68,6 +68,11 @@ function ffmpeg_cross_compile_set_OHOS(){
     ffmpeg_cross_compile_config_add "--pkg-config=${BUILD_TOOLS_DIR}/ndk_pkg_config.sh"
     # OHOS NDK has no pkg-config and no glibc-specific headers
     ffmpeg_cross_compile_config_add "--disable-symver"
+    # OHOS SDK 自带的 vulkan 头不完整：vulkan.h 在 VK_ENABLE_BETA_EXTENSIONS
+    # 下引用缺失的 vulkan_beta.h，FFmpeg 的 vulkan.h 恰好定义该宏 → 编译
+    # 报 "fatal error: 'vulkan_beta.h' file not found"。播放器鸿蒙硬解走
+    # OH_AVCodec（不用 FFmpeg vulkan），显式禁用即可，还省一点体积。
+    ffmpeg_cross_compile_config_add "--disable-vulkan"
     if [ "${NEON_SUPPORT}" == "TRUE" ]
     then
          ffmpeg_cross_compile_config_add "--enable-neon"
