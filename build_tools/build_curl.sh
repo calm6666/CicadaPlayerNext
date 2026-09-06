@@ -94,7 +94,8 @@ function build_curl(){
                 --without-librtmp \
                 --without-brotli \
                 --without-libidn \
-                --without-zstd"
+                --without-zstd \
+                --without-libpsl"
     local build_dir="${CWD}/build/curl/$1/$2"
     local install_dir="${CWD}/install/curl/$1/$2"
 
