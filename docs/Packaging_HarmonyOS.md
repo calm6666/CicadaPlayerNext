@@ -7,6 +7,7 @@
 | HarmonyOS NEXT SDK / OpenHarmony SDK | **5.0.0(12) 及以上**（`OH_AVBuffer`/`OH_NativeWindow_CreateNativeWindowFromSurfaceId` 为 API 12+） |
 | DevEco Studio | 5.0+（含 hvigor）或命令行工具 `hvigorw` |
 | CMake | 3.15+（SDK 自带 build-tools 亦可） |
+| nasm | 2.15+（**仅编译 x86_64 ABI 需要**：FFmpeg 的 x86 手写汇编用 nasm 语法；arm64/armeabi-v7a 不需要） |
 | 主机 | Linux / macOS / Windows |
 
 SDK 目录结构（关键部分）：

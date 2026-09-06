@@ -164,6 +164,11 @@ function build_openssl_3(){
         # （CC 形如 "clang --target=*-linux-ohos --sysroot=... -fPIC"）
         export CC="${CC}"
         config_opt="${config_opt} no-shared no-asm"
+        # 静态合并进 libalivcffmpeg.so：no-dso/no-zlib 让 libcrypto/libssl
+        # 完全自包含（不引用 dlopen/zlib 符号）。否则 FFmpeg configure 的
+        # openssl 探测链接（只带 -lssl -lcrypto -lm）解析不到这些符号，
+        # 报 "ERROR: openssl (>= 1.1.1) not found"。
+        config_opt="${config_opt} no-dso no-zlib"
         case "${CPU_ARCH}" in
             aarch64) config_platform="linux-aarch64" ;;
             arm)     config_platform="linux-armv4" ;;
