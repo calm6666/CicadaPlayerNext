@@ -361,6 +361,21 @@ function link_shared_lib_Android(){
       -o ${install_dir}/lib${LIB_NAME}.so \
       -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
 
+    # 去掉调试符号（.so 里 -g 信息可占一半以上体积；动态符号表保留，
+    # 不影响 SDK 后续按动态符号链接）。BUILD_TYPE=Debug 时保留符号。
+    if [[ "${BUILD_TYPE}" != "Debug" ]]; then
+        local stripbin="${toolchain}/bin/llvm-strip"
+        [[ -x "${stripbin}" ]] || stripbin=$(command -v llvm-strip 2>/dev/null || true)
+        if [[ -n "${stripbin}" ]]; then
+            "${stripbin}" --strip-unneeded "${install_dir}/lib${LIB_NAME}.so" \
+                && echo "stripped ${install_dir}/lib${LIB_NAME}.so -> $(du -h "${install_dir}/lib${LIB_NAME}.so" | cut -f1)"
+        else
+            echo "WARN: llvm-strip not found, lib${LIB_NAME}.so keeps debug info (larger size)"
+        fi
+    else
+        echo "BUILD_TYPE=Debug: keep debug symbols in lib${LIB_NAME}.so"
+    fi
+
     rm build_version.cpp version.h
 }
 function link_shared_lib_win32(){
@@ -426,6 +441,19 @@ function link_shared_lib_win32(){
     -Wl,--kill-at,--out-implib=${install_dir}/lib${LIB_NAME}.lib   \
     -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 -lws2_32 -lbcrypt -lcrypt32
 
+    # 去调试符号（mingw strip，--strip-unneeded 保留动态导出符号）；
+    # BUILD_TYPE=Debug 时保留符号
+    if [[ "${BUILD_TYPE}" != "Debug" ]]; then
+        local stripbin="${CROSS_COMPILE}strip"
+        command -v "${stripbin}" >/dev/null 2>&1 || stripbin=""
+        if [[ -n "${stripbin}" ]]; then
+            "${stripbin}" --strip-unneeded "${install_dir}/lib${LIB_NAME}.dll" \
+                && echo "stripped ${install_dir}/lib${LIB_NAME}.dll -> $(du -h "${install_dir}/lib${LIB_NAME}.dll" | cut -f1)"
+        fi
+    else
+        echo "BUILD_TYPE=Debug: keep debug symbols in lib${LIB_NAME}.dll"
+    fi
+
     rm build_version.cpp version.h
 }
 
@@ -477,6 +505,18 @@ function link_shared_lib_OHOS(){
       -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
       -o ${install_dir}/lib${LIB_NAME}.so \
       -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
+
+    # 去调试符号（同 Android 分支）；BUILD_TYPE=Debug 时保留符号
+    if [[ "${BUILD_TYPE}" != "Debug" ]]; then
+        local stripbin="$(dirname "${clang}")/llvm-strip"
+        [[ -x "${stripbin}" ]] || stripbin=$(command -v llvm-strip 2>/dev/null || true)
+        if [[ -n "${stripbin}" ]]; then
+            "${stripbin}" --strip-unneeded "${install_dir}/lib${LIB_NAME}.so" \
+                && echo "stripped ${install_dir}/lib${LIB_NAME}.so -> $(du -h "${install_dir}/lib${LIB_NAME}.so" | cut -f1)"
+        fi
+    else
+        echo "BUILD_TYPE=Debug: keep debug symbols in lib${LIB_NAME}.so"
+    fi
 
     rm build_version.cpp version.h
 }

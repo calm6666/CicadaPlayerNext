@@ -40,7 +40,9 @@ ffmpeg_disable_all_config="--disable-everything \
   --disable-videotoolbox"
 # libavresample was removed in FFmpeg 5.0; libpostproc was removed in FFmpeg 7.0.
 # The resampling library is libswresample.
-ffmpeg_config_default="--enable-pic"
+# --disable-debug：发布构建不带 -g/assert（FFmpeg 默认 debug=yes，体积翻 2~3 倍）；
+# BUILD_TYPE=Debug 时后面会追加 --enable-debug=3 覆盖。
+ffmpeg_config_default="--enable-pic --disable-debug"
 
 ffmpeg_config_debug="--disable-optimizations \
   --disable-asm \

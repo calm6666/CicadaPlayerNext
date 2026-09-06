@@ -39,6 +39,13 @@ export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libalivcffmpeg.so; fals
 ./gradlew assembleDebug assembleRelease
 ```
 
+> **调试 vs 发布符号**：默认（不定义 `BUILD_TYPE`）为发布构建——FFmpeg 用
+> `--disable-debug`（无 `-g`、无 assert）+ 链接后 `llvm-strip --strip-unneeded`，
+> 单个 ABI 的 `libalivcffmpeg.so` 约 8~12MB。需要带符号调试时，
+> `export BUILD_TYPE=Debug` 后再执行步骤 3：FFmpeg 改按 `--enable-debug=3`
+> 编译（`-g3` + assert），且 `.so` 不做 strip，便于崩溃回溯。
+> （播放器自身 native 代码的符号由 gradle `debugSymbolLevel` 控制，与本脚本无关。）
+
 或一步到位（含产物收集到 `output/`）：
 
 ```bash
