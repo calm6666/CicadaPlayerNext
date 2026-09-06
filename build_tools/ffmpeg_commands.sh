@@ -35,11 +35,11 @@ ffmpeg_disable_all_config="--disable-everything \
   --disable-doc \
   --disable-filters \
   --disable-avdevice \
-  --disable-postproc \
   --disable-hwaccels \
   --disable-bzlib    \
   --disable-videotoolbox"
-# libavresample was removed in FFmpeg 5.0; the resampling library is libswresample.
+# libavresample was removed in FFmpeg 5.0; libpostproc was removed in FFmpeg 7.0.
+# The resampling library is libswresample.
 ffmpeg_config_default="--enable-pic"
 
 ffmpeg_config_debug="--disable-optimizations \
@@ -106,7 +106,7 @@ function ffmpeg_config_add_demuxers(){
 #        echo to add demuxer ${i}
         ffmpeg_config_add_component demuxer  ${i}
         local ret=$?
-        if [[ $? == 0 ]]
+        if [[ ${ret} -eq 0 ]]
         then
 #            echo add demuxer ${i}
             FFMPEG_DEMUXER_LIST_ADDED="${FFMPEG_DEMUXER_LIST_ADDED}  ${i}"
@@ -267,7 +267,10 @@ function ffmpeg_check_component_supported(){
 
     for component in ${!component_list}
     do
-        if [[ "${component}" == "$2" ]]
+        # FFmpeg 的组件名经常是逗号分隔的别名（如 demuxer
+        # "mov,mp4,m4a,3gp,3g2,mj2"、demuxer "hls,applehttp"），
+        # --enable-xxx=别名 是合法的，这里按逗号分段匹配。
+        if [[ ",${component}," == *",$2,"* ]]
         then
 #            echo support $1 $2
             return 0
@@ -433,6 +436,7 @@ function ffmpeg_config(){
     fi
 
     echo ${ff_config}
+    local configure_ret=0
     if [[ "${BUILD}" != "False" ]] || [[ "${BUILD_FFMPEG}" != "False" ]];then
         ${FFMPEG_SOURCE_DIR}/configure   ${ff_config} \
             "--as=${ffmpeg_config_as}"                \
@@ -440,13 +444,13 @@ function ffmpeg_config(){
             "--extra-cflags=${ffmpeg_extra_cflags}"   \
             "--extra-ldflags=${ffmpeg_extra_ldlags}"  \
             --prefix=${ffmpeg_install_dir}
-
+        configure_ret=$?
     fi
 
      FFMPEG_INSTALL_DIR=${ffmpeg_install_dir}
      FFMPEG_BUILD_DIR=$PWD
 
-    return $?
+    return ${configure_ret}
 }
 
 function ffmpeg_build(){

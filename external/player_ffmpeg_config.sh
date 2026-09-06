@@ -29,8 +29,12 @@ ffmpeg_config_add_decoders \
     pcm_s16le pcm_s16be pcm_s24le pcm_f32le \
     ac3 eac3 dca opus vorbis flac alac \
     vp8 vp9 av1 \
-    ass srt subrip webvtt text movtext \
-    ac3_at eac3_at
+    ass srt subrip webvtt text movtext
+
+# AudioToolbox 解码器仅 Apple 平台可用（依赖 audiotoolbox 框架）
+if [[ "$TARGET_PLATFORM" == "iOS" || "$TARGET_PLATFORM" == "Darwin" || "$TARGET_PLATFORM" == "maccatalyst" ]]; then
+    ffmpeg_config_add_decoders ac3_at eac3_at
+fi
 
 # ---- demuxers ---------------------------------------------------------------
 ffmpeg_config_add_demuxers \
@@ -40,7 +44,8 @@ ffmpeg_config_add_demuxers \
     hls dash concat
 
 # ---- muxers -----------------------------------------------------------------
-ffmpeg_config_add_muxers mp4 adts mpegts flv h264 hevc aac
+# 注：FFmpeg 没有 "aac" muxer（AAC 封装用 adts）
+ffmpeg_config_add_muxers mp4 adts mpegts flv h264 hevc
 
 # ---- parsers ----------------------------------------------------------------
 ffmpeg_config_add_parsers \
@@ -54,8 +59,9 @@ ffmpeg_config_add_bsfs \
     mpeg4_unpack_bframes
 
 # ---- protocols --------------------------------------------------------------
+# 注：hls "protocol" 已在 FFmpeg 5.0 移除（播放走 hls demuxer，已在上方启用）
 ffmpeg_config_add_protocols \
-    file rtmp http https hls crypto data tcp pipe subfile concat \
+    file rtmp http https crypto data tcp pipe subfile concat \
     async cache icecast httpproxy
 
 # ---- filters ----------------------------------------------------------------
