@@ -71,7 +71,7 @@ function build_ffmpeg(){
         ffmpeg_config_add_user "--enable-libxml2"
         ffmpeg_config_add_extra_cflags "-I${LIBXML2_INSTALL_DIR}/include/libxml2"
         ffmpeg_config_add_extra_ldflags "-L${LIBXML2_INSTALL_DIR}/lib"
-        sed -i 's#^enabled libxml2 .*require_pkg_config libxml2.*$#enabled libxml2           \&\& check_lib xml2 libxml2/libxml.h xmlCheckVersion -lxml2#' \
+        sed -i 's#^enabled libxml2 .*require_pkg_config libxml2.*$#enabled libxml2           \&\& check_lib xml2 libxml/xmlversion.h xmlCheckVersion -lxml2#' \
             "${FFMPEG_SOURCE_DIR}/configure"
         if ! grep -q '^enabled libxml2 .*check_lib xml2' "${FFMPEG_SOURCE_DIR}/configure"; then
             echo "ERROR: failed to patch libxml2 detection in ${FFMPEG_SOURCE_DIR}/configure"
@@ -125,6 +125,10 @@ function build_ffmpeg(){
         echo build succese
     else
         echo build error
+        # configure 失败时自动打印 config.log 末尾（最后一次探测的编译/链接
+        # 命令与真实报错），例如 openssl 探测失败会显示缺哪个符号/头文件
+        echo "----- ffbuild/config.log tail (diagnostic) -----"
+        tail -60 ffbuild/config.log 2>/dev/null || true
         exit 1;
     fi
 

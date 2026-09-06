@@ -187,7 +187,7 @@ function build_openssl_3(){
     cd ${build_dir}
     if [ "${BUILD}" != "False" ];then
 
-        ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir}  --openssldir=${install_dir}
+        ${OPEN_SSL_SOURCE_DIR}/Configure ${config_platform} ${config_opt} ${cross_compile_opt} ${HARDENED_CFLAG} --prefix=${install_dir} --libdir=lib --openssldir=${install_dir}
 
         if [[ "$1" == "Android" ]]; then
             # ★ 关键：必须使用 NDK 自带、带 API 级别的 clang 包装器（完整路径，
@@ -248,6 +248,16 @@ function build_openssl_3(){
 
         make -j8 V=1 || exit 1
         make  install_sw ||exit 1
+        # OHOS 交叉编译必须产出静态库（FFmpeg 探测 -lssl -lcrypto、最终合并
+        # libalivcffmpeg.so）。若 install 目录缺库，在这里直接失败并打印目录，
+        # 而不是等 FFmpeg configure 报 "ERROR: openssl (>= 1.1.1) not found"。
+        if [[ "$1" == "OHOS" ]]; then
+            if [[ ! -s "${install_dir}/lib/libssl.a" || ! -s "${install_dir}/lib/libcrypto.a" ]]; then
+                echo "ERROR: openssl install incomplete under ${install_dir}"
+                ls -la "${install_dir}" "${install_dir}/lib" 2>/dev/null
+                exit 1
+            fi
+        fi
 
         cd -
     fi
