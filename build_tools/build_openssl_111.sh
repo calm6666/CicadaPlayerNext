@@ -66,6 +66,19 @@ function build_openssl_111(){
         local cross_compile_opt="-D__ANDROID_API__=${ANDROID_API_LEVEL:-24}"
         config_opt="${config_opt} no-shared no-asm"
 
+        # 把 NDK bin 放在 PATH 最前：Configure 的 clang 探测、以及链接阶段的
+        # ld.lld 查找都依赖它（找不到 ld.lld 会退化到系统 GNU ld，
+        # 报 "incompatible with armelf_linux_eabi" 之类的错）
+        local ndk_host
+        case "$(uname -s)" in
+            Darwin*) ndk_host=darwin-x86_64 ;;
+            *)       ndk_host=linux-x86_64 ;;
+        esac
+        local ndk_bin="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin"
+        if [[ -d "${ndk_bin}" ]]; then
+            export PATH="${ndk_bin}:$PATH"
+        fi
+
         if [[ "${openssl_major}" -lt 3 ]]; then
             # 仅 1.1.1 需要：校验/推导旧 NDK 目录结构。
             # 用符号链接把旧 platforms/ 路径指到统一 sysroot（目录结构一致），
@@ -171,8 +184,13 @@ function build_openssl_111(){
                 Darwin*) ndk_host=darwin-x86_64 ;;
                 *)       ndk_host=linux-x86_64 ;;
             esac
+            local ndk_bin="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin"
             local unified_sysroot="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/sysroot"
-            local wrapper="${ANDROID_NDK}/toolchains/llvm/prebuilt/${ndk_host}/bin/${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
+            # 注意：NDK r23+ 的包装器名带 v7a（armv7a-linux-androideabi24-clang），
+            # 而 OpenSSL 3.0 的 conf 只会找 arm-linux-androideabi(24)-clang，
+            # 因此必然回退成 CC=$(CROSS_COMPILE)clang（裸 clang）。
+            # 这里按行整体替换，覆盖 CC=clang / CC=$(CROSS_COMPILE)clang 等任何形式。
+            local wrapper="${ndk_bin}/${CROSS_COMPILE}${ANDROID_API_LEVEL:-24}-clang"
 
             if [[ -d "${unified_sysroot}" ]]; then
                 sed -i "s#--sysroot=[^ ]*#--sysroot=${unified_sysroot}#g" Makefile
@@ -183,10 +201,17 @@ function build_openssl_111(){
             sed -i 's# -target [^ ]*##g' Makefile
 
             if [[ -x "${wrapper}" ]]; then
-                sed -i "s#^CC=clang\$#CC=${wrapper}#; s#^CC= clang\$#CC=${wrapper}#" Makefile
+                sed -i "s#^CC=.*#CC=${wrapper}#" Makefile
+                sed -i "s#^AR=.*#AR=${ndk_bin}/llvm-ar#" Makefile
+                sed -i "s#^RANLIB=.*#RANLIB=${ndk_bin}/llvm-ranlib#" Makefile
                 echo "openssl Android: use NDK wrapper compiler ${wrapper}"
             else
-                echo "WARNING: NDK wrapper not found: ${wrapper}"
+                # 找不到 NDK 包装器时直接失败，避免静默使用系统 clang
+                # （系统 clang 没有 Android 驱动，会出现 asm/types.h 缺失、
+                #  struct sigaction 宏污染等一系列诡异错误）
+                echo "ERROR: NDK clang wrapper not found: ${wrapper}"
+                echo "       check NDK install: ${ANDROID_NDK}"
+                exit 1
             fi
 
             if [[ "${openssl_major}" -lt 3 ]]; then
