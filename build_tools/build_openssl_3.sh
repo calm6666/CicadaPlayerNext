@@ -246,6 +246,6 @@ function build_openssl_3(){
 
         cd -
     fi
-    OPENSSL_INSTALL_DIR=${install_dir}
+    export OPENSSL_INSTALL_DIR=${install_dir}
 
 }

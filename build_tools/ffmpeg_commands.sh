@@ -403,9 +403,9 @@ function ffmpeg_config_set_install(){
     ffmpeg_install_dir=$1
 
 }
-# 配置核对：把清单里请求的组件与 configure 实际生成的 config.h 逐一比对。
-# FFmpeg 9 依赖关系变化时，configure 会静默禁用部分组件（config.log 里留下
-# "WARNING: Disabled xxx because not all dependencies are satisfied"）。
+# 配置核对：把清单里请求的组件与 configure 实际生成的组件宏逐一比对。
+# FFmpeg 9.0 的组件宏（CONFIG_xxx_DECODER 等）在 config_components.h，
+# config.h 只保留库级宏并 #include 它。
 #
 # 严格度分级：
 #   - decoder / parser / bsf：禁用 = 致命（缺解码器/解析器直接导致无法播放）
@@ -413,6 +413,14 @@ function ffmpeg_config_set_install(){
 #     就不链入 FFmpeg：dash_demuxer（需要 libxml2，播放器用自带实现）、
 #     https_protocol/tls（TLS 走 curl），configure 禁用它们属于预期行为。
 function ffmpeg_verify_requested_components(){
+    # FFmpeg 9.0：组件宏（CONFIG_xxx_DECODER / _DEMUXER / _BSF ...）写在
+    # config_components.h 里，config.h 只保留库级宏并 #include 它。
+    local comp_header="config_components.h"
+    if [[ ! -f "${comp_header}" ]]; then
+        echo "ERROR: ${comp_header} not found — configure did not produce output?"
+        return 1
+    fi
+
     local class class_upper listvar name base macro
     for class in decoder parser bsf; do
         listvar="FFMPEG_$(echo "${class}" | tr '[a-z]' '[A-Z]')_LIST_ADDED"
@@ -420,8 +428,8 @@ function ffmpeg_verify_requested_components(){
             [[ -z "${name}" ]] && continue
             base="${name%%,*}"
             macro="CONFIG_$(echo "${base}" | tr '[a-z]-' '[A-Z]_')_$(echo "${class}" | tr '[a-z]' '[A-Z]')"
-            if ! grep -q "^#define ${macro} 1" config.h; then
-                echo "ERROR: requested ${class} '${name}' was disabled by configure (${macro} != 1)"
+            if ! grep -q "^#define ${macro} 1" "${comp_header}"; then
+                echo "ERROR: requested ${class} '${name}' was disabled by configure (${macro} != 1 in ${comp_header})"
                 if [[ -f ffbuild/config.log ]]; then
                     grep -iE "disabled .*${base}|${base}.*disabled" ffbuild/config.log | tail -5
                 fi
@@ -437,8 +445,8 @@ function ffmpeg_verify_requested_components(){
             [[ -z "${name}" ]] && continue
             base="${name%%,*}"
             macro="CONFIG_$(echo "${base}" | tr '[a-z]-' '[A-Z]_')_$(echo "${class}" | tr '[a-z]' '[A-Z]')"
-            if ! grep -q "^#define ${macro} 1" config.h; then
-                echo "WARN: ${class} '${name}' disabled by configure (${macro} != 1) — non-fatal"
+            if ! grep -q "^#define ${macro} 1" "${comp_header}"; then
+                echo "WARN: ${class} '${name}' disabled by configure (${macro} != 1 in ${comp_header}) — non-fatal"
             fi
         done
     done

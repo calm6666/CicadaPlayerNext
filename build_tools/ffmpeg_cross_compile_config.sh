@@ -17,6 +17,10 @@ function ffmpeg_cross_compile_set_Android(){
     ffmpeg_cross_compile_config_add "--arch=${CPU_ARCH}"
     ffmpeg_cross_compile_config_add "--cross-prefix="${CROSS_PREFIX}""
     ffmpeg_cross_compile_config_add "--disable-linux-perf"
+    # NDK r25c 没有 llvm-pkg-config：用项目 shim 应答 libxml2 / openssl 探测
+    # （dash_demuxer 依赖 libxml2、https/tls 依赖 openssl，避免被禁用）
+    chmod +x "${BUILD_TOOLS_DIR}/ndk_pkg_config.sh" 2>/dev/null || true
+    ffmpeg_cross_compile_config_add "--pkg-config=${BUILD_TOOLS_DIR}/ndk_pkg_config.sh"
     if [ "${NEON_SUPPORT}" == "TRUE" ]
     then
          ffmpeg_cross_compile_config_add "--enable-neon"
@@ -59,6 +63,9 @@ function ffmpeg_cross_compile_set_OHOS(){
     ffmpeg_cross_compile_config_add "--target-os=linux"
     ffmpeg_cross_compile_config_add "--arch=${CPU_ARCH}"
     ffmpeg_cross_compile_config_add "--disable-linux-perf"
+    # OHOS NDK 同样没有 pkg-config：shim 应答 libxml2 / openssl 探测
+    chmod +x "${BUILD_TOOLS_DIR}/ndk_pkg_config.sh" 2>/dev/null || true
+    ffmpeg_cross_compile_config_add "--pkg-config=${BUILD_TOOLS_DIR}/ndk_pkg_config.sh"
     # OHOS NDK has no pkg-config and no glibc-specific headers
     ffmpeg_cross_compile_config_add "--disable-symver"
     if [ "${NEON_SUPPORT}" == "TRUE" ]

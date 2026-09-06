@@ -41,7 +41,6 @@ function build_ffmpeg(){
     elif [[ "$1" == "OHOS" ]];then
         # HarmonyOS / OpenHarmony cross-compile via the OHOS NDK clang toolchain
         ffmpeg_cross_compile_set_OHOS $2
-        use_openssl="FALSE"
     elif [ "$1" == "maccatalyst" ];then
       if [[ "${SSL_USE_NATIVE}" != "TRUE" ]];then
           ffmpeg_config_add_user "--disable-securetransport"
@@ -59,15 +58,15 @@ function build_ffmpeg(){
     ffmpeg_config_add_extra_ldflags "${CPU_LDFLAGS}"
     ffmpeg_config_add_extra_cflags "${HARDENED_CFLAG}"
 
-#    if [[ -n "${LIBXML2_INSTALL_DIR}" ]]; then
-#        ffmpeg_config_add_user "--enable-libxml2"
-#        ffmpeg_config_add_extra_cflags "-I${LIBXML2_INSTALL_DIR}/include/libxml2"
-#        ffmpeg_config_add_extra_ldflags "-L${LIBXML2_INSTALL_DIR}/lib"
-#        if [[ "$1" == "win32" ]];then
-#            ffmpeg_config_add_extra_cflags "-DIN_LIBXML"
-#        fi
-#
-#    fi
+    # dash_demuxer 依赖 libxml2。libxml2 由本项目 build_libxml2.sh 编译安装，
+    # 这里显式链入 FFmpeg（探测走 build_tools/ndk_pkg_config.sh，因为 Android/
+    # OHOS 的 NDK 没有 pkg-config），消除
+    # "WARNING: Disabled dash_demuxer because not all dependencies are satisfied: libxml2"。
+    if [[ -n "${LIBXML2_INSTALL_DIR}" ]] && [[ "$1" == "Android" || "$1" == "OHOS" ]]; then
+        ffmpeg_config_add_user "--enable-libxml2"
+        ffmpeg_config_add_extra_cflags "-I${LIBXML2_INSTALL_DIR}/include/libxml2"
+        ffmpeg_config_add_extra_ldflags "-L${LIBXML2_INSTALL_DIR}/lib"
+    fi
     if [[ -n "${FDK_AAC_INSTALL_DIR}" ]]; then
         ffmpeg_config_add_user "--enable-libfdk-aac"
         # libfdk-aac is nonfree-gated since FFmpeg 5.1; enable it explicitly.

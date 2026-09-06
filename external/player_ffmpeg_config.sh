@@ -76,6 +76,10 @@ fi
 # own DASH implementation, so this stays commented).
 # ffmpeg_config_add_demuxers dash
 
-if [[ "${FFMPEG_USE_OPENSSL}" != "TRUE" ]];then
-  FFMPEG_USE_OPENSSL="FALSE"
+# https_protocol 依赖 tls/openssl。OpenSSL 3.0.x 由 build_openssl_3.sh 编译安装，
+# 默认链入 FFmpeg，消除
+# "WARNING: Disabled https_protocol because some selected dependency is unsatisfied: tls_protocol"。
+# Apple 平台设 SSL_USE_NATIVE=TRUE 时仍走 securetransport（build_ffmpeg.sh 判断）。
+if [[ "${FFMPEG_USE_OPENSSL}" != "FALSE" ]];then
+  FFMPEG_USE_OPENSSL="TRUE"
 fi
