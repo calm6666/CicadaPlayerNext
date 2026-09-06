@@ -17,6 +17,15 @@ function git_am_patch() {
     git config core.autocrlf false
     git am --abort 2>/dev/null      # 清理上一次失败残留的 am 状态
     git checkout -- . 2>/dev/null   # 把 CRLF worktree 还原成仓库内的 LF 内容
+
+    # 幂等性：若补丁已经打过（reverse --check 通过），直接跳过，
+    # 避免重复构建时报 "patch does not apply" 的噪音
+    if git apply --check --reverse "${tmp_patch}" >/dev/null 2>&1; then
+        echo "patch already applied, skip: ${patch}"
+        rm -f "${tmp_patch}"
+        return 0
+    fi
+
     git -c core.whitespace=cr-at-eol am "${tmp_patch}"
     local ret=$?
     rm -f "${tmp_patch}"
@@ -58,12 +67,14 @@ function patch_openssl() {
 function patch_curl(){
     cd "${CURL_SOURCE_DIR}" || exit
     # m4 AC_REQUIRE 补丁仅适用于 curl 7.68（curl 8.x 上游已修复）
+    # 注意：git describe 在精确 tag 上输出就是 "curl-7_68_0" 这类完整名，
+    # 不能做 cut -d- 截断（会把 7.x 和 8.x 都截成 "curl"）
     local ver
-    ver=$(git describe --tags 2>/dev/null | cut -d- -f1)
+    ver=$(git describe --tags 2>/dev/null || echo "unknown")
     if [[ "${ver}" == curl-7_* ]]; then
         git_am_patch ../../contribute/curl/0001-curl-functions.m4-remove-inappropriate-AC_REQUIRE.patch
     else
-        echo "curl ${ver:-8.x}: skip 7.x-era patch"
+        echo "curl ${ver}: skip 7.x-era patch"
     fi
 }
 
