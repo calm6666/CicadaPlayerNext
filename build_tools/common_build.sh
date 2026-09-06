@@ -230,13 +230,14 @@ function build_libs(){
 
 # ============================================================================
 # 三个平台（Android/OHOS/win32）共用的"链接前完整性检查 + FFmpeg 档案收集"：
-#   1) 对象树存在性/非空探针：缺或 0 字节则 purge 整个 libavcodec 对象集并
-#      make 自愈重编
-#   2) 收集 6 个 FFmpeg 静态库档案到全局 FFMPEG_LINK_LIBS——整包链接 make 产出
-#      的 .a（成员清单由 FFmpeg 自身构建系统决定），不再手工 glob 裸 .o，
-#      对 FFmpeg 7.0+ 的对象布局变化（改名/新子目录/.objs 清单机制）免疫
-#   3) 档案级符号校验：对整个 .a 做一次 nm，验证关键符号存在（不假设符号在
-#      哪个具体对象文件里）
+# FFmpeg 9.0 起解码器源码按模块重组（AAC → libavcodec/aac/、HEVC → libavcodec/
+# hevc/，见官方 2024 "AAC decoder refactor" 系列补丁），对象文件路径随版本
+# 变化，因此不再按固定文件名探测 .o；改为与对象布局无关的两级校验：
+#   1) 6 个 FFmpeg 静态库档案必须存在且非空（make 退出码已在 ffmpeg_build 检查）
+#   2) 档案级符号校验：对整个 .a 做一次 nm，验证关键 FFCodec 注册符号存在
+#      （不假设符号在哪个具体对象文件里）
+# 整包链接 make 产出的 .a（FFmpeg 9.0 用 .objs 响应文件喂给 llvm-ar，见官方
+# "ffbuild: read library linker objects from a file" 补丁），对对象布局变化免疫。
 # 失败时打印明确修复指令并返回非零；调用方退出。
 # ============================================================================
 function prepare_ffmpeg_link_input(){
@@ -244,63 +245,28 @@ function prepare_ffmpeg_link_input(){
     local nmbin="${CROSS_PREFIX}nm"
     [[ -x "${nmbin}" ]] || nmbin=$(command -v nm 2>/dev/null || true)
 
-    local probe_obj objf heal_needed=0
-    while read -r probe_obj; do
-        [[ -z "${probe_obj}" ]] && continue
-        objf="${FFMPEG_BUILD_DIR}/libavcodec/${probe_obj}"
-        if [[ ! -f "${objf}" ]]; then
-            echo "WARN: FFmpeg object tree incomplete, missing libavcodec/${probe_obj}"
-            heal_needed=1
-        elif [[ ! -s "${objf}" ]]; then
-            echo "WARN: truncated (0-byte) FFmpeg object libavcodec/${probe_obj}"
-            heal_needed=1
-        fi
-    done <<'PROBE_OBJECTS'
-allcodecs.o
-aacdec.o
-aacdec_fixed.o
-hevcdec.o
-opusdec.o
-aactab.o
-PROBE_OBJECTS
-
-    if [[ ${heal_needed} -eq 1 ]]; then
-        echo "self-heal: purge all libavcodec objects and rebuild (incomplete tree)"
-        rm -f "${FFMPEG_BUILD_DIR}"/libavcodec/*.o "${FFMPEG_BUILD_DIR}"/libavcodec/*/*.o
-        if ! ( cd "${FFMPEG_BUILD_DIR}" && make -j8 V=1 ); then
-            echo "ERROR: self-heal rebuild failed"
-            echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh ${platform}"
-            return 1
-        fi
-        # 自愈后只复验存在性+非空（不猜符号位置）
-        for probe_obj in allcodecs.o aacdec.o hevcdec.o; do
-            objf="${FFMPEG_BUILD_DIR}/libavcodec/${probe_obj}"
-            if [[ ! -s "${objf}" ]]; then
-                echo "ERROR: libavcodec/${probe_obj} still missing/empty after self-heal rebuild"
-                echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh ${platform}"
-                return 1
-            fi
-        done
-        echo "self-heal OK: libavcodec rebuilt"
-    fi
-
+    # 1) 六个静态库档案必须存在且非空
     FFMPEG_LINK_LIBS=""
-    local fflib
+    local fflib missing=0
     for fflib in libavcodec libavformat libavutil libswresample libswscale libavfilter; do
-        if [[ -f "${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a" ]]; then
+        if [[ -f "${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a" && -s "${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a" ]]; then
             FFMPEG_LINK_LIBS="${FFMPEG_LINK_LIBS} ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
         else
-            echo "ERROR: missing FFmpeg static library ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
-            echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh ${platform}"
-            return 1
+            echo "ERROR: missing/empty FFmpeg static library ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+            missing=1
         fi
     done
+    if [[ ${missing} -eq 1 ]]; then
+        echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh ${platform}"
+        return 1
+    fi
 
+    # 2) 档案级符号校验（不关心符号落在哪个 .o）
     if [[ -n "${nmbin}" ]]; then
         local symdump sym
         symdump=$("${nmbin}" --print-file-name ${FFMPEG_LINK_LIBS} 2>/dev/null || true)
         for sym in ff_aac_decoder ff_aac_fixed_decoder ff_aac_latm_decoder ff_hevc_decoder \
-                   ff_opus_decoder ff_aac_sbr_vlc ff_hevc_parser ff_opus_parser \
+                   ff_opus_decoder ff_hevc_parser ff_opus_parser \
                    ff_h264_mp4toannexb_bsf; do
             if ! grep -q " ${sym}$" <<< "${symdump}"; then
                 echo "ERROR: symbol ${sym} missing from FFmpeg archives"
