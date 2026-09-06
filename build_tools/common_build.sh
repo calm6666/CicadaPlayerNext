@@ -247,27 +247,99 @@ function link_shared_lib_Android(){
 
     echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
 
-    local objs="${FFMPEG_BUILD_DIR}/compat/*.o";
-    local libraries="libavcodec libswresample libavformat libavutil libswscale libavfilter"
-    local library
+    # 对象树完整性校验：历史中断的增量构建会留下缺失/截断（0 字节）/旧配置的
+    # 对象——"引用方在、定义方缺"的残缺状态会在链接期表现为成片的
+    # undefined symbol（如 ff_aac_decoder/ff_hevc_decoder/ff_aac_sbr_vlc）。
+    # 校验：存在性 + 非空 + 关键符号存在。任一失败即清空整个 libavcodec
+    # 对象集重编（观察到的失败符号全部来自 libavcodec，purge 一并覆盖
+    # parsers/bsf/neon 汇编的同类残缺），自愈后再验证一次。
+    local probe_obj probe_sym nmbin objf heal_needed
+    nmbin="${CROSS_PREFIX}nm"
+    [[ -x "${nmbin}" ]] || nmbin=$(command -v nm 2>/dev/null || true)
+    heal_needed=0
+    while read -r probe_obj probe_sym; do
+        [[ -z "${probe_obj}" ]] && continue
+        objf="${FFMPEG_BUILD_DIR}/libavcodec/${probe_obj}"
+        if [[ ! -f "${objf}" ]]; then
+            echo "WARN: FFmpeg object tree incomplete, missing libavcodec/${probe_obj}"
+            heal_needed=1
+        elif [[ ! -s "${objf}" ]]; then
+            echo "WARN: truncated (0-byte) FFmpeg object libavcodec/${probe_obj}"
+            heal_needed=1
+        elif [[ -n "${probe_sym}" && -n "${nmbin}" ]] && ! "${nmbin}" "${objf}" 2>/dev/null | grep -q "${probe_sym}"; then
+            echo "WARN: libavcodec/${probe_obj} lacks symbol ${probe_sym} (stale/partial object)"
+            heal_needed=1
+        fi
+    done <<'PROBE_OBJECTS'
+aacdec.o ff_aac_decoder
+aacdec_fixed.o ff_aac_fixed_decoder
+hevcdec.o ff_hevc_decoder
+opusdec.o ff_opus_decoder
+aactab.o
+PROBE_OBJECTS
 
-    for library in ${libraries};
-    do
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/*o""
+    if [[ ${heal_needed} -eq 1 ]]; then
+        echo "self-heal: purge all libavcodec objects and rebuild (interrupted build leftover)"
+        rm -f "${FFMPEG_BUILD_DIR}"/libavcodec/*.o "${FFMPEG_BUILD_DIR}"/libavcodec/*/*.o
+        if ! ( cd "${FFMPEG_BUILD_DIR}" && make -j8 V=1 ); then
+            echo "ERROR: self-heal rebuild failed"
+            echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && ./build_external.sh Android"
+            exit 1
         fi
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}/*.o""
-        fi
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/neon" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/neon/*.o""
+        # 自愈后复验一次（仍有问题则给出明确指令，避免 lld 的符号错误墙）
+        while read -r probe_obj probe_sym; do
+            [[ -z "${probe_obj}" ]] && continue
+            objf="${FFMPEG_BUILD_DIR}/libavcodec/${probe_obj}"
+            if [[ ! -s "${objf}" ]] || { [[ -n "${probe_sym}" && -n "${nmbin}" ]] && ! "${nmbin}" "${objf}" 2>/dev/null | grep -q "${probe_sym}"; }; then
+                echo "ERROR: libavcodec/${probe_obj} still broken after self-heal rebuild"
+                echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && ./build_external.sh Android"
+                exit 1
+            fi
+        done <<'PROBE_OBJECTS2'
+aacdec.o ff_aac_decoder
+aacdec_fixed.o ff_aac_fixed_decoder
+hevcdec.o ff_hevc_decoder
+opusdec.o ff_opus_decoder
+aactab.o
+PROBE_OBJECTS2
+        echo "self-heal OK: libavcodec rebuilt"
+    fi
+
+    # FFmpeg 7.0+ 链接对象组织方式随版本变化（重命名/新增子目录/表生成工具
+    # 对象散落各处）。不再手工 glob 裸 .o（漏一个对象就是成片 undefined
+    # symbol），改为整包链接 make 产出的静态库档案：成员清单由 FFmpeg 自己的
+    # 构建系统决定，永远与当前版本一致；宿主机工具对象（ops_asmgen 等）不会被
+    # 收进档案，无需再过滤。whole-archive 保证注册表（allcodecs/parsers/bsf）
+    # 与全部解码器对象都被拉入。
+    local ff_libs=""
+    local fflib
+    for fflib in libavcodec libavformat libavutil libswresample libswscale libavfilter; do
+        if [[ -f "${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a" ]]; then
+            ff_libs="${ff_libs} ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+        else
+            echo "ERROR: missing FFmpeg static library ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+            echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && ./build_external.sh Android"
+            exit 1
         fi
     done
 
-    # FFmpeg 7.0+ 会在目标目录里留下宿主机工具的对象文件（如
-    # libswscale/aarch64/ops_asmgen.o，用 HOSTCC 编译），混入目标链接会报
-    # "incompatible with aarch64linux" 之类的架构错误，必须剔除。
-    objs=$(echo ${objs} | tr ' ' '\n' | grep -v '/ops_asmgen.o$' | tr '\n' ' ')
+    # 档案级符号校验：一次 nm 覆盖全部 .a 成员（不依赖具体对象文件名/子目录，
+    # 对 FFmpeg 版本升级导致的对象布局变化免疫）。缺符号直接给出修复指令，
+    # 而不是让 lld 报几十行 undefined symbol。
+    if [[ -n "${nmbin}" ]]; then
+        local symdump sym
+        symdump=$("${nmbin}" --print-file-name ${ff_libs} 2>/dev/null || true)
+        for sym in ff_aac_decoder ff_aac_fixed_decoder ff_aac_latm_decoder ff_hevc_decoder \
+                   ff_opus_decoder ff_aac_sbr_vlc ff_hevc_parser ff_opus_parser \
+                   ff_h264_mp4toannexb_bsf; do
+            if ! grep -q " ${sym}$" <<< "${symdump}"; then
+                echo "ERROR: symbol ${sym} missing from FFmpeg archives"
+                echo "       object tree does not match current FFmpeg version/config"
+                echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && ./build_external.sh Android"
+                exit 1
+            fi
+        done
+    fi
 
     local ldflags=""
 
@@ -324,7 +396,7 @@ function link_shared_lib_Android(){
       -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS}  -landroid -llog \
       -Wl,--allow-multiple-definition -Wl,-Bsymbolic \
       -Wl,-soname,lib${LIB_NAME}.so \
-      ${objs} \
+      -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
       -o ${install_dir}/lib${LIB_NAME}.so \
       -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
 
@@ -343,26 +415,18 @@ function link_shared_lib_win32(){
 
     echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
 
-    local objs;
-    local libraries="libavcodec libswresample libavformat libavutil libswscale libavfilter"
-    local library
-
-    for library in ${libraries};
-    do
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/*o""
-        fi
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}/*.o""
-        fi
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/neon" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/neon/*.o""
+    # 同 Android/OHOS：整包链接 make 产出的静态库档案，避免 glob 裸 .o
+    # 因版本升级的对象布局变化而漏对象。
+    local ff_libs=""
+    local fflib
+    for fflib in libavcodec libavformat libavutil libswresample libswscale libavfilter; do
+        if [[ -f "${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a" ]]; then
+            ff_libs="${ff_libs} ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+        else
+            echo "ERROR: missing FFmpeg static library ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+            exit 1
         fi
     done
-
-    # FFmpeg 7.0+ 会在目标目录里留下宿主机工具的对象文件（如 ops_asmgen.o，
-    # 用 HOSTCC 编译），混入目标链接会报架构不兼容，必须剔除。
-    objs=$(echo ${objs} | tr ' ' '\n' | grep -v '/ops_asmgen.o$' | tr '\n' ' ')
 
     local ldflags=""
 
@@ -405,7 +469,7 @@ function link_shared_lib_win32(){
 
     ${CROSS_COMPILE}-gcc -std=c++11 ${CPU_FLAGS} build_version.cpp -static-libgcc  -static -lm  -shared  -I${FFMPEG_INSTALL_DIR}/include \
      -Wl,--no-undefined  ${CPU_LD_FLAGS}  -Wl,--allow-multiple-definition -Wl,-Bsymbolic -Wl,-soname,lib${LIB_NAME}.so \
-    ${objs} \
+    -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
     -o ${install_dir}/lib${LIB_NAME}.dll \
     -Wl,--kill-at,--out-implib=${install_dir}/lib${LIB_NAME}.lib   \
     -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 -lws2_32 -lbcrypt -lcrypt32
@@ -428,27 +492,20 @@ function link_shared_lib_OHOS(){
 
     echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
 
-    local objs="${FFMPEG_BUILD_DIR}/compat/*.o";
-    local libraries="libavcodec libswresample libavformat libavutil libswscale libavfilter"
-    local library
-
-    for library in ${libraries};
-    do
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/*o""
-        fi
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/${cup_arch}/*.o""
-        fi
-        if [[ -d "${FFMPEG_BUILD_DIR}/${library}/neon" ]]; then
-            objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/neon/*.o""
+    # FFmpeg 7.0+ 链接对象组织方式随版本变化。整包链接 make 产出的静态库
+    # 档案，成员清单由 FFmpeg 自身构建系统决定（不再 glob 裸 .o，避免
+    # 漏对象导致成片 undefined symbol）。
+    local ff_libs=""
+    local fflib
+    for fflib in libavcodec libavformat libavutil libswresample libswscale libavfilter; do
+        if [[ -f "${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a" ]]; then
+            ff_libs="${ff_libs} ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+        else
+            echo "ERROR: missing FFmpeg static library ${FFMPEG_BUILD_DIR}/${fflib}/${fflib}.a"
+            echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh OHOS"
+            exit 1
         fi
     done
-
-    # FFmpeg 7.0+ 会在目标目录里留下宿主机工具的对象文件（如
-    # libswscale/aarch64/ops_asmgen.o，用 HOSTCC 编译），混入目标链接会报
-    # "incompatible with aarch64linux" 之类的架构错误，必须剔除。
-    objs=$(echo ${objs} | tr ' ' '\n' | grep -v '/ops_asmgen.o$' | tr '\n' ' ')
 
     local ldflags=""
 
@@ -476,7 +533,7 @@ function link_shared_lib_OHOS(){
       -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS} \
       -Wl,--allow-multiple-definition -Wl,-Bsymbolic \
       -Wl,-soname,lib${LIB_NAME}.so \
-      ${objs} \
+      -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
       -o ${install_dir}/lib${LIB_NAME}.so \
       -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
 

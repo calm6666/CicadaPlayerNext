@@ -455,7 +455,14 @@ function ffmpeg_config(){
 
 function ffmpeg_build(){
     if [[ "${BUILD}" != "False" ]] || [[ "${BUILD_FFMPEG}" != "False" ]];then
-        make -j8 V=1
-        make install
+        # 自愈：删除历史中断遗留的 0 字节 .o。clang 被 Ctrl+C/超时杀掉时可能
+        # 留下截断对象（mtime 比源码新），make 会误判为最新而跳过重建，
+        # 最终链接报成片的 undefined symbol。
+        find . -name '*.o' -size 0 -delete 2>/dev/null || true
+        # 必须显式检查 make 的返回码：make install 会掩盖 make -j8 的失败
+        # （.a 是上次构建的残留时 install 可能成功），导致后续合并链接拿到
+        # 残缺的对象树，报一堆 "undefined symbol: ff_xxx_decoder"。
+        make -j8 V=1 || { echo "ERROR: ffmpeg make failed (incomplete object tree?)"; exit 1; }
+        make install || { echo "ERROR: ffmpeg make install failed"; exit 1; }
     fi
 }
