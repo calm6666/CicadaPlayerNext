@@ -279,6 +279,45 @@ function prepare_ffmpeg_link_input(){
     return 0
 }
 
+# ============================================================================
+# 收集外部依赖库的链接参数（Android 与 OHOS 共用同一份清单，保证两平台
+# 功能完全一致；有库目录才加，缺库自动跳过）。
+# 依赖关系：curl→nghttp2/openssl，rtmp→openssl，均在本清单内，整包链接
+# （--whole-archive）下顺序无关紧要。
+# ============================================================================
+function collect_link_ldflags(){
+    local ldflags="$1"
+    if [[ -d "${CURL_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lcurl -L${CURL_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${ARES_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lcares -L${ARES_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${LIBRTMP_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lrtmp -L${LIBRTMP_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${FDK_AAC_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lfdk-aac -L${FDK_AAC_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${OPENSSL_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lssl -lcrypto -L${OPENSSL_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${DAV1D_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -ldav1d -L${DAV1D_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${X264_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lx264 -L${X264_INSTALL_DIR}/lib/"
+    fi
+    # dash_demuxer 启用后 libavformat 引用 libxml2（xml* 符号），必须带上
+    if [[ -d "${LIBXML2_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lxml2 -L${LIBXML2_INSTALL_DIR}/lib/"
+    fi
+    if [[ -d "${NGHTTP2_INSTALL_DIR}" ]];then
+        ldflags="$ldflags -lnghttp2 -L${NGHTTP2_INSTALL_DIR}/lib/"
+    fi
+    printf '%s' "$ldflags"
+}
+
 function link_shared_lib_Android(){
     if [[ "$1" != "Android" ]];then
         return;
@@ -302,43 +341,9 @@ function link_shared_lib_Android(){
     prepare_ffmpeg_link_input "Android" || exit 1
     local ff_libs="${FFMPEG_LINK_LIBS}"
 
-    local ldflags=""
-
-    if [[ -d "${CURL_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lcurl -L${CURL_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${ARES_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lcares -L${ARES_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${LIBRTMP_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lrtmp -L${LIBRTMP_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${FDK_AAC_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lfdk-aac -L${FDK_AAC_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${OPENSSL_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lssl -lcrypto -L${OPENSSL_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${DAV1D_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -ldav1d -L${DAV1D_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${X264_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lx264 -L${X264_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${LIBXML2_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lxml2 -L${LIBXML2_INSTALL_DIR}/lib/"
-    fi
-
-    if [[ -d "${NGHTTP2_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lnghttp2 -L${NGHTTP2_INSTALL_DIR}/lib/"
-    fi
+    # 与 OHOS 共用同一份依赖清单（collect_link_ldflags），保证两平台一致
+    local ldflags
+    ldflags=$(collect_link_ldflags "")
 
     cp ${BUILD_TOOLS_DIR}/src/build_version.cpp ./
     sh ${BUILD_TOOLS_DIR}/gen_build_version.sh > version.h
@@ -359,7 +364,7 @@ function link_shared_lib_Android(){
       -Wl,-soname,lib${LIB_NAME}.so \
       -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
       -o ${install_dir}/lib${LIB_NAME}.so \
-      -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
+      -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 || { echo "ERROR: lib${LIB_NAME}.so link failed"; exit 1; }
 
     # 去掉调试符号（.so 里 -g 信息可占一半以上体积；动态符号表保留，
     # 不影响 SDK 后续按动态符号链接）。BUILD_TYPE=Debug 时保留符号。
@@ -439,7 +444,7 @@ function link_shared_lib_win32(){
     -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
     -o ${install_dir}/lib${LIB_NAME}.dll \
     -Wl,--kill-at,--out-implib=${install_dir}/lib${LIB_NAME}.lib   \
-    -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 -lws2_32 -lbcrypt -lcrypt32
+    -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 -lws2_32 -lbcrypt -lcrypt32 || { echo "ERROR: lib${LIB_NAME}.dll link failed"; exit 1; }
 
     # 去调试符号（mingw strip，--strip-unneeded 保留动态导出符号）；
     # BUILD_TYPE=Debug 时保留符号
@@ -476,17 +481,9 @@ function link_shared_lib_OHOS(){
     prepare_ffmpeg_link_input "OHOS" || exit 1
     local ff_libs="${FFMPEG_LINK_LIBS}"
 
-    local ldflags=""
-
-    if [[ -d "${OPENSSL_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lssl -lcrypto -L${OPENSSL_INSTALL_DIR}/lib/"
-    fi
-    if [[ -d "${DAV1D_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -ldav1d -L${DAV1D_INSTALL_DIR}/lib/"
-    fi
-    if [[ -d "${NGHTTP2_INSTALL_DIR}" ]];then
-        ldflags="$ldflags -lnghttp2 -L${NGHTTP2_INSTALL_DIR}/lib/"
-    fi
+    # 与 Android 共用同一份依赖清单（collect_link_ldflags），功能完全一致
+    local ldflags
+    ldflags=$(collect_link_ldflags "")
 
     cp ${BUILD_TOOLS_DIR}/src/build_version.cpp ./
     sh ${BUILD_TOOLS_DIR}/gen_build_version.sh > version.h
@@ -504,7 +501,7 @@ function link_shared_lib_OHOS(){
       -Wl,-soname,lib${LIB_NAME}.so \
       -Wl,--whole-archive ${ff_libs} -Wl,--no-whole-archive \
       -o ${install_dir}/lib${LIB_NAME}.so \
-      -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
+      -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1 || { echo "ERROR: lib${LIB_NAME}.so link failed"; exit 1; }
 
     # 去调试符号（同 Android 分支）；BUILD_TYPE=Debug 时保留符号
     if [[ "${BUILD_TYPE}" != "Debug" ]]; then
