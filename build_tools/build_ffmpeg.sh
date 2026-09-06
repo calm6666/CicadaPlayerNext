@@ -59,13 +59,25 @@ function build_ffmpeg(){
     ffmpeg_config_add_extra_cflags "${HARDENED_CFLAG}"
 
     # dash_demuxer 依赖 libxml2。libxml2 由本项目 build_libxml2.sh 编译安装，
-    # 这里显式链入 FFmpeg（探测走 build_tools/ndk_pkg_config.sh，因为 Android/
-    # OHOS 的 NDK 没有 pkg-config），消除
+    # 显式链入 FFmpeg，消除
     # "WARNING: Disabled dash_demuxer because not all dependencies are satisfied: libxml2"。
+    #
+    # FFmpeg 9.0 的 libxml2 探测只有 pkg-config 一条路（require_pkg_config），
+    # 而 NDK r25c 没有 llvm-pkg-config，会直接 die：
+    #   "ERROR: libxml-2.0 not found using pkg-config"
+    # 所以按项目 0009 补丁（check_lib 方案）的思路，把探测改成 check_lib，
+    # 头文件/库路径已由上面的 -I/-L 提供；sed 幂等，可重复构建。
     if [[ -n "${LIBXML2_INSTALL_DIR}" ]] && [[ "$1" == "Android" || "$1" == "OHOS" ]]; then
         ffmpeg_config_add_user "--enable-libxml2"
         ffmpeg_config_add_extra_cflags "-I${LIBXML2_INSTALL_DIR}/include/libxml2"
         ffmpeg_config_add_extra_ldflags "-L${LIBXML2_INSTALL_DIR}/lib"
+        sed -i 's#^enabled libxml2 .*require_pkg_config libxml2.*$#enabled libxml2           \&\& check_lib xml2 libxml2/libxml.h xmlCheckVersion -lxml2#' \
+            "${FFMPEG_SOURCE_DIR}/configure"
+        if ! grep -q '^enabled libxml2 .*check_lib xml2' "${FFMPEG_SOURCE_DIR}/configure"; then
+            echo "ERROR: failed to patch libxml2 detection in ${FFMPEG_SOURCE_DIR}/configure"
+            exit 1
+        fi
+        echo "ffmpeg $1: libxml2 detection -> check_lib (NDK has no pkg-config)"
     fi
     if [[ -n "${FDK_AAC_INSTALL_DIR}" ]]; then
         ffmpeg_config_add_user "--enable-libfdk-aac"
