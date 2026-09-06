@@ -222,6 +222,11 @@ function link_shared_lib_Android(){
         fi
     done
 
+    # FFmpeg 7.0+ 会在目标目录里留下宿主机工具的对象文件（如
+    # libswscale/aarch64/ops_asmgen.o，用 HOSTCC 编译），混入目标链接会报
+    # "incompatible with aarch64linux" 之类的架构错误，必须剔除。
+    objs=$(echo ${objs} | tr ' ' '\n' | grep -v '/ops_asmgen.o$' | tr '\n' ' ')
+
     local ldflags=""
 
     if [[ -d "${CURL_INSTALL_DIR}" ]];then
@@ -274,7 +279,9 @@ function link_shared_lib_Android(){
 
     ${toolchain}/bin/clang -target ${TARGET} --sysroot=${SYSTEM_ROOT} -fuse-ld=lld \
       -std=c++11 build_version.cpp -lm -lz -shared -I${FFMPEG_INSTALL_DIR}/include \
-      -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS}  -landroid -llog -Wl,-soname,lib${LIB_NAME}.so \
+      -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS}  -landroid -llog \
+      -Wl,--allow-multiple-definition \
+      -Wl,-soname,lib${LIB_NAME}.so \
       ${objs} \
       -o ${install_dir}/lib${LIB_NAME}.so \
       -Wl,--whole-archive   ${ldflags} -Wl,--no-whole-archive -Wl,--build-id=sha1
@@ -310,6 +317,10 @@ function link_shared_lib_win32(){
             objs="${objs} "${FFMPEG_BUILD_DIR}/${library}/neon/*.o""
         fi
     done
+
+    # FFmpeg 7.0+ 会在目标目录里留下宿主机工具的对象文件（如 ops_asmgen.o，
+    # 用 HOSTCC 编译），混入目标链接会报架构不兼容，必须剔除。
+    objs=$(echo ${objs} | tr ' ' '\n' | grep -v '/ops_asmgen.o$' | tr '\n' ' ')
 
     local ldflags=""
 
@@ -351,7 +362,7 @@ function link_shared_lib_win32(){
     sh ${BUILD_TOOLS_DIR}/gen_build_version.sh > version.h
 
     ${CROSS_COMPILE}-gcc -std=c++11 ${CPU_FLAGS} build_version.cpp -static-libgcc  -static -lm  -shared  -I${FFMPEG_INSTALL_DIR}/include \
-     -Wl,--no-undefined  ${CPU_LD_FLAGS}  -Wl,-soname,lib${LIB_NAME}.so \
+     -Wl,--no-undefined  ${CPU_LD_FLAGS}  -Wl,--allow-multiple-definition -Wl,-soname,lib${LIB_NAME}.so \
     ${objs} \
     -o ${install_dir}/lib${LIB_NAME}.dll \
     -Wl,--kill-at,--out-implib=${install_dir}/lib${LIB_NAME}.lib   \
@@ -392,6 +403,11 @@ function link_shared_lib_OHOS(){
         fi
     done
 
+    # FFmpeg 7.0+ 会在目标目录里留下宿主机工具的对象文件（如
+    # libswscale/aarch64/ops_asmgen.o，用 HOSTCC 编译），混入目标链接会报
+    # "incompatible with aarch64linux" 之类的架构错误，必须剔除。
+    objs=$(echo ${objs} | tr ' ' '\n' | grep -v '/ops_asmgen.o$' | tr '\n' ' ')
+
     local ldflags=""
 
     if [[ -d "${OPENSSL_INSTALL_DIR}" ]];then
@@ -416,6 +432,7 @@ function link_shared_lib_OHOS(){
     ${clang} --target=${TARGET_TRIPLE} --sysroot=${SYSTEM_ROOT} -fuse-ld=lld \
       -std=c++11 build_version.cpp -lm -lz -shared -I${FFMPEG_INSTALL_DIR}/include \
       -Wl,--no-undefined -Wl,-z,noexecstack ${CPU_LD_FLAGS} \
+      -Wl,--allow-multiple-definition \
       -Wl,-soname,lib${LIB_NAME}.so \
       ${objs} \
       -o ${install_dir}/lib${LIB_NAME}.so \
