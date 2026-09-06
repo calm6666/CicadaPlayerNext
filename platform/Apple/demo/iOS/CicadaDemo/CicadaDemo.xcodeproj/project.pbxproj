@@ -31,8 +31,8 @@
 		18DF2E5521E77C5900507CEF /* UIViewController+backAction.m in Sources */ = {isa = PBXBuildFile; fileRef = 18DF2E5421E77C5900507CEF /* UIViewController+backAction.m */; };
 		18F36EFF22B0D2CD00E5DBF2 /* MultChooseViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 18F36EFD22B0D2CD00E5DBF2 /* MultChooseViewController.m */; };
 		18F36F0122B0D2CD00E5DBF2 /* MultPlayerViewController.m in Sources */ = {isa = PBXBuildFile; fileRef = 18F36EFE22B0D2CD00E5DBF2 /* MultPlayerViewController.m */; };
-		1F052F192369630C00A6E842 /* alivcffmpeg.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F052F132369622900A6E842 /* alivcffmpeg.framework */; };
-		1F052F1A2369630C00A6E842 /* alivcffmpeg.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1F052F132369622900A6E842 /* alivcffmpeg.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
+		1F052F192369630C00A6E842 /* ffmpeg.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F052F132369622900A6E842 /* ffmpeg.framework */; };
+		1F052F1A2369630C00A6E842 /* ffmpeg.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1F052F132369622900A6E842 /* ffmpeg.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		1F052F1B2369630D00A6E842 /* CicadaPlayerSDK.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 1F052F122369622900A6E842 /* CicadaPlayerSDK.framework */; };
 		1F052F1C2369630D00A6E842 /* CicadaPlayerSDK.framework in Embed Frameworks */ = {isa = PBXBuildFile; fileRef = 1F052F122369622900A6E842 /* CicadaPlayerSDK.framework */; settings = {ATTRIBUTES = (CodeSignOnCopy, RemoveHeadersOnCopy, ); }; };
 		1F052F23236963BB00A6E842 /* CicadaDemoView.m in Sources */ = {isa = PBXBuildFile; fileRef = 1F052F22236963BB00A6E842 /* CicadaDemoView.m */; };
@@ -64,7 +64,7 @@
 			containerPortal = 1F7561AD2369505B001A5B1E /* CicadaPlayerSDK.xcodeproj */;
 			proxyType = 2;
 			remoteGlobalIDString = BEE5ECD7414E44FCABDD1CCF;
-			remoteInfo = alivcffmpeg;
+			remoteInfo = ffmpeg;
 		};
 		1F7561C92369505B001A5B1E /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -166,7 +166,7 @@
 			dstPath = "";
 			dstSubfolderSpec = 10;
 			files = (
-				1F052F1A2369630C00A6E842 /* alivcffmpeg.framework in Embed Frameworks */,
+				1F052F1A2369630C00A6E842 /* ffmpeg.framework in Embed Frameworks */,
 				1F052F1C2369630D00A6E842 /* CicadaPlayerSDK.framework in Embed Frameworks */,
 			);
 			name = "Embed Frameworks";
@@ -224,7 +224,7 @@
 		18F36EFE22B0D2CD00E5DBF2 /* MultPlayerViewController.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = MultPlayerViewController.m; sourceTree = "<group>"; };
 		18FCB28E21D6126A00289843 /* CicadaDemo.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = CicadaDemo.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		1F052F122369622900A6E842 /* CicadaPlayerSDK.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = CicadaPlayerSDK.framework; path = ../SDK/ARM_SIMULATOR/CicadaPlayerSDK.framework; sourceTree = "<group>"; };
-		1F052F132369622900A6E842 /* alivcffmpeg.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = alivcffmpeg.framework; path = ../SDK/ARM_SIMULATOR/alivcffmpeg.framework; sourceTree = "<group>"; };
+		1F052F132369622900A6E842 /* ffmpeg.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = ffmpeg.framework; path = ../SDK/ARM_SIMULATOR/ffmpeg.framework; sourceTree = "<group>"; };
 		1F052F21236963BB00A6E842 /* CicadaDemoView.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CicadaDemoView.h; sourceTree = "<group>"; };
 		1F052F22236963BB00A6E842 /* CicadaDemoView.m */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.objc; path = CicadaDemoView.m; sourceTree = "<group>"; };
 		1F052F2523696ACA00A6E842 /* CicadaConfig.json */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.json; path = CicadaConfig.json; sourceTree = "<group>"; };
@@ -267,7 +267,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				1F052F192369630C00A6E842 /* alivcffmpeg.framework in Frameworks */,
+				1F052F192369630C00A6E842 /* ffmpeg.framework in Frameworks */,
 				1F052F1B2369630D00A6E842 /* CicadaPlayerSDK.framework in Frameworks */,
 				A3E0D1B1446E5EFC1FFA955A /* libPods-CicadaDemo.a in Frameworks */,
 			);
@@ -441,7 +441,7 @@
 			isa = PBXGroup;
 			children = (
 				1F7561C22369505B001A5B1E /* CicadaPlayerSDK.framework/CicadaPlayerSDK */,
-				1F7561C42369505B001A5B1E /* alivcffmpeg.framework/alivcffmpeg */,
+				1F7561C42369505B001A5B1E /* ffmpeg.framework/ffmpeg */,
 				1F7561CA2369505B001A5B1E /* libcacheModule.a */,
 				CB5A797324C941650005ABD3 /* libcommunication.a */,
 				1F7561CC2369505B001A5B1E /* libdata_source.a */,
@@ -488,7 +488,7 @@
 		AFFA62843CFE8E8CD6FE2076 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
-				1F052F132369622900A6E842 /* alivcffmpeg.framework */,
+				1F052F132369622900A6E842 /* ffmpeg.framework */,
 				1F052F122369622900A6E842 /* CicadaPlayerSDK.framework */,
 				2B9D628A020D4926FC86ED54 /* libPods-AliPlayerDemoDev.a */,
 				D2D29A7BB5E10D77DE2F09D7 /* libPods-CicadaDemo.a */,
@@ -592,11 +592,11 @@
 			remoteRef = 1F7561C12369505B001A5B1E /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
-		1F7561C42369505B001A5B1E /* alivcffmpeg.framework/alivcffmpeg */ = {
+		1F7561C42369505B001A5B1E /* ffmpeg.framework/ffmpeg */ = {
 			isa = PBXReferenceProxy;
 			fileType = wrapper.framework;
-			name = alivcffmpeg.framework/alivcffmpeg;
-			path = alivcffmpeg.framework;
+			name = ffmpeg.framework/ffmpeg;
+			path = ffmpeg.framework;
 			remoteRef = 1F7561C32369505B001A5B1E /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};

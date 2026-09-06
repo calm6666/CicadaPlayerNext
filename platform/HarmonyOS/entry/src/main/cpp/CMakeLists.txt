@@ -46,4 +46,4 @@ target_link_libraries(entry PUBLIC
         libnative_media_core.so
         libohaudio.so
         libnative_drm.so
-        ${FFMPEG_INSTALL_DIR_OHOS_LOCAL}/libalivcffmpeg.so)
+        ${FFMPEG_INSTALL_DIR_OHOS_LOCAL}/libffmpeg.so)

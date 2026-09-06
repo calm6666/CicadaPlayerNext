@@ -136,11 +136,11 @@ export USE_CHINA_MIRROR=true
 # 3) 编译外部库（FFmpeg 9.0 等）
 cd external
 ./build_external.sh Android
-# 产物：external/install/ffmpeg/Android/{armeabi-v7a,arm64-v8a}/libalivcffmpeg.so + include/
+# 产物：external/install/ffmpeg/Android/{armeabi-v7a,arm64-v8a}/libffmpeg.so + include/
 
 # 4) 编译 SDK AAR 与 Demo APK
 cd ../platform/Android/source
-export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libalivcffmpeg.so；false: 宿主 APP 提供
+export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libffmpeg.so；false: 宿主 APP 提供
 ./gradlew assembleDebug assembleRelease
 ```
 
@@ -180,7 +180,7 @@ external/build_external.sh Android
          ├─ x264*    → 可选
          ├─ dav1d*   → 可选（默认关闭）
          └─ ffmpeg   → configure（组件清单见 external/player_ffmpeg_config.sh）
-                       → make → clang/lld 合并所有 .a → libalivcffmpeg.so
+                       → make → clang/lld 合并所有 .a → libffmpeg.so
 ```
 
 \* 标记项未配置源码目录时打印 `xxx source not found` 警告并跳过（**非致命**）。
@@ -191,11 +191,11 @@ external/build_external.sh Android
 
 | 平台 | 命令 | 产物 |
 |---|---|---|
-| HarmonyOS NEXT (API 12+) | `export OHOS_SDK=...` → `. setup.env` → `cd external && ./build_external.sh OHOS` → `build_OHOS`（含 Demo hap） | `external/install/ffmpeg/OHOS/<abi>/libalivcffmpeg.so` + `output/*.hap` |
+| HarmonyOS NEXT (API 12+) | `export OHOS_SDK=...` → `. setup.env` → `cd external && ./build_external.sh OHOS` → `build_OHOS`（含 Demo hap） | `external/install/ffmpeg/OHOS/<abi>/libffmpeg.so` + `output/*.hap` |
 | iOS | `cd external && ./build_external.sh iOS` + Xcode 工程 | 动态 framework（`build_tools/build_iOS.sh`） |
 | macOS | `cd external && ./build_external.sh macOS` + cmake | `cmdline/cicadaPlayer` |
 | Linux | `cd external && ./build_external.sh Linux` + cmake | `cmdline/cicadaPlayer` |
-| Windows (MinGW) | `cd external && ./build_external.sh Windows` + cmake | `cicadaPlayer.exe` + `libalivcffmpeg.dll` |
+| Windows (MinGW) | `cd external && ./build_external.sh Windows` + cmake | `cicadaPlayer.exe` + `libffmpeg.dll` |
 
 详情：`docs/Packaging_HarmonyOS.md`、`docs/Packaging_iOS.md`、
 `docs/Packaging_macOS_Linux_Windows.md`。

@@ -38,7 +38,7 @@ set(ALIBRARYS ${ALI_SRC_LIBRARIES})
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR}/lib)
 add_subdirectory(${TOP_DIR}/mediaPlayer mediaPlayer.out)
-add_subdirectory(${TOP_DIR}/external/install/ffmpeg/${PATH_NAME} alivcffmpeg.out)
+add_subdirectory(${TOP_DIR}/external/install/ffmpeg/${PATH_NAME} ffmpeg.out)
 add_subdirectory(${TOP_DIR}/plugin plugin.out)
 
 add_compile_options(-x objective-c++)
@@ -98,7 +98,7 @@ add_library(CicadaPlayerSDK SHARED
         )
 message("LIBRARYS is ${ALIBRARYS}")
 target_link_libraries(CicadaPlayerSDK PRIVATE ${ALIBRARYS})
-target_link_libraries(CicadaPlayerSDK PUBLIC alivcffmpeg)
+target_link_libraries(CicadaPlayerSDK PUBLIC ffmpeg)
 
 target_include_directories(CicadaPlayerSDK PUBLIC ${PROJECT_SOURCE_DIR})
 
@@ -152,7 +152,7 @@ set(INSTALL_TARGETS CicadaPlayerSDK)
 #DON_T change the install lib's order
 if (IOS)
     set(INSTALL_TARGETS ${INSTALL_TARGETS}
-            alivcffmpeg
+            ffmpeg
             CicadaPlayerSDK
             )
 
@@ -165,7 +165,7 @@ if (IOS)
     #    )
 else ()
     set(INSTALL_TARGETS ${INSTALL_TARGETS}
-            alivcffmpeg
+            ffmpeg
             CicadaPlayerSDK
             )
 

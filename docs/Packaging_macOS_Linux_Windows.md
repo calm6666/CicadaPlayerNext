@@ -45,10 +45,10 @@ cmake -DCMAKE_TOOLCHAIN_FILE=../cmdline/toolchain.windows.cmake ..
 make -j8 cicadaPlayer
 ```
 
-输出 `cicadaPlayer.exe` + `libalivcffmpeg.dll`（`install/ffmpeg/win32/<arch>/`）。
+输出 `cicadaPlayer.exe` + `libffmpeg.dll`（`install/ffmpeg/win32/<arch>/`）。
 本机 MSVC 构建见 `doc/compile_Windows_msvc.md`。
 
 ## 4. 通用发布注意
 
 - 各平台均基于 `build_tools/ffmpeg_cross_compile_config.sh` 的 FFmpeg 9.0 配置；
-- 动态库打包策略见 `build_tools/README.md` 第 3 节（所有静态库合并进 libalivcffmpeg）。
+- 动态库打包策略见 `build_tools/README.md` 第 3 节（所有静态库合并进 libffmpeg）。

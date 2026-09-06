@@ -93,8 +93,8 @@ function build_Android(){
     cp  platform/Android/source/premierlibrary/build/intermediates/cmake/corePlayerRelease/obj/armeabi-v7a/*.so output/armeabi-v7a/
     cp  platform/Android/source/premierlibrary/build/intermediates/cmake/corePlayerRelease/obj/arm64-v8a/*.so output/arm64-v8a/
 
-    cp  external/install/ffmpeg/Android/armeabi-v7a/libalivcffmpeg.so   output/armeabi-v7a/
-    cp  external/install/ffmpeg/Android/arm64-v8a/libalivcffmpeg.so     output/arm64-v8a/
+    cp  external/install/ffmpeg/Android/armeabi-v7a/libffmpeg.so   output/armeabi-v7a/
+    cp  external/install/ffmpeg/Android/arm64-v8a/libffmpeg.so     output/arm64-v8a/
 
     cd output
     tree
@@ -171,7 +171,7 @@ function packet_iOS(){
         echo "simulator build failed"
     else
         lipo -create "${ALL_FRAMEWORK_PATH}/CicadaPlayerSDK.framework/CicadaPlayerSDK" "./Release/CicadaPlayerSDK.framework/CicadaPlayerSDK" -output "${ALL_FRAMEWORK_PATH}/CicadaPlayerSDK.framework/CicadaPlayerSDK"
-        lipo -create "${ALL_FRAMEWORK_PATH}/alivcffmpeg.framework/alivcffmpeg" "./Release/alivcffmpeg.framework/alivcffmpeg" -output "${ALL_FRAMEWORK_PATH}/alivcffmpeg.framework/alivcffmpeg"
+        lipo -create "${ALL_FRAMEWORK_PATH}/ffmpeg.framework/ffmpeg" "./Release/ffmpeg.framework/ffmpeg" -output "${ALL_FRAMEWORK_PATH}/ffmpeg.framework/ffmpeg"
     fi
 
     # copy to SDK folder
@@ -181,7 +181,7 @@ function packet_iOS(){
     mkdir -p ${nobit_path}
     cp -rf ${CicadaSDK_ARM}/*.framework ${nobit_path}
     xcrun bitcode_strip ${nobit_path}/CicadaPlayerSDK.framework/CicadaPlayerSDK -r -o ${nobit_path}/CicadaPlayerSDK.framework/CicadaPlayerSDK
-    xcrun bitcode_strip ${nobit_path}/alivcffmpeg.framework/alivcffmpeg -r -o ${nobit_path}/alivcffmpeg.framework/alivcffmpeg
+    xcrun bitcode_strip ${nobit_path}/ffmpeg.framework/ffmpeg -r -o ${nobit_path}/ffmpeg.framework/ffmpeg
 
     cd ${TOP_DIR}/output/
     tar -cjvf ${TOP_DIR}/output/CicadaPlayerSDK_${MUPP_BUILD_ID}.bz2 CicadaPlayerSDK/

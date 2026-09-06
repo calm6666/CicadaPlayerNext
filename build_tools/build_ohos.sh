@@ -3,7 +3,7 @@
 # Build all external C/C++ libraries for HarmonyOS / OpenHarmony.
 # Requires: OHOS_SDK environment variable pointing at a full OpenHarmony SDK
 #           (native/llvm + native/sysroot must exist).
-# Output:   install/ffmpeg/OHOS/<abi>/  (libalivcffmpeg.so + headers + static libs)
+# Output:   install/ffmpeg/OHOS/<abi>/  (libffmpeg.so + headers + static libs)
 # ============================================================================
 BUILD_TOOLS_DIR=$(cd $(dirname ${BASH_SOURCE[0]}); pwd)
 

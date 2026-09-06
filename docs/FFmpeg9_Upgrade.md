@@ -82,7 +82,7 @@ cd external
 
 - 所有平台统一走 `player_ffmpeg_config.sh`（组件名已按 9.0 校验，不支持的名字会直接报错退出）；
 - `build/ffmpeg/<平台>/<abi>/` 为 FFmpeg 构建目录，`install/ffmpeg/<平台>/<abi>/` 为产物；
-- Android/OHOS 会进一步把所有静态库合并为 `libalivcffmpeg.so`（clang/lld 链接）。
+- Android/OHOS 会进一步把所有静态库合并为 `libffmpeg.so`（clang/lld 链接）。
 
 ## 6. 参考
 

@@ -15,9 +15,9 @@ find_library(AV_FOUNDATION AVFoundation)
 message("xxxxxxxxxxxxxxxxxxxxxxxx TOP_DIR is ${TOP_DIR}")
 
 if ("${TARGET_PLATFORM}" STREQUAL "iOS")
-    find_library(ALIVCFFMPEG alivcffmpeg
+    find_library(FFMPEG ffmpeg
             ${TOP_DIR}/apsaraPlayer/external/install/ffmpeg/${PATH_NAME}/Xcode/OS/_builds/ NO_DEFAULT_PATH)
-    set(ALIVCFFMPEG ${TOP_DIR}/apsaraPlayer/external/install/ffmpeg/${PATH_NAME}/Xcode/OS/_builds/alivcffmpeg.framework)
+    set(FFMPEG ${TOP_DIR}/apsaraPlayer/external/install/ffmpeg/${PATH_NAME}/Xcode/OS/_builds/ffmpeg.framework)
     message("CONAN is ${CONAN}")
     find_library(UIKIT UIKit)
     find_library(OPENGLES OpenGLES)

@@ -10,7 +10,7 @@ public class NativeLoader {
         }
 
         try {
-            System.loadLibrary("alivcffmpeg");
+            System.loadLibrary("ffmpeg");
             System.loadLibrary("CicadaPlayer");
             playerLoaded = true;
         } catch (Exception e) {

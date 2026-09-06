@@ -13,7 +13,7 @@ NGHTTP2_SOURCE_DIR=$TOP_DIR/external/nghttp2
 #ARES_SOURCE_DIR=$TOP_DIR/external/cares
 #RTMPDUMP_SOURCE_DIR=$TOP_DIR/external/rtmpdump/
 #ANDROID_NDK=$ANDROID_NDK_HOME
-export LIB_NAME=alivcffmpeg
+export LIB_NAME=ffmpeg
 # 历史兼容标志：build_openssl_3 现在按源码版本自动适配
 # （默认 OpenSSL 3.0.17 / 可回退 1.1.1），此标志不再影响构建路径。
 OPENSSL_VERSION_3="True"

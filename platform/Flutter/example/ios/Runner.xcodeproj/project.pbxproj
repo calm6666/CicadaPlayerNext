@@ -30,7 +30,7 @@
 			containerPortal = 9BDE7F8426089EF500E1F933 /* CicadaPlayerSDK.xcodeproj */;
 			proxyType = 2;
 			remoteGlobalIDString = 178FE0019BC34500A2FBE9E2;
-			remoteInfo = alivcffmpeg;
+			remoteInfo = ffmpeg;
 		};
 		9BDE7F9C26089EF500E1F933 /* PBXContainerItemProxy */ = {
 			isa = PBXContainerItemProxy;
@@ -239,7 +239,7 @@
 			isa = PBXGroup;
 			children = (
 				9BDE7F9926089EF500E1F933 /* CicadaPlayerSDK.framework/CicadaPlayerSDK */,
-				9BDE7F9B26089EF500E1F933 /* alivcffmpeg.framework/alivcffmpeg */,
+				9BDE7F9B26089EF500E1F933 /* ffmpeg.framework/ffmpeg */,
 				9BDE7F9D26089EF500E1F933 /* libcacheModule.a */,
 				9BDE7F9F26089EF500E1F933 /* libcommunication.a */,
 				9BDE7FA126089EF500E1F933 /* libdata_source.a */,
@@ -339,11 +339,11 @@
 			remoteRef = 9BDE7F9826089EF500E1F933 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};
-		9BDE7F9B26089EF500E1F933 /* alivcffmpeg.framework/alivcffmpeg */ = {
+		9BDE7F9B26089EF500E1F933 /* ffmpeg.framework/ffmpeg */ = {
 			isa = PBXReferenceProxy;
 			fileType = wrapper.framework;
-			name = alivcffmpeg.framework/alivcffmpeg;
-			path = alivcffmpeg.framework;
+			name = ffmpeg.framework/ffmpeg;
+			path = ffmpeg.framework;
 			remoteRef = 9BDE7F9A26089EF500E1F933 /* PBXContainerItemProxy */;
 			sourceTree = BUILT_PRODUCTS_DIR;
 		};

@@ -46,7 +46,7 @@ build_OHOS
 2. `ffmpeg_cross_compile_set_OHOS`：`--target-os=linux --arch=aarch64 --disable-symver --disable-vulkan`
    （OHOS SDK 的 vulkan 头不完整——`vulkan.h` 引用缺失的 `vulkan_beta.h`，而播放器
    鸿蒙硬解走 OH_AVCodec 不用 FFmpeg vulkan，故直接禁用；+ 可选 `--disable-asm` 首启排障）
-3. 每个 ABI：`build_static_lib OHOS <abi>` → `link_shared_lib_OHOS`（clang/lld 合并为 `libalivcffmpeg.so`）
+3. 每个 ABI：`build_static_lib OHOS <abi>` → `link_shared_lib_OHOS`（clang/lld 合并为 `libffmpeg.so`）
 
 外部依赖链（`build_static_lib` 依序构建，全部已支持 OHOS 分支）：
 - **libxml2 2.14.5**：自带新版 config.sub，原生识别 `*-ohos*` 三元组
@@ -58,11 +58,11 @@ build_OHOS
   config.sub 若不认识 ohos，`common_build.sh` 的 `patch_config_sub_for_ohos`
   会装一个 shim（config.sub 已支持时自动跳过，不做任何改动）。
 - 可选库 ares/fdk-aac/x264/librtmp/dav1d/boost 同样带 OHOS 分支。
-- 所有静态库均 `-fPIC`，与 FFmpeg 合并进 `libalivcffmpeg.so`。
+- 所有静态库均 `-fPIC`，与 FFmpeg 合并进 `libffmpeg.so`。
 
 产物：
 ```
-external/install/ffmpeg/OHOS/<abi>/libalivcffmpeg.so
+external/install/ffmpeg/OHOS/<abi>/libffmpeg.so
 external/install/ffmpeg/OHOS/<abi>/include/   (FFmpeg 头文件)
 ```
 
@@ -84,7 +84,7 @@ hvigorw assembleHap --mode module -p product=default
    - `add_subdirectory(<repo>/mediaPlayer)` → 构建 framework（`framework/HarmonyOS.cmake`）+
      mediaPlayer 全量代码；
    - `add_library(entry SHARED napi_init.cpp)` 链接 `media_player`、
-     `libalivcffmpeg.so` 与 NDK 多媒体桩库
+     `libffmpeg.so` 与 NDK 多媒体桩库
      （`libnative_window.so`、`libnative_media_codecbase.so`、`libnative_media_vdec.so`、
      `libnative_media_audiocodec.so`、`libnative_media_core.so`、`libohaudio.so`、`libnative_drm.so`）。
 4. 产物 `libentry.so`（+ `libc++_shared.so`）被打进 `.hap` 的 `libs/<abi>/`。
@@ -110,5 +110,5 @@ hvigorw assembleHap --mode module -p product=default
   与社区 `ohos_ijkplayer` 同一模式。
 - `OHOS_STL=c++_shared` 时 `libc++_shared.so` 由 hvigor 自动打包；对外 `.har` 需携带 `libs/<abi>/*.so`。
 - 首启排障可用 `export OHOS_DISABLE_ASM=TRUE` 关掉 FFmpeg 手写汇编。
-- Demo 中 `libalivcffmpeg.so` 路径由 `FFMPEG_INSTALL_DIR_OHOS` 覆盖（默认
+- Demo 中 `libffmpeg.so` 路径由 `FFMPEG_INSTALL_DIR_OHOS` 覆盖（默认
   `<repo>/external/install/ffmpeg/OHOS/<abi>/`）。

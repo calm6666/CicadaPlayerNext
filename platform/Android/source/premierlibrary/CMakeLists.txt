@@ -58,7 +58,7 @@ target_link_libraries(CicadaPlayer
         framework_filter
         framework_utils
         framework_drm
-        alivcffmpeg
+        ffmpeg
         GLESv2
         EGL
         OpenSLES

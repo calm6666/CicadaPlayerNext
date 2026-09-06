@@ -31,17 +31,17 @@ export USE_CHINA_MIRROR=true            # gradle 走阿里云 Maven
 # 3) 拉取并编译外部库（FFmpeg n9.0 等）
 cd external
 ./build_external.sh Android
-# 产物: external/install/ffmpeg/Android/{armeabi-v7a,arm64-v8a}/libalivcffmpeg.so + include
+# 产物: external/install/ffmpeg/Android/{armeabi-v7a,arm64-v8a}/libffmpeg.so + include
 
 # 4) 编译 SDK 与 Demo APK
 cd ../platform/Android/source
-export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libalivcffmpeg.so; false: 由宿主 APP 提供
+export ANDROID_FULL_PACKAGE=true   # true: AAR 内打包 libffmpeg.so; false: 由宿主 APP 提供
 ./gradlew assembleDebug assembleRelease
 ```
 
 > **调试 vs 发布符号**：默认（不定义 `BUILD_TYPE`）为发布构建——FFmpeg 用
 > `--disable-debug`（无 `-g`、无 assert）+ 链接后 `llvm-strip --strip-unneeded`，
-> 单个 ABI 的 `libalivcffmpeg.so` 约 8~12MB。需要带符号调试时，
+> 单个 ABI 的 `libffmpeg.so` 约 8~12MB。需要带符号调试时，
 > `export BUILD_TYPE=Debug` 后再执行步骤 3：FFmpeg 改按 `--enable-debug=3`
 > 编译（`-g3` + assert），且 `.so` 不做 strip，便于崩溃回溯。
 > （播放器自身 native 代码的符号由 gradle `debugSymbolLevel` 控制，与本脚本无关。）
@@ -75,7 +75,7 @@ build_tools/build_Android.sh → 对每个 ABI:
    build_static_lib（统一补齐 configure/autogen.sh 可执行位后逐库编译）
      libxml2 → boost* → cares* → openssl → nghttp2 → curl → fdk-aac* → x264* → dav1d* → ffmpeg
      * 可选：无源码目录则跳过（打印 not found 警告，非致命）
-   link_shared_lib_Android → clang/lld 把全部 .a 合并为 libalivcffmpeg.so
+   link_shared_lib_Android → clang/lld 把全部 .a 合并为 libffmpeg.so
 ```
 
 关键变量（`build_tools/AndroidConfig.sh`）：`ANDROID_API_LEVEL=24`（默认），NDK llvm clang
@@ -109,7 +109,7 @@ sourceSets.main.jniLibs.srcDirs = ['../../../../external/install/ffmpeg/Android'
 ### 3.3 签名与包体
 
 - 签名：`source/signature/Cicada.keystore`（demo 用，正式发布替换）
-- `ANDROID_FULL_PACKAGE=false` 时 AAR 不含 `libalivcffmpeg.so`（宿主 App 自行放入 jniLibs）
+- `ANDROID_FULL_PACKAGE=false` 时 AAR 不含 `libffmpeg.so`（宿主 App 自行放入 jniLibs）
 
 ## 4. minSdk 24 升级点（本仓库已全部完成）
 

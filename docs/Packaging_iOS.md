@@ -24,7 +24,7 @@ cd mediaPlayer
 cmake -G Xcode -DIOS=ON ..
 ```
 
-SDK 产物：`iOS` 下的动态 framework（含 `libalivcffmpeg` + 播放器代码）。
+SDK 产物：`iOS` 下的动态 framework（含 `ffmpeg` 合并库 + 播放器代码）。
 Demo：参考 `doc/compile_ios.md` 中的 Xcode 集成步骤。
 
 ## 4. 发布注意事项

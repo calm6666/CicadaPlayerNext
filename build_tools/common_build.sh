@@ -332,7 +332,7 @@ function link_shared_lib_Android(){
     fi
 
     if [[ -z "${LIB_NAME}" ]];then
-        export LIB_NAME=alivcffmpeg
+        export LIB_NAME=ffmpeg
     fi
 
     echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
@@ -391,7 +391,7 @@ function link_shared_lib_win32(){
     cross_compile_set_platform_win32  $2
     cup_arch=x86
     if [[ -z "${LIB_NAME}" ]];then
-        export LIB_NAME=alivcffmpeg
+        export LIB_NAME=ffmpeg
     fi
 
     echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
@@ -472,7 +472,7 @@ function link_shared_lib_OHOS(){
     cup_arch=${CPU_ARCH}
 
     if [[ -z "${LIB_NAME}" ]];then
-        export LIB_NAME=alivcffmpeg
+        export LIB_NAME=ffmpeg
     fi
 
     echo ABI is $2 FFMPEG_BUILD_DIR is $FFMPEG_BUILD_DIR
@@ -525,7 +525,7 @@ function link_shared_lib_OHOS(){
 #    local install_dir=${CWD}/install/ffmpeg/win32/$2/
 #    cross_compile_set_platform_win32  $2
 #    if [[ -z "${LIB_NAME}" ]];then
-#        export LIB_NAME=alivcffmpeg
+#        export LIB_NAME=ffmpeg
 #    fi
 #
 #    local curr_dir=${CWD}
