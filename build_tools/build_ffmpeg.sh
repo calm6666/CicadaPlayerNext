@@ -128,6 +128,10 @@ function build_ffmpeg(){
         fi
     fi
 
+    # 组件清单 vs 实际配置核对：configure 静默禁用（如 FFmpeg 9 依赖变化）
+    # 会在这里直接报出原因，而不是等 15 分钟编译后在链接期爆 undefined symbol
+    ffmpeg_verify_requested_components || exit 1
+
     ffmpeg_build
     if [[ $? -eq 0 ]]
     then
