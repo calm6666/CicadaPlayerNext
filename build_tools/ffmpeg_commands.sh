@@ -405,12 +405,16 @@ function ffmpeg_config_set_install(){
 }
 # 配置核对：把清单里请求的组件与 configure 实际生成的 config.h 逐一比对。
 # FFmpeg 9 依赖关系变化时，configure 会静默禁用部分组件（config.log 里留下
-# "WARNING: Disabled xxx because not all dependencies are satisfied"），
-# 结果 make 不产出对应对象，直到链接/自愈阶段才爆 undefined symbol。
-# 这里在 configure 之后、make 之前拦截，并直接把警告原因摘出来。
+# "WARNING: Disabled xxx because not all dependencies are satisfied"）。
+#
+# 严格度分级：
+#   - decoder / parser / bsf：禁用 = 致命（缺解码器/解析器直接导致无法播放）
+#   - demuxer / muxer / protocol / hwaccel：禁用 = 仅警告。部分组件按设计
+#     就不链入 FFmpeg：dash_demuxer（需要 libxml2，播放器用自带实现）、
+#     https_protocol/tls（TLS 走 curl），configure 禁用它们属于预期行为。
 function ffmpeg_verify_requested_components(){
     local class class_upper listvar name base macro
-    for class in decoder encoder demuxer muxer parser bsf protocol hwaccel; do
+    for class in decoder parser bsf; do
         listvar="FFMPEG_$(echo "${class}" | tr '[a-z]' '[A-Z]')_LIST_ADDED"
         for name in ${!listvar}; do
             [[ -z "${name}" ]] && continue
@@ -424,6 +428,17 @@ function ffmpeg_verify_requested_components(){
                 echo "       fix: enable the missing dependency shown above in player_ffmpeg_config.sh"
                 echo "            (full reason: grep -i '${base}' ffbuild/config.log)"
                 return 1
+            fi
+        done
+    done
+    for class in demuxer muxer protocol hwaccel; do
+        listvar="FFMPEG_$(echo "${class}" | tr '[a-z]' '[A-Z]')_LIST_ADDED"
+        for name in ${!listvar}; do
+            [[ -z "${name}" ]] && continue
+            base="${name%%,*}"
+            macro="CONFIG_$(echo "${base}" | tr '[a-z]-' '[A-Z]_')_$(echo "${class}" | tr '[a-z]' '[A-Z]')"
+            if ! grep -q "^#define ${macro} 1" config.h; then
+                echo "WARN: ${class} '${name}' disabled by configure (${macro} != 1) — non-fatal"
             fi
         done
     done
