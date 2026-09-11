@@ -25,7 +25,7 @@ namespace Cicada {
         int pull(AVPacket *pkt) override;
 
     private:
-        static int io_write(void *opaque, uint8_t *buf, int size);
+        static int io_write(void *opaque, const uint8_t *buf, int size);
 
     private:
 

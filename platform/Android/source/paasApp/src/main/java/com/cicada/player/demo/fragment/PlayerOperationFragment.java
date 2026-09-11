@@ -352,6 +352,20 @@ public class PlayerOperationFragment extends BaseFragment {
     private void initHardwareDecoder() {
         mHardwareDecoderCheckBox.setChecked(SharedPreferenceUtils.getBooleanExtra(SharedPreferenceUtils.CICADA_PLAYER_HARDWARE_DECODER));
 
+        // demo 原实现漏绑监听：点击开关无任何效果。补上：
+        // 保存偏好 + 下发到播放器（下次 prepare/重进播放页生效）
+        mHardwareDecoderCheckBox.setOnCheckedChangeListener(new CompoundButton.OnCheckedChangeListener() {
+            @Override
+            public void onCheckedChanged(CompoundButton compoundButton, boolean b) {
+                SharedPreferenceUtils.putBooleanExtra(SharedPreferenceUtils.CICADA_PLAYER_HARDWARE_DECODER, b);
+                if (mCicadaPlayerActivity != null) {
+                    mCicadaPlayerActivity.enableHardwareDecoder(b);
+                    Toast.makeText(getContext(), b ? "已开启硬解，重新播放后生效" : "已关闭硬解，重新播放后生效",
+                            Toast.LENGTH_SHORT).show();
+                }
+            }
+        });
+
         if (mCicadaPlayerActivity != null) {
             mCicadaPlayerActivity.setOnInfoListener(new CicadaPlayer.OnInfoListener() {
                 @Override

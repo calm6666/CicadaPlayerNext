@@ -1,5 +1,12 @@
 {
   "src": [
+    "pages/SourceChoosePage",
+    "pages/SourceChooseListPage",
+    "pages/SourceInputUrlPage",
+    "pages/SettingPage",
+    "pages/MultiPlayerPage",
+    "pages/SnapShotPage",
+    "pages/AvPlayerPage",
     "pages/Index"
   ]
 }

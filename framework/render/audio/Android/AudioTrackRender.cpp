@@ -367,14 +367,16 @@ int AudioTrackRender::device_write(unique_ptr<IAFFrame> &frame)
 int AudioTrackRender::write_loop()
 {
     if (mFrameQueue.empty()) {
-        af_msleep(5);
+        // 无帧可写：5ms→20ms 兜底轮询（帧到达由 device_write 入队，AudioTrack
+        // 内部阻塞写），空转开销降为 1/4
+        af_msleep(20);
         mMaxQueSize = std::min(mMaxQueSize + 1, MAX_FRAME_QUEUE_SIZE);
         return 0;
     }
     while (!mFrameQueue.empty() && mRunning) {
         int ret = device_write_internal(mFrameQueue.front());
         if (ret == -EAGAIN) {
-            af_msleep(5);
+            af_msleep(20);
             //            break;
         } else {
             if (mFrameQueue.size() >= mMaxQueSize) {

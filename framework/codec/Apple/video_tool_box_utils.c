@@ -7,7 +7,7 @@
 #include <config.h>
 #include <libavcodec/bytestream.h>
 #include <libavcodec/h264_parse.h>
-#include <libavcodec/hevc_parse.h>
+#include <libavcodec/hevc/parse.h>
 #include <utils/ffmpeg_utils.h>
 #include <utils/frame_work_log.h>
 #include <TargetConditionals.h>
@@ -157,7 +157,7 @@ int parser_extradata(const uint8_t *pData, int size, parserInfo *pInfo, enum AFC
             return -EINVAL;
         }
 
-        sps = (const HEVCSPS *) ps.sps_list[0]->data;
+        sps = ps.sps_list[0];
 
         if (pInfo && sps) {
             pInfo->width = sps->width;
@@ -272,8 +272,8 @@ static CFDataRef ff_videotoolbox_hvcc_extradata_create(const uint8_t *pData, int
     ret = ff_hevc_decode_extradata(pData, size,
                                    &ps, sei, &is_nalff, &nal_length_size, 0, 1, avctx);
     avcodec_free_context(&avctx);
-    vps = (const HEVCVPS *) ps.vps_list[0]->data;
-    sps = (const HEVCSPS *) ps.sps_list[0]->data;
+    vps = ps.vps_list[0];
+    sps = ps.sps_list[0];
     int i, num_pps = 0;
     pps = ps.pps;
     PTLCommon ptlc = vps->ptl.general_ptl;
@@ -286,7 +286,7 @@ static CFDataRef ff_videotoolbox_hvcc_extradata_create(const uint8_t *pData, int
 
     for (i = 0; i < MAX_PPS_COUNT; i++) {
         if (ps.pps_list[i]) {
-            const HEVCPPS *pps = (const HEVCPPS *) ps.pps_list[i]->data;
+            const HEVCPPS *pps = ps.pps_list[i];
             vt_extradata_size += 2 + pps->data_size;
             num_pps++;
         }
@@ -402,7 +402,7 @@ static CFDataRef ff_videotoolbox_hvcc_extradata_create(const uint8_t *pData, int
 
     for (i = 0; i < MAX_PPS_COUNT; i++) {
         if (ps.pps_list[i]) {
-            const HEVCPPS *pps = (const HEVCPPS *) ps.pps_list[i]->data;
+            const HEVCPPS *pps = ps.pps_list[i];
             AV_WB16(p, pps->data_size);
             memcpy(p + 2, pps->data, pps->data_size);
             p += 2 + pps->data_size;

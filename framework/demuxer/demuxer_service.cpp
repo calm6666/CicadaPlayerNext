@@ -119,7 +119,7 @@ namespace Cicada {
 
             mPProbBuffer[mProbBufferSize] = 0;
             mDemuxerPtr = std::unique_ptr<IDemuxer>(
-                              demuxerPrototype::create(url, mPProbBuffer, mProbBufferSize, move(mDemuxerMeta), mOpts));
+                              demuxerPrototype::create(url, mPProbBuffer, mProbBufferSize, std::move(mDemuxerMeta), mOpts));
 
             if (!mDemuxerPtr) {
                 AF_LOGE("create demuxer error\n");
@@ -369,7 +369,7 @@ namespace Cicada {
 
     void demuxer_service::setDemuxerMeta(unique_ptr<DemuxerMeta> &meta)
     {
-        mDemuxerMeta = move(meta);
+        mDemuxerMeta = std::move(meta);
     }
 
     int demuxer_service::GetStreamMeta(std::unique_ptr<streamMeta> &meta, int index, bool sub)

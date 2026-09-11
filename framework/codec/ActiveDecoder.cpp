@@ -79,7 +79,8 @@ void ActiveDecoder::close()
 int ActiveDecoder::decode_func()
 {
     if (bDecoderEOS) {
-        af_usleep(10000);
+        // EOS 后无任何工作，低频兜底轮询即可（10ms→50ms）
+        af_usleep(50000);
         return 0;
     }
     int needWait = 0;
@@ -143,7 +144,9 @@ int ActiveDecoder::decode_func()
 
     if (needWait == 0) {
         std::unique_lock<std::mutex> locker(mSleepMutex);
-        mSleepCondition.wait_for(locker, std::chrono::milliseconds(5), [this]() { return !mRunning; });
+        // 包到达时 thread_send_packet 会 notify_one 立即唤醒，这里的 wait_for
+        // 只是防丢失唤醒的兜底轮询：5ms→20ms，空转开销降为 1/4
+        mSleepCondition.wait_for(locker, std::chrono::milliseconds(20), [this]() { return !mRunning; });
     }
     return 0;
 }

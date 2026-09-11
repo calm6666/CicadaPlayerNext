@@ -1,6 +1,19 @@
 cmake_minimum_required(VERSION 3.15)
 project(cicadaPlayer)
 
+# 项目源码是 UTF-8（无 BOM），而 MSVC 默认按系统 ANSI(cp936) 解码：中文注释
+# 结尾的全角括号（U+FF08/U+FF09 等）在 cp936 下会留下一个悬空的 GBK 首字节，
+# 连行尾换行一起吃掉，于是紧随其后的 #include 整行被并入注释。例如
+# demuxer/sample_decrypt/SampleDecryptDemuxer.cpp 的
+# <libavformat/avformat.h> 就是这样消失的，AVFormatContext 只剩前置声明 ->
+# C2027；构建时满屏的 C4819 也是同一病根。显式声明源码/执行字符集均为
+# UTF-8（字面量字节与当前一致，只修解码）。
+# 必须放在下面的 add_subdirectory 之前，才能覆盖 mediaPlayer / plugin /
+# framework / cicadaPlayer 全部目标（plugin 不包含 framework/windows.cmake）。
+if (MSVC)
+    add_compile_options(/utf-8)
+endif ()
+
 set(CMAKE_CXX_STANDARD 11)
 option(CMDLINE_BUILD "build command line example" OFF)
 set(CMDLINE_BUILD ON)
@@ -59,13 +72,23 @@ endif ()
 target_link_libraries(cicadaPlayer PRIVATE
         framework_filter
         framework_utils
-        framework_drm
+        framework_drm)
+if (MSVC)
+    # MSVC 链合并库 libffmpeg.lib（win32 交叉构建用 --out-implib --kill-at
+    # 生成，MSVC 可直接链；运行时把 libffmpeg.dll 拷到 exe 同目录）
+    # 库名必须写成 libffmpeg：磁盘上的文件名就是 libffmpeg.lib，写成 ffmpeg
+    # 会让链接器去找并不存在的 ffmpeg.lib，报 LNK1181。
+    target_link_libraries(cicadaPlayer PRIVATE libffmpeg)
+else ()
+    target_link_libraries(cicadaPlayer PRIVATE
         avfilter
         avformat
         avcodec
         swresample
         swscale
-        avutil
+        avutil)
+endif ()
+target_link_libraries(cicadaPlayer PRIVATE
         ${FRAMEWORK_LIBS})
 if (NOT MSVC)
 	target_link_libraries(cicadaPlayer PRIVATE
@@ -82,6 +105,9 @@ endif ()
 if (${CMAKE_SYSTEM_NAME} MATCHES "Windows")
     target_link_libraries(cicadaPlayer PUBLIC
             bcrypt
+            # GetOpenFileNameW / OPENFILENAMEW live in comdlg32
+            comdlg32
+            ole32
             )
 else ()
     target_link_libraries(cicadaPlayer PUBLIC

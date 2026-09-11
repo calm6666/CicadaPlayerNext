@@ -1,0 +1,15 @@
+{
+  "modelVersion": "5.0.0",
+  "dependencies": {
+    /* Empty on purpose: the build uses the hvigor bundled with DevEco Studio
+       (tools/hvigor), so no registry access is required. */
+  },
+  "execution": {
+  },
+  "logging": {
+  },
+  "debugging": {
+  },
+  "nodeOptions": {
+  }
+}

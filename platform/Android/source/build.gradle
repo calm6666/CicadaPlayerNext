@@ -7,6 +7,9 @@ apply from: 'config.gradle'
 def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
 
 buildscript {
+    // buildscript 块是独立作用域，脚本级 def 在这里不可见（Gradle 8 严格化），
+    // 需在块内重新求值
+    def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
 
     repositories {
         if (useChinaMirror) {
@@ -16,9 +19,11 @@ buildscript {
         }
         google()
         mavenCentral()   // jcenter 已停止维护，AndroidX/support 库在 google()，其余在 mavenCentral()
+        // ExoPlayer 2.9.6 等旧构件官方 jcenter 已关停，只存活在 jcenter 镜像上
+        maven { url 'https://maven.aliyun.com/repository/jcenter' }
     }
     dependencies {
-        classpath 'com.android.tools.build:gradle:4.0.0'
+        classpath 'com.android.tools.build:gradle:8.7.3'
 
 
         // NOTE: Do not place your application dependencies here; they belong
@@ -38,6 +43,8 @@ allprojects {
         }
         google()
         mavenCentral()
+        // ExoPlayer 2.9.6 等旧构件只在 jcenter 镜像上还有（官方 jcenter 已关停）
+        maven { url 'https://maven.aliyun.com/repository/jcenter' }
     }
 }
 

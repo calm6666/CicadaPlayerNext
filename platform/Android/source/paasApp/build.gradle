@@ -1,6 +1,7 @@
 apply plugin: 'com.android.application'
 
 android {
+    namespace "com.cicada.player.demo"
     compileSdkVersion 34
     defaultConfig {
         applicationId "com.cicada.player.demo"
@@ -33,18 +34,15 @@ android {
     buildTypes {
         release {
             minifyEnabled false
+            // 用仓库自带 keystore 签名，否则 release 包未签名无法安装（未包含证书）
+            signingConfig signingConfigs.release
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
         }
 
-
-    }
-
-    android.applicationVariants.all { variant ->
-        variant.outputs.all { output ->
-            if (outputFile != null && outputFile.name.endsWith('.apk')) {
-                outputFileName = "CicadaPlayerDemo_${variant.buildType.name}.apk"
-            }
+        debug {
+            signingConfig signingConfigs.debug
         }
+
     }
 
     compileOptions {
@@ -54,6 +52,15 @@ android {
 
 
 
+}
+
+// AGP 8：applicationVariants 旧 API 已移除，用 androidComponents.onVariants 重命名 APK
+androidComponents {
+    onVariants(selector().all()) { variant ->
+        variant.outputs.forEach { output ->
+            output.outputFileName.set("CicadaPlayerDemo_${variant.buildType}.apk")
+        }
+    }
 }
 
 android {

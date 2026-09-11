@@ -9,6 +9,8 @@ import android.text.TextUtils;
 import android.view.Surface;
 import android.view.TextureView;
 
+import java.io.File;
+
 import com.cicada.player.CicadaExternalPlayer;
 import com.cicada.player.CicadaPlayer;
 import com.cicada.player.bean.ErrorCode;
@@ -344,6 +346,15 @@ public class ExternPlayerExo extends CicadaExternalPlayer {
 
     @Override
     public void setDataSource(String url) {
+        // 本地文件路径转 file:// URI：ExoPlayer 的 DefaultDataSource 只认带
+        // scheme 的 URI（file/content/http…），裸绝对路径（如复制到 cache 的
+        // 本地视频）会被判成不支持的 scheme，报 DEMUXER_OPENURL(0x20030001)
+        if (!TextUtils.isEmpty(url) && !url.contains("://")) {
+            File localFile = new File(url);
+            if (localFile.exists()) {
+                url = Uri.fromFile(localFile).toString();
+            }
+        }
         mPlayUrl = url;
         changePlayState(PlayerStatus.PLAYER_INITIALZED);
     }

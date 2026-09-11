@@ -293,7 +293,9 @@ typedef struct {
  * among the first few packets read from the file unless seeking takes place.
  * It can also be accessed at any time in AVStream.attached_pic.
  */
+#ifndef AV_DISPOSITION_ATTACHED_PIC
 #define AV_DISPOSITION_ATTACHED_PIC      0x0400
+#endif
 
 typedef struct Source_meta {
     char *key;

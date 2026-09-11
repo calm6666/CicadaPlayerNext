@@ -3,6 +3,12 @@
 //
 // See OhosDrmHandler.h for the design.
 //
+// NOTE: every DRM Kit call below was checked against the API 22 SDK headers.
+// The previous revision of this file was written against an API that does not
+// exist in the NDK (OH_MediaKeySystem_Create with one argument,
+// OH_MediaKeySession_Create, OH_DRM_ErrCode, OH_MediaKeyRequestInfo.mediaKeyType,
+// ...), so it had never compiled.
+//
 
 #define LOG_TAG "OhosDrmHandler"
 
@@ -24,6 +30,9 @@ namespace Cicada {
     static const char *kPlayReadyUuid = "9a04f079-9840-4286-ab92-e65be0885f95";
     static const char *kFairPlayUuid = "94ce86fb-07ff-4f43-adb8-93d2fa968ca2";
     static const char *kClearKeyUuid = "e2719d58-a985-b3c9-781a-b030af78d30e";
+
+    /** Buffer for the offline key id returned by ProcessMediaKeyResponse. */
+    static const int32_t kOfflineKeyIdCapacity = 512;
 
     OhosDrmHandler OhosDrmHandler::se(0);
 
@@ -66,59 +75,88 @@ namespace Cicada {
     int OhosDrmHandler::open()
     {
         const std::string &uuid = drmInfo.format;
-        mSystem = OH_MediaKeySystem_Create(uuid.c_str());
-        if (mSystem == nullptr) {
-            AF_LOGE("OH_MediaKeySystem_Create failed for %s (plugin not present?)\n", uuid.c_str());
+
+        // OH_MediaKeySystem_Create(const char *name, MediaKeySystem **system)
+        // native_mediakeysystem.h:153
+        Drm_ErrCode err = OH_MediaKeySystem_Create(uuid.c_str(), &mSystem);
+        if (err != DRM_ERR_OK || mSystem == nullptr) {
+            AF_LOGE("OH_MediaKeySystem_Create failed %d for %s (plugin not present?)\n",
+                    static_cast<int>(err), uuid.c_str());
             mError = true;
             return -1;
         }
 
-        OH_MediaKeySession *session = nullptr;
-        OH_DRM_ErrCode err = OH_MediaKeySession_Create(mSystem, &session);
-        if (err != DRM_ERR_OK || session == nullptr) {
-            AF_LOGE("OH_MediaKeySession_Create failed %d\n", err);
+        // OH_MediaKeySystem_CreateMediaKeySession(MediaKeySystem *,
+        //     DRM_ContentProtectionLevel *, MediaKeySession **)
+        // native_mediakeysystem.h:272
+        // SW_CRYPTO is the level ClearKey and Widevine L3 use; L1 content would
+        // need CONTENT_PROTECTION_LEVEL_HW_CRYPTO plus a secure surface.
+        DRM_ContentProtectionLevel level = CONTENT_PROTECTION_LEVEL_SW_CRYPTO;
+        err = OH_MediaKeySystem_CreateMediaKeySession(mSystem, &level, &mSession);
+        if (err != DRM_ERR_OK || mSession == nullptr) {
+            AF_LOGE("OH_MediaKeySystem_CreateMediaKeySession failed %d\n", static_cast<int>(err));
+            mSession = nullptr;
             mError = true;
             return -1;
         }
-        mSession = session;
 
-        // Build the key request and hand the challenge to the app callback.
-        // The app POSTs the challenge to the license server and returns the
-        // license response; we then install it with ProcessMediaKeyResponse.
-        if (drmCallback != nullptr) {
-            OH_MediaKeyRequestInfo requestInfo{};
-            requestInfo.mediaKeyType = MEDIA_KEY_TYPE_ONLINE;
-            requestInfo.mimeType = "video/mp4";
-            // initData: PSSH (base64-decoded) or the default KID, as available.
-            // When no initData is provided, the plugin derives it from the
-            // first encrypted sample's key id.
-            std::vector<uint8_t> initData;
-            if (!drmInfo.pssh.empty()) {
-                // base64 decode omitted for brevity in bring-up builds; the
-                // sample path keeps initData empty and relies on sample key ids.
-            }
-            requestInfo.initData = initData.empty() ? nullptr : initData.data();
-            requestInfo.initDataCount = static_cast<int32_t>(initData.size());
+        if (drmCallback == nullptr) {
+            // No license callback configured: the session is created but no key
+            // request is issued (the caller may drive it later).
+            return 0;
+        }
 
-            err = OH_MediaKeySession_GenerateMediaKeyRequest(mSession, &requestInfo);
-            if (err != DRM_ERR_OK) {
-                AF_LOGW("GenerateMediaKeyRequest err %d (license deferred)\n", err);
-            }
+        // OH_MediaKeySession_GenerateMediaKeyRequest(MediaKeySession *,
+        //     DRM_MediaKeyRequestInfo *, DRM_MediaKeyRequest *)
+        // native_mediakeysession.h:145
+        DRM_MediaKeyRequestInfo requestInfo{};
+        requestInfo.type = MEDIA_KEY_TYPE_ONLINE;
+        // mimeType is a fixed char[MAX_MIMETYPE_LEN] buffer, not a pointer.
+        strncpy(requestInfo.mimeType, "video/mp4", sizeof(requestInfo.mimeType) - 1);
+        // initData (PSSH) is a fixed uint8_t[MAX_INIT_DATA_LEN] buffer. The
+        // bring-up path leaves it empty and relies on the sample key ids; a
+        // base64-decoded drmInfo.pssh should be memcpy'd here once available.
+        requestInfo.initDataLen = 0;
 
-            // Deliver the challenge through the DRM callback.
-            DrmRequestParam param{};
-            param.mDrmType = "OHOS";
-            param.mParam = const_cast<char *>(drmInfo.uri.c_str());
-            DrmResponseData *response = drmCallback(param);
-            if (response != nullptr) {
-                int size = 0;
-                const char *data = response->getData(&size);
-                if (data != nullptr && size > 0) {
-                    OH_MediaKeySession_ProcessMediaKeyResponse(mSession,
-                            reinterpret_cast<uint8_t *>(const_cast<char *>(data)), size);
+        DRM_MediaKeyRequest request{};
+        err = OH_MediaKeySession_GenerateMediaKeyRequest(mSession, &requestInfo, &request);
+        if (err != DRM_ERR_OK) {
+            AF_LOGW("GenerateMediaKeyRequest err %d (license deferred)\n", static_cast<int>(err));
+        }
+
+        // Deliver the challenge through the app-side DRM callback. The key
+        // request blob and the licence server URL come from the DRM Kit and are
+        // exposed on DrmRequestParam; an app callback POSTs the blob to the
+        // server and returns the licence response.
+        DrmRequestParam param{};
+        param.mDrmType = "OHOS";
+        param.mParam = const_cast<char *>(drmInfo.uri.c_str());
+        if (request.dataLen > 0) {
+            param.mKeyRequest.assign(reinterpret_cast<const char *>(request.data),
+                                     static_cast<size_t>(request.dataLen));
+        }
+        param.mLicenseUrl = request.defaultUrl;
+        AF_LOGI("DRM challenge: %d bytes, licence url %s\n", request.dataLen, request.defaultUrl);
+        DrmResponseData *response = drmCallback(param);
+        if (response != nullptr) {
+            int size = 0;
+            const char *data = response->getData(&size);
+            if (data != nullptr && size > 0) {
+                // OH_MediaKeySession_ProcessMediaKeyResponse(MediaKeySession *,
+                //     uint8_t *response, int32_t responseLen,
+                //     uint8_t *offlineMediaKeyId, int32_t *offlineMediaKeyIdLen)
+                // native_mediakeysession.h:163
+                uint8_t offlineKeyId[kOfflineKeyIdCapacity] = {0};
+                int32_t offlineKeyIdLen = kOfflineKeyIdCapacity;
+                err = OH_MediaKeySession_ProcessMediaKeyResponse(mSession,
+                        reinterpret_cast<uint8_t *>(const_cast<char *>(data)), size,
+                        offlineKeyId, &offlineKeyIdLen);
+                if (err != DRM_ERR_OK) {
+                    AF_LOGE("ProcessMediaKeyResponse failed %d\n", static_cast<int>(err));
+                    mError = true;
                 }
-                delete response;
             }
+            delete response;
         }
 
         return 0;

@@ -4,14 +4,15 @@
 // DRM support for HarmonyOS / OpenHarmony via the DRM Kit native C API
 // (libnative_drm.so):
 //
-//   OH_MediaKeySystem  - a DRM plugin instance (selected by system UUID)
-//   OH_MediaKeySession - per-stream key/license state
+//   MediaKeySystem  - a DRM plugin instance (selected by its UUID/name)
+//   MediaKeySession - per-stream key/license state
 //
-// License flow: create system + session -> OH_MediaKeySession_GenerateMediaKeyRequest
-// (challenge) -> the app-side license callback (setDrmCallback) delivers the
-// license response -> OH_MediaKeySession_ProcessMediaKeyResponse installs it.
-// The session is then attached to the OH_AVCodec decoder with
-// OH_AVCodec_SetMediakeySessionConfig() so the codec service decrypts CENC
+// License flow: OH_MediaKeySystem_Create -> OH_MediaKeySystem_CreateMediaKeySession
+// -> OH_MediaKeySession_GenerateMediaKeyRequest (challenge) -> the app-side
+// license callback (setDrmCallback) delivers the license response ->
+// OH_MediaKeySession_ProcessMediaKeyResponse installs it. The session is then
+// attached to the decoder with OH_VideoDecoder_SetDecryptionConfig() /
+// OH_AudioCodec_SetDecryptionConfig() so the codec service decrypts CENC
 // samples in-pipeline.
 //
 // Supported systems (plugin availability is device/vendor-dependent):
@@ -30,8 +31,12 @@
 #include <drm/DrmHandler.h>
 #include <drm/DrmHandlerPrototype.h>
 
-typedef struct OH_MediaKeySystemNative OH_MediaKeySystem;
-typedef struct OH_MediaKeySessionNative OH_MediaKeySession;
+// The DRM Kit's own opaque types. Do NOT invent tags such as
+// "struct OH_MediaKeySessionNative OH_MediaKeySession": the SDK names these
+// MediaKeySystem / MediaKeySession (native_drm_common.h:501/508) and the codec
+// headers re-typedef MediaKeySession themselves, so an invented declaration
+// collides with them.
+#include <multimedia/drm_framework/native_drm_common.h>
 
 namespace Cicada {
 
@@ -48,8 +53,12 @@ namespace Cicada {
          */
         int open();
 
-        /** Attach this session to an OH_AVCodec decoder (before Configure). */
-        OH_MediaKeySession *getMediaKeySession()
+        /**
+         * The DRM Kit session to attach to a decoder via
+         * OH_VideoDecoder_SetDecryptionConfig / OH_AudioCodec_SetDecryptionConfig
+         * (must be called before Configure).
+         */
+        MediaKeySession *getMediaKeySession()
         {
             return mSession;
         }
@@ -75,8 +84,8 @@ namespace Cicada {
         static OhosDrmHandler se;
 
     private:
-        OH_MediaKeySystem *mSystem{nullptr};
-        OH_MediaKeySession *mSession{nullptr};
+        MediaKeySystem *mSystem{nullptr};
+        MediaKeySession *mSession{nullptr};
         bool mError{false};
     };
 } // namespace Cicada

@@ -68,7 +68,7 @@ void MediaPacketQueue::AddPacket(mediaPacket frame)
         mDropedExtra_data_size = 0;
     }
 
-    mQueue.push_back(move(frame));
+    mQueue.push_back(std::move(frame));
     if (empty) {
         mCurrent = mQueue.begin();
     }
@@ -249,7 +249,7 @@ std::unique_ptr<IAFPacket> MediaPacketQueue::getPacket()
 
     std::unique_ptr<IAFPacket> packet;
     if (mMAXBackwardDuration == 0) {
-        packet = move(mQueue.front());
+        packet = std::move(mQueue.front());
         mQueue.pop_front();
         mCurrent = mQueue.begin();
         if (packet && packet->getInfo().duration > 0 && !packet->getDiscard()) {

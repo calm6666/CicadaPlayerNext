@@ -416,6 +416,31 @@ public class CicadaVodPlayerView extends RelativeLayout {
         mCicadaVodPlayer.setDataSource(aliyunLocalSource);
     }
 
+    /**
+     * 对象模式播放（DASH/HLS）：接口返回的 MediaManifest JSON。
+     * 先反序列化为 JSONObject（等价于"JSON 反序列化对象传入"路径）再交给
+     * 播放器，无需 m3u8/mpd 文本与清单网络请求。
+     */
+    public void setDataSourceManifest(String mediaManifestJson) {
+        if (mCicadaVodPlayer == null) {
+            return;
+        }
+        clearAllSource();
+        reset();
+        mUrlSource = null;
+        try {
+            JSONObject mediaManifest = new JSONObject(mediaManifestJson);
+            mCicadaVodPlayer.setDataSource(mediaManifest);
+        } catch (JSONException e) {
+            VcPlayerLog.e(TAG, "parse MediaManifest json failed: " + e.getMessage());
+            showErrorTipView("JSON_PARSE_ERROR", "JSON_PARSE_ERROR", "MediaManifest JSON 解析失败");
+        } catch (UnsupportedOperationException e) {
+            // 外部播放器（ExoPlayer/MediaPlayer）不支持对象播放
+            showErrorTipView("MANIFEST_NOT_SUPPORT", "MANIFEST_NOT_SUPPORT",
+                    "当前播放器内核不支持对象播放，请切换到 CicadaPlayer");
+        }
+    }
+
     private static class MyNetChangeListener implements NetWatchdog.NetChangeListener {
 
         private WeakReference<CicadaVodPlayerView> viewWeakReference;
@@ -1072,6 +1097,13 @@ public class CicadaVodPlayerView extends RelativeLayout {
     /**
      * 初始化播放器显示view
      */
+    /**
+     * 播放中 surface 被销毁过（切后台等）：回前台 surfaceCreated 时
+     * 由 native 侧恢复；mAutoResumeAfterBackground 记录"后台自动暂停，
+     * 回前台续播"（后台播放开关关闭时）
+     */
+    private boolean mAutoResumeAfterBackground = false;
+
     private void initTextureView() {
         boolean selectedCicadaPlayer = SharedPreferenceUtils.getBooleanExtra(SharedPreferenceUtils.SELECTED_CICADA_PLAYER);
         mTextureView = new SurfaceView(getContext().getApplicationContext());
@@ -1084,6 +1116,10 @@ public class CicadaVodPlayerView extends RelativeLayout {
 //                    if(!selectedCicadaPlayer){
 //                        surface.setTextureView(mTextureView);
 //                    }
+                    // 绑定新 surface：native 侧对齐 ExoPlayer 2.9.6，用
+                    // MediaCodec.setOutputSurface 把 codec 从内部 DummySurface
+                    // 切回真实 surface（codec 全程不重建）；暂停状态下 native
+                    // 会用"渲染门 + 原地 seek"逐帧精确恢复暂停的那一帧
                     mCicadaVodPlayer.setSurface(surfaceHolder.getSurface());
 
                     //防止黑屏
@@ -1100,6 +1136,10 @@ public class CicadaVodPlayerView extends RelativeLayout {
             @Override
             public void surfaceDestroyed(SurfaceHolder surfaceHolder) {
                 if (mCicadaVodPlayer != null) {
+                    // 仅解绑 surface：不 pause、不 flush 解码器。native 侧对齐
+                    // ExoPlayer 2.9.6（MediaCodecVideoRenderer.setSurface），把
+                    // codec 输出切到内部 DummySurface，codec 保持运行、帧被
+                    // 静默丢弃；回前台 surfaceCreated 再切回
                     mCicadaVodPlayer.setSurface(null);
                 }
             }
@@ -1689,6 +1729,19 @@ public class CicadaVodPlayerView extends RelativeLayout {
      *
      * @param targetMode
      */
+    public interface OnScreenModeChangeListener {
+        /**
+         * @param fullScreen true=进入全屏；false=退出全屏回到小窗
+         */
+        void onScreenModeChanged(boolean fullScreen);
+    }
+
+    private OnScreenModeChangeListener mOnScreenModeChangeListener;
+
+    public void setOnScreenModeChangeListener(OnScreenModeChangeListener listener) {
+        mOnScreenModeChangeListener = listener;
+    }
+
     public void changeScreenMode(CicadaScreenMode targetMode, boolean isReverse) {
         VcPlayerLog.d(TAG, "mIsFullScreenLocked = " + mIsFullScreenLocked + " ， targetMode = " + targetMode);
 
@@ -1701,6 +1754,12 @@ public class CicadaVodPlayerView extends RelativeLayout {
         //这里可能会对模式做一些修改
         if (targetMode != mCurrentScreenMode) {
             mCurrentScreenMode = finalScreenMode;
+        }
+
+        // 通知外部（Activity）全屏状态：竖拍视频全屏保持竖屏时，
+        // Activity 也要隐藏按钮/标题等外围 UI
+        if (mOnScreenModeChangeListener != null) {
+            mOnScreenModeChangeListener.onScreenModeChanged(finalScreenMode == CicadaScreenMode.Full);
         }
 
         if (mControlView != null) {
@@ -1720,8 +1779,12 @@ public class CicadaVodPlayerView extends RelativeLayout {
             if (finalScreenMode == CicadaScreenMode.Full) {
                 if (getLockPortraitMode() == null) {
                     //不是固定竖屏播放。
-                    //                    ((Activity) context).setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
-                    if (isReverse) {
+                    // 竖拍视频全屏保持竖屏，横屏视频才转横屏
+                    int videoWidth = mCicadaVodPlayer.getVideoWidth();
+                    int videoHeight = mCicadaVodPlayer.getVideoHeight();
+                    if (videoWidth > 0 && videoHeight > videoWidth) {
+                        ((Activity) context).setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                    } else if (isReverse) {
                         ((Activity) context).setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE);
                     } else {
                         ((Activity) context).setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE);
@@ -1937,22 +2000,31 @@ public class CicadaVodPlayerView extends RelativeLayout {
             return;
         }
 
-        start();
-
+        // 后台时因"后台播放开关关闭"自动暂停过 → 回前台继续播放；
+        // 手动暂停后退后台则保持暂停（由 surfaceCreated 里的原地 seek 恢复画面）
+        if (mAutoResumeAfterBackground) {
+            mAutoResumeAfterBackground = false;
+            start();
+        }
     }
 
     /**
-     * 保存当前的状态，供恢复使用
+     * 保存当前的状态，供恢复使用。
+     *
+     * 仅在"后台播放开关关闭"时被调用（Activity.onStop 按开关决定是否调
+     * onStop）：播放中则暂停并记录回前台续播。此刻 native 侧已把 codec
+     * 输出切到内部 DummySurface（对齐 ExoPlayer 2.9.6），pause 的 flush
+     * 落在 dummy surface 上，不会出现旧版"在已销毁 surface 上 flush →
+     * 华为 codec 僵尸"的问题。
      */
     private void savePlayerState() {
         if (mCicadaVodPlayer == null) {
             return;
         }
-
-        //然后再暂停播放器
-        //如果希望后台继续播放，不需要暂停的话，可以注释掉pause调用。
-        pause();
-
+        if (currentPlayState == CicadaPlayer.started) {
+            mAutoResumeAfterBackground = true;
+            pause();
+        }
     }
 
 

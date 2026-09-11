@@ -104,7 +104,8 @@ bool AVAFPacket::getEncryptionInfo(IAFPacket::EncryptionInfo *dst)
 {
     if (mAVEncryptionInfo == nullptr) {
 
-        int encryption_info_size;
+        // FFmpeg 9: av_packet_get_side_data 的尺寸参数为 size_t*
+        size_t encryption_info_size = 0;
         const uint8_t *new_encryption_info = av_packet_get_side_data(mpkt, AV_PKT_DATA_ENCRYPTION_INFO, &encryption_info_size);
 
         if (encryption_info_size <= 0 || new_encryption_info == nullptr) {
@@ -218,8 +219,10 @@ void AVAFFrame::copyInfo()
 
     mInfo.pts = mAvFrame->pts;
     mInfo.pkt_dts = mAvFrame->pkt_dts;
-    mInfo.key = mAvFrame->key_frame;
-    mInfo.duration = mAvFrame->pkt_duration;
+    // FFmpeg 6.0：AVFrame::key_frame 删除 → AV_FRAME_FLAG_KEY；
+    // AVFrame::pkt_duration 删除 → duration
+    mInfo.key = mAvFrame->flags & AV_FRAME_FLAG_KEY;
+    mInfo.duration = mAvFrame->duration;
 
     if (mType == FrameTypeVideo) {
         mInfo.video.height = mAvFrame->height;

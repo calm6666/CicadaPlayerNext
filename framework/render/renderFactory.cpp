@@ -3,6 +3,10 @@
 //
 #include "renderFactory.h"
 
+// Needed for std::unique_ptr below; some platform header sets do not pull it in
+// transitively (observed on the OHOS build).
+#include <memory>
+
 #ifdef ANDROID
     #include "audio/Android/AudioTrackRender.h"
 #endif
@@ -69,7 +73,7 @@ std::unique_ptr<IAudioRender> AudioRenderFactory::create()
     return nullptr;
 }
 
-unique_ptr<IVideoRender> videoRenderFactory::create(uint64_t flags)
+std::unique_ptr<IVideoRender> videoRenderFactory::create(uint64_t flags)
 {
     if (flags & IVideoRender::FLAG_DUMMY) {
         return std::unique_ptr<IVideoRender>(new DummyVideoRender());

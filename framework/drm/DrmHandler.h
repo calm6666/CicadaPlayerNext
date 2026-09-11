@@ -22,6 +22,17 @@ namespace Cicada {
 
         std::string mDrmType{};
         void *mParam{nullptr};
+
+        /**
+         * Optional: the DRM licence challenge produced by the platform DRM
+         * plugin, so an app-side callback can POST it to a licence server.
+         * Empty when the platform's DRM stack hands the challenge to the
+         * codec out-of-band (e.g. the Android MediaDrm path).
+         */
+        std::string mKeyRequest{};
+
+        /** Optional: the licence server URL reported by the DRM plugin. */
+        std::string mLicenseUrl{};
     };
 
     class DrmResponseData {

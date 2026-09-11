@@ -152,6 +152,16 @@ void SMPAVDeviceManager::invalidDevices(uint64_t deviceTypes)
         mVideoRenderValid = false;
     }
 }
+void SMPAVDeviceManager::invalidateDecoder(uint64_t deviceTypes)
+{
+    std::lock_guard<std::mutex> uMutex(mMutex);
+    if (deviceTypes & DEVICE_TYPE_AUDIO) {
+        mAudioDecoder.valid = false;
+    }
+    if (deviceTypes & DEVICE_TYPE_VIDEO) {
+        mVideoDecoder.valid = false;
+    }
+}
 void SMPAVDeviceManager::flushDevice(uint64_t deviceTypes)
 {
     /*

@@ -52,7 +52,7 @@ bool ffmpegVideoFilter::init(int type)
     AVFilterInOut *outputs = avfilter_inout_alloc();
     AVFilterInOut *inputs = avfilter_inout_alloc();
     AVRational time_base = {100000, 1};//fmt_ctx->streams[video_stream_index]->time_base;
-    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUV420P, AV_PIX_FMT_NONE};
+    enum AVPixelFormat pix_fmts[] = {AV_PIX_FMT_YUV420P};
 
     m_pFilterGraph = avfilter_graph_alloc();
     if (!outputs || !inputs || !m_pFilterGraph) {
@@ -79,7 +79,11 @@ bool ffmpegVideoFilter::init(int type)
         goto end;
     }
 
-    ret = av_opt_set_int_list(buffersink_ctx, "pix_fmts", pix_fmts, AV_PIX_FMT_NONE, AV_OPT_SEARCH_CHILDREN);
+    // FFmpeg 9.0：av_opt_set_int_list 已删除，buffersink 选项 pix_fmts 改名
+    // pixel_formats（AV_OPT_TYPE_PIXEL_FMT|ARRAY），改用 av_opt_set_array，
+    // 不再需要 AV_PIX_FMT_NONE 终止符（显式给元素个数），与 ffplay.c 一致
+    ret = av_opt_set_array(buffersink_ctx, "pixel_formats", AV_OPT_SEARCH_CHILDREN,
+                           0, FF_ARRAY_ELEMS(pix_fmts), AV_OPT_TYPE_PIXEL_FMT, pix_fmts);
     if (ret < 0) {
         av_log(NULL, AV_LOG_ERROR, "Cannot set output pixel format\n");
         goto end;

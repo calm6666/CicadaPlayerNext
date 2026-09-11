@@ -96,6 +96,17 @@ if (APPLE)
             )
 endif ()
 
+if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    # The OHOS hardware decoder represents a surface-mode (already rendered)
+    # frame with AFMediaCodecFrame, exactly like the Android MediaCodec path,
+    # so this translation unit is required there as well -- without it the
+    # AFMediaCodecFrame constructor is undefined at link time.
+    list(APPEND SOURCE_FILES
+            ../base/media/AFMediaCodecFrame.cpp
+            ../base/media/AFMediaCodecFrame.h
+            )
+endif ()
+
 if (ANDROID)
     set(SOURCE_FILES ${SOURCE_FILES}
             ../base/media/AFMediaCodecFrame.cpp

@@ -6,6 +6,7 @@
 #define FRAMEWORK_VIDEO_DECODER_H
 
 #include <vector>
+#include <cstdint>
 #include <utils/AFMediaType.h>
 #include <string>
 #include <mutex>
@@ -71,6 +72,47 @@ namespace Cicada {
         virtual void flush() = 0;
 
         virtual void updateMetaData(const Stream_meta *meta){};
+
+        /**
+         * surface 重建（如前后台切换）后热重绑解码器输出 surface。
+         * 仅隧道直通（MediaCodec）解码器需要实现，其余解码器默认 no-op。
+         */
+        virtual int setOutputSurface(void *surface)
+        {
+            return 0;
+        }
+
+        /**
+         * 隧道直通：最近一次实际渲染（releaseOutputBuffer(render=true)）的
+         * 视频帧 PTS 与帧间隔（us）。用于暂停后 surface 重建时逐帧精确恢复
+         * "暂停的那一帧"。默认返回无意义值。
+         */
+        virtual int64_t getLastRenderedVideoPts()
+        {
+            return INT64_MIN;
+        }
+
+        virtual int64_t getLastRenderedVideoFrameDur()
+        {
+            return 0;
+        }
+
+        /**
+         * 渲染门（暂停帧恢复专用）：设置后只放行 PTS 精确等于 gatePts 的
+         * 视频帧，其余帧不上屏（避免从关键帧开始闪帧）；INT64_MIN 关闭。
+         */
+        virtual void setRenderGate(int64_t gatePts)
+        {}
+
+        /**
+         * 渲染门是否已命中（门帧已实际渲染）。未启用渲染门时恒为 true。
+         * 暂停帧恢复期间 seek 必须等门帧渲染后才能宣告完成（否则读包/解码
+         * 管线会在门帧解码前停掉）。
+         */
+        virtual bool isRenderGateHit()
+        {
+            return true;
+        }
 
         virtual void close() = 0;
 

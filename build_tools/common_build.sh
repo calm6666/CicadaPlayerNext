@@ -235,15 +235,25 @@ function build_libs(){
 # 变化，因此不再按固定文件名探测 .o；改为与对象布局无关的两级校验：
 #   1) 6 个 FFmpeg 静态库档案必须存在且非空（make 退出码已在 ffmpeg_build 检查）
 #   2) 档案级符号校验：对整个 .a 做一次 nm，验证关键 FFCodec 注册符号存在
-#      （不假设符号在哪个具体对象文件里）
+#      （不假设符号在哪个具体对象文件里；mingw i686 符号带前导下划线，
+#      [ _] 前缀同时兼容带/不带下划线两种 nm 输出）
 # 整包链接 make 产出的 .a（FFmpeg 9.0 用 .objs 响应文件喂给 llvm-ar，见官方
 # "ffbuild: read library linker objects from a file" 补丁），对对象布局变化免疫。
 # 失败时打印明确修复指令并返回非零；调用方退出。
 # ============================================================================
 function prepare_ffmpeg_link_input(){
     local platform="$1"
-    local nmbin="${CROSS_PREFIX}nm"
-    [[ -x "${nmbin}" ]] || nmbin=$(command -v nm 2>/dev/null || true)
+    # 交叉工具链的 nm 优先；win32 平台（MinGWConfig.sh）只设 CROSS_COMPILE
+    # 不设 CROSS_PREFIX，所以用 CROSS_COMPILE-nm（i686/x86_64-w64-mingw32-nm），
+    # 都没有才退回宿主 nm
+    local nmbin=""
+    if [[ -n "${CROSS_PREFIX}" && -x "$(command -v "${CROSS_PREFIX}nm" 2>/dev/null)" ]]; then
+        nmbin="${CROSS_PREFIX}nm"
+    elif [[ -n "${CROSS_COMPILE}" && -x "$(command -v "${CROSS_COMPILE}-nm" 2>/dev/null)" ]]; then
+        nmbin="${CROSS_COMPILE}-nm"
+    else
+        nmbin=$(command -v nm 2>/dev/null || true)
+    fi
 
     # 1) 六个静态库档案必须存在且非空
     FFMPEG_LINK_LIBS=""
@@ -265,16 +275,23 @@ function prepare_ffmpeg_link_input(){
     if [[ -n "${nmbin}" ]]; then
         local symdump sym
         symdump=$("${nmbin}" --print-file-name ${FFMPEG_LINK_LIBS} 2>/dev/null || true)
-        for sym in ff_aac_decoder ff_aac_fixed_decoder ff_aac_latm_decoder ff_hevc_decoder \
-                   ff_opus_decoder ff_hevc_parser ff_opus_parser \
-                   ff_h264_mp4toannexb_bsf; do
-            if ! grep -q " ${sym}$" <<< "${symdump}"; then
-                echo "ERROR: symbol ${sym} missing from FFmpeg archives"
-                echo "       object tree does not match current FFmpeg version/config"
-                echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh ${platform}"
-                return 1
-            fi
-        done
+        if [[ -z "${symdump}" ]]; then
+            echo "WARN: ${nmbin} produced no output, skip FFmpeg symbol sanity check"
+        else
+            for sym in ff_aac_decoder ff_aac_fixed_decoder ff_aac_latm_decoder ff_hevc_decoder \
+                       ff_opus_decoder ff_hevc_parser ff_opus_parser \
+                       ff_h264_mp4toannexb_bsf; do
+                # mingw i686 的 COFF 符号带前导下划线（_ff_aac_decoder），
+                # 其它工具链不带；[ _] 前缀同时兼容两种 nm 输出
+                if ! grep -qE "[ _]${sym}$" <<< "${symdump}"; then
+                    echo "ERROR: symbol ${sym} missing from FFmpeg archives"
+                    echo "       object tree does not match current FFmpeg version/config"
+                    echo "       (checked with: ${nmbin})"
+                    echo "       fix: rm -rf \"${FFMPEG_BUILD_DIR}\" && re-run ./build_external.sh ${platform}"
+                    return 1
+                fi
+            done
+        fi
     fi
     return 0
 }

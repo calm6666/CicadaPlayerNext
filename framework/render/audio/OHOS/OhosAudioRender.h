@@ -13,13 +13,20 @@
 #ifdef __OHOS__
 
 #include <render/audio/IAudioRender.h>
+
+// Use the SDK's own declarations. Re-declaring the opaque type with an invented
+// tag ("struct OH_AudioRendererNative") collides with the real typedef in
+// ohaudio/native_audiostream_base.h ("typedef struct OH_AudioRendererStruct
+// OH_AudioRenderer;") and the SDK header then fails with
+//   error: typedef redefinition with different types
+#include <ohaudio/native_audiostream_base.h>
+#include <ohaudio/native_audiorenderer.h>
+
 #include <atomic>
 #include <condition_variable>
 #include <deque>
 #include <mutex>
 #include <vector>
-
-typedef struct OH_AudioRendererNative OH_AudioRenderer;
 
 namespace Cicada {
 
@@ -61,10 +68,12 @@ namespace Cicada {
     private:
         static int32_t onWriteData(OH_AudioRenderer *renderer, void *userData,
                                    void *buffer, int32_t length);
-        static int32_t onStreamEvent(OH_AudioRenderer *renderer, void *userData, int32_t event);
+        // The SDK passes the real enum types here, not int32_t.
+        static int32_t onStreamEvent(OH_AudioRenderer *renderer, void *userData,
+                                     OH_AudioStream_Event event);
         static int32_t onInterruptEvent(OH_AudioRenderer *renderer, void *userData,
-                                        int32_t type, int32_t hint);
-        static int32_t onError(OH_AudioRenderer *renderer, void *userData, int32_t error);
+                                        OH_AudioInterrupt_ForceType type, OH_AudioInterrupt_Hint hint);
+        static int32_t onError(OH_AudioRenderer *renderer, void *userData, OH_AudioStream_Result error);
 
     private:
         OH_AudioRenderer *mRenderer{nullptr};

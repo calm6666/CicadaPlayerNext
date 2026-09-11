@@ -1,6 +1,7 @@
 apply plugin: 'com.android.library'
 
 android {
+    namespace "com.cicada.player.zxing"
     compileSdkVersion 34
     defaultConfig {
         minSdkVersion 24

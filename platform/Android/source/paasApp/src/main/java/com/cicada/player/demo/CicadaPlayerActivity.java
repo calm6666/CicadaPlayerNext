@@ -7,6 +7,8 @@ import android.content.res.Configuration;
 import android.graphics.Bitmap;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
 import android.support.annotation.NonNull;
 import android.support.v4.app.Fragment;
 import android.support.v4.app.FragmentManager;
@@ -18,6 +20,9 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.FrameLayout;
+
+import com.google.android.exoplayer2.ui.AspectRatioFrameLayout;
 import android.widget.LinearLayout;
 import android.widget.RadioButton;
 import android.widget.RadioGroup;
@@ -27,6 +32,8 @@ import android.widget.Toast;
 
 import com.cicada.player.CicadaPlayer;
 import com.cicada.player.bean.ErrorInfo;
+import com.cicada.player.bean.InfoBean;
+import com.cicada.player.bean.InfoCode;
 import com.cicada.player.demo.bean.PlayerMediaInfo;
 import com.cicada.player.demo.fragment.BaseFragment;
 import com.cicada.player.demo.fragment.PlayerCacheConfigFragment;
@@ -34,6 +41,7 @@ import com.cicada.player.demo.fragment.PlayerConfigFragment;
 import com.cicada.player.demo.fragment.PlayerOperationFragment;
 import com.cicada.player.demo.fragment.PlayerTrackFragment;
 import com.cicada.player.demo.util.FileUtils;
+import com.cicada.player.demo.util.PerfMonitorUtils;
 import com.cicada.player.demo.util.PermissionUtils;
 import com.cicada.player.demo.util.ScreenStatusController;
 import com.cicada.player.demo.util.ScreenUtils;
@@ -46,6 +54,7 @@ import com.cicada.player.demo.util.VcPlayerLog;
 
 import java.io.File;
 import java.util.LinkedHashMap;
+import java.util.Locale;
 
 /**
  * 视频播放界面
@@ -67,6 +76,10 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
     public static final String URL_TYPE = "url";
     public static final String LIVE_TYPE = "live";
     public static final String LOCAL_TYPE = "local";
+    /**
+     * 对象播放：接口返回的 MediaManifest JSON（反序列化后直接传入播放器）
+     */
+    public static final String MANIFEST_TYPE = "manifest";
     public static final String PLAY_TYPE = "play_type";
     public static final String SUBTITLE_EXT = "subtitle_ext";
 
@@ -78,6 +91,38 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
      * 播放View
      */
     private CicadaVodPlayerView mCicadaVodPlayerView;
+
+    /**
+     * 播放性能调试悬浮层：解码方式 / App CPU / 系统 CPU / GPU 占用，每秒刷新
+     */
+    private FrameLayout mVideoContainer;
+    /**
+     * 视频等比容器（ExoPlayer 官方 AspectRatioFrameLayout，RESIZE_MODE_FIT）：
+     * 按视频宽高比测量，不同比例/全屏自动等比黑边，永不拉伸
+     */
+    private AspectRatioFrameLayout mVideoAspectContainer;
+    private TextView mPerfDebugTextView;
+    private final Handler mPerfHandler = new Handler(Looper.getMainLooper());
+    private Runnable mPerfRunnable;
+    private boolean mUseSoftwareDecoder = false;
+    private String mHwVideoCodecName = null;
+    private long[] mLastProcCpu = null;
+    private long[] mLastSysCpu = null;
+    private long mLastPerfTickMs = 0;
+
+    /**
+     * 视频真实宽高（用于隧道渲染下等比调整容器）
+     */
+    private int mVideoWidth = 0;
+    private int mVideoHeight = 0;
+
+    /**
+     * 全屏模式标记（由 CicadaVodPlayerView 的全屏按钮回调维护；
+     * 竖拍视频全屏保持竖屏，需隐藏按钮/标题等外围 UI）
+     */
+    private boolean mFullScreenMode = false;
+    private LinearLayout mBtnGroup;
+    private View mFragmentContainer;
     /**
      * 当前选中的Fragment
      */
@@ -154,6 +199,19 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
     }
 
     /**
+     * 对象播放（DASH/HLS）：接口返回的 MediaManifest JSON 字符串，
+     * 播放器内反序列化后走对象传入路径
+     * @param context context
+     * @param mediaManifestJson MediaManifest JSON
+     */
+    public static void startApsaraPlayerActivityByManifestJson(Context context, String mediaManifestJson) {
+        Intent intent = new Intent(context, CicadaPlayerActivity.class);
+        intent.putExtra(DATA_SOURCE_URL, mediaManifestJson);
+        intent.putExtra(PLAY_TYPE, MANIFEST_TYPE);
+        context.startActivity(intent);
+    }
+
+    /**
      * 包含外挂字幕
      */
     public static void startApsaraPlayerActivityByUrlWithSubtitle(Context context, PlayerMediaInfo.TypeInfo typeInfo) {
@@ -203,7 +261,27 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
         TextView tvTitle = findViewById(R.id.tv_title);
         rlTitleRoot = findViewById(R.id.rl_title_root);
         mPlayerRaioGroup = findViewById(R.id.radio_group_player);
+        mVideoContainer = findViewById(R.id.fl_video_container);
+        mVideoAspectContainer = findViewById(R.id.video_aspect_container);
         mCicadaVodPlayerView = findViewById(R.id.video_view);
+        mBtnGroup = findViewById(R.id.ll_btn_group);
+        mFragmentContainer = findViewById(R.id.cicada_player_fm);
+
+        mPerfDebugTextView = findViewById(R.id.tv_perf_debug);
+        mHwVideoCodecName = PerfMonitorUtils.findHardwareVideoDecoderName();
+        if (mHwVideoCodecName == null) {
+            mHwVideoCodecName = "unknown";
+        }
+
+        // 方案1：启用 TunnelRender —— MediaCodec 直接渲染到 SurfaceView，
+        // 跳过 SurfaceTexture + GL 逐帧绘制，大幅降低硬解播放 CPU。
+        // 软解或硬解创建失败时播放器自动回退 GL 渲染（SuperMediaPlayer 内置链路）；
+        // 字幕由 demo 层通过 SubtitleEvent 渲染，不受视频渲染管线影响
+        PlayerConfig tunnelRenderConfig = mCicadaVodPlayerView.getPlayerConfig();
+        tunnelRenderConfig.mEnableVideoTunnelRender = true;
+        // 进度回调 500ms→1000ms：降低播放中主线程 UI 刷新频率
+        tunnelRenderConfig.mPositionTimerIntervalMs = 1000;
+        mCicadaVodPlayerView.setPlayerConfig(tunnelRenderConfig);
 
 
         //设置title
@@ -229,6 +307,29 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
         mRetryButton.setOnClickListener(this);
         mPrepareButton.setOnClickListener(this);
         mSnapShotButton.setOnClickListener(this);
+
+        // 视频尺寸变化：对齐 ExoPlayer PlayerView —— 把视频宽高比交给官方
+        // AspectRatioFrameLayout（RESIZE_MODE_FIT），隧道渲染直通下 surface
+        // 始终与视频同比例，4:3/16:9/2.35:1/竖拍视频都不拉伸
+        mCicadaVodPlayerView.setOnVideoSizeChangedListener(new CicadaPlayer.OnVideoSizeChangedListener() {
+            @Override
+            public void onVideoSizeChanged(int width, int height) {
+                if (width > 0 && height > 0) {
+                    mVideoWidth = width;
+                    mVideoHeight = height;
+                    mVideoAspectContainer.setAspectRatio((float) width / height);
+                }
+            }
+        });
+
+        // 全屏状态回调：竖拍视频全屏保持竖屏，也要隐藏按钮/标题等外围 UI
+        mCicadaVodPlayerView.setOnScreenModeChangeListener(new CicadaVodPlayerView.OnScreenModeChangeListener() {
+            @Override
+            public void onScreenModeChanged(boolean fullScreen) {
+                mFullScreenMode = fullScreen;
+                updatePlayerViewMode();
+            }
+        });
 
         //准备完成回调
         mCicadaVodPlayerView.setOnPreparedListener(new CicadaPlayer.OnPreparedListener() {
@@ -357,8 +458,15 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
         switch (v.getId()) {
             case R.id.prepare:
                 //准备
+                // 重新 prepare：重置解码模式标记与视频尺寸（新源可能走硬解/不同比例）
+                mUseSoftwareDecoder = false;
+                mVideoWidth = 0;
+                mVideoHeight = 0;
                 if(URL_TYPE.equals(playType)){
                     mCicadaVodPlayerView.setDataSource(urlDataSource);
+                } else if(MANIFEST_TYPE.equals(playType)){
+                    // 对象播放：MediaManifest JSON（接口返回，反序列化后传入）
+                    mCicadaVodPlayerView.setDataSourceManifest(urlDataSource);
                 }
                 setPlayerSubtitleExt();
                 mCicadaVodPlayerView.prepare();
@@ -462,9 +570,11 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
 
         // Fragment事务
         FragmentTransaction ft = fm.beginTransaction();
-        // 设置Fragment切换效果
-        ft.setCustomAnimations(android.R.anim.fade_in, android.R.anim.fade_out,
-                android.R.anim.fade_in, android.R.anim.fade_out);
+        // 注：support-v4 27 的 Fragment 切换动画在 Android 14+ 会反射
+        // Animation.mListener（hidden API 被禁）导致 NoSuchFieldException 崩溃，
+        // 此处去掉 setCustomAnimations
+        // ft.setCustomAnimations(android.R.anim.fade_in, android.R.anim.fade_out,
+        //         android.R.anim.fade_in, android.R.anim.fade_out);
 
         /*
          * 如果要切换到的Fragment没有被Fragment事务添加,则隐藏被切换的Fragment,添加要切换的Fragment
@@ -492,6 +602,7 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
         if (mCicadaVodPlayerView != null) {
             mCicadaVodPlayerView.onResume();
         }
+        startPerfMonitor();
     }
 
 
@@ -499,6 +610,7 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
     protected void onStop() {
         super.onStop();
 
+        stopPerfMonitor();
         if (mCicadaVodPlayerView != null && !mEnablePlayBack) {
             mCicadaVodPlayerView.onStop();
         }
@@ -512,43 +624,123 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
     }
 
     private void updatePlayerViewMode() {
-        if (mCicadaVodPlayerView != null) {
-            int orientation = getResources().getConfiguration().orientation;
-            //转为竖屏了。
-            if (orientation == Configuration.ORIENTATION_PORTRAIT) {
-                //显示标题栏
-                rlTitleRoot.setVisibility(View.VISIBLE);
-                this.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
-                mCicadaVodPlayerView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+        if (mCicadaVodPlayerView == null) {
+            return;
+        }
 
-                //设置view的布局，宽高之类
-                LinearLayout.LayoutParams cicadaVideoViewLayoutParams = (LinearLayout.LayoutParams) mCicadaVodPlayerView.getLayoutParams();
-                cicadaVideoViewLayoutParams.height = (int) (ScreenUtils.getWidth(this) * 9.0f / 16);
-                cicadaVideoViewLayoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
-
-            } else if (orientation == Configuration.ORIENTATION_LANDSCAPE) {
-                //转到横屏了。
-                //隐藏状态栏
-                if (!isStrangePhone()) {
-                    this.getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
-                    mCicadaVodPlayerView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
-                }
-                //隐藏标题栏
-                rlTitleRoot.setVisibility(View.GONE);
-
-                //设置view的布局，宽高
-                LinearLayout.LayoutParams cicadaVideoViewLayoutParams = (LinearLayout.LayoutParams) mCicadaVodPlayerView.getLayoutParams();
-                cicadaVideoViewLayoutParams.height = ViewGroup.LayoutParams.MATCH_PARENT;
-                cicadaVideoViewLayoutParams.width = ViewGroup.LayoutParams.MATCH_PARENT;
-
+        if (mFullScreenMode) {
+            // 全屏（横屏视频→横屏全屏；竖拍视频→竖屏全屏）：
+            // 隐藏标题栏/按钮区/Fragment 区，视频容器占满屏幕
+            rlTitleRoot.setVisibility(View.GONE);
+            if (mBtnGroup != null) {
+                mBtnGroup.setVisibility(View.GONE);
+            }
+            if (mFragmentContainer != null) {
+                mFragmentContainer.setVisibility(View.GONE);
+            }
+            if (!isStrangePhone()) {
+                this.getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN, WindowManager.LayoutParams.FLAG_FULLSCREEN);
+                mCicadaVodPlayerView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
             }
 
+            LinearLayout.LayoutParams fullLp = (LinearLayout.LayoutParams) mVideoContainer.getLayoutParams();
+            fullLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+            fullLp.height = ViewGroup.LayoutParams.MATCH_PARENT;
+            mVideoContainer.setLayoutParams(fullLp);
+            // 视频比例由官方 AspectRatioFrameLayout(RESIZE_MODE_FIT) 自动按视频
+            // 宽高比测量，全屏/小窗/任意比例都等比留黑边
+            return;
         }
+
+        // 非全屏（竖屏小窗模式）
+        rlTitleRoot.setVisibility(View.VISIBLE);
+        if (mBtnGroup != null) {
+            mBtnGroup.setVisibility(View.VISIBLE);
+        }
+        if (mFragmentContainer != null) {
+            mFragmentContainer.setVisibility(View.VISIBLE);
+        }
+        this.getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        mCicadaVodPlayerView.setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+
+        LinearLayout.LayoutParams smallLp = (LinearLayout.LayoutParams) mVideoContainer.getLayoutParams();
+        smallLp.width = ViewGroup.LayoutParams.MATCH_PARENT;
+        // 视频尺寸未知（还没起播）才用 16:9 默认高度；否则保持原高度。
+        // 小窗容器只是"可用空间"，视频区域由 AspectRatioFrameLayout 在其中
+        // 等比居中（退后台回来也保持与之前一致）
+        if (mVideoWidth <= 0 || mVideoHeight <= 0) {
+            smallLp.height = (int) (ScreenUtils.getWidth(this) * 9.0f / 16);
+        }
+        mVideoContainer.setLayoutParams(smallLp);
+    }
+
+    /**
+     * 启动性能调试监控：每秒刷新 解码方式 / App CPU / 系统 CPU / GPU 占用
+     */
+    private void startPerfMonitor() {
+        if (mPerfDebugTextView == null) {
+            return;
+        }
+        mLastProcCpu = PerfMonitorUtils.readProcessCpu();
+        mLastSysCpu = PerfMonitorUtils.readSystemCpu();
+        mLastPerfTickMs = System.currentTimeMillis();
+        mPerfRunnable = new Runnable() {
+            @Override
+            public void run() {
+                updatePerfDebugInfo();
+                mPerfHandler.postDelayed(this, 1000);
+            }
+        };
+        mPerfHandler.postDelayed(mPerfRunnable, 1000);
+    }
+
+    private void stopPerfMonitor() {
+        if (mPerfRunnable != null) {
+            mPerfHandler.removeCallbacks(mPerfRunnable);
+            mPerfRunnable = null;
+        }
+    }
+
+    private void updatePerfDebugInfo() {
+        if (mPerfDebugTextView == null) {
+            return;
+        }
+        long now = System.currentTimeMillis();
+        long deltaMs = now - mLastPerfTickMs;
+        if (deltaMs <= 0) {
+            mLastPerfTickMs = now;
+            return;
+        }
+
+        long[] procCpu = PerfMonitorUtils.readProcessCpu();
+        long[] sysCpu = PerfMonitorUtils.readSystemCpu();
+
+        double appCpu = PerfMonitorUtils.calcProcessCpuPercent(mLastProcCpu, procCpu, deltaMs);
+        double sysCpuPercent = PerfMonitorUtils.calcSystemCpuPercent(mLastSysCpu, sysCpu);
+        if (procCpu != null) {
+            mLastProcCpu = procCpu;
+        }
+        if (sysCpu != null) {
+            mLastSysCpu = sysCpu;
+        }
+        mLastPerfTickMs = now;
+
+        String gpu = PerfMonitorUtils.readGpuUsage();
+        if (gpu == null) {
+            gpu = "不可读(需root)";
+        }
+        String decodeMode = mUseSoftwareDecoder
+                ? "软解(FFmpeg)"
+                : "硬解(" + mHwVideoCodecName + ")";
+        String text = String.format(Locale.US,
+                "解码: %s\nApp CPU: %.1f%%\nSys CPU: %.1f%%\nGPU: %s",
+                decodeMode, appCpu, sysCpuPercent, gpu);
+        mPerfDebugTextView.setText(text);
     }
 
     @Override
@@ -779,7 +971,19 @@ public class CicadaPlayerActivity extends BaseActivity implements View.OnClickLi
 
     public void setOnInfoListener(CicadaPlayer.OnInfoListener infoListener){
         if(mCicadaVodPlayerView != null){
-            mCicadaVodPlayerView.setOnInfoListener(infoListener);
+            // 包装一层：外部监听（如 PlayerOperationFragment）照常收到事件，
+            // 同时更新性能悬浮层的软解/硬解标记
+            mCicadaVodPlayerView.setOnInfoListener(new CicadaPlayer.OnInfoListener() {
+                @Override
+                public void onInfo(InfoBean infoBean) {
+                    if (infoBean != null && infoBean.getCode() == InfoCode.SwitchToSoftwareVideoDecoder) {
+                        mUseSoftwareDecoder = true;
+                    }
+                    if (infoListener != null) {
+                        infoListener.onInfo(infoBean);
+                    }
+                }
+            });
         }
     }
 

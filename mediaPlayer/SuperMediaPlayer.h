@@ -223,6 +223,23 @@ namespace Cicada {
 
         void reLoad() override;
 
+        /**
+         * 视频解码器重建兜底：仅在 setOutputSurface 热切换失败（codec 已
+         * 失效）时使用，等价于 ExoPlayer 2.9.6 的
+         * releaseCodec()+maybeInitCodec() 分支 —— 仅重建视频解码器，
+         * 音频与解复用保持运行，新解码器绑定新 surface 从下一关键帧续播。
+         * 必须在持有 mCreateMutex 时调用（由 ProcessSetViewMsg 调用）。
+         */
+        int RestartVideoDecoder();
+
+        /**
+         * 暂停状态下 surface 重建后，逐帧精确恢复"暂停的那一帧"：
+         * 用解码器记录的最后渲染帧 PTS 设置渲染门（只放行这一帧），
+         * 再以该帧位置原地 seek 解码上屏。必须在持有 mCreateMutex 时调用
+         * （由 ProcessSetViewMsg 调用）。
+         */
+        int RestorePausedVideoFrame();
+
         void SetAutoPlay(bool bAutoPlay) override;
 
         bool IsAutoPlay() override;
@@ -510,6 +527,8 @@ namespace Cicada {
         atomic_bool mSeekNeedCatch{false};
         const static int64_t SEEK_ACCURATE_MAX;
         atomic <int64_t> mSeekPos{INT64_MIN};
+        // 标记当前 seek 是否为"暂停帧恢复"专用（用户 seek 要关闭渲染门）
+        atomic_bool mRestoringPausedFrame{false};
         SystemReferClock mMasterClock;
         streamTime mAudioTime{INT64_MIN, 0};
         int64_t mPlayedVideoPts{INT64_MIN}; // sync pts

@@ -11,6 +11,10 @@
     {
       "name": "EntryAbility_label",
       "value": "CicadaPlayer"
+    },
+    {
+      "name": "camera_reason",
+      "value": "扫一扫需要访问相机以识别二维码"
     }
   ]
 }

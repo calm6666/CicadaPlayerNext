@@ -98,6 +98,11 @@ namespace Cicada {
 
         int configureAudio(const std::string &mime, int sampleRate, int channelCount, int isADTS);
 
+        /**
+         * surface 重建后热重绑 MediaCodec 输出 surface（隧道直通模式专用）
+         */
+        int setOutputSurface(void *surface);
+
         int start();
 
         int flush();

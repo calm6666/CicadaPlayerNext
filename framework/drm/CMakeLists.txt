@@ -15,6 +15,9 @@ if (ANDROID)
 endif ()
 
 if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+    # Rewritten against the real DRM Kit API (MediaKeySystem / MediaKeySession
+    # from native_drm_common.h, two-argument OH_MediaKeySystem_Create,
+    # OH_MediaKeySystem_CreateMediaKeySession, ...). Built unconditionally again.
     list(APPEND SOURCE_FILES
             OHOS/OhosDrmHandler.cpp
             )

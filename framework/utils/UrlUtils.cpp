@@ -122,7 +122,10 @@ void UrlUtils::parseUrl(URLComponents &urlComponents, const std::string &url)
     urlComponents.port = port;
 }
 
-#if defined(WIN32) || (defined(__linux__) && !defined(__ANDROID__))
+// OHOS uses musl, which already declares strlcpy in <string.h>; defining our
+// own static one here fails with "static declaration follows non-static
+// declaration". (clang targets OHOS as *-linux-ohos, so __linux__ is set.)
+#if defined(WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
 // from ffmpeg/avstring.c
 static size_t strlcpy(char *dst, const char *src, size_t size)
 {

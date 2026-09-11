@@ -1,0 +1,495 @@
+{
+	"configurations" : 
+	[
+		{
+			"directories" : 
+			[
+				{
+					"build" : ".",
+					"childIndexes" : 
+					[
+						1
+					],
+					"jsonFile" : "directory-.-Debug-d0094a50bb2071803777.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6.0"
+					},
+					"projectIndex" : 0,
+					"source" : ".",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"build" : "mediaPlayer",
+					"childIndexes" : 
+					[
+						2
+					],
+					"jsonFile" : "directory-mediaPlayer-Debug-4f20d93e447e684e4b2b.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 0,
+					"projectIndex" : 1,
+					"source" : "D:/hilihili/CicadaPlayerNext/mediaPlayer",
+					"targetIndexes" : 
+					[
+						8
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out",
+					"childIndexes" : 
+					[
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12
+					],
+					"jsonFile" : "directory-mediaPlayer.framework.out-Debug-542888b57201747ec410.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 1,
+					"projectIndex" : 2,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework"
+				},
+				{
+					"build" : "mediaPlayer/framework.out/demuxer",
+					"jsonFile" : "directory-mediaPlayer.framework.out.demuxer-Debug-f6aed7e379078a57d57e.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 3,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/demuxer",
+					"targetIndexes" : 
+					[
+						3
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/codec",
+					"jsonFile" : "directory-mediaPlayer.framework.out.codec-Debug-2bb6f7c2522b52bdbc74.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 4,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/codec",
+					"targetIndexes" : 
+					[
+						11
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/utils",
+					"jsonFile" : "directory-mediaPlayer.framework.out.utils-Debug-401ed3ca61a9bb51026c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 5,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/utils",
+					"targetIndexes" : 
+					[
+						7
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/filter",
+					"jsonFile" : "directory-mediaPlayer.framework.out.filter-Debug-100d7a0dee830ffaab73.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 6,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/filter",
+					"targetIndexes" : 
+					[
+						6
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/render",
+					"jsonFile" : "directory-mediaPlayer.framework.out.render-Debug-1b8f0aa00074515dfdd6.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 7,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/render",
+					"targetIndexes" : 
+					[
+						10
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/drm",
+					"jsonFile" : "directory-mediaPlayer.framework.out.drm-Debug-0702f60457eea8b4d888.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 8,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/drm",
+					"targetIndexes" : 
+					[
+						5
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/communication",
+					"jsonFile" : "directory-mediaPlayer.framework.out.communication-Debug-df39cc93e8c68227c642.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 9,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/communication",
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/cacheModule",
+					"jsonFile" : "directory-mediaPlayer.framework.out.cacheModule-Debug-eb08c566e4bc07a3c77c.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 10,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/cacheModule",
+					"targetIndexes" : 
+					[
+						0
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/muxer",
+					"jsonFile" : "directory-mediaPlayer.framework.out.muxer-Debug-7ffc0caf14d4efe3e027.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 11,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/muxer",
+					"targetIndexes" : 
+					[
+						9
+					]
+				},
+				{
+					"build" : "mediaPlayer/framework.out/data_source",
+					"jsonFile" : "directory-mediaPlayer.framework.out.data_source-Debug-059433d57772f05740d0.json",
+					"minimumCMakeVersion" : 
+					{
+						"string" : "3.6"
+					},
+					"parentIndex" : 2,
+					"projectIndex" : 12,
+					"source" : "D:/hilihili/CicadaPlayerNext/framework/data_source",
+					"targetIndexes" : 
+					[
+						2
+					]
+				}
+			],
+			"name" : "Debug",
+			"projects" : 
+			[
+				{
+					"childIndexes" : 
+					[
+						1
+					],
+					"directoryIndexes" : 
+					[
+						0
+					],
+					"name" : "cicada_ohos",
+					"targetIndexes" : 
+					[
+						4
+					]
+				},
+				{
+					"childIndexes" : 
+					[
+						2
+					],
+					"directoryIndexes" : 
+					[
+						1
+					],
+					"name" : "media_player",
+					"parentIndex" : 0,
+					"targetIndexes" : 
+					[
+						8
+					]
+				},
+				{
+					"childIndexes" : 
+					[
+						3,
+						4,
+						5,
+						6,
+						7,
+						8,
+						9,
+						10,
+						11,
+						12
+					],
+					"directoryIndexes" : 
+					[
+						2
+					],
+					"name" : "framework",
+					"parentIndex" : 1
+				},
+				{
+					"directoryIndexes" : 
+					[
+						3
+					],
+					"name" : "framework_Demuxer",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						3
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						4
+					],
+					"name" : "codec",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						11
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						5
+					],
+					"name" : "framework_utils",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						7
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						6
+					],
+					"name" : "framework_filter",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						6
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						7
+					],
+					"name" : "render",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						10
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						8
+					],
+					"name" : "framework_drm",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						5
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						9
+					],
+					"name" : "communication",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						1
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						10
+					],
+					"name" : "cacheModule",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						0
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						11
+					],
+					"name" : "muxer",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						9
+					]
+				},
+				{
+					"directoryIndexes" : 
+					[
+						12
+					],
+					"name" : "framework_DataSource",
+					"parentIndex" : 2,
+					"targetIndexes" : 
+					[
+						2
+					]
+				}
+			],
+			"targets" : 
+			[
+				{
+					"directoryIndex" : 10,
+					"id" : "cacheModule::@18f56f3a98aff36fb96c",
+					"jsonFile" : "target-cacheModule-Debug-63664be9b115609f6a5a.json",
+					"name" : "cacheModule",
+					"projectIndex" : 10
+				},
+				{
+					"directoryIndex" : 9,
+					"id" : "communication::@2a5b9e0d1594c0ba5918",
+					"jsonFile" : "target-communication-Debug-0a83317e13e0fc931a0f.json",
+					"name" : "communication",
+					"projectIndex" : 9
+				},
+				{
+					"directoryIndex" : 12,
+					"id" : "data_source::@8b584e89bf2f5f0e4f31",
+					"jsonFile" : "target-data_source-Debug-56edf38307607457517f.json",
+					"name" : "data_source",
+					"projectIndex" : 12
+				},
+				{
+					"directoryIndex" : 3,
+					"id" : "demuxer::@1a10af49dd6376246523",
+					"jsonFile" : "target-demuxer-Debug-4398d244a6ffc2c97338.json",
+					"name" : "demuxer",
+					"projectIndex" : 3
+				},
+				{
+					"directoryIndex" : 0,
+					"id" : "entry::@6890427a1f51a3e7e1df",
+					"jsonFile" : "target-entry-Debug-bb923d97f5e340788baf.json",
+					"name" : "entry",
+					"projectIndex" : 0
+				},
+				{
+					"directoryIndex" : 8,
+					"id" : "framework_drm::@79bf824d3c8878857503",
+					"jsonFile" : "target-framework_drm-Debug-a30006ad1908616129f5.json",
+					"name" : "framework_drm",
+					"projectIndex" : 8
+				},
+				{
+					"directoryIndex" : 6,
+					"id" : "framework_filter::@fbd86042b45e62bdd735",
+					"jsonFile" : "target-framework_filter-Debug-99f96bcebc25561b7ea4.json",
+					"name" : "framework_filter",
+					"projectIndex" : 6
+				},
+				{
+					"directoryIndex" : 5,
+					"id" : "framework_utils::@f698ab25f867b2b69e25",
+					"jsonFile" : "target-framework_utils-Debug-313d18c14effe86b58a2.json",
+					"name" : "framework_utils",
+					"projectIndex" : 5
+				},
+				{
+					"directoryIndex" : 1,
+					"id" : "media_player::@40307c708ab5601fbca8",
+					"jsonFile" : "target-media_player-Debug-2db77dc63adfea9c7902.json",
+					"name" : "media_player",
+					"projectIndex" : 1
+				},
+				{
+					"directoryIndex" : 11,
+					"id" : "muxer::@3ba5fddb193b1f34645e",
+					"jsonFile" : "target-muxer-Debug-d3f2a47ae4a6353113f9.json",
+					"name" : "muxer",
+					"projectIndex" : 11
+				},
+				{
+					"directoryIndex" : 7,
+					"id" : "render::@be24b23c26e4a0409442",
+					"jsonFile" : "target-render-Debug-99cc198ff034b5edf1e6.json",
+					"name" : "render",
+					"projectIndex" : 7
+				},
+				{
+					"directoryIndex" : 4,
+					"id" : "videodec::@4cdd961b934e5140216b",
+					"jsonFile" : "target-videodec-Debug-102808a304de3b7f626e.json",
+					"name" : "videodec",
+					"projectIndex" : 4
+				}
+			]
+		}
+	],
+	"kind" : "codemodel",
+	"paths" : 
+	{
+		"build" : "D:/hilihili/CicadaPlayerNext/platform/HarmonyOS/entry/.cxx/default/default/debug/x86_64",
+		"source" : "D:/hilihili/CicadaPlayerNext/platform/HarmonyOS/entry/src/main/cpp"
+	},
+	"version" : 
+	{
+		"major" : 2,
+		"minor" : 6
+	}
+}

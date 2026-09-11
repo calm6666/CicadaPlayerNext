@@ -126,7 +126,8 @@ void FfmpegMuxer::insertStreamInfo(const AVStream *st, const Stream_meta *meta)
         return;
     }
 
-    AVOutputFormat *fmt = mDestFormatContext->oformat;
+    // FFmpeg 9.0：AVFormatContext::oformat 为 const AVOutputFormat*
+    const AVOutputFormat *fmt = mDestFormatContext->oformat;
     AVRational timeBase{};
 
     if (!strncmp(fmt->name, "flv", 3)) {
@@ -269,10 +270,12 @@ void FfmpegMuxer::setWriteDataTypeCallback(writeDataTypeCallback callback, void 
     mWriteDataTypeOpaque = opaque;
 }
 
-int FfmpegMuxer::io_write(void *opaque, uint8_t *buf, int size)
+int FfmpegMuxer::io_write(void *opaque, const uint8_t *buf, int size)
 {
     auto *ffmpegMux = static_cast<FfmpegMuxer *>(opaque);
-    return ffmpegMux->muxerWrite(buf, size);
+    // FFmpeg 8.0+ 写回调带 const；内部写链路（公开 write 回调）不修改缓冲，
+    // 此处安全转掉 const
+    return ffmpegMux->muxerWrite(const_cast<uint8_t *>(buf), size);
 }
 
 int64_t FfmpegMuxer::io_seek(void *opaque, int64_t offset, int whence)
@@ -281,12 +284,13 @@ int64_t FfmpegMuxer::io_seek(void *opaque, int64_t offset, int whence)
     return ffmpegMux->muxerSeek(offset, whence);
 }
 
-int FfmpegMuxer::io_write_data_type(void *opaque, uint8_t *buf, int size, enum AVIODataMarkerType type,
+int FfmpegMuxer::io_write_data_type(void *opaque, const uint8_t *buf, int size, enum AVIODataMarkerType type,
                                     int64_t time)
 {
     auto *ffmpegMux = static_cast<FfmpegMuxer *>(opaque);
     DataType dataType = ffmpegMux->mapType(type);
-    return ffmpegMux->muxerWriteDataType(buf, size, dataType, time);
+    // FFmpeg 8.0+ 写回调带 const；内部写链路不修改缓冲，安全转掉 const
+    return ffmpegMux->muxerWriteDataType(const_cast<uint8_t *>(buf), size, dataType, time);
 }
 
 IMuxer::DataType FfmpegMuxer::mapType(AVIODataMarkerType type)

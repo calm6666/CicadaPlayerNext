@@ -72,6 +72,45 @@ if [[ "$TARGET_PLATFORM" != "Android" ]];then
     ffmpeg_config_add_protocols udp
 fi
 
+# ---- hardware accelerators (Windows only) ------------------------------------
+# ffmpeg_disable_all_config (build_tools/ffmpeg_commands.sh) starts from
+# --disable-everything --disable-hwaccels --disable-dxva2, and nothing here ever
+# re-enabled a hwaccel -- so external/install/ffmpeg/win32/*/libffmpeg.dll ships
+# with no hardware decoder at all (only the d3d11va *device* module, which the
+# --disable-hwaccels option does not touch). framework/codec/avcodecDecoder.cpp
+# therefore has nothing to drive, and Windows always fell back to software.
+#
+# D3D11VA is the only usable modern backend here: DXVA2 is disabled outright
+# (build_tools/ffmpeg_cross_compile_config.sh), and hwcontext_d3d11va is already
+# built. No extra system libraries are needed for the hwaccel itself:
+# libavutil/hwcontext_d3d11va.c loads d3d11.dll/dxgi.dll at runtime through
+# dlopen + GetProcAddress, which is why link_shared_lib_win32() can keep linking
+# with only -lws2_32 -lbcrypt -lcrypt32 under -Wl,--no-undefined.
+#
+# The *_d3d11va2 names matter: FFmpeg defines two D3D11VA hwaccels per codec
+# (libavcodec/hwaccels.h), and only the "2" one is the modern API:
+#   h264_d3d11va   -> .p.pix_fmt = AV_PIX_FMT_D3D11VA_VLD  (legacy; frame->data[3]
+#                     holds a bare ID3D11VideoDecoderOutputView and there is no
+#                     AVHWFramesContext, so av_hwframe_transfer_data() cannot work)
+#   h264_d3d11va2  -> .p.pix_fmt = AV_PIX_FMT_D3D11        (FFmpeg owns a frames
+#                     context, which is what the copy-back in
+#                     framework/codec/avcodecDecoder.cpp needs)
+# Enabling the non-"2" variants would look like it worked and then always fall
+# back to software, so the "2" variants are the ones requested.
+#
+# Every name must appear in `configure --list-hwaccels`; an unavailable one is
+# reported as a non-fatal WARN by ffmpeg_verify_requested_components().
+# Only codecs whose decoder is already enabled above are listed, so enabling a
+# hwaccel cannot silently pull in an extra decoder.
+#
+# NOTE: TARGET_PLATFORM here is the value passed to build_external.sh, i.e.
+# "Windows" -- NOT the internal "win32" token that build_win32.sh passes to
+# build_libs()/ffmpeg_cross_compile_set_win32().
+if [[ "$TARGET_PLATFORM" == "Windows" ]]; then
+    ffmpeg_config_add_hwaccels \
+        h264_d3d11va2 hevc_d3d11va2 mpeg2_d3d11va2 vp9_d3d11va2 av1_d3d11va2
+fi
+
 # Optional: parse DASH MPD through FFmpeg's own demuxer (the player uses its
 # own DASH implementation, so this stays commented).
 # ffmpeg_config_add_demuxers dash

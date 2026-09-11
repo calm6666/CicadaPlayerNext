@@ -21,8 +21,10 @@ set(COMMON_INC_DIR ${COMMON_INC_DIR}
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_CONSTANT_MACROS")
 
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror")
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror")
+# 播放器兼容宏（attribute_deprecated / AV_DISPOSITION_ATTACHED_PIC）与 FFmpeg 9
+# 头文件中的同名宏在混编时会互相重定义（展开值相同），降级为警告而非错误
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror -Wno-macro-redefined")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror -Wno-macro-redefined")
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations -Wno-#warnings")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-deprecated-declarations -Wno-#warnings")

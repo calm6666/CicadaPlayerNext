@@ -41,6 +41,13 @@
                     android:gravity="center"
                     android:text="@string/btn_input_url"/>
 
+                <Button
+                    android:id="@+id/btn_local_video"
+                    android:layout_width="match_parent"
+                    android:layout_height="50dp"
+                    android:gravity="center"
+                    android:text="@string/btn_local_video"/>
+
                 <android.support.v7.widget.RecyclerView
                     android:id="@+id/recycview_date_list"
                     android:overScrollMode="never"

@@ -9,10 +9,14 @@
 #define Cicada_H
 
 #if defined(_MSC_VER)
+  #ifndef attribute_deprecated
   #define attribute_deprecated __declspec(deprecated)
+  #endif
   #define CICADA_CPLUS_EXTERN __declspec(dllexport)
 #elif defined _WIN32 || defined __CYGWIN__
+  #ifndef attribute_deprecated
   #define attribute_deprecated __attribute__((deprecated))
+  #endif
   #ifdef __GNUC__
     #define CICADA_CPLUS_EXTERN __attribute__ ((dllexport))
   #else
@@ -21,10 +25,14 @@
 #else
   #if __GNUC__ >= 4
     #define CICADA_CPLUS_EXTERN __attribute__((visibility ("default")))
+    #ifndef attribute_deprecated
     #define attribute_deprecated __attribute__((deprecated))
+    #endif
   #else
     #define CICADA_CPLUS_EXTERN
+    #ifndef attribute_deprecated
     #define attribute_deprecated
+    #endif
   #endif
 #endif
 

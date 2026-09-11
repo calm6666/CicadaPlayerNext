@@ -353,7 +353,7 @@ int SuperMediaPlayer::Stop()
         return 0;
     }
 
-    std::unique_lock<std::mutex> uMutex(mPlayerMutex);
+    (std::unique_lock<std::mutex>(mPlayerMutex));
     AF_LOGI("Player ReadPacket Stop");
     int64_t t1 = af_getsteady_ms();
     AF_TRACE;
@@ -1954,16 +1954,22 @@ void SuperMediaPlayer::doRender()
         }
 
         if (mSeekFlag) {
-            mSeekFlag = false;
+            // 暂停帧恢复期间：渲染门命中前不能结束 seek —— 门会把目标帧
+            // 之前的帧全部挡掉，若按第一帧就宣告 seek 完成，暂停态的
+            // 读包/解码管线会停，目标帧永远解码不出来（黑屏根因）
+            IDecoder *videoDecoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+            if (videoDecoder == nullptr || videoDecoder->isRenderGateHit()) {
+                mSeekFlag = false;
 
-            if (!mMessageControl->findMsgByType(MSG_SEEKTO)) {
-                // update position when seek end. in case of when paused.
-                // update position before reset seek status, so getCurrentPosition return mSeekPos instead of mCurrentPos
-                // fix bug the mCurrentPos not accuracy
-                NotifyPosition(getCurrentPosition());
-                ResetSeekStatus();
-                mPNotifier->NotifySeekEnd(mSeekInCache);
-                mSeekInCache = false;
+                if (!mMessageControl->findMsgByType(MSG_SEEKTO)) {
+                    // update position when seek end. in case of when paused.
+                    // update position before reset seek status, so getCurrentPosition return mSeekPos instead of mCurrentPos
+                    // fix bug the mCurrentPos not accuracy
+                    NotifyPosition(getCurrentPosition());
+                    ResetSeekStatus();
+                    mPNotifier->NotifySeekEnd(mSeekInCache);
+                    mSeekInCache = false;
+                }
             }
         }
     }
@@ -2266,6 +2272,10 @@ int SuperMediaPlayer::FillVideoFrame()
 
     if (pFrame != nullptr) {
 
+        if (mSeekFlag && mPlayStatus == PLAYER_PAUSED) {
+            AF_LOGI("PFR: frame pulled pts=%" PRId64 " seekFlag=%d\n", pFrame->getInfo().pts, (int) mSeekFlag);
+        }
+
         if (mRecorderSet->decodeFirstVideoFrameInfo.waitFirstFrame) {
             DecodeFirstFrameInfo &info = mRecorderSet->decodeFirstVideoFrameInfo;
             info.getFirstFrameTimeMs = af_getsteady_ms();
@@ -2313,13 +2323,13 @@ int SuperMediaPlayer::FillVideoFrame()
                 std::unique_ptr<IAFFrame> frame = nullptr;
                 success = pull(format, frame);
                 if (success) {
-                    mVideoFrameQue.push(move(frame));
+                    mVideoFrameQue.push(std::move(frame));
                 } else {
                     break;
                 }
             }
         } else {
-            mVideoFrameQue.push(move(pFrame));
+            mVideoFrameQue.push(std::move(pFrame));
         }
 
         videoDecoderFull = true;
@@ -2649,7 +2659,7 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
 
     if (render) {
         mVideoCatchingUp = false;
-        SendVideoFrameToRender(move(videoFrame));
+        SendVideoFrameToRender(std::move(videoFrame));
 
         if (frameWidth != mVideoWidth || frameHeight != mVideoHeight) {
             mVideoWidth = frameWidth;
@@ -2735,7 +2745,7 @@ void SuperMediaPlayer::RenderSubtitle(int64_t pts)
         pFrame->getInfo().dts = mSubtitleShowIndex++;
         //          pFrame->pBuffer[pFrame->size] = 0;
         mPNotifier->NotifySubtitleEvent(subTitle_event_show, pFrame.get(), 0, nullptr);
-        mSubtitleShowedQueue.push_back(move(pFrame));
+        mSubtitleShowedQueue.push_back(std::move(pFrame));
     }
 
     if (changed) {
@@ -2827,14 +2837,14 @@ int SuperMediaPlayer::DecodeAudio(unique_ptr<IAFPacket> &pPacket)
             if (frame->getInfo().pts == INT64_MIN) {
                 // TODO: why mAudioFrameQue.back()->getInfo().pts is INT64_MIN
                 if (!mAudioFrameQue.empty() && mAudioFrameQue.back()->getInfo().pts != INT64_MIN) {
-                    double duration = ((double) frame->getInfo().audio.nb_samples) / frame->getInfo().audio.sample_rate;
+                    duration = ((double) frame->getInfo().audio.nb_samples) / frame->getInfo().audio.sample_rate;
                     frame->getInfo().pts = mAudioFrameQue.back()->getInfo().pts + duration * 1000000;
                 } else {
                     //                       assert(0);
                 }
             }
             mDemuxerService->SetOption("A_FRAME_DECODED", frame->getInfo().pts);
-            mAudioFrameQue.push_back(move(frame));
+            mAudioFrameQue.push_back(std::move(frame));
         }
     } while (ret != -EAGAIN && ret != -EINVAL);
 
@@ -3101,7 +3111,7 @@ int SuperMediaPlayer::ReadPacket()
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_VIDEO);
         }
 
-        mBufferController->AddPacket(move(pMedia_Frame), BUFFER_TYPE_VIDEO);
+        mBufferController->AddPacket(std::move(pMedia_Frame), BUFFER_TYPE_VIDEO);
         mDemuxerService->SetOption("V_FRAME_RECEIVE", pFrame->getInfo().pts);
 
         if (mVideoInterlaced == InterlacedType_UNKNOWN) {
@@ -3210,14 +3220,14 @@ int SuperMediaPlayer::ReadPacket()
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_AUDIO);
         }
 
-        mBufferController->AddPacket(move(pMedia_Frame), BUFFER_TYPE_AUDIO);
+        mBufferController->AddPacket(std::move(pMedia_Frame), BUFFER_TYPE_AUDIO);
         mDemuxerService->SetOption("A_FRAME_RECEIVE", pFrame->getInfo().pts);
     } else if (pFrame->getInfo().streamIndex == mCurrentSubtitleIndex || pFrame->getInfo().streamIndex == mWillChangedSubtitleStreamIndex) {
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_SUB);
         }
 
-        mBufferController->AddPacket(move(pMedia_Frame), BUFFER_TYPE_SUBTITLE);
+        mBufferController->AddPacket(std::move(pMedia_Frame), BUFFER_TYPE_SUBTITLE);
         AF_LOGD("read subtitle pts is %lld", pFrame->getInfo().pts);
 
         if (pFrame->getInfo().streamIndex == mWillChangedSubtitleStreamIndex) {
@@ -3600,9 +3610,30 @@ int SuperMediaPlayer::setUpAudioDecoder(const Stream_meta *meta)
     if (isWideVineVideo) {
         flags |= DECFLAG_HW;
     }
+    // 音频硬解（AAC→MediaCodec）在这台机器上实测是净亏损：MediaCodec 以
+    // 进程内 codec2 模式运行，每多一个实例就多一个厂商 looper 线程
+    // （MediaCodec_loop + CodecLooper）加一个 10ms 轮询的输入循环
+    // （AFActiveDecoder），合计 ≈9% CPU；而 AAC 软解只需 ~1-2%。
+    // ExoPlayer 的 MediaCodecAudioRenderer 靠异步回调（setCallback）省掉
+    // 轮询，但异步模式在本机回调不送达会起播失败（ASYNC_ENABLED 默认关）。
+    // 结论：默认走 FFmpeg 软解，硬件音频解码等异步回调在目标机验证后再开。
+    bool tryHwAudio = false && (meta->codec == AF_CODEC_ID_AAC)
+            && (meta->extradata != nullptr && meta->extradata_size >= 2)
+            && mSet->bEnableHwVideoDecode;
+    if (tryHwAudio) {
+        flags |= DECFLAG_HW;
+    }
 #endif
 
     ret = mAVDeviceManager->setUpDecoder(flags, meta, nullptr, SMPAVDeviceManager::DEVICE_TYPE_AUDIO, 0);
+
+#ifdef ANDROID
+    if (ret < 0 && tryHwAudio) {
+        // MediaCodec AAC 创建失败 → 回退纯软解，保证可播
+        AF_LOGW("audio hw decode failed, fallback to software decoder");
+        ret = mAVDeviceManager->setUpDecoder(DECFLAG_SW, meta, nullptr, SMPAVDeviceManager::DEVICE_TYPE_AUDIO, 0);
+    }
+#endif
 
     if (ret < 0) {
         MediaPlayerEventType type = MEDIA_PLAYER_EVENT_AUDIO_DECODER_DEVICE_ERROR;
@@ -3786,6 +3817,9 @@ int SuperMediaPlayer::SetUpVideoPath()
         flags |= IVideoRender::FLAG_DUMMY;
     }
 
+    AF_LOGI("SetUpVideoPath tunnelRender=%d hw=%d renderFlags=%" PRIx64 " view=%p\n",
+            (int) tunnelRender, (int) bHW, flags, mSet->mView.load());
+
     int ret = setUpVideoRender(flags);
     if (ret < 0) {
         return ret;
@@ -3870,6 +3904,15 @@ void SuperMediaPlayer::updateVideoMeta()
 
     int with = meta->displayWidth == 0 ? meta->width : meta->displayWidth;
     int height = meta->displayHeight == 0 ? meta->height : meta->displayHeight;
+    // TunnelRender（dummy render）直通时旋转由 MediaCodec 完成，
+    // 对外上报的尺寸需与旋转后的显示方向一致（90/270 交换宽高）
+    if (mAVDeviceManager->isVideoRenderValid() &&
+        (mAVDeviceManager->getVideoRender()->getFlags() & IVideoRender::FLAG_DUMMY) &&
+        (meta->rotate == 90 || meta->rotate == 270)) {
+        int tmp = with;
+        with = height;
+        height = tmp;
+    }
     if (mVideoWidth != with || mVideoHeight != height || mVideoRotation != meta->rotate) {
         mVideoWidth = with;
         mVideoHeight = height;
@@ -3970,6 +4013,8 @@ int SuperMediaPlayer::CreateVideoDecoder(bool bHW, Stream_meta &meta)
     }
 #endif
     ret = mAVDeviceManager->setUpDecoder(decFlag, (const Stream_meta *) (&meta), view, SMPAVDeviceManager::DEVICE_TYPE_VIDEO, dstFormat);
+    AF_LOGI("CreateVideoDecoder bHW=%d decFlag=%" PRIx64 " view=%p ret=%d\n",
+            (int) bHW, decFlag, view, ret);
     if (ret < 0) {
         return ret;
     }
@@ -3978,6 +4023,82 @@ int SuperMediaPlayer::CreateVideoDecoder(bool bHW, Stream_meta &meta)
         mMsgCtrlListener->ProcessVideoHoldMsg(mAppStatus == APP_BACKGROUND);
     }
     return ret;
+}
+
+int SuperMediaPlayer::RestartVideoDecoder()
+{
+    // 兜底路径，由 ProcessSetViewMsg 在持有 mCreateMutex 时调用。
+    // 等价于 ExoPlayer 2.9.6 MediaCodecVideoRenderer.setSurface() 中
+    // releaseCodec()+maybeInitCodec() 的分支：setOutputSurface 热切换失败
+    // （codec 已失效，如后台期间 surface 被系统销毁 → ACodec 报错 → 自愈
+    // 关闭）时，仅重建视频解码器；音频/解复用保持运行，新解码器绑定新
+    // surface 并从下一个关键帧续播。
+    if (!mAVDeviceManager->isVideoRenderValid() ||
+        (mAVDeviceManager->getVideoRender()->getFlags() & IVideoRender::FLAG_DUMMY) == 0) {
+        return -EINVAL;
+    }
+
+    // 用栈上副本，避免与主循环线程并发读写共享的 mCurrentVideoMeta
+    Stream_meta meta{};
+    if (mDemuxerService == nullptr ||
+        mDemuxerService->GetStreamMeta(&meta, mCurrentVideoIndex, false) < 0) {
+        return -EINVAL;
+    }
+
+    // 沿用上一次的解码方式（硬解/软解）
+    bool bHW = (mAVDeviceManager->getVideoDecoderFlags() & DECFLAG_HW) != 0;
+
+    // 置无效后 setUpDecoder 才会关掉旧（僵尸）解码器并新建
+    mAVDeviceManager->invalidateDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+    int ret = CreateVideoDecoder(bHW, meta);
+    if (ret < 0 && bHW) {
+        // 软解兜底（罕见路径：硬解重建失败时保音频不断播）
+        ret = CreateVideoDecoder(false, meta);
+    }
+
+    if (ret < 0) {
+        AF_LOGW("%s restart video decoder failed %s\n", __FUNCTION__, framework_err2_string(ret));
+    } else {
+        AF_LOGI("RestartVideoDecoder bHW=%d ret=%d\n", (int) bHW, ret);
+    }
+    return ret;
+}
+
+int SuperMediaPlayer::RestorePausedVideoFrame()
+{
+    // 由 ProcessSetViewMsg 在持有 mCreateMutex 时调用（仅暂停状态）。
+    // surface 重建后 ACodec 不会重绘最后一帧（ExoPlayer 2.9.6 的
+    // setOutputSurface 热切换同样不重绘）。以解码器记录的"最后渲染帧
+    // PTS"为渲染门（只放行这一帧，避免从关键帧开始闪帧），原地 seek
+    // 解码，逐帧精确恢复暂停画面。
+    if (mPlayStatus != PLAYER_PAUSED) {
+        AF_LOGI("PFR: skip, status=%d\n", (int) mPlayStatus.load());
+        return 0;
+    }
+    IDecoder *decoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+    if (decoder == nullptr) {
+        AF_LOGI("PFR: skip, no video decoder\n");
+        return 0;
+    }
+    int64_t lastPts = decoder->getLastRenderedVideoPts();
+    if (lastPts == INT64_MIN) {
+        AF_LOGI("PFR: skip, lastRenderedPts unknown\n");
+        return 0;
+    }
+    int64_t frameDur = decoder->getLastRenderedVideoFrameDur();
+    if (frameDur <= 0) {
+        // 未知帧间隔时按 50ms 兜底：只影响 seek 目标（多读少量包），
+        // 渲染门会丢弃目标帧之外的所有帧
+        frameDur = 50000;
+    }
+
+    decoder->setRenderGate(lastPts);
+    mRestoringPausedFrame = true;
+    // seek 到"暂停帧之后一帧以内"：保证暂停帧所在包被读到，
+    // 且不会多解多少包（向上取整避免毫秒截断到暂停帧之前）
+    SeekTo((lastPts + frameDur + 999) / 1000, false);
+    AF_LOGI("PFR: restore start, lastPts=%" PRId64 " frameDur=%" PRId64 "\n", lastPts, frameDur);
+    return 0;
 }
 
 

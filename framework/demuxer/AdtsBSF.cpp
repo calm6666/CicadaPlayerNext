@@ -65,7 +65,7 @@ int AdtsBSF::init(const std::string &name, AVCodecParameters *codecpar)
     return 0;
 }
 
-int AdtsBSF::io_write(void *opaque, uint8_t *buf, int size)
+int AdtsBSF::io_write(void *opaque, const uint8_t *buf, int size)
 {
     auto *adtsBSF = static_cast<AdtsBSF *>(opaque);
     assert(adtsBSF->targetPkt != nullptr);

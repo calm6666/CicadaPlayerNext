@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "mediaPlayer/framework.out/filter",
+		"source" : "D:/hilihili/CicadaPlayerNext/framework/filter"
+	}
+}

@@ -74,7 +74,7 @@ namespace Cicada {
         AVIOContext *mPuc{};
         AVIOInterruptCB mInterruptCB{};
         int mInterrupted{};
-        char mErrorMsg[AV_ERROR_MAX_STRING_SIZE]{};
+        char mErrorMsg[64]{};   // AV_ERROR_MAX_STRING_SIZE removed in FFmpeg 6.0（原值 64）
         bool isNetWork{true};
     };
 }

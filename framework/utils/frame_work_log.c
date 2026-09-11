@@ -92,7 +92,9 @@ pid_t gettid(void)
 #elif defined(WIN32)
     return GetCurrentThreadId();
 #else
-    return pthread_self();
+    /* glibc: pthread_t is an integer; musl (OHOS): it is a pointer.
+       Cast so the same body works on both. */
+    return (pid_t) pthread_self();
 #endif
 }
 

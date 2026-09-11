@@ -13,6 +13,11 @@ CMakeLists.txt text eol=lf
 *.patch text eol=lf
 *.pl text eol=lf
 
+# Windows 批处理必须始终是 CRLF：cmd.exe 按字节偏移定位标签，
+# LF-only 的 .bat 会让 goto/call :label 失效。
+*.bat text eol=crlf
+*.cmd text eol=crlf
+
 # 二进制文件不做换行/文本转换
 *.png binary
 *.jpg binary

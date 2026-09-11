@@ -56,7 +56,7 @@ namespace Cicada {
         OH_AudioStreamBuilder_SetChannelCount(builder, mChannels);
         OH_AudioStreamBuilder_SetSampleFormat(builder, AUDIOSTREAM_SAMPLE_S16LE);
         OH_AudioStreamBuilder_SetEncodingType(builder, AUDIOSTREAM_ENCODING_TYPE_RAW);
-        OH_AudioStreamBuilder_SetLatencyMode(builder, AUDIOSTREAM_LATENCY_NORMAL);
+        OH_AudioStreamBuilder_SetLatencyMode(builder, AUDIOSTREAM_LATENCY_MODE_NORMAL);
         OH_AudioStreamBuilder_SetRendererInfo(builder, AUDIOSTREAM_USAGE_MUSIC);
 
         OH_AudioRenderer_Callbacks callbacks{};
@@ -218,15 +218,17 @@ namespace Cicada {
         return length;
     }
 
-    int32_t OhosAudioRender::onStreamEvent(OH_AudioRenderer *renderer, void *userData, int32_t event)
+    int32_t OhosAudioRender::onStreamEvent(OH_AudioRenderer *renderer, void *userData,
+                                           OH_AudioStream_Event event)
     {
         (void) renderer;
         (void) userData;
+        (void) event;
         return 0;
     }
 
     int32_t OhosAudioRender::onInterruptEvent(OH_AudioRenderer *renderer, void *userData,
-                                             int32_t type, int32_t hint)
+                                             OH_AudioInterrupt_ForceType type, OH_AudioInterrupt_Hint hint)
     {
         (void) renderer;
         (void) userData;
@@ -235,9 +237,9 @@ namespace Cicada {
         return 0;
     }
 
-    int32_t OhosAudioRender::onError(OH_AudioRenderer *renderer, void *userData, int32_t error)
+    int32_t OhosAudioRender::onError(OH_AudioRenderer *renderer, void *userData, OH_AudioStream_Result error)
     {
-        AF_LOGE("OH_AudioRenderer error %d\n", error);
+        AF_LOGE("OH_AudioRenderer error %d\n", (int) error);
         return 0;
     }
 

@@ -6,6 +6,8 @@
 
 #include "SuperMediaPlayer.h"
 #include "media_player_error_def.h"
+#include <cinttypes>
+#include <render/video/IVideoRender.h>
 #include <cassert>
 #include <climits>
 #include <data_source/dataSourcePrototype.h>
@@ -431,6 +433,12 @@ void SMPMessageControllerListener::ProcessStartMsg()
         }
 
         mPlayer.ChangePlayerStatus(PLAYER_PLAYING);
+
+        // 恢复播放：解除暂停帧恢复的渲染门（恢复正常渲染）
+        IDecoder *decoder = mPlayer.mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+        if (decoder != nullptr) {
+            decoder->setRenderGate(INT64_MIN);
+        }
     }
 }
 
@@ -481,6 +489,27 @@ void SMPMessageControllerListener::ProcessSetViewMsg(void *view)
     if (mPlayer.mAVDeviceManager->getVideoRender() != nullptr) {
         mPlayer.mAVDeviceManager->getVideoRender()->setDisPlay(view);
     }
+
+    // 隧道直通（dummy render）模式：surface 变化（含销毁，view==null）时
+    // 调用 MediaCodec.setOutputSurface —— 对齐 ExoPlayer 2.9.6：
+    // null 时 Java 侧换成内部 DummySurface（codec 保持运行，帧静默丢弃），
+    // 回前台切回真实 surface；只有 codec 已失效（返回负值）才走
+    // releaseCodec+maybeInitCodec 式的重建兜底（RestartVideoDecoder）
+    if (mPlayer.mAVDeviceManager->getVideoRender() != nullptr
+        && (mPlayer.mAVDeviceManager->getVideoRender()->getFlags() & IVideoRender::FLAG_DUMMY)) {
+        IDecoder *decoder = mPlayer.mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+        if (decoder != nullptr) {
+            int ret = decoder->setOutputSurface(view);
+            if (ret < 0) {
+                AF_LOGI("video output surface swap failed ret=%d, fallback: restart video decoder\n", ret);
+                mPlayer.RestartVideoDecoder();
+            } else if (view != nullptr && mPlayer.mPlayStatus == PLAYER_PAUSED) {
+                // 暂停状态恢复 surface：ACodec 不会重绘最后一帧，用渲染门 +
+                // 原地 seek 精确恢复"暂停的那一帧"（只放行最后渲染帧 PTS）
+                mPlayer.RestorePausedVideoFrame();
+            }
+        }
+    }
 }
 
 void SMPMessageControllerListener::ProcessSetDataSourceMsg(const std::string &url)
@@ -519,6 +548,16 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mSeekNeedCatch = bAccurate;
     mPlayer.mSeekPos = seekPos;
 
+    // 暂停帧恢复的渲染门只在"恢复专用 seek"期间保持；用户自己发起的
+    // seek（如暂停时拖动进度条）要关闭渲染门，恢复正常渲染
+    if (!mPlayer.mRestoringPausedFrame) {
+        IDecoder *decoder = mPlayer.mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+        if (decoder != nullptr) {
+            decoder->setRenderGate(INT64_MIN);
+        }
+    }
+    mPlayer.mRestoringPausedFrame = false;
+
     // seek before prepare, should keep mSeekPos
     if (mPlayer.mPlayStatus < PLAYER_PREPARING ||
         // if reuse player..
@@ -540,6 +579,8 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mCurVideoPts = INT64_MIN;
     //flush packet queue
     mPlayer.mSeekInCache = mPlayer.SeekInCache(seekPos);
+    AF_LOGI("PFR: seek posUs=%" PRId64 " inCache=%d status=%d\n",
+            seekPos, (int) mPlayer.mSeekInCache, (int) mPlayer.mPlayStatus.load());
 
     mPlayer.mPNotifier->NotifySeeking(mPlayer.mSeekInCache);
 

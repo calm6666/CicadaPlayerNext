@@ -19,8 +19,7 @@ namespace Cicada {
         mCtx = avformat_alloc_context();
         mCtx->interrupt_callback.callback = interrupt_cb;
         mCtx->interrupt_callback.opaque = this;
-        // correct_ts_overflow was removed in FFmpeg 7.0 (0 is the default).
-        mCtx->flags |= AVFMT_FLAG_KEEP_SIDE_DATA;
+        // AVFMT_FLAG_KEEP_SIDE_DATA removed in FFmpeg 6.0（5.0 起即 no-op）
     }
 
     avFormatSubtitleDemuxer::~avFormatSubtitleDemuxer()
@@ -300,14 +299,17 @@ namespace Cicada {
             return mEntryInfos;
         }
         for (int i = 0; i < mCtx->nb_streams; ++i) {
-            AVIndexEntry *index_entries = mCtx->streams[i]->index_entries;
             streamIndexEntryInfo entryInfo;
             entryInfo.mDuration = mCtx->duration;
             entryInfo.type = STREAM_TYPE_SUB;
-            for (int j = 0; j < mCtx->streams[i]->nb_index_entries; ++j) {
-                int64_t timestamp = av_rescale_q(index_entries[j].timestamp, mCtx->streams[i]->time_base, av_get_time_base_q());
-                streamIndexEntryInfo::entryInfo info(index_entries[j].pos, timestamp, index_entries[j].flags & AVINDEX_KEYFRAME,
-                                                     index_entries[j].flags & AVINDEX_DISCARD_FRAME, index_entries[j].size);
+            // AVStream::index_entries/nb_index_entries removed in FFmpeg 6.0；
+            // 改用公共访问器 avformat_index_get_entries_count/get_entry
+            int nbIndexEntries = avformat_index_get_entries_count(mCtx->streams[i]);
+            for (int j = 0; j < nbIndexEntries; ++j) {
+                const AVIndexEntry *index_entry = avformat_index_get_entry(mCtx->streams[i], j);
+                int64_t timestamp = av_rescale_q(index_entry->timestamp, mCtx->streams[i]->time_base, av_get_time_base_q());
+                streamIndexEntryInfo::entryInfo info(index_entry->pos, timestamp, index_entry->flags & AVINDEX_KEYFRAME,
+                                                     index_entry->flags & AVINDEX_DISCARD_FRAME, index_entry->size);
                 entryInfo.mEntry.push_back(info);
             }
             mEntryInfos.push_back(entryInfo);

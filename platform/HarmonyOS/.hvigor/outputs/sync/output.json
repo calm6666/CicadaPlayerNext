@@ -1,0 +1,165 @@
+{
+  "version": 1,
+  "ohos-module-entry": {
+    "SELECT_TARGET": "default",
+    "MODULE_BUILD_DIR": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build",
+    "TARGETS": {
+      "default": {
+        "SOURCE_ROOT": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\src\\main",
+        "RESOURCES_PATH": [
+          "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\src\\main\\resources"
+        ],
+        "BUILD_PATH": {
+          "OUTPUT_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\outputs\\default",
+          "INTERMEDIA_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates",
+          "JS_ASSETS_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\loader_out\\default",
+          "JS_LITE_ASSETS_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\loader_out_lite\\default",
+          "RES_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\res\\default",
+          "RES_PROFILE_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\res\\default\\resources\\base\\profile",
+          "ETS_SUPER_VISUAL_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\cache\\default\\default@CompileArkTS\\esmodule",
+          "JS_SUPER_VISUAL_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\cache\\default\\default@CompileJS\\jsbundle",
+          "WORKER_LOADER": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\loader\\default\\loader.json",
+          "MANIFEST_JSON": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\manifest\\default",
+          "OUTPUT_METADATA_JSON": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\hap_metadata\\default\\output_metadata.json",
+          "SOURCE_MAP_DIR": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry\\build\\default\\intermediates\\source_map\\default"
+        },
+        "BUILD_OPTION": {
+          "debuggable": true
+        }
+      }
+    },
+    "BUILD_OPTION": {
+      "default-default": {
+        "debuggable": true,
+        "copyFrom": "default",
+        "strictMode": {
+          "caseSensitiveCheck": true
+        },
+        "externalNativeOptions": {
+          "path": "./src/main/cpp/CMakeLists.txt",
+          "arguments": "",
+          "cppFlags": "",
+          "abiFilters": [
+            "arm64-v8a",
+            "x86_64"
+          ]
+        },
+        "name": "debug"
+      }
+    },
+    "BUILD_PROFILE_OPT": {
+      "apiType": "stageMode",
+      "buildOption": {
+        "externalNativeOptions": {
+          "path": "./src/main/cpp/CMakeLists.txt",
+          "arguments": "",
+          "cppFlags": "",
+          "abiFilters": [
+            "arm64-v8a",
+            "x86_64"
+          ]
+        }
+      },
+      "buildOptionSet": [
+        {
+          "name": "release",
+          "arkOptions": {
+            "obfuscation": {
+              "ruleOptions": {
+                "enable": false,
+                "files": [
+                  "./obfuscation-rules.txt"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "name": "default"
+        },
+        {
+          "name": "debug"
+        }
+      ],
+      "targets": [
+        {
+          "name": "default"
+        }
+      ]
+    },
+    "BUILD_CACHE_DIR": ""
+  },
+  "ohos-project": {
+    "SELECT_PRODUCT_NAME": "default",
+    "MODULE_BUILD_DIR": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\build",
+    "BUNDLE_NAME": "com.cicada.player.demo",
+    "VERSION_CODE": 1000000,
+    "VERSION_NAME": "1.0.0",
+    "BUILD_PATH": {
+      "OUTPUT_PATH": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\build\\outputs\\default"
+    },
+    "MODULES": [
+      {
+        "name": "entry",
+        "srcPath": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS\\entry",
+        "targets": [
+          {
+            "name": "default",
+            "applyToProducts": [
+              "default"
+            ]
+          }
+        ],
+        "belongProjectPath": "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS"
+      }
+    ],
+    "PROFILE_OPT": {
+      "app": {
+        "signingConfigs": [],
+        "products": [
+          {
+            "name": "default",
+            "compatibleSdkVersion": "5.0.0(12)",
+            "runtimeOS": "HarmonyOS",
+            "buildOption": {
+              "strictMode": {
+                "caseSensitiveCheck": true
+              }
+            }
+          }
+        ],
+        "buildModeSet": [
+          {
+            "name": "debug"
+          },
+          {
+            "name": "release"
+          }
+        ]
+      },
+      "modules": [
+        {
+          "name": "entry",
+          "srcPath": "./entry",
+          "targets": [
+            {
+              "name": "default",
+              "applyToProducts": [
+                "default"
+              ]
+            }
+          ]
+        }
+      ]
+    },
+    "CONFIG_PROPERTIES": {
+      "enableSignTask": true,
+      "skipNativeIncremental": false,
+      "hvigor.keepDependency": true
+    },
+    "OVERALL_PROJECT_PATHS": [
+      "D:\\hilihili\\CicadaPlayerNext\\platform\\HarmonyOS"
+    ],
+    "BUILD_CACHE_DIR": ""
+  }
+}

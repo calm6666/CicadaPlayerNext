@@ -132,6 +132,11 @@
     <string name="cicada_sts_clear">Clear</string>
     <string name="btn_exoplayer">ExoPlayer</string>
     <string name="btn_input_url">Input Url</string>
+    <string name="btn_local_video">Select Local Video</string>
+    <string name="cicada_pick_video_failed">No file picker available on this device</string>
+    <string name="cicada_import_video_ing">Importing local video…</string>
+    <string name="cicada_import_video_failed">Import local video failed</string>
+    <string name="cicada_perf_debug">perf…</string>
 
     <!--download-->
 

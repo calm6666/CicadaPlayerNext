@@ -42,6 +42,72 @@
                 android:layout_height="50dp"
                 android:text="exoPlayer"/>
 
+            <EditText
+                android:id="@+id/et_input_dash_url"
+                android:layout_width="match_parent"
+                android:layout_height="50dp"
+                android:layout_marginTop="20dp"
+                android:singleLine="true"
+                android:background="@drawable/shape_edit_bg"
+                android:hint="DASH 播放链接（.mpd）"
+                android:maxLines="1" />
+
+            <Button
+                android:id="@+id/btn_play_dash_url"
+                android:layout_width="200dp"
+                android:layout_height="50dp"
+                android:text="播放 DASH (URL)"/>
+
+            <EditText
+                android:id="@+id/et_input_hls_url"
+                android:layout_width="match_parent"
+                android:layout_height="50dp"
+                android:layout_marginTop="20dp"
+                android:singleLine="true"
+                android:background="@drawable/shape_edit_bg"
+                android:hint="HLS 播放链接（.m3u8）"
+                android:maxLines="1" />
+
+            <Button
+                android:id="@+id/btn_play_hls_url"
+                android:layout_width="200dp"
+                android:layout_height="50dp"
+                android:text="播放 HLS (URL)"/>
+
+            <EditText
+                android:id="@+id/et_input_normal_url"
+                android:layout_width="match_parent"
+                android:layout_height="50dp"
+                android:layout_marginTop="20dp"
+                android:singleLine="true"
+                android:background="@drawable/shape_edit_bg"
+                android:hint="普通在线视频链接（mp4/flv 等，非 dash/hls）"
+                android:maxLines="1" />
+
+            <Button
+                android:id="@+id/btn_play_normal_url"
+                android:layout_width="200dp"
+                android:layout_height="50dp"
+                android:text="播放普通视频 (URL)"/>
+
+            <EditText
+                android:id="@+id/et_input_manifest_json"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:minLines="6"
+                android:gravity="top"
+                android:inputType="textMultiLine"
+                android:background="@drawable/shape_edit_bg"
+                android:hint="接口返回的 MediaManifest JSON（DASH/HLS 对象播放，反序列化后直接传入播放器）" />
+
+            <Button
+                android:id="@+id/btn_play_manifest_json"
+                android:layout_width="wrap_content"
+                android:layout_height="50dp"
+                android:layout_marginBottom="20dp"
+                android:text="对象播放 (JSON 传入)"/>
+
         </LinearLayout>
 
     </LinearLayout>

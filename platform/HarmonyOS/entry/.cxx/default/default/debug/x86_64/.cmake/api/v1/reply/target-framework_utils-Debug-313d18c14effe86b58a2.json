@@ -1,0 +1,781 @@
+{
+	"archive" : {},
+	"artifacts" : 
+	[
+		{
+			"path" : "mediaPlayer/framework.out/utils/libframework_utils.a"
+		}
+	],
+	"backtrace" : 1,
+	"backtraceGraph" : 
+	{
+		"commands" : 
+		[
+			"add_library",
+			"add_definitions",
+			"include_directories",
+			"include",
+			"project"
+		],
+		"files" : 
+		[
+			"D:/hilihili/CicadaPlayerNext/framework/utils/CMakeLists.txt",
+			"C:/Program Files/Huawei/DevEco Studio/sdk/default/hms/native/build/cmake/hmos.toolchain.cmake",
+			"D:/hilihili/CicadaPlayerNext/platform/HarmonyOS/entry/.cxx/default/default/debug/x86_64/CMakeFiles/3.28.2/CMakeSystem.cmake",
+			"CMakeLists.txt"
+		],
+		"nodes" : 
+		[
+			{
+				"file" : 0
+			},
+			{
+				"command" : 0,
+				"file" : 0,
+				"line" : 159,
+				"parent" : 0
+			},
+			{
+				"command" : 1,
+				"file" : 0,
+				"line" : 7,
+				"parent" : 0
+			},
+			{
+				"file" : 3
+			},
+			{
+				"command" : 4,
+				"file" : 3,
+				"line" : 11,
+				"parent" : 3
+			},
+			{
+				"file" : 2,
+				"parent" : 4
+			},
+			{
+				"command" : 3,
+				"file" : 2,
+				"line" : 6,
+				"parent" : 5
+			},
+			{
+				"file" : 1,
+				"parent" : 6
+			},
+			{
+				"command" : 2,
+				"file" : 1,
+				"line" : 25,
+				"parent" : 7
+			},
+			{
+				"command" : 2,
+				"file" : 0,
+				"line" : 156,
+				"parent" : 0
+			}
+		]
+	},
+	"compileGroups" : 
+	[
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -fno-addrsig -Wa,--noexecstack -Wformat -Werror=format-security   -D__MUSL__ -D__STDC_CONSTANT_MACROS -D__OHOS__ -DOHOS -Wno-macro-redefined -Wno-deprecated-declarations -D_FILE_OFFSET_BITS=64 -O0 -g -fno-limit-debug-info  -std=gnu++11 -fPIC"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 2,
+					"define" : "ENABLE_CODEC_HEVC"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 8,
+					"path" : "C:/Program Files/Huawei/DevEco Studio/sdk/default/hms/native/sysroot/usr/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/ffmpeg/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/../build/ffmpeg/OHOS/x86_64"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/curl/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/openssl/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/libxml2/OHOS/x86_64/include/libxml2"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/nghttp2/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/boost"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/.."
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/external/ffmpeg"
+				}
+			],
+			"language" : "CXX",
+			"languageStandard" : 
+			{
+				"backtraces" : 
+				[
+					1
+				],
+				"standard" : "11"
+			},
+			"sourceIndexes" : 
+			[
+				10,
+				11,
+				14,
+				15,
+				17,
+				18,
+				20,
+				21,
+				22,
+				25,
+				27,
+				29,
+				32,
+				33,
+				35,
+				37,
+				38,
+				40,
+				44,
+				46,
+				48,
+				50,
+				52,
+				54,
+				56,
+				58,
+				60,
+				62,
+				64,
+				66,
+				68,
+				70,
+				72
+			],
+			"sysroot" : 
+			{
+				"path" : "C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/native/sysroot"
+			}
+		},
+		{
+			"compileCommandFragments" : 
+			[
+				{
+					"fragment" : "-fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -fno-addrsig -Wa,--noexecstack -Wformat -Werror=format-security  -D__MUSL__ -D__OHOS__ -DOHOS -Wno-macro-redefined -Wno-deprecated-declarations -D_FILE_OFFSET_BITS=64 -O0 -g -fno-limit-debug-info  -fPIC"
+				}
+			],
+			"defines" : 
+			[
+				{
+					"backtrace" : 2,
+					"define" : "ENABLE_CODEC_HEVC"
+				}
+			],
+			"includes" : 
+			[
+				{
+					"backtrace" : 8,
+					"path" : "C:/Program Files/Huawei/DevEco Studio/sdk/default/hms/native/sysroot/usr/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/ffmpeg/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/../build/ffmpeg/OHOS/x86_64"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/curl/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/openssl/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/libxml2/OHOS/x86_64/include/libxml2"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/install/nghttp2/OHOS/x86_64/include"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/boost"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework"
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/.."
+				},
+				{
+					"backtrace" : 9,
+					"path" : "D:/hilihili/CicadaPlayerNext/framework/../external/external/ffmpeg"
+				}
+			],
+			"language" : "C",
+			"sourceIndexes" : 
+			[
+				12,
+				13,
+				16,
+				19,
+				28,
+				43
+			],
+			"sysroot" : 
+			{
+				"path" : "C:/Program Files/Huawei/DevEco Studio/sdk/default/openharmony/native/sysroot"
+			}
+		}
+	],
+	"id" : "framework_utils::@f698ab25f867b2b69e25",
+	"name" : "framework_utils",
+	"nameOnDisk" : "libframework_utils.a",
+	"paths" : 
+	{
+		"build" : "mediaPlayer/framework.out/utils",
+		"source" : "D:/hilihili/CicadaPlayerNext/framework/utils"
+	},
+	"sourceGroups" : 
+	[
+		{
+			"name" : "Header Files",
+			"sourceIndexes" : 
+			[
+				0,
+				1,
+				2,
+				3,
+				4,
+				5,
+				6,
+				7,
+				8,
+				9,
+				23,
+				24,
+				26,
+				30,
+				31,
+				34,
+				36,
+				39,
+				41,
+				42,
+				45,
+				47,
+				49,
+				51,
+				53,
+				55,
+				57,
+				59,
+				61,
+				63,
+				65,
+				67,
+				69,
+				71,
+				73
+			]
+		},
+		{
+			"name" : "Source Files",
+			"sourceIndexes" : 
+			[
+				10,
+				11,
+				12,
+				13,
+				14,
+				15,
+				16,
+				17,
+				18,
+				19,
+				20,
+				21,
+				22,
+				25,
+				27,
+				28,
+				29,
+				32,
+				33,
+				35,
+				37,
+				38,
+				40,
+				43,
+				44,
+				46,
+				48,
+				50,
+				52,
+				54,
+				56,
+				58,
+				60,
+				62,
+				64,
+				66,
+				68,
+				70,
+				72
+			]
+		}
+	],
+	"sources" : 
+	[
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/AutoAVFrame.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaJSON.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/afThread.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/frame_work_log.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/mediaFrame.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/timer.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/af_string.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/af_clock.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/ringBuffer.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/cJSON.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaJSON.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/afThread.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/frame_work_log.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/mediaFrame.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/timer.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/af_string.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/errors/framework_error.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/af_clock.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/ringBuffer.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/cJSON.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/globalSettings.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/property.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/err.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/err.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaType.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/bitStreamParser.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaUtils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaUtils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/AFUtils.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/AsyncJob.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/AsyncJob.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaDynamicLoader.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaDynamicLoader.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/file/FileCntl.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/file/FileCntl.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/file/FileUtils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/file/FileUtils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/oscl/oscl_utils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaThumbnailParser.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/CicadaThumbnailParser.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/mediaTypeInternal.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/mediaTypeInternal.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/ffmpeg_utils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/ffmpeg_utils.c",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/subTitlePacket.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/subTitlePacket.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/Md5Utils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/Md5Utils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/options.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/options.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/UrlUtils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/UrlUtils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/DrmUtils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/DrmUtils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/UTCTimer.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/UTCTimer.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/globalNetWorkManager.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/globalNetWorkManager.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/AssUtils.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/AssUtils.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/IAFPacket.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/IAFPacket.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/AVAFPacket.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/AVAFPacket.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/TextureFrame.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/TextureFrame.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/xml/DOMHelper.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/xml/DOMHelper.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/xml/DOMParser.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/xml/DOMParser.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/xml/Node.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/utils/xml/Node.h",
+			"sourceGroupIndex" : 0
+		},
+		{
+			"backtrace" : 1,
+			"compileGroupIndex" : 0,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/AFMediaCodecFrame.cpp",
+			"sourceGroupIndex" : 1
+		},
+		{
+			"backtrace" : 1,
+			"path" : "D:/hilihili/CicadaPlayerNext/framework/base/media/AFMediaCodecFrame.h",
+			"sourceGroupIndex" : 0
+		}
+	],
+	"type" : "STATIC_LIBRARY"
+}

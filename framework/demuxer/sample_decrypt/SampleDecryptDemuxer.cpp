@@ -7,6 +7,8 @@
 #include "SampleDecryptDemuxer.h"
 #include <base/media/AVAFPacket.h>
 #include <utils/frame_work_log.h>
+// mCtx 成员访问需要 AVFormatContext 完整定义（avFormatDemuxer.h 只有前置声明）
+#include <libavformat/avformat.h>
 
 namespace Cicada {
     SampleDecryptDemuxer SampleDecryptDemuxer::se(0);

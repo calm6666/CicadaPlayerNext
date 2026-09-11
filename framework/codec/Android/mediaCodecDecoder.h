@@ -2,7 +2,9 @@
 #define QU_ANDROID_H264_DECODER_HH
 
 #include <cstdio>
+#include <cstdint>
 #include <list>
+#include <atomic>
 #include <jni.h>
 #include <thread>
 #include <condition_variable>
@@ -46,6 +48,16 @@ namespace Cicada{
             return 0;
         };
         void decoder_updateMetaData(const Stream_meta *meta) override{};
+
+        int setOutputSurface(void *surface) override;
+
+        int64_t getLastRenderedVideoPts() override;
+
+        int64_t getLastRenderedVideoFrameDur() override;
+
+        void setRenderGate(int64_t gatePts) override;
+
+        bool isRenderGateHit() override;
 
     private:
         static bool checkSupport(const Stream_meta &meta, uint64_t flags, int maxSize);
@@ -106,6 +118,7 @@ namespace Cicada{
         bool mbInit{false};
 
         int mInputFrameCount{0};
+        int mInputTryAgainCount{0};
         int mOutputFrameCount{0};
         bool mThrowFrame{false};
         bool mUseNdk{false};
@@ -117,6 +130,14 @@ namespace Cicada{
         volatile int mFlushState{0};
 
         std::set<int64_t> mDiscardPTSSet;
+
+        // 暂停帧恢复（surface 重建后精确恢复"暂停的那一帧"）：
+        // 追踪最近一次实际渲染帧的 PTS/帧间隔，setRenderGate 设置渲染门
+        std::atomic<int64_t> mLastRenderedVideoPts{INT64_MIN};
+        std::atomic<int64_t> mPrevRenderedVideoPts{INT64_MIN};
+        std::atomic<int64_t> mRenderGatePts{INT64_MIN};
+        std::atomic<bool> mRenderHold{false};
+        std::atomic<bool> mRenderGateHit{false};
 
         Stream_meta mMeta{};
         void* mVideoOutObser = nullptr;

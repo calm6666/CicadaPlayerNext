@@ -69,6 +69,21 @@ unique_ptr<IDecoder> decoderFactory::createBuildIn(const AFCodecID &codec, uint6
         }
 #endif
 #endif
+#if defined(_WIN32)
+        /*
+         * Windows has no separate hardware decoder class: FFmpeg's D3D11VA
+         * hwaccel runs inside avcodecDecoder, which downloads each decoded
+         * surface back to system memory for the RAM based SDL renderer.
+         *
+         * avcodecDecoder::open() decides whether the hwaccel is actually
+         * available and reports DECFLAG_SW when it is not, so the caller in
+         * SuperMediaPlayer transparently retries with CreateVideoDecoder(false).
+         * That is why every codec can be handed to it here instead of keeping a
+         * hardcoded list: with the stock prebuilt libffmpeg.dll
+         * (--disable-hwaccels) it simply always falls back to software.
+         */
+        return unique_ptr<IDecoder>(new avcodecDecoder());
+#endif
     }
 
     if (flags & DECFLAG_SW) {

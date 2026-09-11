@@ -27,7 +27,10 @@ set(BUILD_TEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CICADA_ROOT}/mediaPlayer ${CMAKE_CURRENT_BINARY_DIR}/mediaPlayer)
 
 # --- NAPI wrapper -------------------------------------------------------------
-add_library(entry SHARED napi_init.cpp)
+add_library(entry SHARED
+        napi_init.cpp
+        napi_player.cpp
+        napi_events.cpp)
 
 target_include_directories(entry PRIVATE
         ${CICADA_ROOT}/mediaPlayer
@@ -35,14 +38,26 @@ target_include_directories(entry PRIVATE
         ${CICADA_ROOT}/framework/base
         ${FFMPEG_INSTALL_DIR_OHOS_LOCAL}/include)
 
+# media_player is a STATIC library and does not declare its framework
+# dependencies, so this shared object has to link the same set the cmdline
+# executable links (see cmdline/CMakeLists.txt).
 target_link_libraries(entry PUBLIC
         media_player
+        demuxer
+        data_source
+        render
+        videodec
+        framework_filter
+        framework_utils
+        framework_drm
+        muxer
+        cacheModule
         libace_napi.z.so
         libnative_window.so
         libnative_buffer.so
         libnative_media_codecbase.so
         libnative_media_vdec.so
-        libnative_media_audiocodec.so
+        libnative_media_acodec.so
         libnative_media_core.so
         libohaudio.so
         libnative_drm.so

@@ -1,270 +1,98 @@
 // napi_init.cpp
 //
-// NAPI bridge between the ArkTS page and the Cicada native player.
+// Module registration for the HarmonyOS NAPI bridge. The implementation lives
+// in napi_player.cpp (registry + control/config API) and napi_events.cpp
+// (playerListener_t -> ArkTS event bridge).
 //
-// Exposed JS API (import testNapi from 'libentry.so'):
-//   create(): number                 - player handle id
-//   release(id: number): void
-//   setDataSource(id, url): void
-//   setDataSourceManifest(id, json): void     - object-based playback + DRM
-//   setSurface(id, surfaceId: string): void   - XComponent surfaceId string
-//   setDrmCallback(id, cb): void              - license request callback
-//   prepare(id): void
-//   start(id): void
-//   pause(id): void
-//   seek(id, positionMs, accurate): void
-//   stop(id): void
-//   release(id): void
-//
+// From ArkTS:  import cicada from 'libentry.so'
 
-#include <napi/native_api.h>
-#include <native_window/external_window.h>
-
-#include <cstdlib>
-#include <map>
-#include <mutex>
-#include <string>
-
-extern "C" {
-#include "media_player_api.h"
-}
-
-namespace {
-
-    struct PlayerEntry {
-        playerHandle *handle{nullptr};
-        OHNativeWindow *window{nullptr};
-        napi_threadsafe_function drmTsfn{nullptr};
-    };
-
-    std::mutex gMutex;
-    int gNextId = 1;
-    std::map<int, PlayerEntry> gPlayers;
-
-    int getPlayerId(napi_env env, napi_value value)
-    {
-        int32_t id = 0;
-        napi_get_value_int32(env, value, &id);
-        return id;
-    }
-
-    PlayerEntry *getPlayer(int id)
-    {
-        auto it = gPlayers.find(id);
-        return it == gPlayers.end() ? nullptr : &it->second;
-    }
-
-    napi_value create(napi_env env, napi_callback_info info)
-    {
-        std::lock_guard<std::mutex> lock(gMutex);
-        PlayerEntry entry;
-        entry.handle = CicadaCreatePlayer(nullptr);
-        int id = gNextId++;
-        gPlayers[id] = entry;
-        napi_value result;
-        napi_create_int32(env, id, &result);
-        return result;
-    }
-
-    napi_value release(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int id = getPlayerId(env, args[0]);
-        std::lock_guard<std::mutex> lock(gMutex);
-        auto it = gPlayers.find(id);
-        if (it != gPlayers.end()) {
-            if (it->second.window != nullptr) {
-                OH_NativeWindow_DestroyNativeWindow(it->second.window);
-            }
-            if (it->second.handle != nullptr) {
-                CicadaReleasePlayer(&it->second.handle);
-            }
-            gPlayers.erase(it);
-        }
-        return nullptr;
-    }
-
-    napi_value setDataSource(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 2;
-        napi_value args[2];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int id = getPlayerId(env, args[0]);
-        size_t len = 0;
-        napi_get_value_string_utf8(env, args[1], nullptr, 0, &len);
-        std::string url(len, '\0');
-        napi_get_value_string_utf8(env, args[1], &url[0], len + 1, &len);
-        if (PlayerEntry *entry = getPlayer(id)) {
-            CicadaSetDataSourceWithUrl(entry->handle, url.c_str());
-        }
-        return nullptr;
-    }
-
-    napi_value setDataSourceManifest(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 2;
-        napi_value args[2];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int id = getPlayerId(env, args[0]);
-        size_t len = 0;
-        napi_get_value_string_utf8(env, args[1], nullptr, 0, &len);
-        std::string json(len, '\0');
-        napi_get_value_string_utf8(env, args[1], &json[0], len + 1, &len);
-        if (PlayerEntry *entry = getPlayer(id)) {
-            // Object-based playback: unified MediaManifest JSON, DRM-capable.
-            CicadaSetDataSourceWithManifest(entry->handle, json.c_str());
-        }
-        return nullptr;
-    }
-
-    napi_value setSurface(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 2;
-        napi_value args[2];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int id = getPlayerId(env, args[0]);
-        size_t len = 0;
-        napi_get_value_string_utf8(env, args[1], nullptr, 0, &len);
-        std::string surfaceId(len, '\0');
-        napi_get_value_string_utf8(env, args[1], &surfaceId[0], len + 1, &len);
-
-        uint64_t id64 = strtoull(surfaceId.c_str(), nullptr, 10);
-        OHNativeWindow *window = OH_NativeWindow_CreateNativeWindowFromSurfaceId(id64);
-        if (window == nullptr) {
-            return nullptr;
-        }
-
-        if (PlayerEntry *entry = getPlayer(id)) {
-            if (entry->window != nullptr) {
-                OH_NativeWindow_DestroyNativeWindow(entry->window);
-            }
-            entry->window = window;
-            // The OHOS decoder (surface mode) receives the window through SetView.
-            CicadaSetView(entry->handle, window);
-        }
-        return nullptr;
-    }
-
-    napi_value prepare(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            CicadaPreparePlayer(entry->handle);
-        }
-        return nullptr;
-    }
-
-    napi_value start(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            CicadaStartPlayer(entry->handle);
-        }
-        return nullptr;
-    }
-
-    napi_value pause(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            CicadaPausePlayer(entry->handle);
-        }
-        return nullptr;
-    }
-
-    napi_value seek(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 3;
-        napi_value args[3];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int64_t positionMs = 0;
-        bool accurate = false;
-        napi_get_value_int64(env, args[1], &positionMs);
-        napi_get_value_bool(env, args[2], &accurate);
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            CicadaSeekToTime(entry->handle, positionMs, accurate);
-        }
-        return nullptr;
-    }
-
-    napi_value stop(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            CicadaStopPlayer(entry->handle);
-        }
-        return nullptr;
-    }
-
-    napi_value setVolume(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 2;
-        napi_value args[2];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        double volume = 1.0;
-        napi_get_value_double(env, args[1], &volume);
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            CicadaSetVolume(entry->handle, static_cast<float>(volume));
-        }
-        return nullptr;
-    }
-
-    napi_value getDuration(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int64_t duration = -1;
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            duration = CicadaGetDuration(entry->handle);
-        }
-        napi_value result;
-        napi_create_int64(env, duration, &result);
-        return result;
-    }
-
-    napi_value getCurrentPosition(napi_env env, napi_callback_info info)
-    {
-        size_t argc = 1;
-        napi_value args[1];
-        napi_get_cb_info(env, info, &argc, args, nullptr, nullptr);
-        int64_t position = -1;
-        if (PlayerEntry *entry = getPlayer(getPlayerId(env, args[0]))) {
-            position = CicadaGetCurrentPosition(entry->handle);
-        }
-        napi_value result;
-        napi_create_int64(env, position, &result);
-        return result;
-    }
-} // anonymous namespace
+#include "napi_player.h"
 
 EXTERN_C_START
 static napi_value Init(napi_env env, napi_value exports)
 {
     napi_property_descriptor desc[] = {
-        {"create", nullptr, create, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"release", nullptr, release, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setDataSource", nullptr, setDataSource, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setDataSourceManifest", nullptr, setDataSourceManifest, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setSurface", nullptr, setSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"prepare", nullptr, prepare, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"start", nullptr, start, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"pause", nullptr, pause, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"seek", nullptr, seek, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"stop", nullptr, stop, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"setVolume", nullptr, setVolume, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getDuration", nullptr, getDuration, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getCurrentPosition", nullptr, getCurrentPosition, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // ---- lifecycle ----
+        {"create", nullptr, cicada_ohos::Create, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"release", nullptr, cicada_ohos::Release, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setListener", nullptr, cicada_ohos::SetListener, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- view / surface ----
+        {"setSurface", nullptr, cicada_ohos::SetSurface, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"clearScreen", nullptr, cicada_ohos::ClearScreen, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- source ----
+        {"setDataSource", nullptr, cicada_ohos::SetDataSource, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDataSourceManifest", nullptr, cicada_ohos::SetDataSourceManifest, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"addExtSubtitle", nullptr, cicada_ohos::AddExtSubtitle, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"selectExtSubtitle", nullptr, cicada_ohos::SelectExtSubtitle, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setStreamDelayTime", nullptr, cicada_ohos::SetStreamDelayTime, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- transport ----
+        {"prepare", nullptr, cicada_ohos::Prepare, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"start", nullptr, cicada_ohos::Start, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"pause", nullptr, cicada_ohos::Pause, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"stop", nullptr, cicada_ohos::Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"reload", nullptr, cicada_ohos::Reload, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"seek", nullptr, cicada_ohos::Seek, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- speed / volume / modes ----
+        {"setSpeed", nullptr, cicada_ohos::SetSpeed, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getSpeed", nullptr, cicada_ohos::GetSpeed, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setVolume", nullptr, cicada_ohos::SetVolume, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getVolume", nullptr, cicada_ohos::GetVolume, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setMute", nullptr, cicada_ohos::SetMute, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isMute", nullptr, cicada_ohos::IsMute, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setLoop", nullptr, cicada_ohos::SetLoop, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getLoop", nullptr, cicada_ohos::GetLoop, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setAutoPlay", nullptr, cicada_ohos::SetAutoPlay, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isAutoPlay", nullptr, cicada_ohos::IsAutoPlay, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- picture modes ----
+        {"setScaleMode", nullptr, cicada_ohos::SetScaleMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getScaleMode", nullptr, cicada_ohos::GetScaleMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setRotateMode", nullptr, cicada_ohos::SetRotateMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getRotateMode", nullptr, cicada_ohos::GetRotateMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setMirrorMode", nullptr, cicada_ohos::SetMirrorMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getMirrorMode", nullptr, cicada_ohos::GetMirrorMode, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setVideoBackgroundColor", nullptr, cicada_ohos::SetVideoBackgroundColor, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- progress / geometry ----
+        {"getDuration", nullptr, cicada_ohos::GetDuration, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getCurrentPosition", nullptr, cicada_ohos::GetCurrentPosition, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getCurrentBufferedPosition", nullptr, cicada_ohos::GetCurrentBufferedPosition, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getMasterClockPts", nullptr, cicada_ohos::GetMasterClockPts, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getVideoResolution", nullptr, cicada_ohos::GetVideoResolution, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getVideoRotation", nullptr, cicada_ohos::GetVideoRotation, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- tracks ----
+        {"switchStreamIndex", nullptr, cicada_ohos::SwitchStreamIndex, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getCurrentStreamIndex", nullptr, cicada_ohos::GetCurrentStreamIndex, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getCurrentStreamInfo", nullptr, cicada_ohos::GetCurrentStreamInfo, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- snapshot ----
+        {"captureScreen", nullptr, cicada_ohos::CaptureScreen, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- network / config ----
+        {"setTimeout", nullptr, cicada_ohos::SetTimeout, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDropBufferThreshold", nullptr, cicada_ohos::SetDropBufferThreshold, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setRefer", nullptr, cicada_ohos::SetRefer, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setUserAgent", nullptr, cicada_ohos::SetUserAgent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"addCustomHttpHeader", nullptr, cicada_ohos::AddCustomHttpHeader, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"removeAllCustomHttpHeader", nullptr, cicada_ohos::RemoveAllCustomHttpHeader, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDefaultBandWidth", nullptr, cicada_ohos::SetDefaultBandWidth, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setDecoderType", nullptr, cicada_ohos::SetDecoderType, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getDecoderType", nullptr, cicada_ohos::GetDecoderType, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"enterBackGround", nullptr, cicada_ohos::EnterBackGround, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- generic options / diagnostics ----
+        {"setOption", nullptr, cicada_ohos::SetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getOption", nullptr, cicada_ohos::GetOption, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getPropertyLong", nullptr, cicada_ohos::GetPropertyLong, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getPlayerName", nullptr, cicada_ohos::GetPlayerName, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"invokeComponent", nullptr, cicada_ohos::InvokeComponent, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getVideoRenderFps", nullptr, cicada_ohos::GetVideoRenderFps, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getVideoDecodeFps", nullptr, cicada_ohos::GetVideoDecodeFps, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
@@ -273,17 +101,17 @@ EXTERN_C_END
 
 // C++11-compatible positional initializer (designated initializers are a C99
 // feature not accepted under strict -std=c++11).
-static napi_module demoModule = {
-        1,      // nm_version
-        0,      // nm_flags
-        nullptr,// nm_filename
-        Init,   // nm_register_func
-        "entry",// nm_modname
-        nullptr,// nm_priv
-        {0},    // reserved
+static napi_module cicadaModule = {
+        1,          // nm_version
+        0,          // nm_flags
+        nullptr,    // nm_filename
+        Init,       // nm_register_func
+        "entry",    // nm_modname -> libentry.so
+        nullptr,    // nm_priv
+        {0},        // reserved
 };
 
 extern "C" __attribute__((constructor)) void RegisterEntryModule(void)
 {
-    napi_module_register(&demoModule);
+    napi_module_register(&cicadaModule);
 }

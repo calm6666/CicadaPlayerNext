@@ -4,6 +4,18 @@
 // OpenHarmony OH_AVCodec hardware decode integration (API 12+).
 // See OhosAVCodecDecoder.h for the design notes.
 //
+// The OpenHarmony NDK declares no generic OH_AVCodec_* command surface: every
+// codec operation exists once per media type, and the caller picks the family:
+//
+//   video: OH_VideoDecoder_*   <multimedia/player_framework/native_avcodec_videodecoder.h>
+//   audio: OH_AudioCodec_*     <multimedia/player_framework/native_avcodec_audiocodec.h>
+//
+// Codec capabilities are *handed out by the framework* through
+// OH_AVCodec_GetCapability()/OH_AVCodec_GetCapabilityByCategory() and read with
+// OH_AVCapability_IsHardware()/OH_AVCapability_GetName()
+// (<multimedia/player_framework/native_avcapability.h>) -- there is no
+// OH_AVCapability_Create/OH_AVCapability_Destroy in the NDK.
+//
 
 #define LOG_TAG "OhosAVCodecDecoder"
 
@@ -18,6 +30,7 @@
 #include <drm/OHOS/OhosDrmHandler.h>
 
 #include <multimedia/player_framework/native_avcodec_base.h>
+#include <multimedia/player_framework/native_avcodec_videodecoder.h>
 #include <multimedia/player_framework/native_avcodec_audiocodec.h>
 #include <multimedia/player_framework/native_avcapability.h>
 #include <multimedia/player_framework/native_avformat.h>
@@ -31,7 +44,10 @@ using namespace std;
 
 namespace Cicada {
 
-    static const char *codecToMime(AFCodecID codecId)
+    // Defined as the class member declared in the header: an unqualified call to
+    // codecToMime() inside a member function resolves to the member, so a
+    // file-scope helper of the same name would leave it undefined at link time.
+    const char *OhosAVCodecDecoder::codecToMime(AFCodecID codecId)
     {
         switch (codecId) {
             case AF_CODEC_ID_H264:
@@ -49,6 +65,91 @@ namespace Cicada {
             default:
                 return nullptr;
         }
+    }
+
+    // ------------------------------------------------------------------------
+    // OH_AVCodec command dispatch.
+    //
+    // The video and the audio entry points operate on the same OH_AVCodec
+    // instance; only the function names differ, so a single isAudio flag picks
+    // the right family for every call made from this class.
+    // ------------------------------------------------------------------------
+
+    static OH_AVCodec *ohosCodecCreateByMime(bool isAudio, const char *mime)
+    {
+        return isAudio ? OH_AudioCodec_CreateByMime(mime, false /* decoder */)
+                       : OH_VideoDecoder_CreateByMime(mime);
+    }
+
+    static OH_AVErrCode ohosCodecRegisterCallback(OH_AVCodec *codec, bool isAudio,
+                                                  OH_AVCodecCallback callback, void *userData)
+    {
+        return isAudio ? OH_AudioCodec_RegisterCallback(codec, callback, userData)
+                       : OH_VideoDecoder_RegisterCallback(codec, callback, userData);
+    }
+
+    static OH_AVErrCode ohosCodecSetSurface(OH_AVCodec *codec, bool isAudio, OHNativeWindow *window)
+    {
+        // Only the video decoder renders into a native window; audio always
+        // produces PCM buffers.
+        if (isAudio || window == nullptr) {
+            return AV_ERR_INVALID_VAL;
+        }
+        return OH_VideoDecoder_SetSurface(codec, window);
+    }
+
+    static OH_AVErrCode ohosCodecSetDecryptionConfig(OH_AVCodec *codec, bool isAudio,
+                                                     MediaKeySession *session)
+    {
+        // secureAudio / secureVideoPath = false: the codec service decrypts CENC
+        // samples in-pipeline with a non-secure decoder (Widevine L3, ClearKey).
+        // L1 content would need secureVideoPath = true, which is only valid
+        // together with an output surface.
+        return isAudio ? OH_AudioCodec_SetDecryptionConfig(codec, session, false)
+                       : OH_VideoDecoder_SetDecryptionConfig(codec, session, false);
+    }
+
+    static OH_AVErrCode ohosCodecConfigure(OH_AVCodec *codec, bool isAudio, OH_AVFormat *format)
+    {
+        return isAudio ? OH_AudioCodec_Configure(codec, format)
+                       : OH_VideoDecoder_Configure(codec, format);
+    }
+
+    static OH_AVErrCode ohosCodecPrepare(OH_AVCodec *codec, bool isAudio)
+    {
+        return isAudio ? OH_AudioCodec_Prepare(codec) : OH_VideoDecoder_Prepare(codec);
+    }
+
+    static OH_AVErrCode ohosCodecStart(OH_AVCodec *codec, bool isAudio)
+    {
+        return isAudio ? OH_AudioCodec_Start(codec) : OH_VideoDecoder_Start(codec);
+    }
+
+    static OH_AVErrCode ohosCodecStop(OH_AVCodec *codec, bool isAudio)
+    {
+        return isAudio ? OH_AudioCodec_Stop(codec) : OH_VideoDecoder_Stop(codec);
+    }
+
+    static OH_AVErrCode ohosCodecFlush(OH_AVCodec *codec, bool isAudio)
+    {
+        return isAudio ? OH_AudioCodec_Flush(codec) : OH_VideoDecoder_Flush(codec);
+    }
+
+    static OH_AVErrCode ohosCodecPushInputBuffer(OH_AVCodec *codec, bool isAudio, uint32_t index)
+    {
+        return isAudio ? OH_AudioCodec_PushInputBuffer(codec, index)
+                       : OH_VideoDecoder_PushInputBuffer(codec, index);
+    }
+
+    static OH_AVErrCode ohosCodecFreeOutputBuffer(OH_AVCodec *codec, bool isAudio, uint32_t index)
+    {
+        return isAudio ? OH_AudioCodec_FreeOutputBuffer(codec, index)
+                       : OH_VideoDecoder_FreeOutputBuffer(codec, index);
+    }
+
+    static OH_AVErrCode ohosCodecDestroy(OH_AVCodec *codec, bool isAudio)
+    {
+        return isAudio ? OH_AudioCodec_Destroy(codec) : OH_VideoDecoder_Destroy(codec);
     }
 
     bool OhosAVCodecDecoder::checkSupport(const Stream_meta &meta, uint64_t flags, int maxSize)
@@ -73,45 +174,51 @@ namespace Cicada {
         close_decoder();
     }
 
-    // ------------------------------------------------------------------ DRM --
-    // Attach a DRM session when the stream is content-protected; the codec
-    // service decrypts CENC samples in-pipeline.
-
     // ------------------------------------------------------------------ init --
 
     int OhosAVCodecDecoder::init_decoder(const Stream_meta *meta, void *wnd, uint64_t flags,
                                          const DrmInfo *drmInfo)
     {
         mIsAudio = (meta->type == STREAM_TYPE_AUDIO);
-        mMime = codecToMime(meta->codec);
-        if (mMime.empty()) {
+
+        const char *mime = codecToMime(meta->codec);
+        if (mime == nullptr) {
             return gen_framework_errno(error_class_codec,
                                        mIsAudio ? codec_error_audio_not_support : codec_error_video_not_support);
         }
+        mMime = mime;
+
         mWidth = meta->width;
         mHeight = meta->height;
         mSampleRate = meta->samplerate;
         mChannels = meta->channels;
 
-        // 1. Discover the vendor hardware decoder name for the MIME type.
-        OH_AVCapability *capability = OH_AVCapability_Create();
-        const char *hwName = nullptr;
-        if (capability && !mIsAudio) {
-            OH_AVErrCode err = OH_AVCapability_GetHardwareDecoderName(capability, HARDWARE, mMime.c_str(), &hwName);
-            if (err != AV_ERR_OK) {
-                hwName = nullptr;
-                AF_LOGW("OH_AVCapability_GetHardwareDecoderName %s failed err %d\n", mMime.c_str(), err);
+        // 1. Create the codec instance.
+        //
+        // For video, prefer the vendor hardware decoder: the capability instance
+        // is borrowed from the framework (it must NOT be destroyed by the
+        // caller) and OH_AVCapability_GetName() yields the codec name that
+        // OH_VideoDecoder_CreateByName() takes. Audio keeps the mime-based
+        // creation, which is also what the framework recommends for audio.
+        if (!mIsAudio) {
+            OH_AVCapability *capability =
+                    OH_AVCodec_GetCapabilityByCategory(mMime.c_str(), false /* decoder */, HARDWARE);
+            if (capability != nullptr && OH_AVCapability_IsHardware(capability)) {
+                const char *hwName = OH_AVCapability_GetName(capability);
+                if (hwName != nullptr) {
+                    mCodec = OH_VideoDecoder_CreateByName(hwName);
+                    AF_LOGI("create OHOS hardware decoder by name %s -> %p\n", hwName, mCodec);
+                }
+            } else {
+                AF_LOGW("no OHOS hardware capability for mime %s\n", mMime.c_str());
             }
         }
-        if (capability) {
-            OH_AVCapability_Destroy(capability);
-        }
 
-        if (hwName != nullptr) {
-            mCodec = OH_AVCodec_CreateByName(hwName);
-            AF_LOGI("create OHOS hardware decoder by name %s -> %p\n", hwName, mCodec);
-        } else {
-            mCodec = OH_AVCodec_CreateByMime(mMime.c_str());
+        if (mCodec == nullptr) {
+            // No hardware capability was reported, or creating by name failed:
+            // let the framework pick the codec (it still prefers hardware).
+            mCodec = ohosCodecCreateByMime(mIsAudio, mMime.c_str());
+            AF_LOGI("create OHOS decoder by mime %s -> %p\n", mMime.c_str(), mCodec);
         }
 
         if (mCodec == nullptr) {
@@ -125,29 +232,36 @@ namespace Cicada {
         callback.onStreamChanged = onStreamChanged;
         callback.onNeedInputBuffer = onNeedInputBuffer;
         callback.onNewOutputBuffer = onNewOutputBuffer;
-        if (OH_AVCodec_SetCallback(mCodec, callback, this) != AV_ERR_OK) {
-            AF_LOGE("OH_AVCodec_SetCallback failed\n");
+        if (ohosCodecRegisterCallback(mCodec, mIsAudio, callback, this) != AV_ERR_OK) {
+            AF_LOGE("OHOS codec RegisterCallback failed\n");
             return gen_framework_errno(error_class_codec, codec_error_video_device_error);
         }
 
         // 2. Surface mode: zero-copy output into the XComponent window.
         if (!mIsAudio && wnd != nullptr) {
             mWindow = static_cast<OHNativeWindow *>(wnd);
-            if (OH_AVCodec_SetSurface(mCodec, mWindow) == AV_ERR_OK) {
+            if (ohosCodecSetSurface(mCodec, mIsAudio, mWindow) == AV_ERR_OK) {
                 mSurfaceMode = true;
                 AF_LOGI("OHOS decoder surface mode on\n");
             } else {
-                AF_LOGW("OH_AVCodec_SetSurface failed, fallback to buffer mode\n");
+                AF_LOGW("OHOS decoder SetSurface failed, fallback to buffer mode\n");
                 mSurfaceMode = false;
             }
         }
 
         // 3. Configure.
         OH_AVFormat *format = OH_AVFormat_Create();
+        if (format == nullptr) {
+            AF_LOGE("OH_AVFormat_Create failed\n");
+            return gen_framework_errno(error_class_codec, codec_error_video_device_error);
+        }
         OH_AVFormat_SetStringValue(format, OH_MD_KEY_CODEC_MIME, mMime.c_str());
         if (mIsAudio) {
-            OH_AVFormat_SetIntValue(format, OH_MD_KEY_SAMPLE_RATE, mSampleRate);
-            OH_AVFormat_SetIntValue(format, OH_MD_KEY_CHANNEL_COUNT, mChannels);
+            OH_AVFormat_SetIntValue(format, OH_MD_KEY_AUD_SAMPLE_RATE, mSampleRate);
+            OH_AVFormat_SetIntValue(format, OH_MD_KEY_AUD_CHANNEL_COUNT, mChannels);
+            // The buffer-mode frame below is built as interleaved S16, so pin the
+            // output sample format instead of relying on the default.
+            OH_AVFormat_SetIntValue(format, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, SAMPLE_S16LE);
             OH_AVFormat_SetIntValue(format, OH_MD_KEY_MAX_INPUT_SIZE, 16 * 1024);
         } else {
             OH_AVFormat_SetIntValue(format, OH_MD_KEY_WIDTH, mWidth);
@@ -159,7 +273,9 @@ namespace Cicada {
             }
         }
 
-        // 4. DRM: attach an OH_MediaKeySession before Configure when protected.
+        // 4. DRM: attach the DRM Kit media key session before Configure when the
+        //    stream is content protected; the codec service then decrypts the
+        //    CENC samples in-pipeline.
         if (drmInfo != nullptr && !drmInfo->format.empty()) {
             mDrmHandler = std::dynamic_pointer_cast<OhosDrmHandler>(mRequireDrmHandlerCallback
                     ? mRequireDrmHandlerCallback(*drmInfo) : nullptr);
@@ -168,30 +284,36 @@ namespace Cicada {
                 // request before attaching the session to the decoder.
                 mDrmHandler->open();
             }
-            if (mDrmHandler && mDrmHandler->getMediaKeySession() != nullptr) {
-                if (OH_AVCodec_SetMediakeySessionConfig(mCodec, mDrmHandler->getMediaKeySession()) != AV_ERR_OK) {
-                    AF_LOGW("OH_AVCodec_SetMediakeySessionConfig failed\n");
+            if (mDrmHandler != nullptr && mDrmHandler->getMediaKeySession() != nullptr) {
+                // The codec API takes the DRM Kit's opaque MediaKeySession
+                // (native_avcodec_videodecoder.h / native_avcodec_audiocodec.h),
+                // while OhosDrmHandler exposes the very same DRM Kit session
+                // under its own opaque tag.
+                MediaKeySession *session =
+                        reinterpret_cast<MediaKeySession *>(mDrmHandler->getMediaKeySession());
+                if (ohosCodecSetDecryptionConfig(mCodec, mIsAudio, session) != AV_ERR_OK) {
+                    AF_LOGW("OHOS decoder SetDecryptionConfig failed\n");
                 } else {
                     AF_LOGI("DRM session attached to OHOS decoder\n");
                 }
             }
         }
 
-        OH_AVErrCode err = OH_AVCodec_Configure(mCodec, format);
+        OH_AVErrCode err = ohosCodecConfigure(mCodec, mIsAudio, format);
         OH_AVFormat_Destroy(format);
         if (err != AV_ERR_OK) {
-            AF_LOGE("OH_AVCodec_Configure failed err %d\n", err);
+            AF_LOGE("OHOS decoder Configure failed err %d\n", err);
             return gen_framework_errno(error_class_codec, codec_error_video_device_error);
         }
 
-        err = OH_AVCodec_Prepare(mCodec);
+        err = ohosCodecPrepare(mCodec, mIsAudio);
         if (err != AV_ERR_OK) {
-            AF_LOGE("OH_AVCodec_Prepare failed err %d\n", err);
+            AF_LOGE("OHOS decoder Prepare failed err %d\n", err);
             return gen_framework_errno(error_class_codec, codec_error_video_device_error);
         }
-        err = OH_AVCodec_Start(mCodec);
+        err = ohosCodecStart(mCodec, mIsAudio);
         if (err != AV_ERR_OK) {
-            AF_LOGE("OH_AVCodec_Start failed err %d\n", err);
+            AF_LOGE("OHOS decoder Start failed err %d\n", err);
             return gen_framework_errno(error_class_codec, codec_error_video_device_error);
         }
 
@@ -204,8 +326,8 @@ namespace Cicada {
     void OhosAVCodecDecoder::close_decoder()
     {
         if (mCodec != nullptr) {
-            OH_AVCodec_Stop(mCodec);
-            OH_AVCodec_Destroy(mCodec);
+            ohosCodecStop(mCodec, mIsAudio);
+            ohosCodecDestroy(mCodec, mIsAudio);
             mCodec = nullptr;
         }
         mWindow = nullptr;
@@ -269,12 +391,12 @@ namespace Cicada {
             attr.offset = 0;
             attr.flags = 0;
             if (info.flags & AF_PKT_FLAG_KEY) {
-                attr.flags |= OH_AVCODEC_BUFFER_FLAGS_SYNC_FRAME;
+                attr.flags |= AVCODEC_BUFFER_FLAGS_SYNC_FRAME;
             }
             if (packet->getData() != nullptr && attr.size > 0) {
                 uint8_t *dst = OH_AVBuffer_GetAddr(buffer);
-                size_t capacity = OH_AVBuffer_GetCapacity(buffer);
-                if (dst != nullptr && capacity >= static_cast<size_t>(attr.size)) {
+                int32_t capacity = OH_AVBuffer_GetCapacity(buffer);
+                if (dst != nullptr && capacity > 0 && static_cast<size_t>(capacity) >= static_cast<size_t>(attr.size)) {
                     memcpy(dst, packet->getData(), attr.size);
                 } else {
                     attr.size = 0;
@@ -283,14 +405,14 @@ namespace Cicada {
         } else if (!decoder->mInputEosSent) {
             // Nothing pending -> signal EOS once.
             decoder->mInputEosSent = true;
-            attr.flags |= OH_AVCODEC_BUFFER_FLAGS_EOS;
+            attr.flags |= AVCODEC_BUFFER_FLAGS_EOS;
         } else {
             // Decoder asks for more input after EOS was already submitted;
             // submit an empty buffer to keep the pipeline alive.
         }
 
         OH_AVBuffer_SetBufferAttr(buffer, &attr);
-        OH_AVCodec_PushInputBuffer(codec, index);
+        ohosCodecPushInputBuffer(codec, decoder->mIsAudio, index);
     }
 
     void OhosAVCodecDecoder::onError(OH_AVCodec *codec, int32_t errorCode, void *userData)
@@ -322,13 +444,15 @@ namespace Cicada {
             attr.flags = 0;
         }
 
-        bool eos = (attr.flags & OH_AVCODEC_BUFFER_FLAGS_EOS) != 0;
+        bool eos = (attr.flags & AVCODEC_BUFFER_FLAGS_EOS) != 0;
         int64_t ptsUs = attr.pts;
 
         if (decoder->mSurfaceMode) {
             // Zero-copy: commit the frame to the XComponent surface and hand
             // the pipeline a data-less frame (render happened in hardware).
-            OH_AVCodec_RenderOutputBuffer(codec, index);
+            // mSurfaceMode is only ever set for video, so the video decoder
+            // entry point is the right one here.
+            OH_VideoDecoder_RenderOutputBuffer(codec, index);
             unique_ptr<IAFFrame> frame(
                     new AFMediaCodecFrame(IAFFrame::FrameTypeVideo, static_cast<int>(index),
                                           [](int, bool) {}));
@@ -341,7 +465,7 @@ namespace Cicada {
             }
             decoder->mOutputCond.notify_one();
         } else if (decoder->mIsAudio) {
-            // Audio PCM (interleaved S16 by default).
+            // Audio PCM (interleaved S16, see OH_MD_KEY_AUDIO_SAMPLE_FORMAT).
             uint8_t *data = OH_AVBuffer_GetAddr(buffer);
             int32_t size = attr.size;
             IAFFrame::AFFrameInfo frameInfo{};
@@ -355,7 +479,7 @@ namespace Cicada {
             unique_ptr<IAFFrame> frame(
                     new AVAFFrame(frameInfo, (const uint8_t **) pcm, (const int *) lineSize, 1,
                                   IAFFrame::FrameTypeAudio));
-            OH_AVCodec_FreeOutputBuffer(codec, index);
+            ohosCodecFreeOutputBuffer(codec, decoder->mIsAudio, index);
             {
                 std::lock_guard<std::mutex> lock(decoder->mOutputMutex);
                 decoder->mOutputFrames.push_back(std::move(frame));
@@ -364,7 +488,6 @@ namespace Cicada {
         } else {
             // Video buffer mode: NV12 -> I420 conversion by the pipeline.
             uint8_t *data = OH_AVBuffer_GetAddr(buffer);
-            int32_t size = attr.size;
             IAFFrame::AFFrameInfo frameInfo{};
             frameInfo.video.width = decoder->mWidth;
             frameInfo.video.height = decoder->mHeight;
@@ -375,7 +498,7 @@ namespace Cicada {
             unique_ptr<IAFFrame> frame(
                     new AVAFFrame(frameInfo, (const uint8_t **) planes, (const int *) lineSizeArr, 2,
                                   IAFFrame::FrameTypeVideo));
-            OH_AVCodec_FreeOutputBuffer(codec, index);
+            ohosCodecFreeOutputBuffer(codec, decoder->mIsAudio, index);
             {
                 std::lock_guard<std::mutex> lock(decoder->mOutputMutex);
                 decoder->mOutputFrames.push_back(std::move(frame));
@@ -414,7 +537,7 @@ namespace Cicada {
         }
         std::lock_guard<std::mutex> lockFlush(mFlushMutex);
         mFlushing = true;
-        OH_AVCodec_Flush(mCodec);
+        ohosCodecFlush(mCodec, mIsAudio);
         {
             std::lock_guard<std::mutex> lock(mOutputMutex);
             mOutputFrames.clear();

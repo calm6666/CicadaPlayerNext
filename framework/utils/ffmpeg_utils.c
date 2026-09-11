@@ -7,9 +7,9 @@
 #include <libavcodec/avcodec.h>
 #include <libavcodec/h264_parse.h>
 #include <libavcodec/h264_ps.h>
-#include <libavcodec/hevc_parse.h>
-#include <libavcodec/hevc_ps.h>
-#include <libavcodec/hevc_sei.h>
+#include <libavcodec/hevc/parse.h>
+#include <libavcodec/hevc/ps.h>
+#include <libavcodec/hevc/sei.h>
 #include <libavformat/avc.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio_internal.h>
@@ -557,7 +557,8 @@ int get_stream_meta(const struct AVStream *pStream, Stream_meta *meta)
     meta->extradata_size = pStream->codecpar->extradata_size;
     meta->extradata = malloc(pStream->codecpar->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
     memcpy(meta->extradata, pStream->codecpar->extradata, pStream->codecpar->extradata_size);
-    meta->nb_index_entries = pStream->nb_index_entries;
+    // AVStream::nb_index_entries removed in FFmpeg 6.0 → 用公共访问器
+    meta->nb_index_entries = avformat_index_get_entries_count(pStream);
     meta->pid = pStream->id;
 //        if (pHandle->have_program && pHandle->have_program[stream_index] == 0) {
 //            meta->no_program = 1;
@@ -726,7 +727,8 @@ bool updateH26xHeader2xxc(AVCodecParameters *par)
     if (par->codec_id == AV_CODEC_ID_H264) {
         ret = ff_isom_write_avcc(pb, extradata, extradata_size);
     } else {
-        ret = ff_isom_write_hvcc(pb, extradata, extradata_size, 0);
+        // FFmpeg 9.0：ff_isom_write_hvcc 新增第 5 参 logctx（这里无上下文，传 NULL）
+        ret = ff_isom_write_hvcc(pb, extradata, extradata_size, 0, NULL);
     }
 
     if (ret < 0) {
@@ -839,24 +841,28 @@ int parse_h264_extraData(enum AVCodecID codecId, const uint8_t* extraData,int ex
     int i;
     for (i = 0; i < MAX_PPS_COUNT; i++) {
         if (ps.pps_list[i]) {
-            pps = (const PPS *) ps.pps_list[i]->data;
+            // FFmpeg 9.0：pps_list 直接持有 const PPS*（RefStruct 引用）。
+            // 旧代码 (const PPS *)ps.pps_list[i]->data 是阿里私有补丁（data 位于
+            // 结构体首部）时代的 container_of 用法；9.0 中 data 在结构体尾部，
+            // 必须直接用列表指针
+            pps = ps.pps_list[i];
             break;
         }
     }
 
     if (pps) {
         if (ps.sps_list[pps->sps_id]) {
-            sps = (const SPS *) ps.sps_list[pps->sps_id]->data;
+            sps = ps.sps_list[pps->sps_id];
         }
     }
 
     if (pps && sps) {
 
-        if ((ret = h2645_ps_to_nalu(sps->data, sps->data_size, sps_data, sps_data_size)) < 0) {
+        if ((ret = h2645_ps_to_nalu(sps->data, (int) sps->data_size, sps_data, sps_data_size)) < 0) {
             goto done;
         }
 
-        if ((ret = h2645_ps_to_nalu(pps->data, pps->data_size, pps_data, pps_data_size)) < 0) {
+        if ((ret = h2645_ps_to_nalu(pps->data, (int) pps->data_size, pps_data, pps_data_size)) < 0) {
             goto done;
         }
     } else {
@@ -891,12 +897,6 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
     int ret;
 
     HEVCParamSets ps;
-#if (LIBAVCODEC_VERSION_MAJOR >= 60)
-    // FFmpeg 7.0+: HEVCSEI is heap-allocated.
-    HEVCSEI *sei = ff_hevc_sei_alloc();
-#else
-    HEVCSEI sei;
-#endif
 
     const HEVCVPS *vps = NULL;
     const HEVCPPS *pps = NULL;
@@ -904,32 +904,42 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
     int is_nalff = 0;
 
     memset(&ps, 0, sizeof(ps));
-#if (LIBAVCODEC_VERSION_MAJOR < 60)
-    memset(&sei, 0, sizeof(sei));
-#endif
 
+#if (LIBAVCODEC_VERSION_MAJOR >= 60 && LIBAVCODEC_VERSION_MAJOR < 63)
+    // FFmpeg 7.x/8.x：HEVCSEI 堆分配
+    HEVCSEI *sei = ff_hevc_sei_alloc();
     ret = ff_hevc_decode_extradata(extradata, extradata_size, &ps, sei, &is_nalff, nal_length_size, 0, 1, avctx);
+#else
+    // FFmpeg <=6.x 与 9.0+（HEVC 重构入 libavcodec/hevc/ 后）：
+    // HEVCSEI 内嵌栈上；9.0 已无 ff_hevc_sei_alloc/ff_hevc_sei_free
+    HEVCSEI sei;
+    memset(&sei, 0, sizeof(sei));
+    ret = ff_hevc_decode_extradata(extradata, extradata_size, &ps, &sei, &is_nalff, nal_length_size, 0, 1, avctx);
+#endif
     if (ret < 0) {
         goto done;
     }
 
     for (i = 0; i < HEVC_MAX_VPS_COUNT; i++) {
         if (ps.vps_list[i]) {
-            vps = (const HEVCVPS *) ps.vps_list[i]->data;
+            // FFmpeg 9.0：vps_list/pps_list/sps_list 直接持有 const 结构指针，
+            // 旧代码 (const HEVCVPS*)ps.vps_list[i]->data 是私有补丁时代的
+            // container_of 用法（9.0 中 data 为结构体尾部字段），必须直接用列表指针
+            vps = ps.vps_list[i];
             break;
         }
     }
 
     for (i = 0; i < HEVC_MAX_PPS_COUNT; i++) {
         if (ps.pps_list[i]) {
-            pps = (const HEVCPPS *) ps.pps_list[i]->data;
+            pps = ps.pps_list[i];
             break;
         }
     }
 
     if (pps) {
         if (ps.sps_list[pps->sps_id]) {
-            sps = (const HEVCSPS *) ps.sps_list[pps->sps_id]->data;
+            sps = ps.sps_list[pps->sps_id];
         }
     }
 
@@ -946,7 +956,7 @@ int parse_h265_extraData(enum AVCodecID codecId, const uint8_t* extradata,int ex
 
     done:
     ff_hevc_ps_uninit(&ps);
-#if (LIBAVCODEC_VERSION_MAJOR >= 60)
+#if (LIBAVCODEC_VERSION_MAJOR >= 60 && LIBAVCODEC_VERSION_MAJOR < 63)
     ff_hevc_sei_free(&sei);
 #endif
     avcodec_free_context(&avctx);

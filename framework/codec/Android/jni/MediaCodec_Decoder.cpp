@@ -23,6 +23,7 @@ static jmethodID jMediaCodec_setDrmInfo = nullptr;
 static jmethodID jMediaCodec_setForceInsecureDecoder = nullptr;
 static jmethodID jMediaCodec_configureVideo = nullptr;
 static jmethodID jMediaCodec_configureAudio = nullptr;
+static jmethodID jMediaCodec_setOutputSurface = nullptr;
 static jmethodID jMediaCodec_start = nullptr;
 static jmethodID jMediaCodec_flush = nullptr;
 static jmethodID jMediaCodec_stop = nullptr;
@@ -54,6 +55,8 @@ void MediaCodec_Decoder::init(JNIEnv *env) {
                                                       "(Ljava/lang/String;IIILjava/lang/Object;)I");
         jMediaCodec_configureAudio = env->GetMethodID(jMediaCodecClass, "configureAudio",
                                                       "(Ljava/lang/String;III)I");
+        jMediaCodec_setOutputSurface = env->GetMethodID(jMediaCodecClass, "setOutputSurface",
+                                                         "(Ljava/lang/Object;)I");
         jMediaCodec_start = env->GetMethodID(jMediaCodecClass, "start", "()I");
         jMediaCodec_flush = env->GetMethodID(jMediaCodecClass, "flush", "()I");
         jMediaCodec_stop = env->GetMethodID(jMediaCodecClass, "stop", "()I");
@@ -464,6 +467,22 @@ int MediaCodec_Decoder::releaseOutputBuffer(int index, bool render) {
     int ret = env->CallIntMethod(mMediaCodec, jMediaCodec_releaseOutputBuffer, (jint) index,
                                  (jboolean) render);
     return ret;
+}
+
+int MediaCodec_Decoder::setOutputSurface(void *surface) {
+    if (mMediaCodec == nullptr) {
+        return -1;
+    }
+
+    JniEnv jniEnv{};
+    JNIEnv *env = jniEnv.getEnv();
+    if (env == nullptr) {
+        return -1;
+    }
+
+    // surface 允许为 null：Java 侧对齐 ExoPlayer 2.9.6 换成内部 DummySurface，
+    // codec 保持运行；回前台再切回真实 surface
+    return env->CallIntMethod(mMediaCodec, jMediaCodec_setOutputSurface, (jobject) surface);
 }
 
 

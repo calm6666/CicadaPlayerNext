@@ -45,18 +45,24 @@ namespace Cicada {
 
     bool mediaCodecDecoder::checkSupport(const Stream_meta &meta, uint64_t flags, int maxSize) {
         AFCodecID codec = meta.codec;
+        // 硬解白名单扩展：主流视频格式只要芯片支持就走 MediaCodec 硬解，
+        // 不支持时 configure 失败，播放器会自动回退软解（SuperMediaPlayer 的
+        // CreateVideoDecoder(false) 重试链路）
         if (codec != AF_CODEC_ID_H264 && codec != AF_CODEC_ID_HEVC
+            && codec != AF_CODEC_ID_MPEG4 && codec != AF_CODEC_ID_VP8
+            && codec != AF_CODEC_ID_VP9 && codec != AF_CODEC_ID_AV1
             && codec != AF_CODEC_ID_AAC) {
             return false;
         }
 
         string version = get_android_property("ro.build.version.sdk");
+        int sdkVersion = atoi(version.c_str());
 
-        if (atoi(version.c_str()) < 16) {
+        if (sdkVersion < 16) {
             return false;
         }
 
-        if (atoi(version.c_str()) < 21) {
+        if (sdkVersion < 21) {
             if (flags & DECFLAG_ADAPTIVE || codec == AF_CODEC_ID_HEVC
                 //maxSize will be judged by the codec. Tianmao box supports large width/height.
                 /*|| maxSize > 1920*/
@@ -64,6 +70,14 @@ namespace Cicada {
                 return false;
             }
         }
+
+        // VP9 硬解自 Android 7.0(API 24) 提供；AV1 硬解自 Android 10(API 29) 提供，
+        // 版本不满足直接交给软解，避免无效的 MediaCodec 创建尝试
+        if ((codec == AF_CODEC_ID_VP9 && sdkVersion < 24) ||
+            (codec == AF_CODEC_ID_AV1 && sdkVersion < 29)) {
+            return false;
+        }
+
         string model = get_android_property("ro.product.model");
         for (auto device : blackList) {
             if (device.codec == codec && device.model == model) {
@@ -96,6 +110,18 @@ namespace Cicada {
         } else if (meta->codec == AF_CODEC_ID_HEVC) {
             codecType = CODEC_VIDEO;
             mMime = "video/hevc";
+        } else if (meta->codec == AF_CODEC_ID_MPEG4) {
+            codecType = CODEC_VIDEO;
+            mMime = "video/mp4v-es";
+        } else if (meta->codec == AF_CODEC_ID_VP8) {
+            codecType = CODEC_VIDEO;
+            mMime = "video/x-vnd.on2.vp8";
+        } else if (meta->codec == AF_CODEC_ID_VP9) {
+            codecType = CODEC_VIDEO;
+            mMime = "video/x-vnd.on2.vp9";
+        } else if (meta->codec == AF_CODEC_ID_AV1) {
+            codecType = CODEC_VIDEO;
+            mMime = "video/av01";
         } else if (meta->codec == AF_CODEC_ID_AAC) {
             codecType = CODEC_AUDIO;
             mMime = "audio/mp4a-latm";
@@ -107,6 +133,15 @@ namespace Cicada {
         mMeta = *meta;
         mVideoOutObser = voutObsr;
         updateCSD(meta, meta->extradata, meta->extradata_size);
+
+        // CSD 必须在 configure 之前下发给 Java 层（addCsdInfo 把 csd-0 写入
+        // MediaFormat）。此前只在 enqueue_decoder 里下发（configure 之后），
+        // AAC 缺 AudioSpecificConfig 永远不出帧，导致音视频同步卡死；
+        // H264/HEVC 走 AnnexB 裸流不依赖 CSD 才未暴露
+        if (!mCSDList.empty()) {
+            mDecoder->setCodecSpecificData(mCSDList);
+            mCSDList.clear();
+        }
 
         lock_guard<recursive_mutex> func_entry_lock(mFuncEntryMutex);
 
@@ -228,6 +263,20 @@ namespace Cicada {
                 mCSDList.push_back(move(csd0));
             }
             return;
+        } else if (meta->codec == AF_CODEC_ID_VP8) {
+            // VP8 无 CSD（in-band），无需处理
+            return;
+        } else if (meta->codec == AF_CODEC_ID_VP9 || meta->codec == AF_CODEC_ID_AV1
+                   || meta->codec == AF_CODEC_ID_MPEG4) {
+            // mp4 封装下 FFmpeg 把 vpcC/av1C/ESDS 盒子内容放进 extradata，
+            // MediaCodec 需要它们作为 csd-0；mkv/webm 无 extradata（in-band）直接跳过
+            if (extradata == nullptr || extradata_size == 0) {
+                return;
+            }
+            mCSDList.clear();
+            std::unique_ptr<CodecSpecificData> csd0 = std::unique_ptr<CodecSpecificData>(new CodecSpecificData());
+            csd0->setScd("csd-0", (void *) extradata, extradata_size);
+            mCSDList.push_back(move(csd0));
         } else {
             return;
         }
@@ -259,6 +308,11 @@ namespace Cicada {
     void mediaCodecDecoder::close_decoder() {
         lock_guard<recursive_mutex> func_entry_lock(mFuncEntryMutex);
 
+        // 关闭渲染门：解码器即将释放，暂停帧恢复状态失效
+        mRenderHold = false;
+        mRenderGatePts = INT64_MIN;
+        mRenderGateHit = false;
+
         // stop decoder.
         // must before destructor producer because inner thread will use surface.
         if (mbInit) {
@@ -271,6 +325,57 @@ namespace Cicada {
         mInputFrameCount = 0;
     }
 
+    int mediaCodecDecoder::setOutputSurface(void *surface) {
+        if (codecType != CODEC_VIDEO) {
+            return 0;
+        }
+        if (!mbInit) {
+            // 解码器已被自愈关闭（后台 surface 被系统销毁 → ACodec 报错）。
+            // 返回负值，让上层（ProcessSetViewMsg）走重建兜底
+            AF_LOGI("setOutputSurface: decoder closed, need rebuild\n");
+            return -1;
+        }
+        // 对齐 ExoPlayer 2.9.6：surface 变化（含 null，Java 侧换成内部
+        // DummySurface）时调用 MediaCodec.setOutputSurface 热重绑，codec 保持
+        // 运行，无需重建解码器
+        lock_guard<recursive_mutex> func_entry_lock(mFuncEntryMutex);
+        int ret = mDecoder->setOutputSurface(surface);
+        AF_LOGI("mediaCodecDecoder setOutputSurface surface=%p ret=%d\n", surface, ret);
+        return ret;
+    }
+
+    int64_t mediaCodecDecoder::getLastRenderedVideoPts() {
+        return mLastRenderedVideoPts.load();
+    }
+
+    int64_t mediaCodecDecoder::getLastRenderedVideoFrameDur() {
+        int64_t last = mLastRenderedVideoPts.load();
+        int64_t prev = mPrevRenderedVideoPts.load();
+        if (last == INT64_MIN || prev == INT64_MIN || last <= prev) {
+            return 0;
+        }
+        return last - prev;
+    }
+
+    void mediaCodecDecoder::setRenderGate(int64_t gatePts) {
+        if (gatePts == INT64_MIN) {
+            // 关闭渲染门（恢复正常渲染）
+            mRenderHold = false;
+            mRenderGatePts = INT64_MIN;
+            mRenderGateHit = false;
+        } else {
+            mRenderGatePts = gatePts;
+            mRenderGateHit = false;
+            mRenderHold = true;
+        }
+    }
+
+    bool mediaCodecDecoder::isRenderGateHit() {
+        // 未启用渲染门时视为"命中"（不影响普通 seek 的完成判定）；
+        // 启用期间必须等门帧实际渲染后才算命中
+        return !mRenderHold.load() || mRenderGateHit.load();
+    }
+
     void mediaCodecDecoder::releaseDecoder() {
         if (mDecoder != nullptr) {
             mDecoder->release();
@@ -279,7 +384,13 @@ namespace Cicada {
 
     int mediaCodecDecoder::enqueue_decoder(unique_ptr<IAFPacket> &pPacket) {
 
-        if (!mbInit && mDrmHandler != nullptr) {
+        if (!mbInit) {
+            if (mDrmHandler == nullptr) {
+                // 解码器已被自愈关闭（surface 失效）：结束解码线程，
+                // 避免对已释放 codec 反复 dequeue/enqueue 刷错误日志，
+                // 由上层（ProcessSetViewMsg → RestartVideoDecoder）重建
+                return STATUS_EOS;
+            }
             int ret = initDrmHandler();
             if (ret == -EAGAIN) {
                 return -EAGAIN;
@@ -303,15 +414,27 @@ namespace Cicada {
             mCSDList.clear();
         }
 
-        int index = mDecoder->dequeueInputBufferIndex(1000);
+        int index = mDecoder->dequeueInputBufferIndex(10000);
 
         if (index == MC_ERROR) {
             AF_LOGE("dequeue_in error.");
             // TODO: value
             return -ENOSPC;
         } else if (index == MC_INFO_TRYAGAIN) {
+            // 对齐 ExoPlayer：codec 失效（典型：surface 销毁后 flush 导致华为
+            // codec 进入僵尸态，dequeueInput 永远 TRY_AGAIN）时，检测到连续
+            // 拿不到输入缓冲即优雅关闭解码器并结束解码线程，由上层
+            // （demo 的 reload/重建）恢复；避免在同一包上死循环刷屏
+            mInputTryAgainCount++;
+            if (mInputTryAgainCount > 100) {   // 100 × ~10ms ≈ 1 秒
+                AF_LOGE("codec input stuck, close decoder for recreation");
+                close_decoder();
+                return STATUS_EOS;
+            }
             return -EAGAIN;
         }
+
+        mInputTryAgainCount = 0;
 
         int ret = 0;
 
@@ -399,10 +522,22 @@ namespace Cicada {
 
         int ret;
         int index;
-        index = mDecoder->dequeueOutputBufferIndex(1000);
+        // 输出轮询超时 1ms→10ms：无帧可出时线程每毫秒唤醒一次做 JNI 调用，
+        // 是 MediaCodec_loop 线程 ~2-3% CPU 的来源；视频帧间隔 16~33ms，
+        // 10ms 超时不影响播放节奏，但把空轮询次数降低 10 倍
+        index = mDecoder->dequeueOutputBufferIndex(10000);
 
         if (index == MC_ERROR) {
             AF_LOGE("dequeue_out occur error. flush state %d", mFlushState);
+            // codec 已失效（典型场景：surface 销毁后 ACodec 报错、或 codec
+            // 内部错误）。对齐 ExoPlayer 的 releaseCodec() 自愈：优雅关闭本
+            // 解码器并结束解码线程，避免死循环报错刷屏；回前台由
+            // ProcessSetViewMsg → RestartVideoDecoder 用新 surface 重建。
+            // mFlushState==1（flush 进行中，如 seek）时跳过，避免打断正常 flush
+            if (mFlushState == 0 || mFlushState == 2) {
+                close_decoder();
+                return STATUS_EOS;
+            }
             return MC_ERROR;
         } else if (index == MC_INFO_TRYAGAIN || index == MC_INFO_OUTPUT_BUFFERS_CHANGED) {
             return -EAGAIN;
@@ -446,9 +581,25 @@ namespace Cicada {
 
             // AF_LOGD("mediacodec out pts %" PRId64, out.buf.pts);
             if (codecType == CODEC_VIDEO) {
+                const int64_t framePts = out.buf.pts;
                 pFrame = unique_ptr<AFMediaCodecFrame>(
                         new AFMediaCodecFrame(IAFFrame::FrameTypeVideo, index,
-                                              [this](int index, bool render) {
+                                              [this, framePts](int index, bool render) {
+                                                  // 暂停帧恢复：只放行 PTS 精确等于门值的
+                                                  // 那一帧，其余帧不上屏（避免 GOP 闪帧）
+                                                  if (mRenderHold.load()) {
+                                                      bool gateHit = (framePts == mRenderGatePts.load());
+                                                      AF_LOGI("PFR: release idx=%d pts=%" PRId64 " gate=%" PRId64 " render=%d gateHit=%d\n",
+                                                              index, framePts, mRenderGatePts.load(), (int) render, (int) gateHit);
+                                                      if (gateHit && render) {
+                                                          mRenderGateHit = true;
+                                                      }
+                                                      render = render && gateHit;
+                                                  }
+                                                  if (render) {
+                                                      mPrevRenderedVideoPts = mLastRenderedVideoPts.load();
+                                                      mLastRenderedVideoPts = framePts;
+                                                  }
                                                   mDecoder->releaseOutputBuffer(index, render);
                                               }));
                 pFrame->getInfo().video.width = width;
@@ -508,7 +659,13 @@ namespace Cicada {
 
         int ret = -1;
         if (codecType == CODEC_VIDEO) {
-            ret = mDecoder->configureVideo(mMime, mMeta.width, mMeta.height, 0,
+            int angle = 0;
+            if (mFlags & DECFLAG_OUT) {
+                // TunnelRender 直通模式：GL 不参与旋转，交给 MediaCodec 的
+                // rotation-degrees（其定义是逆时针；meta.rotate 是顺时针，需换算）
+                angle = (360 - mMeta.rotate) % 360;
+            }
+            ret = mDecoder->configureVideo(mMime, mMeta.width, mMeta.height, angle,
                                            static_cast<jobject>(mVideoOutObser));
         } else if (codecType == CODEC_AUDIO) {
             ret = mDecoder->configureAudio(mMime, mMeta.samplerate, mMeta.channels,isADTS);

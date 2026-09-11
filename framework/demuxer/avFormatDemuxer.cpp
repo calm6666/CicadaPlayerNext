@@ -34,8 +34,8 @@ namespace Cicada {
         mCtx = avformat_alloc_context();
         mCtx->interrupt_callback.callback = interrupt_cb;
         mCtx->interrupt_callback.opaque = this;
-        // correct_ts_overflow was removed in FFmpeg 7.0 (0 is the default).
-        mCtx->flags |= AVFMT_FLAG_KEEP_SIDE_DATA;
+        // AVFMT_FLAG_KEEP_SIDE_DATA removed in FFmpeg 6.0（5.0 起即 no-op，
+        // side data 总是保留）
 #if AF_HAVE_PTHREAD
         mPthread = NEW_AF_THREAD(readLoop);
 #endif
@@ -151,7 +151,7 @@ namespace Cicada {
         int probeHeader_seekCount = -1;
         if (mCtx->pb != nullptr) {
             probeHeader_pos = mCtx->pb->bytes_read;
-            probeHeader_seekCount = mCtx->pb->seek_count;
+            // AVIOContext::seek_count removed in FFmpeg 6.0（仅探测统计，保持未知）
         }
 
         if (mSeekCb == nullptr && strcmp(mCtx->iformat->name, "mpegts") == 0) {
@@ -201,13 +201,15 @@ namespace Cicada {
         int probeStream_seekCount = -1;
         if (mCtx->pb != nullptr) {
             probeStream_pos = mCtx->pb->bytes_read;
-            probeStream_seekCount = mCtx->pb->seek_count;
+            // AVIOContext::seek_count removed in FFmpeg 6.0（仅探测统计，保持未知）
         }
 
         int probeStream_nbFrames = 0;
-        // AVStream::codec_info_nb_frames moved to private AVStreamInternal in
-        // FFmpeg 5.0; report the context-wide frame counter instead.
-        probeStream_nbFrames = mCtx->nb_frames;
+        // AVFormatContext::nb_frames removed in FFmpeg 6.0；改为对
+        // AVStream::nb_frames（仍为公共字段）求和（仅探测统计）
+        for (unsigned int i = 0; i < mCtx->nb_streams; ++i) {
+            probeStream_nbFrames += (int) mCtx->streams[i]->nb_frames;
+        }
 
         /*
          * this flag is only affect on mp3 and flac
@@ -354,7 +356,8 @@ namespace Cicada {
         }
 
         bool needUpdateExtraData = false;
-        int new_extradata_size;
+        // FFmpeg 9: av_packet_get_side_data 的尺寸参数为 size_t*
+        size_t new_extradata_size = 0;
         const uint8_t *new_extradata = av_packet_get_side_data(pkt,
                                        AV_PKT_DATA_NEW_EXTRADATA,
                                        &new_extradata_size);
@@ -365,7 +368,7 @@ namespace Cicada {
             av_free(codecpar->extradata);
             codecpar->extradata = static_cast<uint8_t *>(av_malloc(new_extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
             memcpy(codecpar->extradata, new_extradata, new_extradata_size);
-            codecpar->extradata_size = new_extradata_size;
+            codecpar->extradata_size = static_cast<int>(new_extradata_size);
             createBsf(pkt, streamIndex);
             needUpdateExtraData = true;
         }
@@ -468,7 +471,8 @@ namespace Cicada {
 
     int avFormatDemuxer::createBsf(AVPacket *pkt, int index)
     {
-        int encryption_info_size;
+        // FFmpeg 9: av_packet_get_side_data 的尺寸参数为 size_t*
+        size_t encryption_info_size = 0;
         const uint8_t *new_encryption_info = av_packet_get_side_data(pkt, AV_PKT_DATA_ENCRYPTION_INFO, &encryption_info_size);
         if (encryption_info_size > 0 && new_encryption_info != nullptr) {
             return 0;
@@ -871,7 +875,6 @@ namespace Cicada {
             return mEntryInfos;
         }
         for (int i = 0; i < mCtx->nb_streams; ++i) {
-            AVIndexEntry *index_entries = mCtx->streams[i]->index_entries;
             streamIndexEntryInfo entryInfo;
             entryInfo.mDuration = mCtx->duration;
             switch (mCtx->streams[i]->codecpar->codec_type) {
@@ -887,10 +890,14 @@ namespace Cicada {
                 default:
                     break;
             }
-            for (int j = 0; j < mCtx->streams[i]->nb_index_entries; ++j) {
-                int64_t timestamp = av_rescale_q(index_entries[j].timestamp, mCtx->streams[i]->time_base, av_get_time_base_q());
-                streamIndexEntryInfo::entryInfo info(index_entries[j].pos, timestamp, index_entries[j].flags & AVINDEX_KEYFRAME,
-                                                     index_entries[j].flags & AVINDEX_DISCARD_FRAME, index_entries[j].size);
+            // AVStream::index_entries/nb_index_entries removed in FFmpeg 6.0；
+            // 改用公共访问器 avformat_index_get_entries_count/get_entry
+            int nbIndexEntries = avformat_index_get_entries_count(mCtx->streams[i]);
+            for (int j = 0; j < nbIndexEntries; ++j) {
+                const AVIndexEntry *index_entry = avformat_index_get_entry(mCtx->streams[i], j);
+                int64_t timestamp = av_rescale_q(index_entry->timestamp, mCtx->streams[i]->time_base, av_get_time_base_q());
+                streamIndexEntryInfo::entryInfo info(index_entry->pos, timestamp, index_entry->flags & AVINDEX_KEYFRAME,
+                                                     index_entry->flags & AVINDEX_DISCARD_FRAME, index_entry->size);
                 entryInfo.mEntry.push_back(info);
             }
             mEntryInfos.push_back(entryInfo);

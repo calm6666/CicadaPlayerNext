@@ -1,0 +1,14 @@
+{
+	"backtraceGraph" : 
+	{
+		"commands" : [],
+		"files" : [],
+		"nodes" : []
+	},
+	"installers" : [],
+	"paths" : 
+	{
+		"build" : "mediaPlayer/framework.out/codec",
+		"source" : "D:/hilihili/CicadaPlayerNext/framework/codec"
+	}
+}

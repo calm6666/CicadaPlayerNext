@@ -6,10 +6,8 @@ def fullPackage = System.getenv("ANDROID_FULL_PACKAGE")
 println("fullpackage = ${fullPackage}")
 
 android {
+    namespace "com.cicada.player"
     ndkVersion '25.2.9519653'
-
-    publishNonDefault true //this line
-
 
     flavorDimensions "default"
     compileSdkVersion 34
@@ -33,9 +31,21 @@ android {
     }
 
     buildTypes {
+        debug {
+            // 裁剪本地编译的 libCicadaPlayer.so 调试符号：-g 全量调试信息下
+            // 每个 ABI 的 .so 有 20~30MB，是 APK 膨胀到 76MB 的主因（FFmpeg
+            // 合并库只有 ~10MB 且已裁剪）。裁剪后约 5~6MB/ABI，测试调试
+            // （logcat/断点 Java 侧）不受影响
+            ndk {
+                debugSymbolLevel 'NONE'
+            }
+        }
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            ndk {
+                debugSymbolLevel 'NONE'
+            }
         }
     }
     sourceSets {

@@ -2,18 +2,23 @@
 // OhosAVCodecDecoder.h
 //
 // Hardware video/audio decoder for HarmonyOS / OpenHarmony built on the
-// OH_AVCodec native API (API 12+):
+// OH_AVCodec native API (API 12+). The NDK declares its codec surface once per
+// media type -- OH_VideoDecoder_* and OH_AudioCodec_* -- so this class keeps a
+// single OH_AVCodec handle and dispatches every call to the matching family:
 //
-//   - Video:  OH_AVCodec hardware codec discovered through OH_AVCapability,
-//             zero-copy surface output into an OHNativeWindow created from the
-//             ArkTS XComponent surfaceId (surface mode), or NV12 buffer mode
-//             when no window is attached.
-//   - Audio:  software AAC/audio decode via OH_AVCodec (audio has no hardware
-//             renderer requirement; the decoded PCM is fed to OhosAudioRender).
-//   - DRM:    an OhosDrmHandler (OH_MediaKeySystem/OH_MediaKeySession) is
-//             attached through OH_AVCodec_SetMediakeySessionConfig() so the
-//             codec service decrypts CENC samples in-pipeline (Widevine L3 on
-//             commercial HarmonyOS NEXT devices, ClearKey on open OpenHarmony).
+//   - Video:  hardware decoder taken from the framework capabilities
+//             (OH_AVCodec_GetCapabilityByCategory + OH_AVCapability_GetName ->
+//             OH_VideoDecoder_CreateByName), zero-copy surface output into an
+//             OHNativeWindow created from the ArkTS XComponent surfaceId
+//             (surface mode), or NV12 buffer mode when no window is attached.
+//   - Audio:  software AAC/audio decode via OH_AudioCodec_* (audio has no
+//             hardware renderer requirement; the decoded PCM is fed to
+//             OhosAudioRender).
+//   - DRM:    an OhosDrmHandler (DRM Kit) media key session is attached with
+//             OH_VideoDecoder_SetDecryptionConfig() /
+//             OH_AudioCodec_SetDecryptionConfig() so the codec service decrypts
+//             CENC samples in-pipeline (Widevine L3 on commercial HarmonyOS
+//             NEXT devices, ClearKey on open OpenHarmony).
 //
 
 #ifndef FRAMEWORK_CODEC_OHOS_OHOSAVCODECDECODER_H
@@ -29,11 +34,22 @@
 #include <mutex>
 #include <string>
 
-typedef struct OH_AVCodecNative OH_AVCodec;
-typedef struct OH_AVFormatNative OH_AVFormat;
-typedef struct OH_AVBufferNative OH_AVBuffer;
-typedef struct OHNativeWindow OHNativeWindow;
-typedef struct OH_MediaKeySessionNative OH_MediaKeySession;
+// Do NOT re-declare the SDK's opaque types here. Inventing struct tags such as
+// "struct OH_AVFormatNative" collides with the real typedefs in the multimedia
+// headers ("typedef struct OH_AVFormat OH_AVFormat;"), after which the SDK
+// headers themselves fail with
+//   error: typedef 'OH_AVFormat' cannot be referenced with a struct specifier
+// Pull in the SDK declarations instead.
+#include <multimedia/player_framework/native_avcodec_base.h>
+#include <multimedia/player_framework/native_avformat.h>
+#include <multimedia/player_framework/native_avbuffer.h>
+#include <native_window/external_window.h>
+
+// NOTE: "OH_MediaKeySession" is not a type of the OpenHarmony NDK -- the DRM Kit
+// names its opaque session type MediaKeySession
+// (<multimedia/drm_framework/native_drm_common.h>), and that is what the decoder
+// decryption entry points take. Nothing in this header names it, and the .cpp
+// gets it from <native_avcodec_videodecoder.h>/<native_avcodec_audiocodec.h>.
 
 namespace Cicada {
 

@@ -27,13 +27,13 @@ namespace Cicada {
 
         switch (type) {
             case BUFFER_TYPE_AUDIO:
-                return mAudioPacketQueue.AddPacket(move(packet));
+                return mAudioPacketQueue.AddPacket(std::move(packet));
 
             case BUFFER_TYPE_VIDEO:
-                return mVideoPacketQueue.AddPacket(move(packet));
+                return mVideoPacketQueue.AddPacket(std::move(packet));
 
             case BUFFER_TYPE_SUBTITLE:
-                return mSubtitlePacketQueue.AddPacket(move(packet));
+                return mSubtitlePacketQueue.AddPacket(std::move(packet));
 
             default:
                 AF_LOGE("error media type");

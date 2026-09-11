@@ -101,9 +101,10 @@ private:
 
     static int64_t io_seek(void *opaque, int64_t offset, int whence);
 
-    static int io_write(void *opaque, uint8_t *buf, int size);
+    // FFmpeg 8.0+：avio 写回调签名带 const uint8_t*
+    static int io_write(void *opaque, const uint8_t *buf, int size);
 
-    static int io_write_data_type(void *opaque, uint8_t *buf, int size,
+    static int io_write_data_type(void *opaque, const uint8_t *buf, int size,
                                   enum AVIODataMarkerType type, int64_t time);
 
     int writeFrame(std::unique_ptr<IAFPacket> packetPtr);

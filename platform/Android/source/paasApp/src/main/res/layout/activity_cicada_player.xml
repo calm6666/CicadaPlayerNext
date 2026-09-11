@@ -8,13 +8,45 @@
 
     <include layout="@layout/view_title" />
 
-    <com.cicada.player.demo.view.CicadaVodPlayerView
-        android:id="@+id/video_view"
+    <FrameLayout
+        android:id="@+id/fl_video_container"
         android:layout_width="match_parent"
-        android:layout_height="200dp" />
+        android:layout_height="200dp">
+
+        <!-- 对齐 ExoPlayer PlayerView：官方 AspectRatioFrameLayout(RESIZE_MODE_FIT)
+             按视频宽高比测量视频区域，不同比例/全屏自动等比留黑边，永不拉伸 -->
+        <com.google.android.exoplayer2.ui.AspectRatioFrameLayout
+            android:id="@+id/video_aspect_container"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:layout_gravity="center"
+            app:resize_mode="fit">
+
+            <com.cicada.player.demo.view.CicadaVodPlayerView
+                android:id="@+id/video_view"
+                android:layout_width="match_parent"
+                android:layout_height="match_parent" />
+        </com.google.android.exoplayer2.ui.AspectRatioFrameLayout>
+
+        <!-- 播放性能调试悬浮层：解码方式 / App CPU / 系统 CPU / GPU 占用，每秒刷新 -->
+        <TextView
+            android:id="@+id/tv_perf_debug"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_gravity="top|start"
+            android:layout_margin="6dp"
+            android:background="#80000000"
+            android:lineSpacingExtra="2dp"
+            android:padding="6dp"
+            android:text="@string/cicada_perf_debug"
+            android:textColor="#FFFFFF"
+            android:textSize="11sp"
+            android:typeface="monospace" />
+    </FrameLayout>
 
     <!-- 准备，播放，停止，暂停按钮 -->
     <LinearLayout
+        android:id="@+id/ll_btn_group"
         android:layout_width="match_parent"
         android:layout_height="50dp"
         android:background="@android:color/white"
@@ -44,6 +76,7 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:text="@string/pause_button" />
+
         <Button
             android:id="@+id/stop"
             style="@style/btn_bordless_style"
@@ -67,9 +100,9 @@
             android:layout_height="wrap_content"
             android:layout_weight="1"
             android:enabled="false"
-            android:visibility="gone"
+            android:text="@string/retry_button"
             android:textColor="@drawable/selector_button"
-            android:text="@string/retry_button" />
+            android:visibility="gone" />
 
     </LinearLayout>
     <!-- 准备，播放，停止，暂停按钮 End -->

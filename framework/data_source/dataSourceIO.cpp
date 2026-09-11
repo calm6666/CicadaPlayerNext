@@ -4,6 +4,13 @@
 
 #include <utils/af_string.h>
 #include "dataSourceIO.h"
+// FFmpeg 9.0：avio.h 不再间接引入 mem.h/error.h，需显式包含；
+// mem.h 自身没有 extern "C" 包裹，必须手动包一层——否则 C++ 会 mangle
+// av_malloc/av_freep 等符号，与 libffmpeg.so 里的 C 符号对不上（链接失败）
+extern "C" {
+#include <libavutil/mem.h>
+#include <libavutil/error.h>
+}
 
 #define INITIAL_BUFFER_SIZE 32768
 namespace Cicada {

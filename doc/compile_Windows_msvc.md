@@ -10,6 +10,9 @@
 	```bash
 	cross compile ffmpeg on ubuntu use mingGW, see compile_Windows.md
 	copy build result CicadaPlayer\external\install\ffmpeg in ubuntu to the same dir in your windows system
+	（新版合并库：同时把 external\build\ffmpeg\win32\i686\config*.h 与源码树
+	  external\external\ffmpeg 同步到 Windows；avc.h/hevc.h 等内部头的
+	  手工拷贝已不需要，CMake 会从源码树/构建树直接包含）
 	find avc.h hevc.h avio_internal.h url.h in CicadaPlayer\external\external\ffmpeg\libavformat in ubuntu, copy to CicadaPlayer\external\install\ffmpeg\win32\i686\include\libavformat
 	run CicadaPlayer\external\win\install_external.bat, you can set proxy by set HTTPS_PROXY and HTTP_PROXY system environment variables, see https://github.com/microsoft/vcpkg/issues/9527
 	```
@@ -21,6 +24,6 @@
 
 4. copy depends
     ```bash
-    copy CicadaPlayer\external\install\ffmpeg\win32\i686\bin\*.dll to CicadaPlayer\cmdline\msvc_build\_generated\cmake_win\Release
-	find libgcc_s_sjlj-1.dll(posix version) in mingw install dir, copy to CicadaPlayer\cmdline\msvc_build\_generated\cmake_win\Release
+    copy CicadaPlayer\external\install\ffmpeg\win32\i686\libffmpeg.dll to CicadaPlayer\cmdline\msvc_build\_generated\cmake_win\Release
+    （FFmpeg 9 起合并为单一 libffmpeg.dll；mingw 静态链接了 libgcc，无需再拷 libgcc_s_sjlj-1.dll）
     ```

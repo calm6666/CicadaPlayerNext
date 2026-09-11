@@ -6,6 +6,10 @@
 #define LOG_TAG "TCPProtocol"
 extern "C" {
 #include <libavutil/bswap.h>
+// AV_ERROR_MAX_STRING_SIZE lives in error.h and AV_TIME_BASE in avutil.h;
+// neither is pulled in transitively on every platform.
+#include <libavutil/error.h>
+#include <libavutil/avutil.h>
 }
 #include <utils/frame_work_log.h>
 using namespace Cicada;

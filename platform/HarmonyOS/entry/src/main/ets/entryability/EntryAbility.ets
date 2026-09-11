@@ -11,7 +11,7 @@ export default class EntryAbility extends UIAbility {
   }
 
   onWindowStageCreate(windowStage: window.WindowStage): void {
-    windowStage.loadContent('pages/Index', (err) => {
+    windowStage.loadContent('pages/SourceChoosePage', (err) => {
       if (err.code) {
         return;
       }

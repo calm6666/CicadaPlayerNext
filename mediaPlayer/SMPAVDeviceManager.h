@@ -75,6 +75,12 @@ namespace Cicada {
 
         void invalidDevices(uint64_t deviceTypes);
 
+        /**
+         * 仅把解码器标记为无效（不触碰 audio/render 资源）。
+         * surface 重建热重绑失败后，调用 setUpDecoder 会关闭旧解码器并新建。
+         */
+        void invalidateDecoder(uint64_t deviceTypes);
+
         void flushDevice(uint64_t deviceTypes);
 
         int getFrame(std::unique_ptr<IAFFrame> &frame, deviceType type, uint64_t timeOut);
