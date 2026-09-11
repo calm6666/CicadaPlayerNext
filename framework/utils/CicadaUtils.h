@@ -9,6 +9,7 @@
 #define CicadaUtils_hpp
 
 #include <stdio.h>
+#include <cstdint>
 #include <string>
 #include "CicadaType.h"
 #include <vector>

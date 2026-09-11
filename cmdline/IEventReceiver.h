@@ -26,6 +26,17 @@ public:
 
         virtual void onChangeVolume(bool large) = 0;
 
+        /*
+         * Absolute volume in 0.0 .. 1.0.
+         *
+         * The keyboard path (onChangeVolume) only knows a direction, but a mouse
+         * driven slider knows a position, so it needs this. Non-pure with an
+         * empty body on purpose: existing listeners keep compiling unchanged.
+         */
+        virtual void onSetVolume(float volume)
+        {
+        }
+
         virtual void onSetView(void *view) = 0;
 
         virtual void onSpeedUp(bool up) = 0;

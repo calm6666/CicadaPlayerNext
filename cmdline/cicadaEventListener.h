@@ -35,6 +35,8 @@ public:
 
     void onChangeVolume(bool large) override;
 
+    void onSetVolume(float volume) override;
+
     void onSetView(void *view) override;
 
     void onSpeedUp(bool up) override;
@@ -46,9 +48,29 @@ public:
     void onSpeedReset() override;
     void onReconnect() override;
 
+    /*
+     * Play/pause state, so the on-screen control bar can draw the right glyph.
+     * All pause/play requests - keyboard and mouse - go through onPausePlay(),
+     * which keeps this flag as the single source of truth.
+     */
+    bool isPaused() const
+    {
+        return paused;
+    }
+
+    /*
+     * True while the window is full screen. onFullScreen() is a notification
+     * from SDLEventReceiver, which is what actually toggles the window.
+     */
+    bool isFullScreen() const
+    {
+        return fullScreen;
+    }
+
 protected:
     Cicada::MediaPlayer *mediaPlayer;
     bool paused = false;
+    bool fullScreen = false;
 };
 
 

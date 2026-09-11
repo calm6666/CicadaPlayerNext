@@ -36,12 +36,47 @@ if [[ "$TARGET_PLATFORM" == "iOS" || "$TARGET_PLATFORM" == "Darwin" || "$TARGET_
     ffmpeg_config_add_decoders ac3_at eac3_at
 fi
 
+# Additional audio decoders.
+#
+# Most audio files in a local collection failed for one of two reasons: the
+# decoder was simply not compiled in (everything below), or the decoded sample
+# format was one the SDL audio render cannot open - see forceSupportedAudioFormat()
+# in cmdline/cicadaPlayer.cpp for that half.
+#
+# Every name is checked against libavcodec/allcodecs.c, where the decoder list
+# comes from (configure: DECODER_LIST=$(find_things_extern decoder FFCodec
+# libavcodec/allcodecs.c), so the name is the <name> in ff_<name>_decoder).
+# This matters more than it looks: ffmpeg_config_add_decoders exits 1 on a name
+# it cannot find, unlike the demuxer list which only warns.
+ffmpeg_config_add_decoders \
+    mp1 mp2 \
+    ape wavpack tta \
+    wmav1 wmav2 wmapro wmalossless \
+    truehd mlp \
+    amrnb amrwb speex nellymoser cook ra_144 sbc atrac3 \
+    adpcm_ms adpcm_ima_wav adpcm_yamaha \
+    pcm_u8 pcm_s8 pcm_s16le_planar pcm_s24be pcm_s32le pcm_s32be pcm_f64le \
+    pcm_alaw pcm_mulaw
+
 # ---- demuxers ---------------------------------------------------------------
 ffmpeg_config_add_demuxers \
     flv live_flv aac h264 hevc \
     mov mp4 m4v mp3 mpegts mpegps matroska av1 \
     webvtt srt ass ac3 eac3 ogg wav \
     hls dash concat
+
+# Audio containers that were missing.
+#
+# flac matters most: the FLAC *decoder* was already enabled, but a plain .flac
+# file needs the flac *demuxer* to be opened at all - avformat_open_input fails
+# without it, so nothing plays. The rest cover the other audio files a local
+# media collection realistically contains.
+#
+# Demuxer names are checked against libavformat/allformats.c
+# (ff_<name>_demuxer); ffmpeg_config_add_demuxers only warns about a name it
+# cannot find, unlike the decoder list which aborts the build.
+ffmpeg_config_add_demuxers \
+    flac aiff au voc wv tta ape dts asf amr caf oma ac4
 
 # ---- muxers -----------------------------------------------------------------
 # 注：FFmpeg 没有 "aac" muxer（AAC 封装用 adts）
@@ -128,6 +163,34 @@ if [[ "$TARGET_PLATFORM" == "Windows" ]]; then
         mpeg2_d3d11va mpeg2_d3d11va2 \
         vp9_d3d11va   vp9_d3d11va2 \
         av1_d3d11va   av1_d3d11va2
+fi
+
+# ---- hardware accelerators (Linux) -------------------------------------------
+# Same copy-back design as the Windows block above, on the backend Linux has:
+# VAAPI. framework/codec/avcodecDecoder.cpp picks the device type per platform
+# (D3D11VA on Windows, VAAPI here) and downloads every decoded surface to system
+# memory, so the SDL renderer stays untouched.
+#
+# Every name needs the "vaapi" hwcontext, which configure only enables when it
+# finds libva through pkg-config:
+#   configure: check_pkg_config vaapi "libva >= 0.35.0" "va/va.h" vaInitialize
+# so the build machine needs libva-dev installed:
+#     sudo apt install libva-dev
+# Without it configure disables each of these and reports
+#   WARN: hwaccel 'h264_vaapi' disabled by configure (...)
+# which ffmpeg_verify_requested_components() prints as a non-fatal warning - the
+# build still succeeds and simply produces a software-only player.
+#
+# hevc/vp9/av1 additionally check for libva header types
+# (VAPictureParameterBufferHEVC, VADecPictureParameterBufferVP9_bit_depth,
+# VADecPictureParameterBufferAV1_bit_depth_idx), so an older libva drops just
+# those three rather than the whole list.
+#
+# Only codecs whose decoder is already enabled above are listed.
+if [[ "$TARGET_PLATFORM" == "Linux" ]]; then
+    ffmpeg_config_add_hwaccels \
+        h264_vaapi hevc_vaapi mpeg2_vaapi mpeg4_vaapi \
+        vp8_vaapi vp9_vaapi av1_vaapi mjpeg_vaapi
 fi
 
 # Optional: parse DASH MPD through FFmpeg's own demuxer (the player uses its

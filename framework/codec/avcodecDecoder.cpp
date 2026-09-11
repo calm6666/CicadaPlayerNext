@@ -6,22 +6,38 @@
 extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/opt.h>
-};
-
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
 /*
- * These must NOT go inside the extern "C" block above.
- * hwcontext_d3d11va.h pulls in the Windows SDK <d3d11.h>, which defines C++
- * comparison operators for D3D11_VIEWPORT / D3D11_RECT / D3D11_BOX. Inside an
- * extern "C" block those operators get C linkage and MSVC rejects every one of
- * them with C2733. FFmpeg's own headers carry their own extern "C" guards, so
- * nothing is lost by including them outside.
+ * These belong INSIDE extern "C": FFmpeg's headers carry no extern "C" guard of
+ * their own -- libavutil/pixdesc.h and libswscale/swscale.h contain no
+ * __cplusplus/extern "C" block at all -- so including them outside gives every
+ * symbol C++ linkage and the link fails on mangled names that the C import
+ * library does not export:
+ *   videodec.lib(avcodecDecoder.obj) : error LNK2019: unresolved external symbol
+ *   "char const * __cdecl av_get_pix_fmt_name(enum AVPixelFormat)"
+ *   "void __cdecl sws_freeContext(struct SwsContext *)"
+ *   "int __cdecl sws_scale(...)"
+ *   "struct SwsContext * __cdecl sws_getCachedContext(...)"
+ *   fatal error LNK1120: 4 unresolved externals
+ *
+ * libavutil/hwcontext.h is safe in here: it only pulls in buffer.h, frame.h,
+ * log.h and pixfmt.h, never a Windows SDK header. It is where every hardware
+ * decoding type and call this file needs comes from - AV_HWDEVICE_TYPE_D3D11VA
+ * or AV_HWDEVICE_TYPE_VAAPI, av_hwdevice_ctx_create(),
+ * av_hwframe_transfer_data() and AVHWFramesContext.
+ *
+ * libavutil/hwcontext_d3d11va.h is deliberately NOT included. It is the single
+ * header that does #include <d3d11.h>, and the C++ comparison operators that
+ * d3d11.h defines for D3D11_VIEWPORT / D3D11_RECT / D3D11_BOX would get C
+ * linkage inside an extern "C" block, which makes MSVC reject every one of them
+ * with C2733. It only declares AVD3D11VADeviceContext, which this file never
+ * uses, so it is simply not needed.
  */
 #include <libavutil/hwcontext.h>
-#include <libavutil/hwcontext_d3d11va.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
 #endif
+};
 
 #include <utils/AFUtils.h>
 #include <cstring>
@@ -42,14 +58,14 @@ using namespace std;
 namespace Cicada {
     avcodecDecoder avcodecDecoder::se(0);
 
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
     /*
      * Pixel format negotiation callback. FFmpeg hands us the list of formats the
      * codec can output; we accept the D3D11VA one and refuse everything else,
      * which makes avcodec_open2() fail cleanly (and the caller fall back to the
      * software decoder) rather than silently producing frames we cannot use.
      */
-    enum AVPixelFormat avcodecDecoder::getD3D11vaFormat(AVCodecContext *ctx,
+    enum AVPixelFormat avcodecDecoder::getHwFormat(AVCodecContext *ctx,
                                                         const enum AVPixelFormat *pixFmts)
     {
         auto *dec = static_cast<decoder_handle_v *>(ctx->opaque);
@@ -60,23 +76,27 @@ namespace Cicada {
             }
         }
 
-        AF_LOGE("D3D11VA: decoder did not offer %s, refusing\n",
-                av_get_pix_fmt_name(dec->hwPixFmt));
+        AF_LOGE("%s: decoder did not offer %s, refusing\n",
+                CICADA_HW_NAME, av_get_pix_fmt_name(dec->hwPixFmt));
         return AV_PIX_FMT_NONE;
     }
 
     /*
-     * Finds the D3D11VA hardware configuration for this codec.
+     * Finds the hardware configuration for this codec on this platform.
      *
-     * Only AV_PIX_FMT_D3D11 is accepted: that is the modern API, where FFmpeg
-     * owns an AVHWFramesContext and av_hwframe_transfer_data() can download a
-     * decoded surface. The legacy AV_PIX_FMT_D3D11VA_VLD format (produced by the
-     * h264_d3d11va hwaccel, as opposed to h264_d3d11va2) carries a bare
-     * ID3D11VideoDecoderOutputView pointer in frame->data[3] and no frames
-     * context at all, so copy-back is impossible there - it is refused with a
-     * warning rather than producing frames the renderer cannot use.
+     * The match is against CICADA_HW_DEVICE_TYPE / CICADA_HW_PIX_FMT, so the
+     * same code serves D3D11VA on Windows and VAAPI on Linux.
+     *
+     * Windows needs one extra rule. FFmpeg ships two D3D11VA hwaccels per codec
+     * and only the "2" one is usable here: h264_d3d11va2 reports
+     * AV_PIX_FMT_D3D11, where FFmpeg owns an AVHWFramesContext and
+     * av_hwframe_transfer_data() can download a surface, while h264_d3d11va
+     * reports the legacy AV_PIX_FMT_D3D11VA_VLD, which carries a bare
+     * ID3D11VideoDecoderOutputView in frame->data[3] and no frames context at
+     * all. That one is refused with a warning rather than producing frames the
+     * renderer cannot use. VAAPI has no such split.
      */
-    static bool hasD3D11vaHwConfig(const AVCodec *codec, enum AVPixelFormat *pixFmt)
+    static bool hasHwConfig(const AVCodec *codec, enum AVPixelFormat *pixFmt)
     {
         bool onlyLegacyApi = false;
 
@@ -88,25 +108,27 @@ namespace Cicada {
             }
 
             if ((config->methods & AV_CODEC_HW_CONFIG_METHOD_HW_DEVICE_CTX) == 0 ||
-                    config->device_type != AV_HWDEVICE_TYPE_D3D11VA) {
+                    config->device_type != CICADA_HW_DEVICE_TYPE) {
                 continue;
             }
 
-            if (config->pix_fmt == AV_PIX_FMT_D3D11) {
+            if (config->pix_fmt == CICADA_HW_PIX_FMT) {
                 *pixFmt = config->pix_fmt;
                 return true;
             }
 
+#if defined(_WIN32)
             if (config->pix_fmt == AV_PIX_FMT_D3D11VA_VLD) {
                 onlyLegacyApi = true;
             }
+#endif
         }
 
         if (onlyLegacyApi) {
-            AF_LOGW("D3D11VA: %s only offers the legacy AV_PIX_FMT_D3D11VA_VLD hwaccel, "
+            AF_LOGW("%s: %s only offers the legacy AV_PIX_FMT_D3D11VA_VLD hwaccel, "
                     "which has no frames context to download from; copy-back needs "
                     "AV_PIX_FMT_D3D11 (enable the *_d3d11va2 hwaccels in "
-                    "external/player_ffmpeg_config.sh)\n", codec->name);
+                    "external/player_ffmpeg_config.sh)\n", CICADA_HW_NAME, codec->name);
         }
 
         return false;
@@ -119,7 +141,7 @@ namespace Cicada {
             return;
         }
 
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
         mPDecoder->hwDecodeActive = false;
 
         if (mPDecoder->swsCtx != nullptr) {
@@ -200,7 +222,7 @@ namespace Cicada {
         AF_LOGI("set decoder thread as :%d\n", threadcount);
         mPDecoder->codecCont->thread_count = threadcount;
 
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
 
         // D3D11VA is set up here, still before avcodec_open2() so the codec
         // context is opened straight onto the GPU. It has to come after the
@@ -210,7 +232,7 @@ namespace Cicada {
         //
         // Only video, and only when the caller asked for hardware decoding. On
         // any failure the decoder is left exactly as a software decoder.
-        if (!isAudio && (flags & DECFLAG_HW) && initD3D11va(meta)) {
+        if (!isAudio && (flags & DECFLAG_HW) && initHwDecoder(meta)) {
             mPDecoder->flags = DECFLAG_HW;
             mPDecoder->codecCont->thread_count = 1;
         }
@@ -223,33 +245,29 @@ namespace Cicada {
             return -1;
         }
 
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
 
-        // Now that avcodec_open2() ran, FFmpeg has created the D3D11 surface pool
-        // and we can learn which software layout the surfaces download to. NV12
-        // is the usual answer for 8-bit 4:2:0; that is fine for the copy-back
-        // itself, but the SDL renderer uploads Y/U/V planes and therefore needs
-        // YUV420P - so this is the value to watch when debugging a green or
-        // empty picture with hardware decoding on.
+        /*
+         * Do NOT look for codecCont->hw_frames_ctx here.
+         *
+         * For H.264, HEVC and most other codecs FFmpeg only calls the get_format
+         * callback - and therefore only allocates the D3D11 surface pool - when
+         * the first frame is parsed, not during avcodec_open2(). Checking at this
+         * point finds a null hw_frames_ctx for a perfectly healthy hardware
+         * decoder, and acting on that is actively harmful: clearing
+         * hwDecodeActive without also removing get_format/hw_device_ctx leaves
+         * FFmpeg decoding into D3D11 surfaces while the download step is skipped,
+         * so the renderer receives raw GPU frames whose data[0] is an
+         * ID3D11Texture2D pointer and whose linesize[0] is a surface index. SDL
+         * then reports "Parameter 'Ypitch' is invalid" for every frame and paints
+         * a green window.
+         *
+         * The surface pool is inspected lazily instead, in retrieveHwFrame(),
+         * from the decoded frame's own hw_frames_ctx.
+         */
         if (mPDecoder->hwDecodeActive) {
-            auto *framesCtx = reinterpret_cast<AVHWFramesContext *>(
-                    mPDecoder->codecCont->hw_frames_ctx ? mPDecoder->codecCont->hw_frames_ctx->data : nullptr);
-
-            if (framesCtx != nullptr) {
-                mPDecoder->swPixFmt = framesCtx->sw_format;
-                AF_LOGI("D3D11VA: surfaces %dx%d, download format %s\n",
-                        framesCtx->width, framesCtx->height,
-                        av_get_pix_fmt_name(framesCtx->sw_format));
-
-                if (framesCtx->sw_format != AV_PIX_FMT_YUV420P) {
-                    AF_LOGI("D3D11VA: converting the download from %s to YUV420P for the renderer\n",
-                            av_get_pix_fmt_name(framesCtx->sw_format));
-                }
-            } else {
-                AF_LOGW("D3D11VA: no frames context after open, falling back to software\n");
-                mPDecoder->hwDecodeActive = false;
-                mPDecoder->flags = DECFLAG_SW;
-            }
+            AF_LOGI("%s: codec opened; the surface pool is allocated on the first frame\n",
+                    CICADA_HW_NAME);
         }
 
 #endif
@@ -261,8 +279,8 @@ namespace Cicada {
         return 0;
     }
 
-#if defined(_WIN32)
-    bool avcodecDecoder::initD3D11va(const Stream_meta *meta)
+#if defined(CICADA_HW_DEVICE_TYPE)
+    bool avcodecDecoder::initHwDecoder(const Stream_meta *meta)
     {
         (void) meta;
         enum AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
@@ -270,20 +288,20 @@ namespace Cicada {
         // 1. Does the linked FFmpeg even have a D3D11VA decoder for this codec?
         //    With the stock prebuilt win32 libffmpeg.dll (--disable-hwaccels)
         //    this is false, and we leave the decoder entirely untouched.
-        if (!hasD3D11vaHwConfig(mPDecoder->codec, &hwPixFmt)) {
-            AF_LOGI("D3D11VA: %s has no d3d11va hwaccel in this FFmpeg build, "
-                    "using the software decoder\n", mPDecoder->codec->name);
+        if (!hasHwConfig(mPDecoder->codec, &hwPixFmt)) {
+            AF_LOGI("%s: %s has no hardware decoder in this FFmpeg build, "
+                    "using the software decoder\n", CICADA_HW_NAME, mPDecoder->codec->name);
             return false;
         }
 
         // 2. Create the D3D11 device (and its immediate context) FFmpeg will
         //    decode on. A nullptr device string selects the default adapter.
         AVBufferRef *deviceRef = nullptr;
-        int ret = av_hwdevice_ctx_create(&deviceRef, AV_HWDEVICE_TYPE_D3D11VA, nullptr, nullptr, 0);
+        int ret = av_hwdevice_ctx_create(&deviceRef, CICADA_HW_DEVICE_TYPE, nullptr, nullptr, 0);
 
         if (ret < 0) {
-            AF_LOGW("D3D11VA: av_hwdevice_ctx_create failed: %s, using the software decoder\n",
-                    getErrorString(ret));
+            AF_LOGW("%s: av_hwdevice_ctx_create failed: %s, using the software decoder\n",
+                    CICADA_HW_NAME, getErrorString(ret));
             return false;
         }
 
@@ -296,10 +314,10 @@ namespace Cicada {
         //    us once it knows coded_width/coded_height from the bitstream.
         mPDecoder->codecCont->hw_device_ctx = av_buffer_ref(deviceRef);
         mPDecoder->codecCont->opaque = mPDecoder;
-        mPDecoder->codecCont->get_format = getD3D11vaFormat;
+        mPDecoder->codecCont->get_format = getHwFormat;
 
-        AF_LOGI("D3D11VA: hardware decoding enabled for %s (hw pixel format %s)\n",
-                mPDecoder->codec->name, av_get_pix_fmt_name(hwPixFmt));
+        AF_LOGI("%s: hardware decoding enabled for %s (hw pixel format %s)\n",
+                CICADA_HW_NAME, mPDecoder->codec->name, av_get_pix_fmt_name(hwPixFmt));
         return true;
     }
 
@@ -318,17 +336,42 @@ namespace Cicada {
      * Decoding itself (entropy decode + motion compensation) still runs on the
      * GPU; this is only the download plus a cheap chroma copy.
      *
-     * Returns the frame to hand to the caller, or hwFrame unchanged when the
-     * download was not possible.
+     * Returns the frame to hand to the caller, or nullptr when the download was
+     * not possible. nullptr must be treated as "drop this frame": a D3D11 frame
+     * handed on as if it were CPU data has a texture pointer in data[0] and a
+     * surface index in linesize[0], which is what produced a green window with
+     * "Parameter 'Ypitch' is invalid" in the log.
      */
     AVFrame *avcodecDecoder::retrieveHwFrame(AVFrame *hwFrame)
     {
+        /*
+         * The decoded frame carries the surface pool it came from, and that is
+         * the only reliable place to read the software layout: for H.264 / HEVC
+         * FFmpeg allocates the pool lazily when the first frame is parsed, so
+         * codecCont->hw_frames_ctx is still null right after avcodec_open2().
+         */
+        auto *framesCtx = reinterpret_cast<AVHWFramesContext *>(
+                hwFrame->hw_frames_ctx ? hwFrame->hw_frames_ctx->data : nullptr);
+
+        if (framesCtx == nullptr) {
+            AF_LOGE("%s: the decoded hardware frame carries no hw_frames_ctx, "
+                    "so it cannot be downloaded\n", CICADA_HW_NAME);
+            return nullptr;
+        }
+
+        if (mPDecoder->swPixFmt == AV_PIX_FMT_NONE) {
+            mPDecoder->swPixFmt = framesCtx->sw_format;
+            AF_LOGI("%s: surfaces %dx%d, download format %s\n", CICADA_HW_NAME,
+                    framesCtx->width, framesCtx->height,
+                    av_get_pix_fmt_name(framesCtx->sw_format));
+        }
+
         if (mPDecoder->swFrame == nullptr) {
             mPDecoder->swFrame = av_frame_alloc();
 
             if (mPDecoder->swFrame == nullptr) {
-                AF_LOGE("D3D11VA: cannot allocate the copy-back frame\n");
-                return hwFrame;
+                AF_LOGE("%s: cannot allocate the copy-back frame\n", CICADA_HW_NAME);
+                return nullptr;
             }
         }
 
@@ -344,13 +387,52 @@ namespace Cicada {
         int ret = av_hwframe_transfer_data(swFrame, hwFrame, 0);
 
         if (ret < 0) {
-            AF_LOGE("D3D11VA: av_hwframe_transfer_data failed: %s\n", getErrorString(ret));
-            return hwFrame;
+            AF_LOGE("%s: av_hwframe_transfer_data failed: %s\n",
+                    CICADA_HW_NAME, getErrorString(ret));
+            return nullptr;
         }
 
         // Keep pts / duration / metadata - av_hwframe_transfer_data only copies
         // the pixel data.
         av_frame_copy_props(swFrame, hwFrame);
+
+        /*
+         * One-off diagnostic on the first downloaded frame.
+         *
+         * A luminance plane that is entirely zero is exactly what a solid green
+         * picture looks like: Y=U=V=0 converts to RGB(0,135,0). So when the
+         * D3D11 texture download silently returns no data the user sees a green
+         * window and an otherwise working player, with nothing in the log to
+         * explain it. Checking once and saying so turns that into a concrete
+         * message.
+         */
+        if (!mPDecoder->hwDownloadLogged) {
+            mPDecoder->hwDownloadLogged = true;
+
+            const uint8_t *y = swFrame->data[0];
+            bool allZero = (y != nullptr);
+            int ySize = swFrame->linesize[0] * swFrame->height;
+
+            for (int i = 0; y != nullptr && i < ySize; ++i) {
+                if (y[i] != 0) {
+                    allZero = false;
+                    break;
+                }
+            }
+
+            AF_LOGI("%s: downloaded %s %dx%d linesize=%d/%d\n", CICADA_HW_NAME,
+                    av_get_pix_fmt_name((enum AVPixelFormat) swFrame->format),
+                    swFrame->width, swFrame->height,
+                    swFrame->linesize[0], swFrame->linesize[1]);
+
+            if (allZero) {
+                AF_LOGE("%s: the downloaded Y plane is ALL ZERO - the GPU surface "
+                        "copy returned no pixel data, which renders as a solid "
+                        "green picture. Run with -sw to confirm, then check that "
+                        "the GPU driver and the device FFmpeg created agree on the "
+                        "decoder surfaces.\n", CICADA_HW_NAME);
+            }
+        }
 
         if (swFrame->format == AV_PIX_FMT_YUV420P) {
             return swFrame;
@@ -361,8 +443,8 @@ namespace Cicada {
             mPDecoder->convFrame = av_frame_alloc();
 
             if (mPDecoder->convFrame == nullptr) {
-                AF_LOGE("D3D11VA: cannot allocate the conversion frame\n");
-                return swFrame;
+                AF_LOGE("%s: cannot allocate the conversion frame\n", CICADA_HW_NAME);
+                return nullptr;
             }
         }
 
@@ -373,8 +455,8 @@ namespace Cicada {
         out->height = swFrame->height;
 
         if (av_frame_get_buffer(out, 0) < 0) {
-            AF_LOGE("D3D11VA: cannot allocate the YUV420P conversion buffer\n");
-            return swFrame;
+            AF_LOGE("%s: cannot allocate the YUV420P conversion buffer\n", CICADA_HW_NAME);
+            return nullptr;
         }
 
         mPDecoder->swsCtx = sws_getCachedContext(static_cast<SwsContext *>(mPDecoder->swsCtx),
@@ -385,8 +467,8 @@ namespace Cicada {
                                                  SWS_POINT, nullptr, nullptr, nullptr);
 
         if (mPDecoder->swsCtx == nullptr) {
-            AF_LOGE("D3D11VA: cannot create the swscale context\n");
-            return swFrame;
+            AF_LOGE("%s: cannot create the swscale context\n", CICADA_HW_NAME);
+            return nullptr;
         }
 
         sws_scale(static_cast<SwsContext *>(mPDecoder->swsCtx), swFrame->data, swFrame->linesize,
@@ -401,7 +483,7 @@ namespace Cicada {
         mName = "VD.avcodec";
         mPDecoder = new decoder_handle_v();
         memset(mPDecoder, 0, sizeof(decoder_handle_v));
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
         mPDecoder->hwPixFmt = AV_PIX_FMT_NONE;
         mPDecoder->swPixFmt = AV_PIX_FMT_NONE;
 #endif
@@ -433,7 +515,7 @@ namespace Cicada {
 
     void avcodecDecoder::flush_decoder()
     {
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
 
         // Drop the in-flight copy-back buffers so a seek cannot hand the
         // renderer a frame from before the flush.
@@ -472,12 +554,32 @@ namespace Cicada {
         }
 
         AVFrame *outFrame = mPDecoder->avFrame;
-#if defined(_WIN32)
+#if defined(CICADA_HW_DEVICE_TYPE)
 
-        // Hardware frames must be downloaded to system memory before the
-        // renderer can upload them into an SDL texture.
-        if (mPDecoder->hwDecodeActive && mPDecoder->avFrame->format == mPDecoder->hwPixFmt) {
+        /*
+         * A D3D11 frame must never reach the renderer as if it were CPU data:
+         * its data[0] is an ID3D11Texture2D pointer and its linesize[0] is a
+         * surface index, which SDL rejects with "Parameter 'Ypitch' is invalid"
+         * for every frame and draws as a green window. Download it, or drop it.
+         *
+         * The format test also catches the case where FFmpeg still decodes into
+         * D3D11 surfaces while hwDecodeActive is false (get_format installed but
+         * the download disabled) - that is exactly how the green screen appeared.
+         */
+        if (mPDecoder->avFrame->format == mPDecoder->hwPixFmt) {
+            if (!mPDecoder->hwDecodeActive) {
+                AF_LOGW("%s: dropping a hardware frame while hardware decoding is disabled\n",
+                        CICADA_HW_NAME);
+                return -EAGAIN;
+            }
+
             outFrame = retrieveHwFrame(mPDecoder->avFrame);
+
+            if (outFrame == nullptr) {
+                AF_LOGW("%s: dropping a hardware frame that could not be downloaded\n",
+                        CICADA_HW_NAME);
+                return -EAGAIN;
+            }
         }
 
 #endif

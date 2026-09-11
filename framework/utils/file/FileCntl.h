@@ -6,6 +6,7 @@
 #define SOURCE_FILECNTL_H
 
 #include "utils/CicadaType.h"
+#include <cstdint>
 #include <fcntl.h>
 #include <string>
 

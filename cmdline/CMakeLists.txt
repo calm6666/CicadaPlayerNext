@@ -47,6 +47,13 @@ if (ENABLE_SDL)
             nativeWindow/CocoaWindow.m
             nativeWindow/X11Window.c
             nativeWindow/WindowsWindow.c)
+    # The on-screen control bar is Windows only: on Windows the demo takes over
+    # presentation itself so it can draw the bar into the same SDL_Renderer.
+    if (MSVC)
+        list(APPEND SRC_FILE
+                SdlControlBar.cpp
+                SdlControlBar.h)
+    endif ()
 endif ()
 
 add_executable(cicadaPlayer
@@ -150,6 +157,12 @@ target_link_libraries(cicadaPlayer PUBLIC coverage_config)
 
 if (${CMAKE_SYSTEM_NAME} MATCHES "Linux")
     target_link_libraries(cicadaPlayer PUBLIC X11)
+    # libva, only when the FFmpeg the player links was built with VAAPI.
+    # Linux.cmake reads FFmpeg's config.h to decide and leaves CICADA_VAAPI_LIBS
+    # empty otherwise, so a build machine without libva-dev still links.
+    if (CICADA_VAAPI_LIBS)
+        target_link_libraries(cicadaPlayer PRIVATE ${CICADA_VAAPI_LIBS})
+    endif ()
 endif()
 
 if(MSVC AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)

@@ -222,6 +222,15 @@ echo ===========================================================================
 
 REM Only this architecture's tree is wiped, so "build_win.bat x64" leaves a
 REM previously built x86 output untouched.
+REM
+REM A still-running cicadaPlayer.exe cannot be deleted or overwritten. That
+REM shows up after the usual "run it, change something, rebuild" cycle as
+REM   LNK1104: cannot open file '...\Release\cicadaPlayer.exe'
+REM because rd cannot remove the locked exe and the linker cannot replace it.
+REM Stop any leftover instance first so the tree wipe and the link can proceed.
+taskkill /f /im cicadaPlayer.exe >nul 2>&1
+if not errorlevel 1 echo stopped a running cicadaPlayer.exe so it can be rebuilt
+
 if exist "%ARCH_BUILD_DIR%" rd /s /q "%ARCH_BUILD_DIR%"
 md "%ARCH_BUILD_DIR%"
 cd /d "%ARCH_BUILD_DIR%"

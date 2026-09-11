@@ -9,6 +9,10 @@
 #include <vector>
 #include <sstream>
 #include <map>
+// uint8_t / uint64_t are used in the declarations below. MSVC happens to get
+// them transitively through another header, GCC does not, which broke the Linux
+// build with "'uint8_t' was not declared in this scope" on Linux/x86_64.
+#include <cstdint>
 #include "CicadaType.h"
 
 #ifndef __APPLE__

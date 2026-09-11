@@ -3,6 +3,7 @@
 //
 
 #include "CicadaType.h"
+#include <cstdint>
 #include <map>
 #include <string>
 

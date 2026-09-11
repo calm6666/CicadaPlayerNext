@@ -3856,6 +3856,12 @@ int SuperMediaPlayer::SetUpVideoPath()
                 }
             }
 
+            // Hardware decoding is the default, but a failure here must not cost
+            // the user the video: drop to the software decoder and keep playing.
+            // On Windows that is the D3D11VA path in avcodecDecoder failing
+            // (no hwaccel in the linked FFmpeg, or the D3D11 device could not be
+            // created); avcodec_get_hw_config() decides, so an unavailable
+            // hwaccel is detected before any frame is decoded.
             ret = CreateVideoDecoder(false, *meta);
         }
     }

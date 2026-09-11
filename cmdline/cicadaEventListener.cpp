@@ -55,6 +55,19 @@ void cicadaEventListener::onChangeVolume(bool large)
     mediaPlayer->SetVolume(vol);
 }
 
+void cicadaEventListener::onSetVolume(float volume)
+{
+    // Absolute volume for the mouse driven slider. Clamp here because the
+    // caller works in pixels and can overshoot at the ends of the track.
+    if (volume < 0.0f) {
+        volume = 0.0f;
+    } else if (volume > 1.0f) {
+        volume = 1.0f;
+    }
+
+    mediaPlayer->SetVolume(volume);
+}
+
 void cicadaEventListener::onSetView(void *view)
 {
     mediaPlayer->SetView(view);
@@ -79,7 +92,11 @@ void cicadaEventListener::onPrePare()
     //   mediaPlayer->Prepare();
 }
 void cicadaEventListener::onFullScreen(bool full)
-{}
+{
+    // SDLEventReceiver owns the window and performs the actual toggle; this is
+    // only a notification, kept so the control bar can draw the right glyph.
+    fullScreen = full;
+}
 void cicadaEventListener::onSpeedReset()
 {
     mediaPlayer->SetSpeed(1.0f);

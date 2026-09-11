@@ -39,6 +39,53 @@ struct cicadaCont {
 
 static const char *DEFAULT_URL = "https://player.alicdn.com/video/aliyunmedia.mp4";
 
+#ifdef _WIN32
+/*
+ * Opts the process into per-monitor DPI awareness.
+ *
+ * Without this Windows treats the process as DPI-unaware and bitmap-stretches
+ * everything it draws, which is why the file dialog came out blurry on a scaled
+ * display. It has to run before any window or dialog exists: the file dialog is
+ * opened before SDL_Init(), so calling this first in main() covers both the
+ * dialog and the video window.
+ *
+ * SetProcessDpiAwarenessContext() exists only on Windows 10 1703+, so it is
+ * resolved dynamically and the Vista-era SetProcessDPIAware() is the fallback.
+ * Doing it via GetProcAddress also avoids linking Shcore.lib. If neither works
+ * the picture is simply system-scaled as before - no failure.
+ */
+static void enableDpiAwareness()
+{
+    typedef BOOL (WINAPI * SetProcessDpiAwarenessContextFn)(HANDLE);
+    HMODULE user32 = GetModuleHandleW(L"user32.dll");
+
+    if (user32 != nullptr) {
+        auto setContext = reinterpret_cast<SetProcessDpiAwarenessContextFn>(
+                GetProcAddress(user32, "SetProcessDpiAwarenessContext"));
+
+        // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == (HANDLE)-4
+        if (setContext != nullptr &&
+                setContext(reinterpret_cast<HANDLE>(static_cast<LONG_PTR>(-4))) != FALSE) {
+            return;
+        }
+    }
+
+    SetProcessDPIAware();
+}
+
+/*
+ * The player logs UTF-8 (the source path of a locally picked file is UTF-8),
+ * but a Chinese Windows console defaults to cp936, so every non-ASCII path came
+ * out as mojibake such as "D:\瑙嗛\鎵嬫満瑙嗛\...". Switching the console's output
+ * code page to UTF-8 makes the log readable. If it fails the log still works,
+ * it is just displayed in the old code page.
+ */
+static void enableUtf8Console()
+{
+    SetConsoleOutputCP(CP_UTF8);
+}
+#endif
+
 static void usage(const char *exe)
 {
     printf("CicadaPlayer cmdline demo\n"
@@ -54,7 +101,9 @@ static void usage(const char *exe)
            "  -m, --manifest <file> play an object-based MediaManifest JSON (DRM)\n"
            "\n"
            "decode:\n"
-           "  -hw, --hardware       request hardware (GPU) video decoding [default]\n"
+           "  -hw, --hardware       hardware (GPU) video decoding [default]\n"
+           "                        On Windows this is D3D11VA; if it cannot be set\n"
+           "                        up, the player falls back to the CPU decoder.\n"
            "  -sw, --software       force the software (FFmpeg) video decoder\n"
            "\n"
            "misc:\n"
@@ -62,7 +111,8 @@ static void usage(const char *exe)
            "\n"
            "keyboard: SPACE pause/resume   LEFT/RIGHT step seek   UP/DOWN volume\n"
            "          F7/F9 speed down/up  F8 reset speed   0-9 seek to percent\n"
-           "          p re-prepare         r reconnect         ESC quit\n",
+           "          p re-prepare         r reconnect         ESC quit\n"
+           "mouse   : click the play/pause button, drag the progress bar to seek\n",
            exe);
 }
 
@@ -226,13 +276,262 @@ static void onSeekEnd(int64_t position, void *userData)
     //  AF_LOGD("seek end\n");
 }
 
-static void changeAudioFormat()
+/*
+ * Force the audio render onto 16 bit samples.
+ *
+ * SdlAFAudioRender2::device_require_format() (framework/render/audio/
+ * SdlAFAudioRender2.cpp:31) accepts only S16, S16P, FLT and FLTP, and
+ * init_device() maps exactly those onto AUDIO_S16SYS / AUDIO_F32SYS. Anything
+ * else - most visibly the S32 that a 24 bit FLAC decodes to - matches neither
+ * branch, so the SDL_AudioSpec it hands to SDL_OpenAudioDevice() keeps
+ * format == 0, the device fails to open and the file plays with no sound while
+ * the video and the position timer carry on perfectly normally.
+ *
+ * protected.audio.render.change_format is the framework's own answer: it makes
+ * filterAudioRender (the base of SdlAFAudioRender2, see renderFactory.cpp:71)
+ * convert the decoded frames to the requested layout before they reach the
+ * device.
+ *
+ * Only fmt is set. The framework also understands change_format.channels and
+ * change_format.sample_rate, but setting those would resample and downmix every
+ * file - including the ones that were already fine - for no benefit. Set them
+ * only if a particular audio device turns out to reject the source rate.
+ *
+ * Windows only for the moment, to keep this change inside the platform being
+ * worked on; the same gap exists in the Linux and macOS SDL builds.
+ */
+static void forceSupportedAudioFormat()
 {
     setProperty("protected.audio.render.change_format", "ON");
     setProperty("protected.audio.render.change_format.fmt", "s16");
-    setProperty("protected.audio.render.change_format.channels", "2");
-    setProperty("protected.audio.render.change_format.sample_rate", "44100");
 }
+
+#if defined(_WIN32) && defined(ENABLE_SDL)
+/*
+ * Presentation is taken over from SdlAFVideoRender so the control bar can be
+ * drawn into the same SDL_Renderer, after the video and before the present.
+ * IVideoRender's callback is called before the framework draws and returning
+ * true skips its drawing, so everything below is the demo's responsibility.
+ */
+struct renderContext {
+    Cicada::MediaPlayer *player = nullptr;
+    cicadaEventListener *listener = nullptr;
+    SDLEventReceiver *receiver = nullptr;
+    SDL_Window *window = nullptr;
+    SDL_Renderer *renderer = nullptr;
+    SDL_Texture *texture = nullptr;
+    int textureWidth = 0;
+    int textureHeight = 0;
+    int lastOutputWidth = 0;
+    int lastOutputHeight = 0;
+};
+
+/* Aspect-fit rectangle, centred - the default Scale_AspectFit behaviour. */
+static SDL_Rect aspectFit(int videoWidth, int videoHeight, int windowWidth, int windowHeight)
+{
+    SDL_Rect result{0, 0, 0, 0};
+
+    if (videoWidth <= 0 || videoHeight <= 0 || windowWidth <= 0 || windowHeight <= 0) {
+        return result;
+    }
+
+    const float videoRatio = static_cast<float>(videoWidth) / static_cast<float>(videoHeight);
+    const float windowRatio = static_cast<float>(windowWidth) / static_cast<float>(windowHeight);
+
+    if (videoRatio <= windowRatio) {
+        result.h = windowHeight;
+        result.w = static_cast<int>(windowHeight * videoRatio);
+    } else {
+        result.w = windowWidth;
+        result.h = static_cast<int>(windowWidth / videoRatio);
+    }
+
+    result.x = (windowWidth - result.w) / 2;
+    result.y = (windowHeight - result.h) / 2;
+    return result;
+}
+
+/*
+ * Marks the span during which the render thread is inside SDL. A full screen
+ * switch waits for this to clear before touching the window, so the guard has to
+ * release on every exit path, including the early returns.
+ */
+namespace {
+    struct RenderCallGuard {
+        explicit RenderCallGuard(SDLEventReceiver *receiver) : mReceiver(receiver)
+        {
+            mReceiver->enterRenderCall();
+        }
+
+        ~RenderCallGuard()
+        {
+            mReceiver->leaveRenderCall();
+        }
+
+        SDLEventReceiver *mReceiver;
+    };
+}
+
+static bool onVideoRendering(void *userData, IAFFrame *frame, const CicadaJSONItem &params)
+{
+    (void) params;
+    auto *ctx = static_cast<renderContext *>(userData);
+
+    if (ctx == nullptr || frame == nullptr || frame->getType() != IAFFrame::FrameTypeVideo) {
+        return false;
+    }
+
+    /*
+     * A full screen switch is in progress. Return without touching SDL at all -
+     * the window is mid-rebuild and any call here could block behind it. The
+     * last presented frame simply stays on screen for the few frames this lasts.
+     */
+    if (ctx->receiver->isRenderSuspended()) {
+        return true;
+    }
+
+    RenderCallGuard renderCall(ctx->receiver);
+
+    SDL_Window *window = static_cast<SDL_Window *>(ctx->receiver->getWindow());
+
+    if (window == nullptr) {
+        /* The window does not exist yet (the view is created on the first video
+         * size notification). Let the framework have the frame. */
+        return false;
+    }
+
+    /*
+     * The window was just switched to or from full screen. Anything the render
+     * thread cached from the old window state has to go: the renderer's swap
+     * chain has been rebuilt, and a D3D device reset invalidates every default
+     * pool resource, the video texture included. Dropping both makes the code
+     * below re-fetch the renderer and allocate a fresh texture.
+     */
+    if (ctx->receiver->consumeWindowGeometryChanged()) {
+        if (ctx->texture != nullptr) {
+            SDL_DestroyTexture(ctx->texture);
+            ctx->texture = nullptr;
+        }
+
+        ctx->textureWidth = 0;
+        ctx->textureHeight = 0;
+    }
+
+    if (ctx->renderer == nullptr || ctx->window != window) {
+        ctx->renderer = SDL_GetRenderer(window);
+        ctx->window = window;
+
+        if (ctx->renderer == nullptr) {
+            AF_LOGE("SDL_GetRenderer returned null: %s\n", SDL_GetError());
+            return false;
+        }
+
+        SDL_RendererInfo info;
+
+        if (SDL_GetRendererInfo(ctx->renderer, &info) == 0) {
+            AF_LOGI("video renderer: '%s'\n", info.name ? info.name : "?");
+        }
+    }
+
+    /*
+     * SdlAFVideoRender::init() installed a render scale to compensate for DPI,
+     * which would also scale every coordinate below. Work in drawable pixels
+     * with the scale neutralised instead.
+     */
+    SDL_RenderSetScale(ctx->renderer, 1.0f, 1.0f);
+
+    int outWidth = 0;
+    int outHeight = 0;
+    SDL_GetRendererOutputSize(ctx->renderer, &outWidth, &outHeight);
+
+    /*
+     * Rebuild the texture whenever the drawable size changes, not only on a full
+     * screen switch. A maximise, or the user dragging the window edge, resizes
+     * the window without going through toggleFullScreen(), and the renderer's
+     * back buffer is rebuilt underneath us in all of those cases.
+     */
+    if (outWidth != ctx->lastOutputWidth || outHeight != ctx->lastOutputHeight) {
+        ctx->lastOutputWidth = outWidth;
+        ctx->lastOutputHeight = outHeight;
+
+        if (ctx->texture != nullptr) {
+            SDL_DestroyTexture(ctx->texture);
+            ctx->texture = nullptr;
+        }
+
+        ctx->textureWidth = 0;
+        ctx->textureHeight = 0;
+        AF_LOGI("window drawable size is now %dx%d, rebuilding the video texture\n",
+                outWidth, outHeight);
+    }
+
+    const int videoWidth = frame->getInfo().video.width;
+    const int videoHeight = frame->getInfo().video.height;
+
+    if (videoWidth <= 0 || videoHeight <= 0) {
+        return false;
+    }
+
+    if (ctx->texture == nullptr || ctx->textureWidth != videoWidth || ctx->textureHeight != videoHeight) {
+        if (ctx->texture != nullptr) {
+            SDL_DestroyTexture(ctx->texture);
+            ctx->texture = nullptr;
+        }
+
+        /* The decoder hands out 8 bit 4:2:0 here: FFmpeg software decoding gives
+         * YUV420P, and the D3D11VA copy-back converts its NV12 download to
+         * YUV420P precisely because this renderer uploads Y/U/V planes. */
+        ctx->texture = SDL_CreateTexture(ctx->renderer, SDL_PIXELFORMAT_IYUV,
+                                         SDL_TEXTUREACCESS_STREAMING, videoWidth, videoHeight);
+        ctx->textureWidth = videoWidth;
+        ctx->textureHeight = videoHeight;
+
+        if (ctx->texture == nullptr) {
+            AF_LOGE("cannot create the video texture: %s\n", SDL_GetError());
+            return false;
+        }
+    }
+
+    uint8_t **data = frame->getData();
+    int *lineSize = frame->getLineSize();
+
+    if (data == nullptr || lineSize == nullptr || data[0] == nullptr) {
+        return false;
+    }
+
+    SDL_Rect srcRect{0, 0, videoWidth, videoHeight};
+
+    if (SDL_UpdateYUVTexture(ctx->texture, &srcRect,
+                             data[0], lineSize[0], data[1], lineSize[1], data[2], lineSize[2]) != 0) {
+        AF_LOGE("SDL_UpdateYUVTexture failed: %s\n", SDL_GetError());
+    }
+
+    const SDL_Rect dstRect = aspectFit(videoWidth, videoHeight, outWidth, outHeight);
+
+    SDL_SetRenderDrawColor(ctx->renderer, 0, 0, 0, 255);
+    SDL_RenderClear(ctx->renderer);
+
+    if (SDL_RenderCopy(ctx->renderer, ctx->texture, &srcRect, &dstRect) != 0) {
+        AF_LOGE("SDL_RenderCopy failed: %s\n", SDL_GetError());
+    }
+
+    SdlControlBar &bar = ctx->receiver->getControlBar();
+    bar.layout(outWidth, outHeight);
+
+    if (bar.visible()) {
+        SdlControlBar::Info info;
+        info.positionMs = ctx->player->GetCurrentPosition();
+        info.durationMs = ctx->player->GetDuration();
+        info.volume = ctx->player->GetVolume();
+        info.paused = ctx->listener->isPaused();
+        info.fullScreen = ctx->listener->isFullScreen();
+        bar.draw(ctx->renderer, info);
+    }
+
+    SDL_RenderPresent(ctx->renderer);
+    return true;
+}
+#endif
 
 namespace {
     struct cmdlineOptions {
@@ -240,15 +539,27 @@ namespace {
         string manifestJson;
         bool wantFilePicker = false;
         bool haveSource = false;
-        // The framework enables hardware video decoding by default
-        // (player_types.h: bEnableHwVideoDecode), so that is the default here
-        // too; -sw forces the FFmpeg software decoder.
+        /*
+         * Hardware video decoding is the default, matching the framework
+         * (player_types.h: bEnableHwVideoDecode == true). On Windows this drives
+         * the D3D11VA path in avcodecDecoder; if that cannot be set up, the
+         * framework drops to the software decoder so the video still plays
+         * instead of failing outright. Pass -sw to stay on the CPU on purpose.
+         */
         bool hardwareDecode = true;
     };
 }
 
 int main(int argc, char *argv[])
 {
+#ifdef _WIN32
+    // Must come before the file dialog and before SDL creates the video window,
+    // otherwise Windows bitmap-stretches both and everything looks blurry.
+    enableDpiAwareness();
+    // And make the UTF-8 log readable on a cp936 console.
+    enableUtf8Console();
+#endif
+
     cmdlineOptions opt;
     setProperty("protected.network.http.http2", "ON");
 
@@ -304,7 +615,11 @@ int main(int argc, char *argv[])
     log_set_level(AF_LOG_LEVEL_TRACE, 1);
     setProperty("protected.audio.render.hw.tempo", "OFF");
     //
-    //    changeAudioFormat();
+#ifdef _WIN32
+    // Without this, any audio that does not decode to S16 or FLT (24 bit FLAC
+    // decodes to S32, for instance) opens no SDL device and plays silently.
+    forceSupportedAudioFormat();
+#endif
 
 #ifdef _WIN32
     if (!opt.haveSource) {
@@ -339,6 +654,21 @@ int main(int argc, char *argv[])
     AF_LOGI("video decoder: %s\n", opt.hardwareDecode ? "hardware (GPU)" : "software (FFmpeg)");
 
     cicadaCont cicada{};
+#if defined(_WIN32) && defined(ENABLE_SDL)
+    /*
+     * Declared BEFORE the player on purpose.
+     *
+     * Locals are destroyed in reverse order, so this context is torn down after
+     * the player has stopped its renderer and VSync thread. Declaring it later
+     * would destroy it first, while the VSync thread could still be calling
+     * onVideoRendering() with a dangling pointer.
+     *
+     * The texture is intentionally not destroyed here: by the time this goes
+     * away the SDL_Renderer is already gone, and calling SDL_DestroyTexture on a
+     * dead renderer would be worse than letting the process exit release it.
+     */
+    renderContext renderCtx;
+#endif
     unique_ptr<MediaPlayer> player = unique_ptr<MediaPlayer>(new MediaPlayer());
     cicada.player = player.get();
     playerListener pListener{nullptr};
@@ -363,6 +693,21 @@ int main(int argc, char *argv[])
     player->SetListener(pListener);
     player->SetDefaultBandWidth(1000 * 1000);
     player->EnableHardwareDecoder(opt.hardwareDecode);
+#if defined(_WIN32) && defined(ENABLE_SDL)
+    /*
+     * Take over presentation so the control bar can be drawn on top of the video.
+     *
+     * IVideoRender's rendering callback runs before the framework blits the
+     * frame, and returning true skips the built-in drawing entirely, so the demo
+     * has to do the whole job: texture upload, letter box, overlay, present.
+     * That is deliberate - the alternative would be a hook inside
+     * SdlAFVideoRender, which is shared with the Linux and macOS builds.
+     */
+    renderCtx.player = player.get();
+    renderCtx.listener = &eListener;
+    renderCtx.receiver = &receiver;
+    player->SetVideoRenderingCallback(onVideoRendering, &renderCtx);
+#endif
     if (!opt.manifestJson.empty()) {
         // Object-based playback: unified MediaManifest JSON (DRM-capable).
         player->SetDataSource(opt.manifestJson);
