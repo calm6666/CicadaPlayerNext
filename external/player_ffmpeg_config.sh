@@ -87,16 +87,31 @@ fi
 # dlopen + GetProcAddress, which is why link_shared_lib_win32() can keep linking
 # with only -lws2_32 -lbcrypt -lcrypt32 under -Wl,--no-undefined.
 #
-# The *_d3d11va2 names matter: FFmpeg defines two D3D11VA hwaccels per codec
-# (libavcodec/hwaccels.h), and only the "2" one is the modern API:
+# The *_d3d11va2 names matter: FFmpeg defines two D3D11VA hwaccels per codec,
+# and only the "2" one is the modern API:
 #   h264_d3d11va   -> .p.pix_fmt = AV_PIX_FMT_D3D11VA_VLD  (legacy; frame->data[3]
 #                     holds a bare ID3D11VideoDecoderOutputView and there is no
 #                     AVHWFramesContext, so av_hwframe_transfer_data() cannot work)
 #   h264_d3d11va2  -> .p.pix_fmt = AV_PIX_FMT_D3D11        (FFmpeg owns a frames
 #                     context, which is what the copy-back in
 #                     framework/codec/avcodecDecoder.cpp needs)
-# Enabling the non-"2" variants would look like it worked and then always fall
-# back to software, so the "2" variants are the ones requested.
+#
+# BOTH variants of a codec must be enabled together -- this is not optional:
+# libavcodec/Makefile only wires the object file for the non-"2" hwaccel
+#   OBJS-$(CONFIG_H264_D3D11VA_HWACCEL)  += dxva2_h264.o
+#   OBJS-$(CONFIG_H264_DXVA2_HWACCEL)    += dxva2_h264.o
+#   (there is no OBJS-$(CONFIG_H264_D3D11VA2_HWACCEL) rule at all)
+# while both structs live in that single object, guarded separately:
+#   dxva2_h264.c: #if CONFIG_H264_D3D11VA_HWACCEL  -> ff_h264_d3d11va_hwaccel
+#   dxva2_h264.c: #if CONFIG_H264_D3D11VA2_HWACCEL -> ff_h264_d3d11va2_hwaccel
+# Enabling only the "2" name therefore sets the macro that makes h264dec.c
+# reference ff_h264_d3d11va2_hwaccel without ever compiling the object that
+# defines it, and the merged DLL link dies with
+#   undefined reference to `ff_h264_d3d11va2_hwaccel'
+# (same for hevc/mpeg2/vp9/av1). Enabling both compiles the object once and
+# emits both structs; the decoder then reports both pixel formats through
+# avcodec_get_hw_config(), and avcodecDecoder::hasD3D11vaHwConfig() explicitly
+# selects the AV_PIX_FMT_D3D11 entry and ignores the legacy one.
 #
 # Every name must appear in `configure --list-hwaccels`; an unavailable one is
 # reported as a non-fatal WARN by ffmpeg_verify_requested_components().
@@ -108,7 +123,11 @@ fi
 # build_libs()/ffmpeg_cross_compile_set_win32().
 if [[ "$TARGET_PLATFORM" == "Windows" ]]; then
     ffmpeg_config_add_hwaccels \
-        h264_d3d11va2 hevc_d3d11va2 mpeg2_d3d11va2 vp9_d3d11va2 av1_d3d11va2
+        h264_d3d11va  h264_d3d11va2 \
+        hevc_d3d11va  hevc_d3d11va2 \
+        mpeg2_d3d11va mpeg2_d3d11va2 \
+        vp9_d3d11va   vp9_d3d11va2 \
+        av1_d3d11va   av1_d3d11va2
 fi
 
 # Optional: parse DASH MPD through FFmpeg's own demuxer (the player uses its
