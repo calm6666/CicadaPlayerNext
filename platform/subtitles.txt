@@ -1,0 +1,369 @@
+<div class="bpx-player-ctrl-btn bpx-player-ctrl-subtitle" aria-label="字幕" data-i18n-attr="aria-label:subtitles" tabindex="0">
+            <div class="bpx-player-ctrl-subtitle-result-wrap">
+                <div class="bpx-player-ctrl-subtitle-result" data-i18n="subtitles">字幕</div>
+                <span class="bpx-common-svg-icon" style="display:none"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+            </div>
+                <div class="bpx-player-ctrl-subtitle-box">
+                    <div class="bpx-player-ctrl-subtitle-menu bui bui-panel bui-dark"><div class="bui-area"><div class="bui-panel-wrap" style="width: 168px; height: 311px;">
+    <div class="bui-panel-move" style="width: 434px;">
+        
+        <div class="bui-panel-item bui-panel-item-active" style="width: 168px; height: 311px;"><div class="bpx-player-ctrl-subtitle-menu-left">
+                            <div class="bpx-player-ctrl-subtitle-menu-translation" style="display: none;">
+                                <div class="bpx-player-ctrl-translation-title-area">
+                                    <div class="bpx-player-ctrl-translation-add-wrap bpx-player-ctrl-subtitle-item-flex">
+                                        <div class="bpx-player-ctrl-translation-title">
+                                            <div class="bpx-player-ctrl-translation-title-text"></div>
+                                            <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 16 16"><path fill="#fff" d="M8 2.333a5.667 5.667 0 1 0 0 11.333A5.667 5.667 0 0 0 8 2.333ZM1.333 7.999a6.667 6.667 0 1 1 13.334 0A6.667 6.667 0 0 1 1.333 8Z"></path><path fill="#fff" d="M8.583 10.624a.583.583 0 1 1-1.166 0 .583.583 0 0 1 1.166 0ZM8 5.916a.833.833 0 0 0-.833.833.5.5 0 1 1-1 0 1.833 1.833 0 0 1 3.666 0c0 .492-.177.85-.411 1.134-.11.134-.232.25-.34.35l-.093.085c-.076.07-.144.132-.214.202-.167.167-.226.285-.25.354a.572.572 0 0 0-.025.209.5.5 0 1 1-1 0c0-.136.007-.326.08-.536.082-.237.234-.48.488-.735a7.97 7.97 0 0 1 .261-.245l.074-.068c.102-.094.182-.173.247-.252a.719.719 0 0 0 .183-.498A.833.833 0 0 0 8 5.916Z"></path></svg></span>
+                                        </div>
+                                    </div>
+                                    <div class="bpx-player-ctrl-translation-close-switch bpx-state-active" data-action="close" data-i18n="close">关闭</div>
+                                </div>
+                                <div class="bpx-player-ctrl-translation-language">
+                                    <div class="bpx-player-ctrl-translation-content">
+                                        <div class="bpx-player-ctrl-translation-inner"></div>
+                                    </div>
+                                </div>
+                                <div class="bpx-player-ctrl-translation-separator" style="display: none;"></div>
+                                <div class="bpx-player-ctrl-translation-unlogin" style="display: none">
+                                    <div class="bpx-player-ctrl-translation-unlogin-content" data-i18n="loginBenefitPrefix">登录可享</div>
+                                </div>
+                                <div class="bpx-player-ctrl-translation-feedback" style="display: none;">
+                                    <div class="bpx-player-ctrl-translation-feedback-text" data-i18n="audioTranslationFeedback">原声翻译体验反馈</div>
+                                    <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" viewBox="0 0 16 16"><path d="m9.188 7.999-3.359 3.359a.75.75 0 1 0 1.061 1.061l3.889-3.889a.75.75 0 0 0 0-1.061L6.89 3.58a.75.75 0 1 0-1.061 1.061l3.359 3.358z"></path></svg></span>
+                                </div>
+                            </div>
+                            <div class="bpx-player-ctrl-subtitle-menu-origin">
+                                <div class="bpx-player-ctrl-subtitle-title-area">
+                                    <div class="bpx-player-ctrl-subtitle-add-wrap bpx-player-ctrl-subtitle-item-flex">
+                                        <div class="bpx-player-ctrl-subtitle-title" data-i18n="subtitles">字幕</div>
+                                        <div class="bpx-player-ctrl-subtitle-add" style="display: none;"><span data-i18n="addSubtitles">添加字幕</span></div>
+                                    </div>
+                                    <div class="bpx-player-ctrl-subtitle-close-switch bpx-state-active" data-action="close" data-i18n="close">关闭</div>
+                                    <div class="bpx-player-ctrl-subtitle-fake-switch" style="display: none">
+                                         <div class="bpx-player-ctrl-subtitle-fake-switch-text" data-i18n="close">关闭</div>
+                                         <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 12 12"><path fill="#61666D" d="M6 1.875a4.125 4.125 0 1 0 0 8.25 4.125 4.125 0 0 0 0-8.25ZM.875 6a5.125 5.125 0 1 1 10.25 0A5.125 5.125 0 0 1 .875 6Z"></path><path fill="#61666D" d="M6 3.5a.5.5 0 0 1 .5.5v2.25a.5.5 0 1 1-1 0V4a.5.5 0 0 1 .5-.5ZM6 7.25a.5.5 0 0 1 .5.5v.125a.5.5 0 1 1-1 0V7.75a.5.5 0 0 1 .5-.5Z"></path></svg></span>
+                                    </div>
+                                <div class="bpx-player-ctrl-subtitle-separator-above" style="display: none;"></div>
+                                <div class="bpx-player-ctrl-subtitle-language-unlogin" style="display: none">
+                                    <div class="bpx-player-ctrl-subtitle-language-unlogin-content" data-i18n="loginBenefitPrefix">登录可享</div>
+                                </div>
+                                <div class="bpx-player-ctrl-subtitle-bilingual-above bui bui-switch" data-i18n="subtitles" style="display: none;"><div class="bui-area"><input class="bui-switch-input" type="checkbox" aria-label="双语字幕">
+<label class="bui-switch-label">
+    <span class="bui-switch-name" data-i18n="bilingualSubtitles">双语字幕</span>
+    <span class="bui-switch-body">
+        <span class="bui-switch-dot">
+            <span></span>
+        </span>
+    </span>
+</label>
+</div></div>
+                                <div class="bpx-player-ctrl-subtitle-language">
+                                    <div class="bpx-player-ctrl-subtitle-nolan" data-i18n="noSubtitlesAvailable" style="display: none;">暂无字幕</div>
+                                    <div class="bpx-player-ctrl-subtitle-major" style="width: 100%;">
+                                        <div class="bpx-player-ctrl-subtitle-major-title" data-i18n="mainSubtitle" style="display: none;">主字幕</div>
+                                        <div class="bpx-player-ctrl-subtitle-major-content" style="height: 135px; touch-action: pan-x; user-select: none; -webkit-user-drag: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0);">
+                                            <div class="bpx-player-ctrl-subtitle-major-inner" style="transition-timing-function: cubic-bezier(0.165, 0.84, 0.44, 1); transition-duration: 0ms; transform: translate(0px, 0px) scale(1) translateZ(0px);"><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-zh">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">中文</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-en">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">English</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-ja">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">日本語</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-es">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">Español</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-ar">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">العربية</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-pt">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">Português</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div></div>
+                                        <div class="bscroll-vertical-scrollbar" style="position: absolute; z-index: 9999; width: 7px; bottom: 2px; top: 2px; right: 1px; overflow: hidden; opacity: 0; transition-duration: 500ms;"><div class="bscroll-indicator" style="box-sizing: border-box; position: absolute; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 3px; width: 100%; transition-timing-function: cubic-bezier(0.165, 0.84, 0.44, 1); transition-duration: 0ms; transform: translateY(0px) translateZ(0px); height: 76px;"></div></div></div>
+                                    </div>
+                                    <div class="bpx-player-ctrl-subtitle-minor" style="display: none;">
+                                        <div class="bpx-player-ctrl-subtitle-minor-title" data-i18n="secondarySubtitles">副字幕</div>
+                                        <div class="bpx-player-ctrl-subtitle-minor-content" style="height: 99px; touch-action: pan-x; user-select: none; -webkit-user-drag: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0);">
+                                            <div class="bpx-player-ctrl-subtitle-minor-inner" style="transition-timing-function: cubic-bezier(0.165, 0.84, 0.44, 1); transition-duration: 0ms; transform: translate(0px, 0px) scale(1) translateZ(0px);"><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-zh">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">中文</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-en">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">English</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-ja">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">日本語</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-es">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">Español</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-ar">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">العربية</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div><div class="bpx-player-ctrl-subtitle-language-item" data-lan="ai-pt">
+                    <div class="bpx-player-ctrl-subtitle-language-item-text">Português</div> <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 12"><rect width="13.5" height="11.5" x=".25" y=".25" stroke="#fff" stroke-opacity=".5" stroke-width=".5" rx="5.75"></rect><path fill="#fff" d="M5.248 2.788h.76L8.256 8.5h-.712l-.608-1.6H4.312l-.608 1.6H3l2.248-5.712Zm-.728 3.56h2.208l-1.08-2.856h-.032L4.52 6.348Zm4.362-3.56h.648V8.5h-.648V2.788Z"></path></svg></span>
+                </div></div>
+                                        <div class="bscroll-vertical-scrollbar" style="position: absolute; z-index: 9999; width: 7px; bottom: 2px; top: 2px; right: 1px; overflow: hidden; opacity: 0; display: none; transition-duration: 500ms;"><div class="bscroll-indicator" style="box-sizing: border-box; position: absolute; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 3px; width: 100%; transition-timing-function: cubic-bezier(0.165, 0.84, 0.44, 1); transition-duration: 0ms; transform: translateY(0px) translateZ(0px);"></div></div></div>
+                                    </div>
+                                </div>
+                                <div class="bpx-player-ctrl-subtitle-separator-bottom"></div>
+                                <div class="bpx-player-ctrl-subtitle-bilingual-bottom bui bui-switch" data-i18n="subtitles"><div class="bui-area"><input class="bui-switch-input" type="checkbox" aria-label="双语字幕">
+<label class="bui-switch-label">
+    <span class="bui-switch-name" data-i18n="bilingualSubtitles">双语字幕</span>
+    <span class="bui-switch-body">
+        <span class="bui-switch-dot">
+            <span></span>
+        </span>
+    </span>
+</label>
+</div></div>
+                                <div class="bpx-player-ctrl-subtitle-setting">
+                                    <span class="bpx-player-ctrl-subtitle-setting-text" data-i18n="subtitleSettings">字幕设置</span>
+                                    <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" viewBox="0 0 16 16"><path d="m9.188 7.999-3.359 3.359a.75.75 0 1 0 1.061 1.061l3.889-3.889a.75.75 0 0 0 0-1.061L6.89 3.58a.75.75 0 1 0-1.061 1.061l3.359 3.358z"></path></svg></span>
+                                </div>
+                            </div>    
+                        </div>
+                        
+                        <div class="bpx-player-ctrl-subtitle-menu-description" style="display: none;">
+                            <div class="bpx-player-ctrl-description-title">
+                                <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 6 10"><path fill="#fff" d="M4.93.15c.231-.213.613-.197.865.035l.038.034a.556.556 0 0 1 0 .795L1.538 5l4.295 4.017a.557.557 0 0 1 0 .796l-.053.047c-.26.19-.63.19-.851-.014L.167 5.396a.557.557 0 0 1 0-.795L4.93.15Z"></path></svg></span>
+                                <div class="bpx-player-ctrl-description-title-text"></div>
+                            </div>
+                            <div class="bpx-player-ctrl-description-separator"></div>
+                            <div class="bpx-player-ctrl-description-content"><p>B站自研的AI原声翻译功能通过大模型翻译、音色克隆、中文字幕改写、口型匹配等AI能力，将中文原生视频转化为"外语原生视频"：</p><ul><li>将中文内容翻译为外语</li><li>保留原视频内说话人的音色、语调和话语节奏</li><li>在可能的情况下，会同步将原视频内的中文字幕擦除并匹配对应外语字幕、将讲中文的嘴型匹配为外语嘴型</li></ul></div>
+                        </div>
+                    </div></div>
+        
+        <div class="bui-panel-item" style="width: 266px; height: 260px;"><div class="bpx-player-ctrl-subtitle-menu-right">
+                            <div class="bpx-player-ctrl-subtitle-settings-content">
+                                <div class="bpx-player-ctrl-subtitle-settings-scroller">
+                                    <div class="bpx-player-ctrl-subtitle-item bpx-player-ctrl-subtitle-item-flex">
+                                        <div class="bpx-player-ctrl-subtitle-fontsize">
+                                            <div class="bpx-player-ctrl-subtitle-fontsize-title" data-i18n="subtitleSize">字幕大小</div>
+                                            <div class="bpx-player-ctrl-subtitle-fontsize-content bui bui-select bui-dark"><div class="bui-area"><div class="bui-select-wrap">
+    <div class="bui-select-border">
+        <div class="bui-select-header">
+            <span class="bui-select-result"><span data-i18n="moderate">适中</span></span>
+            <span class="bui-select-arrow">
+                <span class="bui-select-arrow-down"></span>
+            </span>
+        </div>
+        <div class="bui-select-list-wrap" style="">
+            <ul class="bui-select-list" style="border-width: medium; border-style: none; border-color: currentcolor; border-image: none;">
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="0.6"><span data-i18n="minimum">最小</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="0.8"><span data-i18n="smaller">较小</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                         bui-select-item-active" data-value="1"><span data-i18n="moderate">适中</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="1.3"><span data-i18n="larger">较大</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="1.6"><span data-i18n="maximum">最大</span></li>
+                
+            </ul>
+        </div>
+    </div>
+</div></div></div>
+                                        </div>
+                                        <div class="bpx-player-ctrl-subtitle-color">
+                                            <div class="bpx-player-ctrl-subtitle-color-title" data-i18n="subtitleColor">字幕颜色</div>
+                                            <div class="bpx-player-ctrl-subtitle-color-content bui bui-select bui-dark"><div class="bui-area"><div class="bui-select-wrap">
+    <div class="bui-select-border">
+        <div class="bui-select-header">
+            <span class="bui-select-result"><span style="background: #ffffff;"></span><span data-i18n="white">白色</span></span>
+            <span class="bui-select-arrow">
+                <span class="bui-select-arrow-down"></span>
+            </span>
+        </div>
+        <div class="bui-select-list-wrap" style="">
+            <ul class="bui-select-list" style="border-width: medium; border-style: none; border-color: currentcolor; border-image: none;">
+                
+                <li class="bui-select-item
+                        
+                        
+                         bui-select-item-active" data-value="16777215"><span style="background: #ffffff;"></span><span data-i18n="white">白色</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="16007990"><span style="background: #F44336;"></span><span data-i18n="red">红色</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="10233776"><span style="background: #9C27B0;"></span><span data-i18n="purple">紫色</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="6765239"><span style="background: #673AB7;"></span><span data-i18n="deepPurple">深紫色</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="4149685"><span style="background: #3F51B5;"></span><span data-i18n="indigo">靛青色</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="2201331"><span style="background: #2196F3;"></span><span data-i18n="blue">蓝色</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="240116"><span style="background: #03A9F4;"></span><span data-i18n="brightBlue">亮蓝色</span></li>
+                
+            </ul>
+        </div>
+    </div>
+</div></div></div>
+                                        </div>
+                                    </div>
+                                    <div class="bpx-player-ctrl-subtitle-item bpx-player-ctrl-subtitle-item-flex">
+                                        <div class="bpx-player-ctrl-subtitle-shadow">
+                                            <div class="bpx-player-ctrl-subtitle-shadow-title" data-i18n="strokeStyle">描边方式</div>
+                                            <div class="bpx-player-ctrl-subtitle-shadow-content bui bui-select bui-dark"><div class="bui-area"><div class="bui-select-wrap">
+    <div class="bui-select-border">
+        <div class="bui-select-header">
+            <span class="bui-select-result"><span data-i18n="noOutline">无描边</span></span>
+            <span class="bui-select-arrow">
+                <span class="bui-select-arrow-down"></span>
+            </span>
+        </div>
+        <div class="bui-select-list-wrap" style="">
+            <ul class="bui-select-list" style="border-width: medium; border-style: none; border-color: currentcolor; border-image: none;">
+                
+                <li class="bui-select-item
+                        
+                        
+                         bui-select-item-active" data-value="0"><span data-i18n="noOutline">无描边</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="1"><span data-i18n="heavyInk">重墨</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="2"><span data-i18n="outline">描边</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="3"><span data-i18n="projection">45°投影</span></li>
+                
+            </ul>
+        </div>
+    </div>
+</div></div></div>
+                                        </div>
+                                        <div class="bpx-player-ctrl-subtitle-position">
+                                            <div class="bpx-player-ctrl-subtitle-position-title" data-i18n="defaultPosition">默认位置</div>
+                                            <div class="bpx-player-ctrl-subtitle-position-content bui bui-select bui-dark"><div class="bui-area"><div class="bui-select-wrap">
+    <div class="bui-select-border">
+        <div class="bui-select-header">
+            <span class="bui-select-result"><span data-i18n="bottomCenter">底部居中</span></span>
+            <span class="bui-select-arrow">
+                <span class="bui-select-arrow-down"></span>
+            </span>
+        </div>
+        <div class="bui-select-list-wrap" style="">
+            <ul class="bui-select-list" style="border-width: medium; border-style: none; border-color: currentcolor; border-image: none;">
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="bottom-left"><span data-i18n="bottomLeftCorner">左下角</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                         bui-select-item-active" data-value="bottom-center"><span data-i18n="bottomCenter">底部居中</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="bottom-right"><span data-i18n="bottomRightCorner">右下角</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="top-left"><span data-i18n="topLeftCorner">左上角</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="top-center"><span data-i18n="topCenter">顶部居中</span></li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="top-right"><span data-i18n="topRightCorner">右上角</span></li>
+                
+            </ul>
+        </div>
+    </div>
+</div></div></div>
+                                        </div>
+                                    </div>
+                                    <div class="bpx-player-ctrl-subtitle-item bpx-player-ctrl-subtitle-opacity">
+                                        <div class="bpx-player-ctrl-subtitle-opacity-header">
+                                            <div class="bpx-player-ctrl-subtitle-opacity-title" data-i18n="backgroundOpacity">背景不透明度</div>
+                                            <span class="bpx-player-ctrl-subtitle-opacity-percent">87%</span>
+                                        </div>
+                                        <div class="bpx-player-ctrl-subtitle-opacity-content bui bui-slider bui-dark"><div class="bui-area"><div class="bui-track
+            
+            
+            " style="">
+    
+        <div class="bui-bar-wrap">
+            
+            
+            <div class="bui-bar bui-bar-normal" role="progressbar" style="transform: scaleX(0.87);"></div>
+            
+        </div>
+    
+    
+    <div class="bui-thumb" style="transform: translateX(186.18px);">
+        
+        
+        <div class="bui-thumb-dot" style=""></div>
+        
+    </div>
+</div></div></div>
+                                    </div>
+                                    <div class="bpx-player-ctrl-subtitle-other">
+                                        <div class="bpx-player-ctrl-subtitle-other-title" data-i18n="otherSettings">其它设置</div>
+                                        <div class="bpx-player-ctrl-subtitle-other-content">
+                                            <span class="bpx-player-ctrl-subtitle-scale bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" checked="" aria-label="等比缩放">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name" data-i18n="fitToScale">等比缩放</span>
+</label></div></span>
+                                            <span class="bpx-player-ctrl-subtitle-fade bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" aria-label="淡入淡出">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name" data-i18n="fadeInAndOut">淡入淡出</span>
+</label></div></span>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="bpx-player-ctrl-subtitle-settings-footer">
+                                <div class="bpx-player-ctrl-subtitle-separator"></div>
+                                <div class="bpx-player-ctrl-subtitle-reset bui bui-button"><div class="bui-area bui-button-transparent"><span data-i18n="restoreDefaultSettings">恢复默认设置</span></div></div>
+                            </div>
+                        </div></div>
+        
+    </div>
+</div></div></div>
+            </div></div>

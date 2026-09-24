@@ -271,8 +271,27 @@ namespace Cicada {
                 int64_t deltaPts = pts - (mLastInputPts + mLastInPutDuration);
 
                 if (llabs(deltaPts) > mLastInPutDuration / 2) {
-                    mDeltaPts += deltaPts;
-                    AF_LOGD("mDeltaPts is %lld\n", mDeltaPts);
+                    /*
+                     * 普通编码抖动（几十毫秒）可以通过 mDeltaPts 平滑掉；但
+                     * DASH/HLS seek 后有些 segment 会携带完全不同的时间轴，
+                     * deltaPts 可能达到几十秒。这里必须把“时间轴跳变”反向抵消：
+                     * 输出时间 = 滤波器时间 + mFirstPts + mDeltaPts，因此输入
+                     * 向前跳 deltaPts 时应减去该值（而不是继续累加正值）。日志中
+                     * mDeltaPts=50154667/87168001 正是原实现把正向跳变越加越大的
+                     * 证据，最终造成音频整体领先视频几十秒。
+                     *
+                     * 大跳变只修正一次，后续帧继续沿用同一 offset；本地文件和
+                     * 其它平台的小幅连续 PTS 修正逻辑保持不变。
+                     */
+                    constexpr int64_t kLargeTimelineDiscontinuityUs = 5 * 1000 * 1000;
+                    if (llabs(deltaPts) >= kLargeTimelineDiscontinuityUs) {
+                        AF_LOGW("audio timeline discontinuity %lld us, re-anchor filter at pts=%lld\n",
+                                (long long) deltaPts, (long long) pts);
+                        mDeltaPts -= deltaPts;
+                    } else {
+                        mDeltaPts += deltaPts;
+                        AF_LOGD("mDeltaPts is %lld\n", mDeltaPts);
+                    }
                 }
             }
 
@@ -444,6 +463,19 @@ namespace Cicada {
             delete mOutPut.front();
             mOutPut.pop();
         }
+
+        /*
+         * flush 不只是清空 AVFilterGraph 的缓存，还必须清空“输入时间轴状态”。
+         * DASH/HLS seek 或清晰度切换后，下一段音频的 PTS 会从新的 segment 起点
+         * 重新开始；如果保留上一段的 mLastInputPts/mFirstPts/mDeltaPts，下面的
+         * discontinuity 计算会把新旧时间轴差值累计进去。日志中的
+         *   mDeltaPts is 50154667 / 87168001
+         * 就是这个问题，随后音频时钟会整体领先/落后视频几十秒。
+         */
+        mFirstPts = INT64_MIN;
+        mDeltaPts = 0;
+        mLastInputPts = INT64_MIN;
+        mLastInPutDuration = 0;
 
         if (m_pFilterGraph) {
             avfilter_graph_free(&m_pFilterGraph);

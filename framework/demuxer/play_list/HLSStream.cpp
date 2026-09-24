@@ -1130,8 +1130,23 @@ namespace Cicada {
         }
 
         if (ret == 0 && mStopOnSegEnd) {
+            /*
+             * 【这条不是错误，别每 10ms 打一次】
+             *
+             * "切清晰度"时管理器会让旧流**在本分片边界停下**（HLSStream::stopOnSegEnd(true)），
+             * 这个分支就是"这一片读完了、上面要求停"，属于正常状态。
+             *
+             * 但 read_thread 对 -EAGAIN 的处理是 `af_msleep(10)` 后重试（见上面 read_thread），
+             * 而这里原来每轮都打一条 **AF_LOGE** —— 切一次清晰度要等旧分片读完（几十毫秒到
+             * 十几秒），日志里就是刷屏的红色 "mStopOnSegEnd"：用户实测"切换不过去还卡死"，
+             * 一半是这些日志、一半是等待本身。改成**每次要求停只打一行**，而且降到 D 级。
+             */
+            if (!mStopOnSegEndLogged) {
+                mStopOnSegEndLogged = true;
+                AF_LOGD("stop on segment end（切清晰度：本片读完就停在片界，等管理器换流）\n");
+            }
+
             mIsEOS = true;
-            AF_LOGE("mStopOnSegEnd");
             return -EAGAIN;
         }
 
@@ -1524,6 +1539,24 @@ namespace Cicada {
         AF_LOGD("%s:%d stream (%d) usSeeked is %lld seek num is %d\n", __func__, __LINE__,
                 mPTracker->getStreamType(), usSought, num);
 
+        /*
+         * 【落点诊断】这一行是"目标 Representation 到底被定位到哪"的唯一权威读数。
+         *
+         * 2026-09-21 的 HLS 实测：点 2160p 时请求 34.831s，这里拿到 segNum=5
+         * （= 33.366s，正确），但 0.5 秒后读取线程已经把 -9.m4s（70.9s）读进队列，
+         * 播放点却还在 34.9s —— 于是 RenderVideo() 认为"帧太早"一直不渲染，
+         * FPS 永久 0。上一条 usSeeked 打印的是**请求值**不是结果，容易误判，
+         * 所以在这里补上 tracker 真正选中的段号/段位置。
+         */
+        AF_LOGI("[seek] hls %s: reqUs=%lld -> segNum=%llu curSegNum=%llu lastSegNum=%llu "
+                "duration=%lld live=%d initialized=%d\n",
+                mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
+                (long long) usSought, (unsigned long long) num,
+                (unsigned long long) mPTracker->getCurSegNum(),
+                (unsigned long long) mPTracker->getLastSegNum(),
+                (long long) mPTracker->getDuration(), (int) mPTracker->isLive(),
+                (int) mPTracker->isInited());
+
         if (mPTracker->getStreamType() == STREAM_TYPE_SUB && num == mPTracker->getCurSegNum()) {
             AF_LOGW("only one  subtitle seg");
             reqReOpen = false;
@@ -1555,6 +1588,9 @@ namespace Cicada {
             }
 
             mPTracker->setCurSegNum(num);
+            AF_LOGI("[seek] hls %s: tracker positioned at segNum=%llu (reqUs=%lld, reopened)\n",
+                    mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
+                    (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought);
         }
 
         mIsEOS = false;
@@ -1593,6 +1629,12 @@ namespace Cicada {
     int HLSStream::stopOnSegEnd(bool stop)
     {
         mStopOnSegEnd = stop;
+
+        /* 每次"要求停"只允许打一行日志（见 read_internal 里那个分支的说明） */
+        if (stop) {
+            mStopOnSegEndLogged = false;
+        }
+
         return 0;
     }
 

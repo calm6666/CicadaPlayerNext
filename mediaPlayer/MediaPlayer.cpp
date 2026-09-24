@@ -61,6 +61,7 @@ namespace Cicada {
         listener.SubtitleHeader = subtitleHeaderCallback;
         listener.MediaInfoGet = mediaInfoGetCallback;
         listener.StreamSwitchSuc = streamChangedSucCallback;
+        listener.VideoQualitySwitch = videoQualitySwitchCallback;
         listener.StatusChanged = PlayerStatusChanged;
         listener.CaptureScreen = captureScreenResult;
         listener.AutoPlayStart = autoPlayStart;
@@ -285,20 +286,45 @@ namespace Cicada {
 
     void MediaPlayer::SelectTrack(int index)
     {
-        std::lock_guard<std::mutex> lock(mMutexAbr);
-        GET_PLAYER_HANDLE
+        /*
+         * 【2026-09-21 修：切到"自动"必须**真的**变成自动】
+         *
+         * 原来这里只 `EnableAbr(true)`。但 ABR 线程是**可以被暂停**的：
+         * `MediaPlayer::Pause()`（暂停播放）和 `MediaPlayer::SeekTo()`（每次 seek！）
+         * 都会 `mAbrManager->Pause()`，只有 `Start()`（播放）和 seek 结束回调里才会
+         * 重新 `Start()`。于是只要有一次 seek 没有走到结束回调（被新 seek 覆盖、
+         * 中途 stop、失败），ABR 线程就一直停着：用户从手动档切回"自动"，
+         * `EnableAbr(true)` 只置了个标志，线程根本没醒 —— 界面显示自动、行为却完全
+         * 不动，跟"没实现"一模一样。
+         *
+         * 所以这里在打开 ABR 的同时把线程也拉起来。注意两条：
+         *   1) `mAbrManager->Start()` 要放在 mMutexAbr **外面**调用：ABR 线程回调
+         *      `abrChanged()`（持 mMutexAbr）是发生在 `AbrManager::mMutex` 里面的，
+         *      在持 mMutexAbr 时再去拿 AbrManager::mMutex 就是反向加锁，会 ABBA 死锁；
+         *   2) 暂停状态下不硬拉线程（ABR 不该在暂停时自己切档）；那种情况只
+         *      EnableAbr(true)，用户按播放时 `MediaPlayer::Start()` 会把它起来。
+         */
+        bool enableAbr = false;
+        {
+            std::lock_guard<std::mutex> lock(mMutexAbr);
+            GET_PLAYER_HANDLE
 
-        if (SELECT_TRACK_VIDEO_AUTO == index) {
-            mAbrManager->EnableAbr(true);
-            return;
-        } else if (index < SELECT_TRACK_VIDEO_AUTO) {
-            return;
+            if (SELECT_TRACK_VIDEO_AUTO == index) {
+                mAbrManager->EnableAbr(true);
+                enableAbr = true;
+            } else if (index < SELECT_TRACK_VIDEO_AUTO) {
+                return;
+            } else {
+                StreamType type = CicadaSwitchStreamIndex(handle, index);
+
+                if (ST_TYPE_VIDEO == type) {
+                    mAbrManager->EnableAbr(false);
+                }
+            }
         }
 
-        StreamType type = CicadaSwitchStreamIndex(handle, index);
-
-        if (ST_TYPE_VIDEO == type) {
-            mAbrManager->EnableAbr(false);
+        if (enableAbr && mOldPlayStatus == PLAYER_PLAYING) {
+            mAbrManager->Start();
         }
     }
 
@@ -1003,6 +1029,14 @@ namespace Cicada {
 
         if (player->mListener.StreamSwitchSuc) {
             player->mListener.StreamSwitchSuc(type, Info, player->mListener.userData);
+        }
+    }
+
+    void MediaPlayer::videoQualitySwitchCallback(int64_t status, int64_t streamIndex, const void *desc, void *userData)
+    {
+        GET_MEDIA_PLAYER
+        if (player->mListener.VideoQualitySwitch) {
+            player->mListener.VideoQualitySwitch(status, streamIndex, desc, player->mListener.userData);
         }
     }
 

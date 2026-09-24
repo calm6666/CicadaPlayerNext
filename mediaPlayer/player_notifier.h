@@ -78,6 +78,14 @@ namespace Cicada {
 
         void NotifyStreamChanged(StreamInfo *info, StreamType type);
 
+        /*
+         * 向应用层投递清晰度切换状态。
+         * 回调参数依次为：状态、目标 streamIndex、UTF-8 描述字符串。
+         * 事件会进入 PlayerNotifier 自己的异步队列，不在播放器服务线程
+         * 直接调用应用回调，避免 UI 或 JNI 回调阻塞解码主循环。
+         */
+        void NotifyVideoQualitySwitch(player_quality_switch_status status, int64_t streamIndex, const char *desc);
+
         void CancelNotifyMediaInfo();
 
         void NotifyAutoPlayStart();

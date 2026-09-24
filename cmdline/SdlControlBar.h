@@ -21,6 +21,19 @@
 
 class SdlControlBar {
 public:
+    /*
+     * 绘图目标抽象。
+     *
+     * 控件条本身只用“填一个矩形”这一种图元（播放三角也是逐行矩形拼出来的），
+     * 所以把这一种操作抽出来，SDL 呈现和零拷贝 D3D11 呈现（CPU 位图 +
+     * CopySubresourceRegion）就能共用同一套外观代码，不会改一边忘一边。
+     */
+    class Canvas {
+    public:
+        virtual ~Canvas() = default;
+        virtual void fill(const SDL_Rect &rect, const SDL_Color &color) = 0;
+    };
+
     /* What the caller has to act on after a click or drag. */
     enum class Hit {
         None,
@@ -55,11 +68,23 @@ public:
      * Mouse handling. mouseDown returns the control that was grabbed, or
      * Hit::None when the click missed the bar. While a drag is in progress the
      * caller should keep applying dragFraction() - that is what makes the
-     * progress and volume bars follow the mouse live.
+     * progress and volume bars follow the mouse.
+     *
+     * A click on a hidden bar is swallowed: it only wakes the bar up and
+     * returns Hit::None. Without that, the invisible bar keeps answering for
+     * the bottom strip of the window, so clicking the picture there paused the
+     * player or jumped the position with nothing on screen to explain it.
      */
     Hit mouseDown(int x, int y);
     void mouseMotion(int x, int y);
     void mouseUp();
+
+    /*
+     * The pointer left the window. Without this the hover flag stays set (SDL
+     * only sends motion while the pointer is inside), the bar never hides and
+     * keeps answering clicks in the bottom strip of the picture.
+     */
+    void mouseLeave();
 
     bool isDragging() const;
 
@@ -80,16 +105,36 @@ public:
     void notifyActivity();
     bool visible() const;
 
+    /* Draws into an SDL_Renderer (the classic path, no NV12 / no direct mode). */
     void draw(SDL_Renderer *renderer, const Info &info);
 
+    /* Draws into any other target, e.g. the CPU bitmap used by -direct. */
+    void draw(Canvas &canvas, const Info &info);
+
+    /*
+     * 零拷贝路径用：把控件条画成一张 BGRA 位图（尺寸 = barWidth() x
+     * barHeight()，由 layout() 决定），调用方再用 CopySubresourceRegion 贴到
+     * 后台缓冲底部。那条路径没有混合能力，所以这里把 alpha 与黑色预乘后写成
+     * 不透明像素，和 SDL 上看到的深浅一致。
+     */
+    void drawToBitmap(uint32_t *pixels, const Info &info) const;
+
+    /* 位图尺寸，等于最近一次 layout() 里的条宽度 / 条高度。 */
+    int barWidth() const;
+    int barHeight() const;
+
 private:
-    void drawPlayPause(SDL_Renderer *renderer, const SDL_Rect &area, bool paused, bool highlight);
-    void drawFullScreen(SDL_Renderer *renderer, const SDL_Rect &area, bool fullScreen);
-    void drawSlider(SDL_Renderer *renderer, const SDL_Rect &track, float fraction, bool highlight);
-    void drawTriangle(SDL_Renderer *renderer, const SDL_Rect &area, SDL_Color color);
+    void drawBar(Canvas &canvas, const Info &info) const;
+    void drawPlayPause(Canvas &canvas, const SDL_Rect &area, bool paused, bool highlight) const;
+    void drawFullScreen(Canvas &canvas, const SDL_Rect &area, bool fullScreen) const;
+    void drawSlider(Canvas &canvas, const SDL_Rect &track, float fraction, bool highlight) const;
+    void drawTriangle(Canvas &canvas, const SDL_Rect &area, SDL_Color color) const;
 
     /* fractionAt() with mMutex already held, for the internal callers. */
     float fractionAtLocked(Hit control, int x) const;
+
+    /* visible() with mMutex already held. */
+    bool visibleLocked() const;
 
     SDL_Rect mBar{};
     SDL_Rect mPlayPause{};

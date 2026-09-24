@@ -4,6 +4,8 @@
 
 #include "SdlControlBar.h"
 
+#include <algorithm>
+
 namespace {
     /* Layout constants, in drawable pixels. */
     const int BAR_HEIGHT = 56;
@@ -23,12 +25,6 @@ namespace {
     const SDL_Color COLOR_HIGHLIGHT = { 90, 190, 255, 255 };
     const SDL_Color COLOR_TRACK = { 90, 90, 90, 255 };
 
-    void fillRect(SDL_Renderer *renderer, const SDL_Rect &rect, const SDL_Color &color)
-    {
-        SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-        SDL_RenderFillRect(renderer, &rect);
-    }
-
     float clamp01(float value)
     {
         if (value < 0.0f) {
@@ -46,6 +42,80 @@ namespace {
     {
         return x >= rect.x && x < rect.x + rect.w && y >= rect.y && y < rect.y + rect.h;
     }
+
+    /* Canvas backed by an SDL_Renderer. */
+    class SdlRendererCanvas : public SdlControlBar::Canvas {
+    public:
+        explicit SdlRendererCanvas(SDL_Renderer *renderer) : mRenderer(renderer)
+        {
+            /* Blend so the bar dims the video underneath instead of hiding it. */
+            SDL_SetRenderDrawBlendMode(mRenderer, SDL_BLENDMODE_BLEND);
+        }
+
+        ~SdlRendererCanvas() override
+        {
+            SDL_SetRenderDrawBlendMode(mRenderer, SDL_BLENDMODE_NONE);
+        }
+
+        void fill(const SDL_Rect &rect, const SDL_Color &color) override
+        {
+            SDL_SetRenderDrawColor(mRenderer, color.r, color.g, color.b, color.a);
+            SDL_RenderFillRect(mRenderer, &rect);
+        }
+
+    private:
+        SDL_Renderer *mRenderer;
+    };
+
+    /*
+     * Canvas backed by a BGRA bitmap, for the zero-copy D3D11 path. The bitmap
+     * only covers the bar itself, while the drawing code works in window
+     * coordinates, so (mOffsetX, mOffsetY) translates one into the other.
+     *
+     * That path copies the bitmap into the back buffer without blending, so the
+     * alpha is composited here, against black, and then forced opaque - the bar
+     * looks the same as it does over the video on the SDL path.
+     */
+    class BgraBitmapCanvas : public SdlControlBar::Canvas {
+    public:
+        BgraBitmapCanvas(uint32_t *pixels, int width, int height, int offsetX, int offsetY)
+            : mPixels(pixels), mWidth(width), mHeight(height), mOffsetX(offsetX), mOffsetY(offsetY)
+        {
+            for (int i = 0; i < width * height; ++i) {
+                mPixels[i] = 0xff000000u;
+            }
+        }
+
+        void fill(const SDL_Rect &rect, const SDL_Color &color) override
+        {
+            const int x0 = std::max(0, rect.x - mOffsetX);
+            const int y0 = std::max(0, rect.y - mOffsetY);
+            const int x1 = std::min(mWidth, rect.x - mOffsetX + rect.w);
+            const int y1 = std::min(mHeight, rect.y - mOffsetY + rect.h);
+            const uint32_t a = color.a;
+
+            for (int y = y0; y < y1; ++y) {
+                uint32_t *row = mPixels + y * mWidth;
+
+                for (int x = x0; x < x1; ++x) {
+                    const uint32_t dst = row[x];
+
+                    const uint32_t r = (color.r * a + ((dst >> 16) & 0xff) * (255 - a)) / 255;
+                    const uint32_t g = (color.g * a + ((dst >> 8) & 0xff) * (255 - a)) / 255;
+                    const uint32_t b = (color.b * a + (dst & 0xff) * (255 - a)) / 255;
+
+                    row[x] = 0xff000000u | (r << 16) | (g << 8) | b;
+                }
+            }
+        }
+
+    private:
+        uint32_t *mPixels;
+        int mWidth;
+        int mHeight;
+        int mOffsetX;
+        int mOffsetY;
+    };
 }
 
 void SdlControlBar::layout(int windowWidth, int windowHeight)
@@ -96,6 +166,19 @@ SdlControlBar::Hit SdlControlBar::mouseDown(int x, int y)
     std::lock_guard<std::mutex> lock(mMutex);
 
     mLastActivity = SDL_GetTicks();
+
+    /*
+     * The bar hides itself three seconds after the last mouse activity. Keep
+     * swallowing clicks while it is hidden: the controls are not on screen, so
+     * acting on them turns "click the picture" into a pause, a seek or a full
+     * screen switch the user never asked for.
+     *
+     * The activity stamp above still runs first, so this very click brings the
+     * bar back and the next one hit tests against visible buttons.
+     */
+    if (!visibleLocked()) {
+        return Hit::None;
+    }
 
     if (!pointIn(mBar, x, y)) {
         return Hit::None;
@@ -156,6 +239,12 @@ void SdlControlBar::mouseUp()
     mDrag = Hit::None;
 }
 
+void SdlControlBar::mouseLeave()
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+    mHovered = false;
+}
+
 bool SdlControlBar::isDragging() const
 {
     std::lock_guard<std::mutex> lock(mMutex);
@@ -206,7 +295,11 @@ void SdlControlBar::notifyActivity()
 bool SdlControlBar::visible() const
 {
     std::lock_guard<std::mutex> lock(mMutex);
+    return visibleLocked();
+}
 
+bool SdlControlBar::visibleLocked() const
+{
     if (mDrag != Hit::None || mHovered) {
         return true;
     }
@@ -214,15 +307,14 @@ bool SdlControlBar::visible() const
     return (SDL_GetTicks() - mLastActivity) < HIDE_DELAY_MS;
 }
 
-void SdlControlBar::drawTriangle(SDL_Renderer *renderer, const SDL_Rect &area, SDL_Color color)
+void SdlControlBar::drawTriangle(Canvas &canvas, const SDL_Rect &area, SDL_Color color) const
 {
     /*
      * Filled right pointing triangle, drawn as one horizontal span per row.
      * SDL_RenderGeometry() would be shorter but only exists from 2.0.18; this
-     * keeps the bar portable across whatever SDL2 the build picks up.
+     * keeps the bar portable across whatever SDL2 the build picks up - and it
+     * works unchanged on the bitmap canvas, which only knows rectangles.
      */
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-
     const int height = area.h - 8;
     const int top = area.y + (area.h - height) / 2;
     const int left = area.x + 8;
@@ -237,17 +329,17 @@ void SdlControlBar::drawTriangle(SDL_Renderer *renderer, const SDL_Rect &area, S
             continue;
         }
 
-        SDL_Rect line{ left, top + row, span, 1 };
-        SDL_RenderFillRect(renderer, &line);
+        const SDL_Rect line{ left, top + row, span, 1 };
+        canvas.fill(line, color);
     }
 }
 
-void SdlControlBar::drawPlayPause(SDL_Renderer *renderer, const SDL_Rect &area, bool paused, bool highlight)
+void SdlControlBar::drawPlayPause(Canvas &canvas, const SDL_Rect &area, bool paused, bool highlight) const
 {
     const SDL_Color color = highlight ? COLOR_HIGHLIGHT : COLOR_CONTROL;
 
     if (paused) {
-        drawTriangle(renderer, area, color);
+        drawTriangle(canvas, area, color);
         return;
     }
 
@@ -258,15 +350,13 @@ void SdlControlBar::drawPlayPause(SDL_Renderer *renderer, const SDL_Rect &area, 
     const int top = area.y + (area.h - height) / 2;
     const int left = area.x + (area.w - (barWidth * 2 + gap)) / 2;
 
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-
-    SDL_Rect first{ left, top, barWidth, height };
-    SDL_Rect second{ left + barWidth + gap, top, barWidth, height };
-    SDL_RenderFillRect(renderer, &first);
-    SDL_RenderFillRect(renderer, &second);
+    const SDL_Rect first{ left, top, barWidth, height };
+    const SDL_Rect second{ left + barWidth + gap, top, barWidth, height };
+    canvas.fill(first, color);
+    canvas.fill(second, color);
 }
 
-void SdlControlBar::drawFullScreen(SDL_Renderer *renderer, const SDL_Rect &area, bool fullScreen)
+void SdlControlBar::drawFullScreen(Canvas &canvas, const SDL_Rect &area, bool fullScreen) const
 {
     (void) fullScreen;
 
@@ -281,8 +371,6 @@ void SdlControlBar::drawFullScreen(SDL_Renderer *renderer, const SDL_Rect &area,
     const int top = area.y + inset;
     const int bottom = area.y + area.h - inset;
 
-    SDL_SetRenderDrawColor(renderer, color.r, color.g, color.b, color.a);
-
     /* One horizontal and one vertical arm per corner. */
     const SDL_Rect rects[8] = {
         { left, top, armLength, thickness },
@@ -296,46 +384,38 @@ void SdlControlBar::drawFullScreen(SDL_Renderer *renderer, const SDL_Rect &area,
     };
 
     for (const SDL_Rect &rect : rects) {
-        SDL_RenderFillRect(renderer, &rect);
+        canvas.fill(rect, color);
     }
 }
 
-void SdlControlBar::drawSlider(SDL_Renderer *renderer, const SDL_Rect &track, float fraction, bool highlight)
+void SdlControlBar::drawSlider(Canvas &canvas, const SDL_Rect &track, float fraction, bool highlight) const
 {
-    fillRect(renderer, track, COLOR_TRACK);
+    canvas.fill(track, COLOR_TRACK);
 
     SDL_Rect filled = track;
     filled.w = static_cast<int>(track.w * clamp01(fraction));
 
     if (filled.w > 0) {
-        fillRect(renderer, filled, highlight ? COLOR_HIGHLIGHT : COLOR_CONTROL);
+        canvas.fill(filled, highlight ? COLOR_HIGHLIGHT : COLOR_CONTROL);
     }
 
     /* Knob, centred on the current position. */
     const int knobX = track.x + static_cast<int>(track.w * clamp01(fraction)) - KNOB_SIZE / 2;
-    SDL_Rect knob{ knobX, track.y + track.h / 2 - KNOB_SIZE / 2, KNOB_SIZE, KNOB_SIZE };
-    fillRect(renderer, knob, highlight ? COLOR_HIGHLIGHT : COLOR_CONTROL);
+    const SDL_Rect knob{ knobX, track.y + track.h / 2 - KNOB_SIZE / 2, KNOB_SIZE, KNOB_SIZE };
+    canvas.fill(knob, highlight ? COLOR_HIGHLIGHT : COLOR_CONTROL);
 }
 
-void SdlControlBar::draw(SDL_Renderer *renderer, const Info &info)
+/* mMutex already held: the whole visual design lives here, shared by both paths. */
+void SdlControlBar::drawBar(Canvas &canvas, const Info &info) const
 {
-    if (renderer == nullptr) {
-        return;
-    }
-
-    std::lock_guard<std::mutex> lock(mMutex);
-
     if (mBar.w <= 0) {
         return;
     }
 
-    /* Blend so the bar dims the video underneath instead of hiding it. */
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+    canvas.fill(mBar, COLOR_BAR_BG);
 
-    fillRect(renderer, mBar, COLOR_BAR_BG);
-
-    drawPlayPause(renderer, mPlayPause, info.paused, mDrag == Hit::PlayPause);
-    drawFullScreen(renderer, mFullScreen, info.fullScreen);
+    drawPlayPause(canvas, mPlayPause, info.paused, mDrag == Hit::PlayPause);
+    drawFullScreen(canvas, mFullScreen, info.fullScreen);
 
     float progressFraction = 0.0f;
 
@@ -348,7 +428,7 @@ void SdlControlBar::draw(SDL_Renderer *renderer, const Info &info)
         progressFraction = mDragFraction;
     }
 
-    drawSlider(renderer, mProgress, progressFraction, mDrag == Hit::Progress);
+    drawSlider(canvas, mProgress, progressFraction, mDrag == Hit::Progress);
 
     /* Volume is 0.0 .. 1.0 (player_types.cpp default 1.0, clamped by
      * SuperMediaPlayer::SetVolume), which maps straight onto the track. */
@@ -358,7 +438,53 @@ void SdlControlBar::draw(SDL_Renderer *renderer, const Info &info)
         volumeFraction = mDragFraction;
     }
 
-    drawSlider(renderer, mVolume, volumeFraction, mDrag == Hit::Volume);
+    drawSlider(canvas, mVolume, volumeFraction, mDrag == Hit::Volume);
+}
 
-    SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+void SdlControlBar::draw(Canvas &canvas, const Info &info)
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+    drawBar(canvas, info);
+}
+
+void SdlControlBar::draw(SDL_Renderer *renderer, const Info &info)
+{
+    if (renderer == nullptr) {
+        return;
+    }
+
+    SdlRendererCanvas canvas(renderer);
+    draw(canvas, info);
+}
+
+void SdlControlBar::drawToBitmap(uint32_t *pixels, const Info &info) const
+{
+    if (pixels == nullptr) {
+        return;
+    }
+
+    std::lock_guard<std::mutex> lock(mMutex);
+
+    if (mBar.w <= 0 || mBar.h <= 0) {
+        return;
+    }
+
+    /*
+     * The bitmap covers the bar only, the drawing code works in window
+     * coordinates: offset by -mBar.y so the bar lands at row 0.
+     */
+    BgraBitmapCanvas canvas(pixels, mBar.w, mBar.h, 0, mBar.y);
+    drawBar(canvas, info);
+}
+
+int SdlControlBar::barWidth() const
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mBar.w;
+}
+
+int SdlControlBar::barHeight() const
+{
+    std::lock_guard<std::mutex> lock(mMutex);
+    return mBar.h;
 }

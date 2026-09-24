@@ -49,6 +49,14 @@ public:
     virtual void Clear();
     virtual void SetDuration(int64_t ms) {mDurationMS = ms;}
 
+    /*
+     * ABR 被重新打开时回调（用户从手动档切回"自动"）。
+     * 默认什么都不做；策略可以用它清掉"上次在途切换"的残留状态/限流计时，
+     * 保证"切到自动就立刻是自动的"，而不是先白等一个看门狗周期。
+     */
+    virtual void OnAbrEnabled()
+    {}
+
     //reset abr algo
     virtual void Reset() = 0;
 

@@ -14,10 +14,19 @@ set(COMMON_INC_DIR ${COMMON_INC_DIR}
         ${EXTERN_INSTALL_DIR_ANDROID}/openssl/Android/${ANDROID_ABI}/include/
         ${EXTERN_INSTALL_DIR_ANDROID}/libxml2/Android/${ANDROID_ABI}/include/libxml2/
         ${CMAKE_CURRENT_LIST_DIR}/../external/boost/
-        ${PROJECT_SOURCE_DIR}
-        ${PROJECT_SOURCE_DIR}/../
         ${FFMPEG_SOURCE_DIR}
         )
+
+# 这里原来还有两行 ${PROJECT_SOURCE_DIR} 和 ${PROJECT_SOURCE_DIR}/../，已删除：
+#   · 本文件是被 mediaPlayer/CMakeLists.txt include 的（那里的 project(media_player) 先执行），
+#     所以 PROJECT_SOURCE_DIR = <内核>/mediaPlayer，${PROJECT_SOURCE_DIR}/../ 正是**整个内核根目录**；
+#   · 它作为 -I 传给编译器后，Android Studio 会把这个目录记成 native-header-root 挂进工程视图，
+#     结果是整棵内核树（platform/QtPlayer、platform/HarmonyOS、cmdline、tests… 别的平台代码）
+#     全部冒出来；
+#   · 内核里没有任何源码用 "mediaPlayer/…" / "framework/…" 这种"相对内核根"的写法
+#     （framework/tests 里有，但 tests 没被编译：framework/CMakeLists.txt 里 add_subdirectory(tests)
+#     在 BUILD_TEST 里且是注释状态）；mediaPlayer 自己的目录本来就通过 ./ 在 include 路径里。
+# 本文件只被 Android 构建使用（framework/${TARGET_PLATFORM}.cmake），不影响 Qt 播放器。
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__STDC_CONSTANT_MACROS")
 

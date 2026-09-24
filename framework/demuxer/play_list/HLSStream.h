@@ -201,6 +201,8 @@ namespace Cicada {
         int64_t mInitSegSize{0};
         int mInitSegPtr{0};
         std::atomic_bool mStopOnSegEnd{false};
+        /* "停在本片界"的日志每次只打一行（否则 read_thread 每 10ms 一轮会刷屏） */
+        bool mStopOnSegEndLogged{false};
         bool mLastReadSuccess{false};
         std::mutex mDataMutex;
         std::condition_variable mWaitCond;

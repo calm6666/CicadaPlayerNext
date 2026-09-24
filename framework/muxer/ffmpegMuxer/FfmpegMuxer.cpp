@@ -103,8 +103,22 @@ void FfmpegMuxer::check_codec_tag(const AVStream *stream)
             const uint32_t otag = av_codec_get_tag(mDestFormatContext->oformat->codec_tag,
                                                    stream->codecpar->codec_id);
 #ifndef _WIN32
+            /*
+             * av_fourcc2str() expands to
+             *   av_fourcc_make_string((char[AV_FOURCC_MAX_STRING_SIZE]){0}, fourcc)
+             * which is a C99 compound literal. Taking the address of that
+             * temporary array is an error in C++ and GCC rejects it outright:
+             *   FfmpegMuxer.cpp:107: error: taking address of temporary array
+             * (MSVC accepts the extension, which is why this never showed up in
+             * the Windows build - and this block is #ifndef _WIN32 anyway).
+             * Spell the two buffers out instead of using the macro.
+             */
+            char srcFourcc[AV_FOURCC_MAX_STRING_SIZE] = { 0 };
+            char dstFourcc[AV_FOURCC_MAX_STRING_SIZE] = { 0 };
             AF_LOGW("Tag %s incompatible with output codec id '%d' (%s)\n",
-                    av_fourcc2str(stream->codecpar->codec_tag), stream->codecpar->codec_id, av_fourcc2str(otag));
+                    av_fourcc_make_string(srcFourcc, stream->codecpar->codec_tag),
+                    stream->codecpar->codec_id,
+                    av_fourcc_make_string(dstFourcc, otag));
 #endif
             stream->codecpar->codec_tag = otag;
         }

@@ -17,6 +17,9 @@
 #include "demuxer/play_list/Representation.h"
 #include "utils/xml/DOMHelper.h"
 #include "utils/xml/DOMParser.h"
+/* AF_LOGI（清单解析的关键节点各一行，崩溃定位用） */
+#include "utils/frame_work_log.h"
+#include <cstring>
 #include <limits>
 #include <locale>
 
@@ -40,6 +43,22 @@ Cicada::playList *MPDParser::parse(const std::string &playlistur)
     char *buffer = (char *) malloc(buffer_size);
     while (!mDataSourceIO->isEOF()) {
         char c = mDataSourceIO->readChar();
+
+        /*
+         * 【EOF 时 readChar() 返回的 0 不是数据，绝不能塞进 buffer】
+         *
+         * avio_r8() 在流结束时返回 0（见 aviobuf.c:606-612），而 isEOF() 要等**下一次**
+         * 读失败才会变真 —— 于是循环会多走一轮、把那个 0 当成一个字符追加到清单尾部。
+         * 交给 libxml2 之后就是：
+         *     Entity: line 73: parser error : Extra content at the end of the document
+         * （`</MPD>` 已经闭合，后面却还有一个字节），而且树是残缺的，后面处理它会崩。
+         * 所以这里读到一个字符后立刻复查一次 EOF：真的是结尾就**不**计入 size、不写 buffer。
+         * XML/m3u8 文本里不可能出现 0 字节，所以这不会丢掉任何真实数据。
+         */
+        if (mDataSourceIO->isEOF()) {
+            break;
+        }
+
         size++;
         if (size > buffer_size) {
             buffer_size = buffer_size * 2;
@@ -52,6 +71,11 @@ Cicada::playList *MPDParser::parse(const std::string &playlistur)
     domParser.parse((const char *) buffer, size);
 
     mRoot = domParser.getRootNode();
+
+    /* 冷路径（一次片源一行）：出问题时一眼能看出"清单读了多少字节、根节点建出来没有" */
+    AF_LOGI("[dash] 清单 %lld 字节，根节点 %s（%s）\n", (long long) size,
+            mRoot != nullptr ? "OK" : "为空", playlisturl.c_str());
+
     if (mRoot == nullptr) {
         free(buffer);
         return nullptr;
@@ -66,6 +90,11 @@ Cicada::playList *MPDParser::parse(const std::string &playlistur)
     parseUtcTiming(mpd, DOMHelper::getFirstChildElementByName(mRoot, "UTCTiming"));
     parseMPDBaseUrl(mpd, mRoot);
     parsePeriods(mpd, mRoot);
+
+    /* 同上：冷路径一行，能看出 DASH 解析到底有没有落地（Periods=0 就是清单没读懂） */
+    AF_LOGI("[dash] 解析完成：%d 个 Period，时长 %.1f 秒，live=%d\n",
+            (int) mpd->GetPeriods().size(), mpd->getDuration() / 1000000.0, mpd->isLive() ? 1 : 0);
+
     mpd->InitUtcTime();
     mRoot = nullptr;
     free(buffer);
@@ -580,6 +609,19 @@ void MPDParser::parseCommonMultiSegmentBase(MPDPlayList *mpd, xml::Node *node, I
     if (node->hasAttribute("startNumber")) {
         uint64_t startNumber = std::strtoull(node->getAttributeValue("startNumber").c_str(), nullptr, 0);
         base->addAttribute(new StartnumberAttr(startNumber));
+    }
+
+    /*
+     * endNumber：最后一个分片的编号（含）。以前完全没解析，导致最后一个"余量分片"
+     * 的边界要靠 duration 反推，既可能多推一个不存在的号，又会被 SegmentTemplate
+     * 里的 `i_pos >= endnum - 1` 把真正的最后一片判成 EOS。
+     */
+    if (node->hasAttribute("endNumber")) {
+        uint64_t endNumber = std::strtoull(node->getAttributeValue("endNumber").c_str(), nullptr, 0);
+
+        if (endNumber > 0) {
+            base->addAttribute(new EndnumberAttr(endNumber));
+        }
     }
 
     parseTimeline(mpd, DOMHelper::getFirstChildElementByName(node, "SegmentTimeline"), base);

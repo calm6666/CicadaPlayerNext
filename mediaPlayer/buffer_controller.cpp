@@ -111,6 +111,40 @@ namespace Cicada {
         return INT64_MIN;
     }
 
+    int64_t BufferController::GetFirstKeyPTSAfter(BUFFER_TYPE type, int64_t pts)
+    {
+        switch (type) {
+            case BUFFER_TYPE_AUDIO:
+                return mAudioPacketQueue.GetFirstKeyPTSAfter(pts);
+
+            case BUFFER_TYPE_VIDEO:
+                return mVideoPacketQueue.GetFirstKeyPTSAfter(pts);
+
+            default:
+                AF_LOGE("error media type");
+                break;
+        }
+
+        return INT64_MIN;
+    }
+
+    int64_t BufferController::GetLastKeyPTSAtOrBefore(BUFFER_TYPE type, int64_t pts)
+    {
+        switch (type) {
+            case BUFFER_TYPE_AUDIO:
+                return mAudioPacketQueue.GetLastKeyPTSAtOrBefore(pts);
+
+            case BUFFER_TYPE_VIDEO:
+                return mVideoPacketQueue.GetLastKeyPTSAtOrBefore(pts);
+
+            default:
+                AF_LOGE("error media type");
+                break;
+        }
+
+        return INT64_MIN;
+    }
+
     int64_t BufferController::GetKeyTimePositionBefore(BUFFER_TYPE type, int64_t pts)
     {
         switch (type) {
@@ -174,6 +208,25 @@ namespace Cicada {
 
         if (type & BUFFER_TYPE_SUBTITLE) {
             drop += mSubtitlePacketQueue.ClearPacketBeforePTS(pts);
+        }
+
+        return drop;
+    }
+
+    int BufferController::DropPacketsByStream(BUFFER_TYPE type, int streamIndex)
+    {
+        int drop = 0;
+
+        if (type & BUFFER_TYPE_AUDIO) {
+            drop += mAudioPacketQueue.DropPacketsByStream(streamIndex);
+        }
+
+        if (type & BUFFER_TYPE_VIDEO) {
+            drop += mVideoPacketQueue.DropPacketsByStream(streamIndex);
+        }
+
+        if (type & BUFFER_TYPE_SUBTITLE) {
+            drop += mSubtitlePacketQueue.DropPacketsByStream(streamIndex);
         }
 
         return drop;

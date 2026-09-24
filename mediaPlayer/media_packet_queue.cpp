@@ -175,6 +175,57 @@ int64_t MediaPacketQueue::GetFirstTimePos()
     return (*mCurrent)->getInfo().timePosition;
 }
 
+int64_t MediaPacketQueue::GetFirstKeyPTSAfter(int64_t pts)
+{
+    ADD_LOCK;
+
+    if (pts == INT64_MIN || mCurrent == mQueue.end()) {
+        return INT64_MIN;
+    }
+
+    /*
+     * 只扫**还没被读走**的那一段：[mCurrent, end)。
+     *
+     * mCurrent 指向第一个未消费的包，前面那一段已经交给解码器了；老的
+     * GetFirstKeyPTS() 恰恰是从 begin() 扫到 mCurrent 就 break，等于只在
+     * “已经用掉”的包里找，永远找不到时钟后面的关键帧，这就是追赶逻辑一直
+     * 不生效的原因。
+     */
+    for (auto iter = mCurrent; iter != mQueue.end(); ++iter) {
+        IAFPacket *packet = (*iter).get();
+
+        if (packet != nullptr && packet->getInfo().pts != INT64_MIN &&
+                (packet->getInfo().flags & AF_PKT_FLAG_KEY) && packet->getInfo().pts >= pts) {
+            return packet->getInfo().pts;
+        }
+    }
+
+    return INT64_MIN;
+}
+
+int64_t MediaPacketQueue::GetLastKeyPTSAtOrBefore(int64_t pts)
+{
+    ADD_LOCK;
+
+    if (pts == INT64_MIN || mCurrent == mQueue.end()) {
+        return INT64_MIN;
+    }
+
+    int64_t lastKeyPts = INT64_MIN;
+
+    /* 同样只扫“还没被读走”的那一段：[mCurrent, end)。 */
+    for (auto iter = mCurrent; iter != mQueue.end(); ++iter) {
+        IAFPacket *packet = (*iter).get();
+
+        if (packet != nullptr && packet->getInfo().pts != INT64_MIN &&
+            (packet->getInfo().flags & AF_PKT_FLAG_KEY) && packet->getInfo().pts <= pts) {
+            lastKeyPts = packet->getInfo().pts;
+        }
+    }
+
+    return lastKeyPts;
+}
+
 int64_t MediaPacketQueue::GetFirstKeyPTS(int64_t pts)
 {
     ADD_LOCK;
@@ -402,6 +453,49 @@ int64_t MediaPacketQueue::ClearPacketBeforePTS(int64_t pts)
     }
 
     return dropCount;
+}
+
+int MediaPacketQueue::DropPacketsByStream(int streamIndex)
+{
+    ADD_LOCK;
+
+    if (mQueue.empty()) {
+        return 0;
+    }
+
+    int dropped = 0;
+
+    for (auto it = mQueue.begin(); it != mQueue.end();) {
+        IAFPacket *packet = (*it).get();
+
+        if (packet == nullptr || packet->getInfo().streamIndex != streamIndex) {
+            ++it;
+            continue;
+        }
+
+        /* 记账要和 getPacket()/PopFrontPacket() 一致，否则 getPacket 里的
+         * assert(mTotalDuration == mDuration) 会炸。 */
+        if (packet->getInfo().duration > 0 && !packet->getDiscard()) {
+            mDuration -= packet->getInfo().duration;
+            mTotalDuration -= packet->getInfo().duration;
+        }
+
+        const bool wasCurrent = (it == mCurrent);
+        /* std::list::erase 只让被删元素的迭代器失效，其它迭代器（含 mCurrent）
+         * 继续有效；删到 mCurrent 时把游标挪到它的下一个元素。 */
+        it = mQueue.erase(it);
+        ++dropped;
+
+        if (wasCurrent) {
+            mCurrent = it;
+        }
+    }
+
+    if (mQueue.empty()) {
+        mCurrent = mQueue.end();
+    }
+
+    return dropped;
 }
 
 int64_t MediaPacketQueue::ClearPacketBeforeTimePos(int64_t pts)

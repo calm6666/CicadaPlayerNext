@@ -32,7 +32,16 @@ if ("${TARGET_PLATFORM}" STREQUAL "Android")
     message("build Android")
 endif ()
 
-set(TOPDIR ${PROJECT_SOURCE_DIR}/..)
+# TOPDIR = 仓库根目录（external/、framework/、plugin/ 都在它下面）。
+#
+# 用 CMAKE_CURRENT_SOURCE_DIR（= 本文件所在目录，即 .../CicadaPlayerNext/mediaPlayer）
+# 往上推一层，而不用 PROJECT_SOURCE_DIR：后者是"最外层 project() 所在目录"，
+# mediaPlayer 自己没调 project()，所以它会跟着调用方变。cmdline 恰好在仓库根下一层
+# （.../CicadaPlayerNext/cmdline），PROJECT_SOURCE_DIR/.. 正好等于仓库根，看起来没问题；
+# 但从更深一层的工程（.../CicadaPlayerNext/platform/QtPlayer）编进来时会算成
+# .../CicadaPlayerNext/platform，framework 就找不到了。
+# 用 CMAKE_CURRENT_SOURCE_DIR 与调用方无关，两种入口都对。
+set(TOPDIR ${CMAKE_CURRENT_SOURCE_DIR}/..)
 
 add_subdirectory(${TOPDIR}/framework framework.out)
 

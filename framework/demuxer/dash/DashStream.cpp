@@ -948,9 +948,26 @@ int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
         meta->type = (Stream_type) mPTracker->getStreamType();
     }
 
-    if (meta->height == 0) {
-        meta->height = height;
+    /*
+     * 【宽高必须**各自**补齐，不能只看 height】
+     *
+     * 这里 meta 是"已开流（mPDemuxer 存在）"时才可能被底层填过：宽高来自解码器对
+     * init 段/SPS 的解析。而**换档切换的窗口期**（新流 OpenStream 之后、第一个关键帧
+     * 解出来之前）底层很可能只填了 height 没填 width（或者反过来）—— 老代码的条件是
+     * `if (meta->height == 0)`：height 有值时整段跳过，于是 width 保持 0，上层拿到
+     * `0 x 2160` 这种残值。后果有两个，用户都遇到过：
+     *   * Qt 侧清晰度菜单按"宽x高"分档去重（platform/QtPlayer/src/CicadaPlayerItem.cpp
+     *     的 onMediaInfoGetCb），`0x2160` 和 `3840x2160` 分不进同一档 → **同一清晰度出现两个**；
+     *   * 标签/画幅比例跟着一起错。
+     * 所以两个字段分别判断：缺哪个补哪个（MPD 里的值本来就来自清单属性，见
+     * MPDParser.cpp:400-410 → Representation::getStreamInfo）。
+     */
+    if (meta->width <= 0) {
         meta->width = width;
+    }
+
+    if (meta->height <= 0) {
+        meta->height = height;
     }
 
     meta->lang = strdup(lang.c_str());
@@ -1084,6 +1101,19 @@ int64_t DashStream::seek(int64_t us, int flags)
 
     AF_LOGD("%s:%d stream (%d) usSeeked is %lld seek num is %d\n", __func__, __LINE__, mPTracker->getStreamType(), usSought, num);
 
+    /*
+     * 【落点诊断】同 HLSStream::seek 里的说明：usSeeked 打的是**请求值**，
+     * tracker 真正选中的段号在这里才是权威读数。DASH 实测里
+     * "seek us is 17835000 / pending seek" 之后读取线程一路跑到 getCurSegNum=7，
+     * 需要这一行来区分"seek 没生效"和"seek 生效后又被读取线程跑远"。
+     */
+    AF_LOGI("[seek] dash %s: reqUs=%lld -> segNum=%llu curSegNum=%llu duration=%lld live=%d initialized=%d\n",
+            mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
+            (long long) usSought, (unsigned long long) num,
+            (unsigned long long) mPTracker->getCurSegNum(),
+            (long long) mPTracker->getDuration(), (int) mPTracker->isLive(),
+            (int) mPTracker->isInited());
+
     if (mPTracker->getStreamType() == STREAM_TYPE_SUB && num == mPTracker->getCurSegNum()) {
         AF_LOGW("only one  subtitle seg");
         reqReOpen = false;
@@ -1114,6 +1144,9 @@ int64_t DashStream::seek(int64_t us, int flags)
         }
 
         mPTracker->setCurSegNum(num - 1);
+        AF_LOGI("[seek] dash %s: tracker positioned at segNum=%llu (reqUs=%lld, reopened)\n",
+                mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
+                (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought);
     }
 
     mIsEOS = false;

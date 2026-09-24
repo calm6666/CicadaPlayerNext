@@ -114,7 +114,24 @@ namespace Cicada {
         } else {
             float timeS = float(time - mLastReadTime) / 1000000;
 
-            if (timeS > 1.0) {
+            /*
+             * 【2026-09-21 修：窗口 1 秒 → 200ms（带最小字节数）】
+             *
+             * 这个值就是 CurrentDownLoadSpeed（ABR 唯一的吞吐样本来源）。
+             * 原来只有 `timeS > 1.0` 才结算一次，于是**高速网络根本测不到速度**：
+             * 本地/内网服务器把 50 秒缓冲一口气读完只要几百毫秒，一次窗口都不会
+             * 闭合，值就永远是初始的 0。用户日志里的
+             *   `ABR waiting for samples: 0/128000 bytes, buffer=1951/50000 ms, speed=0 bps`
+             * 连续刷了 25 秒，ABR 因此一个决策都做不了 —— "自动档等于没有"。
+             *
+             * 改成 200ms 结算一次，但要求窗口内至少读到 64KB（或者窗口已经满 1 秒）：
+             *   * 高速网络：几百毫秒的突发也能切出 1~2 个有效样本；
+             *   * 低速网络：窗口内凑不够 64KB 就继续攒，最迟 1 秒结算，行为与以前一致；
+             *   * 清单那种几 KB 的下载不会被当成一次吞吐测量。
+             */
+            const bool burstBigEnough = mReadGotSize >= 64 * 1024;
+
+            if ((timeS >= 0.2 && burstBigEnough) || timeS >= 1.0) {
                 mCurrentDownloadSpeed = (float) mReadGotSize * 8 / timeS;
 
                 AF_LOGD("mReadLoopIndex is \t %f\n", (float) mReadLoopIndex / timeS);

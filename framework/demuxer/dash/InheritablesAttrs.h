@@ -31,6 +31,7 @@ namespace Cicada {
                 Timeline,
                 Duration,
                 StartNumber,
+                EndNumber,
                 AvailabilityTimeOffset,
                 AvailabilityTimeComplete,
             };
@@ -73,6 +74,18 @@ namespace Cicada {
             AbstractAttr *inheritAttribute(AbstractAttr::Type type) const;
             /* helpers */
             uint64_t inheritStartNumber() const;
+            /*
+             * SegmentTemplate 的 endNumber：**最后一个分片的编号**（含）。
+             * 0 / 未设置表示"从 duration 和媒体时长推算"。
+             *
+             * 为什么要单独解析它：duration 只能算出"分片边界"，算不出"到底有几个
+             * 分片"。最后一个分片通常是**不足一个 duration 的余量**
+             * （实测片源：PT4M28.2S + duration=10s + endNumber=27 → 第 27 个分片
+             * 只有 8.2 秒），只按 duration 推会多推出一个不存在的分片 28，
+             * 而 `i_pos >= endnum - 1` 那个判断又会把真正的最后一个（27）当成 EOS
+             * —— 表现就是"seek 到最后少一段、直接跳到结尾"。
+             */
+            uint64_t inheritEndNumber() const;
             int64_t inheritDuration() const;
             Timescale inheritTimescale() const;
             int64_t inheritAvailabilityTimeOffset() const;
@@ -114,6 +127,7 @@ namespace Cicada {
         using AvailabilityTimeOffsetAttr = AttrWrapper<AbstractAttr::Type::AvailabilityTimeOffset, int64_t>;
         using AvailabilityTimeCompleteAttr = AttrWrapper<AbstractAttr::Type::AvailabilityTimeComplete, bool>;
         using StartnumberAttr = AttrWrapper<AbstractAttr::Type::StartNumber, uint64_t>;
+        using EndnumberAttr = AttrWrapper<AbstractAttr::Type::EndNumber, uint64_t>;
 
         class TimescaleAttr : public AttrWrapper<AbstractAttr::Type::Timescale, Timescale> {
         public:

@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  :cicadaplayer —— 内核模块（com.cicada.player）。
+  内核 = CicadaPlayerNext 的 C++ 核心（与 Qt 播放器同一个内核），JNI 走 src/main/jni/**。
+  App 层不使用 ExoPlayer/Media3。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+
+</manifest>

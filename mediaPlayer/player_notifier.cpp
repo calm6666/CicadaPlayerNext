@@ -422,6 +422,17 @@ namespace Cicada {
         pushEvent(event);
     }
 
+    void PlayerNotifier::NotifyVideoQualitySwitch(player_quality_switch_status status, int64_t streamIndex, const char *desc)
+    {
+        if (!mEnable || mListener.VideoQualitySwitch == nullptr) {
+            return;
+        }
+        char *copy = desc ? strdup(desc) : nullptr;
+        auto *event = new player_event(static_cast<int64_t>(status), streamIndex, copy,
+                                       mListener.VideoQualitySwitch, false);
+        pushEvent(event);
+    }
+
     void PlayerNotifier::NotifyPrepared()
     {
         if (!mEnable || mListener.Prepared == nullptr) {

@@ -548,6 +548,22 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mSeekNeedCatch = bAccurate;
     mPlayer.mSeekPos = seekPos;
 
+    /*
+     * 立刻把主时钟钉到 seek 目标上（而不是等下面 demuxer->Seek() 返回后再钉，
+     * 函数末尾还有一次 setTime(seekPos)）。
+     *
+     * 为什么要提前：DASH/HLS 的 demuxer->Seek() 要等新 segment 下载完（实测 1s+），
+     * 而 seek 开始时第 622 行的 ClearPacket(BUFFER_TYPE_ALL) 已经把缓存清空，
+     * 主循环于是先进入缓冲态并 pause() 主时钟 —— 此时时钟还停在 **seek 之前**的位置。
+     * 新 segment 一到，解码器立刻解出目标帧并上屏，第 3039 行 beginRendererJoining()
+     * 用的是这个旧时钟（日志实测 master=14.85s，目标是 12.33s），追赶窗口就把
+     * 12.33s~14.85s 的目标帧全部当成"迟到帧"丢掉；随后时钟又被拉回 12.33s，
+     * 于是丢掉的区间变成了再也拿不回来的未来 —— 画面静止约 2.5 秒，这就是
+     * "seek 之后卡一下"的根因。提前钉住时钟后，无论 seek 的哪个线程先跑，
+     * 时间轴都和目标一致，追赶窗口丢掉的只有真正的 seek 之前帧。
+     */
+    mPlayer.mMasterClock.setTime(seekPos);
+
     // 暂停帧恢复的渲染门只在"恢复专用 seek"期间保持；用户自己发起的
     // seek（如暂停时拖动进度条）要关闭渲染门，恢复正常渲染
     if (!mPlayer.mRestoringPausedFrame) {
@@ -559,9 +575,12 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mRestoringPausedFrame = false;
 
     // seek before prepare, should keep mSeekPos
-    if (mPlayer.mPlayStatus < PLAYER_PREPARING ||
-        // if reuse player..
-        mPlayer.mPlayStatus == PLAYER_STOPPED) {
+    // 注意这里**不包含 PLAYER_STOPPED**：停住/出错的状态下这个 seek 是不会执行的，
+    // 那种情况必须把 seek 状态清掉（交给下面那个分支的 ResetSeekStatus）。
+    // 原来 STOPPED 写在这个条件里，于是永远走不到下面、mSeekPos 和 mSeekNeedCatch
+    // 就一直留着 —— isSeeking() 永远为真，位置读出来是那个没生效的目标值，
+    // 而且之后所有"早于目标位置"的包都会被丢掉：重新播放时画面出不来（卡死）。
+    if (mPlayer.mPlayStatus < PLAYER_PREPARING) {
         return;
     }
 
@@ -577,8 +596,33 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mPlayedAudioPts = INT64_MIN;
     mPlayer.mSoughtVideoPos = INT64_MIN;
     mPlayer.mCurVideoPts = INT64_MIN;
+    /* 用户 seek 开始时丢弃上一次清晰度切换留下的时间轴偏移和 retired 状态；
+     * seek 目标是新的 A/V 同步锚点，不能继续把 rendition 偏移应用到新帧。 */
+    mPlayer.mPendingVideoPtsOffset = INT64_MIN;
+    mPlayer.mActiveVideoPtsOffset = INT64_MIN;
+    mPlayer.mQualitySwitchCommitPending = false;
+    mPlayer.mQualitySwitchCommittedStreamIndex = -1;
+    mPlayer.mVideoPtsRevert = false;
+    mPlayer.mAudioPtsRevert = false;
+    /* 必须在调用 DASH/HLS demuxer->Seek() 之前取消 pending representation。
+     * 旧顺序先对所有 selected stream 做 Seek，再 CloseStream(pending)，网络
+     * 慢时 Seek 会等待已经被用户取消的目标流，表现为 seek 直接卡死。普通本地
+     * 文件没有 pending 路时保持原有 SeekInCache 行为，不额外 flush。 */
+    if (mPlayer.mPendingVideoStreamIndex >= 0 || mPlayer.mWillChangedVideoStreamIndex >= 0) {
+        mPlayer.FlushVideoPath(true, true, __func__);
+        mPlayer.mWillChangedVideoStreamIndex = -1;
+        mPlayer.mVideoChangedFirstPts = INT64_MIN;
+    }
     //flush packet queue
     mPlayer.mSeekInCache = mPlayer.SeekInCache(seekPos);
+    /* DASH/HLS 的 segment reader 有独立的当前 segment 游标，单纯在
+     * BufferController 中回退 packet 并不能把 demuxer 游标回退；日志里
+     * seek 到 18.7s 后 demuxer 仍从 60s segment 读取，随后视频追帧进入
+     * FPS=0/1 死循环。对 playlist/manifest 强制走 demuxer seek，只有本地
+     * 文件等可安全回放公共缓存的路径才使用 SeekInCache。 */
+    if (mPlayer.mDemuxerService->isPlayList()) {
+        mPlayer.mSeekInCache = false;
+    }
     AF_LOGI("PFR: seek posUs=%" PRId64 " inCache=%d status=%d\n",
             seekPos, (int) mPlayer.mSeekInCache, (int) mPlayer.mPlayStatus.load());
 
@@ -597,8 +641,16 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
         if (ret < 0) {
             mPlayer.NotifyError(ret);
         }
-        //in case of seekpos larger than duration.
-        mPlayer.mPNotifier->NotifyBufferPosition((seekPos <= mPlayer.mDuration ? seekPos : mPlayer.mDuration) / 1000);
+        /*
+         * 【这里以前会把"已缓冲位置"直接报成 seek 目标点】
+         *     NotifyBufferPosition(seekPos / 1000);
+         * 但上面那句 ClearPacket(BUFFER_TYPE_ALL) 已经把整段缓存清空了，
+         * 新 segment 还在下载 —— 等于告诉界面"一直到 seek 目标都有缓冲"。
+         * 界面上看到的就是：灰色缓冲条先窜到 seek 点，随后框架报出真实的
+         * 缓冲位置（几乎为 0）又塌回来，用户描述成"每次 seek 缓冲条都在重新加载"。
+         * 现在不再伪造：让界面按框架真实的 BufferPositionUpdate 走，
+         * 缓冲条只会随真实数据增长（seek 后本来就是从 0 重新缓冲，这是分片流的固有行为）。
+         */
         mPlayer.mEof = false;
 
         if ((mPlayer.mVideoChangedFirstPts != INT64_MAX) && (INT64_MIN != mPlayer.mVideoChangedFirstPts)) {
@@ -624,7 +676,11 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
         }
     }
 
-    mPlayer.FlushVideoPath();
+    /* demuxer 已经完成定位后再 flush active decoder/渲染队列。这样不会让
+     * DASH/HLS 的 Seek() 等待已经取消的 pending 流，同时保证旧位置的解码帧
+     * 不会混入新 seek 时间轴；本地文件和其它平台仍沿用原有 flush 语义。 */
+    mPlayer.FlushVideoPath(true, false, __func__);
+
     mPlayer.FlushAudioPath();
     mPlayer.FlushSubtitleInfo();
 
@@ -673,6 +729,16 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
     }
 
     if (mPlayer.mDuration == 0) {
+        /* 直播清单同样走双 decoder 切换状态机。旧实现这里直接调用
+        * SwitchStreamAligned()，而我们已取消 manager 的 stopOnSegEnd 语义，
+         * 结果就是点击 HLS/DASH 清晰度后只记录了目标却没有启动 pending 路。
+         * 视频和混合流统一转到 switchVideoStream()，音频/字幕仍走原有路径。 */
+        if (type == STREAM_TYPE_VIDEO || type == STREAM_TYPE_MIXED) {
+            /* 混合流的 mediaInfo 使用复合 stream id，必须和有限时长路径
+             * 一样先编码主流 id，否则 willChangeInfo 查找不到目标档位。 */
+            switchVideoStream(type == STREAM_TYPE_MIXED ? GEN_STREAM_INDEX(index) : index, type);
+            return;
+        }
         int toIndex = index;
         int fromIndex = -1;
 
@@ -688,6 +754,7 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
         } else if (type == STREAM_TYPE_VIDEO && mPlayer.mCurrentVideoIndex >= 0 && mPlayer.mCurrentVideoIndex != index) {
             fromIndex = mPlayer.mCurrentVideoIndex;
             mPlayer.mWillChangedVideoStreamIndex = index;
+            mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
         } else if (type == STREAM_TYPE_AUDIO && mPlayer.mCurrentAudioIndex >= 0 && mPlayer.mCurrentAudioIndex != index) {
             fromIndex = mPlayer.mCurrentAudioIndex;
             mPlayer.mWillChangedAudioStreamIndex = index;
@@ -922,31 +989,32 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     //TODO: different strategy
     mPlayer.mWillChangedVideoStreamIndex = index;
     mPlayer.mVideoChangedFirstPts = INT64_MAX;
+    mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
 
-    if (willChangeInfo->videoBandwidth < currentInfo->videoBandwidth) {
-        mPlayer.mDemuxerService->SwitchStreamAligned(currentId, index);
-    } else {
-        mPlayer.mMixMode = (type == STREAM_TYPE_MIXED);
-        int videoCount = 0;
-        int64_t startTime = mPlayer.mBufferController->FindSeamlessPointTimePosition(BUFFER_TYPE_VIDEO, videoCount);
-
-        if (startTime == 0 || videoCount < 40) {
-            mPlayer.mWillSwitchVideo = true;
-            return;
-        }
-
-        if (mPlayer.mMixMode) {
-            int64_t startTimeA = mPlayer.mBufferController->FindSeamlessPointTimePosition(BUFFER_TYPE_AUDIO, videoCount);
-
-            if (startTimeA == 0 || videoCount < 40) {
-                mPlayer.mWillSwitchVideo = true;
-                return;
-            }
-
-            startTime = std::max(startTime, startTimeA);
-        }
-        mPlayer.SwitchVideo(startTime);
+    /*
+     * 双 decoder 对升档、降档采用完全相同的入口：先保留旧路，再打开目标
+     * representation 并从当前缓存的安全点预热。旧的“降档走
+     * SwitchStreamAligned、升档直接 SwitchVideo”模型依赖 manager 在旧分片
+     * 结束时替换流；现在旧流必须一直播放到目标帧真正渲染，若降档仍走旧
+     * 分支，目标流根本不会 Open，表现就是 HLS 点击清晰度没有任何变化。
+     */
+    mPlayer.mMixMode = (type == STREAM_TYPE_MIXED);
+    /*
+     * 切换目标必须从当前播放时钟附近开始，而不是从公共缓存队列的末端
+     * （FindSeamlessPointTimePosition）开始。后者在本地测试中会得到 40s、
+     * 但当前播放点只有 20s；目标 decoder 被迫从未来 GOP 追赶，active 路
+     * 同时又可能被追帧逻辑判定为落后，最终出现 FPS=0/1。主流播放器是
+     * “current media time + 最近关键帧”策略：demuxer 自己选择不晚于该时刻
+     * 的 segment，pending decoder 解码到当前时钟后再原子提交。
+     */
+    int64_t startTime = mPlayer.mMasterClock.GetTime();
+    if (startTime <= 0 || startTime == INT64_MIN) {
+        startTime = mPlayer.mCurrentPos;
     }
+    if (startTime < 0) {
+        startTime = 0;
+    }
+    mPlayer.SwitchVideo(startTime);
 }
 
 void SMPMessageControllerListener::switchAudio(int index)

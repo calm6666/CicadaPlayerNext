@@ -66,6 +66,15 @@ void AbrManager::Stop()
 
 void AbrManager::EnableAbr(bool bEnabled)
 {
+    /*
+     * 从"关"变"开"时通知策略清一次状态：用户手动选了某一档、再切回"自动"时，
+     * 策略里可能还留着上一次 ABR 请求的在途标记/上切禁令，不清掉的话切回自动
+     * 之后还要白等一个看门狗周期才会重新评估。
+     */
+    if (bEnabled && !mEnableAbr && mAlgoStrategy != nullptr) {
+        mAlgoStrategy->OnAbrEnabled();
+    }
+
     mEnableAbr = bEnabled;
 }
 

@@ -89,6 +89,20 @@ typedef void (*playerType13Callback)(int64_t errorCode, const void *errorMsg, vo
 
 typedef void (*playerType123Callback)(int64_t index, int64_t size, const void *subtitle, void *userData);
 
+/*
+ * 自适应清晰度切换状态。
+ * STARTED：收到切换请求并开始拉取目标流；
+ * READY：目标 decoder 已经解出首帧并完成 active/pending 交换；
+ * FAILED：目标 decoder 创建或解码失败；
+ * CANCELED：切换过程中发生 seek/停止/重新切换，旧路径被保留。
+ */
+typedef enum player_quality_switch_status_t {
+    PLAYER_QUALITY_SWITCH_STARTED = 0,
+    PLAYER_QUALITY_SWITCH_READY = 1,
+    PLAYER_QUALITY_SWITCH_FAILED = 2,
+    PLAYER_QUALITY_SWITCH_CANCELED = 3,
+} player_quality_switch_status;
+
 typedef struct playerListener_t {
     playerVoidCallback LoopingStart;
     playerVoidCallback Prepared;
@@ -123,6 +137,8 @@ typedef struct playerListener_t {
     playerType13Callback SubtitleExtAdd;
     playerType13Callback SubtitleHeader;
     void *userData;
+    /* 新字段追加在结构体末尾，旧回调字段的内存布局保持不变。 */
+    playerType123Callback VideoQualitySwitch;
 } playerListener;
 
 //apsara player status

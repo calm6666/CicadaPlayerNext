@@ -3,10 +3,38 @@
 //
 #define LOG_TAG "avcodecDecoder"
 
+#if defined(_WIN32)
+/*
+ * d3d11.h 必须先以 C++ 链接进来。libavutil/hwcontext_d3d11va.h 会包含它，而下面
+ * 的 FFmpeg 头都包在 extern "C" 里，整块进去会让 d3d11.h 为 D3D11_VIEWPORT /
+ * D3D11_RECT / D3D11_BOX 定义的 C++ 比较运算符变成 C 链接，MSVC 全部报 C2733。
+ * d3d11.h 有 include guard，所以下面那次包含是空操作，直接拿到结构体定义。
+ */
+#include <d3d11.h>
+#endif
+
 extern "C" {
 #include <libavformat/avformat.h>
+/*
+ * avcodec.h 自带 extern "C" 保护（和 pixdesc.h / swscale.h 不同），放在这里
+ * 只是为了不依赖别的头间接把它带进来：getHwFormat() 用的 avcodec_is_open()
+ * 声明在它里面。
+ */
+#include <libavcodec/avcodec.h>
 #include <libavutil/opt.h>
-#if defined(CICADA_HW_DEVICE_TYPE)
+/*
+ * The platform test here is deliberately NOT `defined(CICADA_HW_DEVICE_TYPE)`.
+ * Those macros live in avcodecDecoder.h, which this file only includes further
+ * down, so testing them at this point would be false on every platform and these
+ * three headers would never be pulled in - which is exactly how av_get_pix_fmt_name
+ * and SwsContext ended up undeclared:
+ *   avcodecDecoder.cpp(79,9): error C3861: "av_get_pix_fmt_name": identifier not found
+ *   avcodecDecoder.cpp(148,41): error C2061: syntax error: identifier "SwsContext"
+ *
+ * __APPLE__ 也在列表里：Apple 上现在也定义了 CICADA_HW_DEVICE_TYPE
+ * （VideoToolbox，默认不激活，见 avcodecDecoder.h），少了这几个头会直接编不过。
+ */
+#if defined(_WIN32) || defined(__linux__) || defined(__APPLE__)
 /*
  * These belong INSIDE extern "C": FFmpeg's headers carry no extern "C" guard of
  * their own -- libavutil/pixdesc.h and libswscale/swscale.h contain no
@@ -26,16 +54,25 @@ extern "C" {
  * or AV_HWDEVICE_TYPE_VAAPI, av_hwdevice_ctx_create(),
  * av_hwframe_transfer_data() and AVHWFramesContext.
  *
- * libavutil/hwcontext_d3d11va.h is deliberately NOT included. It is the single
- * header that does #include <d3d11.h>, and the C++ comparison operators that
- * d3d11.h defines for D3D11_VIEWPORT / D3D11_RECT / D3D11_BOX would get C
- * linkage inside an extern "C" block, which makes MSVC reject every one of them
- * with C2733. It only declares AVD3D11VADeviceContext, which this file never
- * uses, so it is simply not needed.
+ * libavutil/hwcontext_d3d11va.h is the single header that does #include <d3d11.h>,
+ * and the C++ comparison operators that d3d11.h defines for D3D11_VIEWPORT /
+ * D3D11_RECT / D3D11_BOX would get C linkage inside an extern "C" block, which
+ * makes MSVC reject every one of them with C2733. It is needed only for
+ * AVD3D11VADeviceContext, which the zero-copy path touches in initHwDecoder(),
+ * and the way out is to include d3d11.h with C++ linkage FIRST (see the top of
+ * this file): its include guard then makes this second, extern "C" include a
+ * no-op and the struct arrives intact.
  */
 #include <libavutil/hwcontext.h>
 #include <libavutil/pixdesc.h>
 #include <libswscale/swscale.h>
+#if defined(_WIN32)
+/*
+ * 只为了 AVD3D11VADeviceContext：零拷贝直通要在设备级补 BindFlags，见
+ * initHwDecoder()。d3d11.h 已经在文件最上面以 C++ 链接进来过了。
+ */
+#include <libavutil/hwcontext_d3d11va.h>
+#endif
 #endif
 };
 
@@ -43,8 +80,12 @@ extern "C" {
 #include <cstring>
 #include <cstdlib>
 #include <utils/frame_work_log.h>
+#include <utils/globalSettings.h>
 #include <utils/mediaFrame.h>
 #include <utils/ffmpeg_utils.h>
+#include <utils/property.h>
+/* 零拷贝：借用平台（Qt）已有的 GPU 设备，见 hwDeviceBridge.h。 */
+#include <utils/hwDeviceBridge.h>
 #include <cassert>
 #include <deque>
 #include "avcodecDecoder.h"
@@ -61,9 +102,16 @@ namespace Cicada {
 #if defined(CICADA_HW_DEVICE_TYPE)
     /*
      * Pixel format negotiation callback. FFmpeg hands us the list of formats the
-     * codec can output; we accept the D3D11VA one and refuse everything else,
-     * which makes avcodec_open2() fail cleanly (and the caller fall back to the
-     * software decoder) rather than silently producing frames we cannot use.
+     * codec can output; we accept the D3D11VA one.
+     *
+     * 列表里没有硬解格式时怎么处理，取决于协商发生在什么时候：
+     *   - 打开之前（第一次协商）：返回 NONE，让 avcodec_open2() 干净地失败，
+     *     调用方随后退回软解。
+     *   - 打开之后：说明是解码途中 FFmpeg 把硬件加速摘掉了（hwaccel 初始化失败、
+     *     设备丢失之类）。这时再返回 NONE 会让**每一帧**都解码失败：
+     *     "no frame!" / "Error while decoding frame -1094995529" 刷屏，一帧都
+     *     出不来，窗口就是一片空白（实测就是这样）。所以改成让 FFmpeg 挑一个
+     *     软件格式继续解，画面接着播，只是这条流退回软解。
      */
     enum AVPixelFormat avcodecDecoder::getHwFormat(AVCodecContext *ctx,
                                                         const enum AVPixelFormat *pixFmts)
@@ -72,7 +120,32 @@ namespace Cicada {
 
         for (const enum AVPixelFormat *p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
             if (*p == dec->hwPixFmt) {
+                /*
+                 * 硬解格式回到列表里了（例如上一轮协商把它摘掉、现在又给了）：
+                 * 标记也恢复，否则后面交上来的 D3D11 帧会被当成"硬解已关"丢掉，
+                 * 画面就停住了。
+                 */
+                if (!dec->hwDecodeActive) {
+                    AF_LOGW("%s: %s is in the format list again, going back to hardware "
+                            "decoding\n", CICADA_HW_NAME, av_get_pix_fmt_name(dec->hwPixFmt));
+                }
+
+                dec->hwDecodeActive = true;
                 return *p;
+            }
+        }
+
+        if (avcodec_is_open(ctx)) {
+            for (const enum AVPixelFormat *p = pixFmts; *p != AV_PIX_FMT_NONE; ++p) {
+                const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(*p);
+
+                if (desc != nullptr && (desc->flags & AV_PIX_FMT_FLAG_HWACCEL) == 0) {
+                    AF_LOGW("%s: %s is gone from the format list, decoding the rest of "
+                            "this stream as %s\n", CICADA_HW_NAME,
+                            av_get_pix_fmt_name(dec->hwPixFmt), av_get_pix_fmt_name(*p));
+                    dec->hwDecodeActive = false;
+                    return *p;
+                }
             }
         }
 
@@ -153,8 +226,10 @@ namespace Cicada {
             av_frame_free(&mPDecoder->convFrame);
         }
 
-        if (mPDecoder->swFrame != nullptr) {
-            av_frame_free(&mPDecoder->swFrame);
+        for (AVFrame *&frame : mPDecoder->swFrames) {
+            if (frame != nullptr) {
+                av_frame_free(&frame);
+            }
         }
 
         // Must go before avcodec_free_context(): the codec context holds its own
@@ -285,6 +360,35 @@ namespace Cicada {
         (void) meta;
         enum AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
 
+#if defined(__APPLE__)
+        /*
+         * Apple 平台默认走 framework/codec/Apple 的 AFVTBDecoder（自研
+         * VideoToolbox 封装），这条 FFmpeg videotoolbox 路径只在应用显式打开
+         * 全局设置时才启用 —— 为了零拷贝（拿到 CVPixelBuffer）需要它的应用，
+         * 例如 platform/QtPlayer，会打开 "video.decoder.ffmpeg_videotoolbox"。
+         * 开关的完整说明见 property.h。
+         */
+        if (globalSettings::getSetting().getProperty(PROPERTY_KEY_DECODER_FFMPEG_VT) != "ON") {
+            return false;
+        }
+#endif
+
+        /*
+         * 下载出来的帧要不要保持 NV12，由全局设置决定（键名见 property.h）。
+         * 默认关闭，也就是维持老的“转成 YUV420P 再交出去”；只有明确声明
+         * 自己能吃 NV12 的呈现方才会打开。在 Windows 上 cmdline 的
+         * onVideoRendering() 就是这样一个呈现方，它把开关打开后每帧能省掉
+         * 一次 4K 全画幅的 swscale 转换。
+         */
+        mPDecoder->outputNv12 =
+                (globalSettings::getSetting().getProperty(PROPERTY_KEY_HW_COPYBACK_NV12) == "ON");
+
+        /*
+         * 零拷贝直通：解码纹理不下载，上层自己用 D3D11 呈现。见 property.h。
+         */
+        mPDecoder->directOutput =
+                (globalSettings::getSetting().getProperty(PROPERTY_KEY_HW_DIRECT_TEXTURE) == "ON");
+
         // 1. Does the linked FFmpeg even have a D3D11VA decoder for this codec?
         //    With the stock prebuilt win32 libffmpeg.dll (--disable-hwaccels)
         //    this is false, and we leave the decoder entirely untouched.
@@ -297,9 +401,28 @@ namespace Cicada {
         // 2. Create the D3D11 device (and its immediate context) FFmpeg will
         //    decode on. A nullptr device string selects the default adapter.
         AVBufferRef *deviceRef = nullptr;
-        int ret = av_hwdevice_ctx_create(&deviceRef, CICADA_HW_DEVICE_TYPE, nullptr, nullptr, 0);
+        int ret = 0;
 
-        if (ret < 0) {
+        /*
+         * 先问平台集成方有没有"现成的设备"（Qt 会把 RHI 的 ID3D11Device 交过来）。
+         *
+         * 零拷贝的前提是解码纹理和呈现方在**同一个** GPU 设备上：D3D11 里两个不同
+         * ID3D11Device 的纹理不能互相采样，Qt 的场景图也一样，只有同设备的纹理才能
+         * 直接包成 QSGTexture。拿不到外部设备就退回自己创建一个（copy-back 仍然可用，
+         * 只是没有零拷贝）。详见 framework/utils/hwDeviceBridge.h。
+         */
+#if defined(CICADA_HW_SUPPORTS_EXTERNAL_DEVICE)
+        auto *externalDevice = static_cast<AVBufferRef *>(HwDeviceBridge::acquireExternalDevice());
+
+        if (externalDevice != nullptr) {
+            deviceRef = externalDevice;
+        } else
+#endif
+        {
+            ret = av_hwdevice_ctx_create(&deviceRef, CICADA_HW_DEVICE_TYPE, nullptr, nullptr, 0);
+        }
+
+        if (deviceRef == nullptr) {
             AF_LOGW("%s: av_hwdevice_ctx_create failed: %s, using the software decoder\n",
                     CICADA_HW_NAME, getErrorString(ret));
             return false;
@@ -318,23 +441,63 @@ namespace Cicada {
 
         AF_LOGI("%s: hardware decoding enabled for %s (hw pixel format %s)\n",
                 CICADA_HW_NAME, mPDecoder->codec->name, av_get_pix_fmt_name(hwPixFmt));
+
+        if (mPDecoder->outputNv12) {
+            AF_LOGI("%s: the presenter takes NV12, the download is handed over "
+                    "as is (no swscale conversion)\n", CICADA_HW_NAME);
+        }
+
+        if (mPDecoder->directOutput) {
+            /*
+             * 零拷贝直通：解码表面原样交给上层（Windows 上是 AF_PIX_FMT_D3D11，
+             * macOS 上是 AV_PIX_FMT_VIDEOTOOLBOX，Linux 上是 AV_PIX_FMT_VAAPI）。
+             * 上层拿到原生句柄后自己把它包成 GPU 纹理，全程不下载、不经过 CPU。
+             *
+             * **Windows 上千万不要动 BindFlags。** 曾经的写法是在这里补
+             * D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE
+             * （想让视频处理器的输入视图更好用），结果每一帧都失败：
+             *
+             *   [AVHWFramesContext] Could not create the texture (80070057)
+             *   [h264] Failed setup for format d3d11: hwaccel initialisation returned error
+             *
+             * 80070057 是 E_INVALIDARG：D3D11 不允许解码器输出面同时当渲染目标
+             * （dxva2.c 给解码表面只加 D3D11_BIND_DECODER 就是这个原因），
+             * 而 hwcontext_d3d11va.c 的 d3d11va_frames_init() 会把这里的
+             * BindFlags 并进每一张表面纹理，于是整池子纹理都建不出来，硬解直接
+             * 废掉、一帧都出不来（表现是白屏 + 播放器退出）。
+             *
+             * 表面的用途由**呈现方**自己解决：Windows 上呈现方可以给视频处理器
+             * 建一张自有的 RENDER_TARGET 中转纹理（GPU 内部拷一次，仍然不经过
+             * CPU），macOS/Linux 上呈现方直接用 CVPixelBuffer / VAAPI surface。
+             */
+            AF_LOGI("%s: zero-copy direct output, decoded textures go straight to the "
+                    "presenter (no download, no CPU copy)\n", CICADA_HW_NAME);
+        }
+
         return true;
     }
 
     /*
-     * Downloads a decoded D3D11 surface into system memory and, when needed,
-     * converts it to the YUV420P layout the renderer uploads.
+     * Downloads a decoded GPU surface into system memory and returns the frame
+     * to hand to the caller.
      *
-     * The SDL renderer feeds SDL_UpdateYUVTexture() with three separate Y/U/V
-     * planes, so it only accepts YUV420P. D3D11VA surfaces, however, download as
-     * NV12 - hwcontext_d3d11va.c only ever reports ctx->sw_format from
-     * d3d11va_transfer_get_formats() and explicitly refuses the opaque 420
-     * layout that would map to YUV420P. So the chroma plane is re-split here
-     * rather than adding NV12 handling to the renderer, which is shared with the
-     * Linux and macOS builds.
+     * The download always comes back as NV12: hwcontext_d3d11va.c only ever
+     * reports ctx->sw_format from d3d11va_transfer_get_formats() and explicitly
+     * refuses the opaque 420 layout that would map to YUV420P. What the caller
+     * gets depends on who renders the frame:
      *
-     * Decoding itself (entropy decode + motion compensation) still runs on the
-     * GPU; this is only the download plus a cheap chroma copy.
+     *   - 4K60 硬解每帧要搬的内存是：GPU 下载 12.4MB (3840x2160 NV12)
+     *     + swscale 转 YUV420P（读 12.4MB、写 12.4MB）+ 上传纹理 12.4MB，
+     *     合计约 50MB/帧；60fps 就是 3GB/s。这是 4K 追不上实时、进而把
+     *     播放器拖进死锁的根源，所以能省的一定要省。
+     *   - 呈现方声明自己能直接吃 NV12 时（全局设置
+     *     "video.render.hw.copyback_nv12" == "ON"，目前由 cmdline 的
+     *     onVideoRendering() 用 SDL_PIXELFORMAT_NV12 纹理打开），NV12 直接
+     *     交出去，一次全画幅转换就省掉了。
+     *   - 否则保持原行为转成 YUV420P：SDL_UpdateYUVTexture() 要三个独立
+     *     平面，而这里只能下载到 NV12，于是就地拆开色度平面。
+     *
+     * 解码本身（熵解码 + 运动补偿）始终在 GPU 上，这里只是下载 + 格式整理。
      *
      * Returns the frame to hand to the caller, or nullptr when the download was
      * not possible. nullptr must be treated as "drop this frame": a D3D11 frame
@@ -366,22 +529,48 @@ namespace Cicada {
                     av_get_pix_fmt_name(framesCtx->sw_format));
         }
 
-        if (mPDecoder->swFrame == nullptr) {
-            mPDecoder->swFrame = av_frame_alloc();
+        if (mPDecoder->swFrames[mPDecoder->swFrameIndex] == nullptr) {
+            mPDecoder->swFrames[mPDecoder->swFrameIndex] = av_frame_alloc();
 
-            if (mPDecoder->swFrame == nullptr) {
+            if (mPDecoder->swFrames[mPDecoder->swFrameIndex] == nullptr) {
                 AF_LOGE("%s: cannot allocate the copy-back frame\n", CICADA_HW_NAME);
                 return nullptr;
             }
         }
 
-        AVFrame *swFrame = mPDecoder->swFrame;
-        av_frame_unref(swFrame);
+        /*
+         * 轮转使用下载缓冲池（见 decoder_handle_v::swFrames）。
+         *
+         * 不做复用的话，4K 每帧都要 malloc 12.4MB、写的时候再缺页 3000 次、
+         * 用完全部 munmap：每帧 1~3ms 白扔，60fps 下就是几个百分点的算力。
+         *
+         * 只有当这块缓冲已经没人持有时（av_buffer_is_writable() 为真，说明
+         * 消费者已经上屏完、只剩池子自己这一份引用）才原地复用；否则必须
+         * 重新分配，不然会把正在显示的帧改花。分辨率/像素格式变了同理。
+         */
+        AVFrame *swFrame = mPDecoder->swFrames[mPDecoder->swFrameIndex];
+        mPDecoder->swFrameIndex = (mPDecoder->swFrameIndex + 1) % CICADA_HW_SW_FRAME_POOL;
+
+        if (swFrame->buf[0] != nullptr &&
+                (swFrame->format != mPDecoder->swPixFmt ||
+                 swFrame->width != hwFrame->width || swFrame->height != hwFrame->height ||
+                 !av_buffer_is_writable(swFrame->buf[0]))) {
+            av_frame_unref(swFrame);
+        } else if (swFrame->buf[0] != nullptr) {
+            /*
+             * 缓冲复用时元数据字典要单独清：av_frame_copy_props() 只覆盖同名字段，
+             * 上一帧的 timePosition / utcTime 会残留下来，seek 时的丢帧判断
+             * （NeedDrop(mSeekPos)）会因此用错时间戳。
+             */
+            av_dict_free(&swFrame->metadata);
+        }
 
         // Ask for the layout the surface pool actually provides; requesting
         // anything else makes av_hwframe_transfer_data() fail.
         if (mPDecoder->swPixFmt != AV_PIX_FMT_NONE) {
             swFrame->format = mPDecoder->swPixFmt;
+            swFrame->width = hwFrame->width;
+            swFrame->height = hwFrame->height;
         }
 
         int ret = av_hwframe_transfer_data(swFrame, hwFrame, 0);
@@ -438,6 +627,14 @@ namespace Cicada {
             return swFrame;
         }
 
+        /*
+         * NV12 直接交给声明过自己能吃 NV12 的呈现方，跳过下面整段转换。
+         * 4K 一帧就省掉 12.4MB 读 + 12.4MB 写，是这里最大的一笔开销。
+         */
+        if (mPDecoder->outputNv12 && swFrame->format == AV_PIX_FMT_NV12) {
+            return swFrame;
+        }
+
         // Convert to YUV420P for the renderer.
         if (mPDecoder->convFrame == nullptr) {
             mPDecoder->convFrame = av_frame_alloc();
@@ -449,14 +646,30 @@ namespace Cicada {
         }
 
         AVFrame *out = mPDecoder->convFrame;
-        av_frame_unref(out);
-        out->format = AV_PIX_FMT_YUV420P;
-        out->width = swFrame->width;
-        out->height = swFrame->height;
 
-        if (av_frame_get_buffer(out, 0) < 0) {
-            AF_LOGE("%s: cannot allocate the YUV420P conversion buffer\n", CICADA_HW_NAME);
-            return nullptr;
+        /*
+         * 转换缓冲同样复用：只有没人持有、且尺寸没变时才原地写，否则重新
+         * 分配（sws_scale 直接写进 out->data，所以必须在分配后保持不动）。
+         */
+        if (out->buf[0] != nullptr &&
+                (out->format != AV_PIX_FMT_YUV420P ||
+                 out->width != swFrame->width || out->height != swFrame->height ||
+                 !av_buffer_is_writable(out->buf[0]))) {
+            av_frame_unref(out);
+        } else if (out->buf[0] != nullptr) {
+            // 同下载缓冲：复用时清掉上一帧残留的 timePosition / utcTime
+            av_dict_free(&out->metadata);
+        }
+
+        if (out->buf[0] == nullptr) {
+            out->format = AV_PIX_FMT_YUV420P;
+            out->width = swFrame->width;
+            out->height = swFrame->height;
+
+            if (av_frame_get_buffer(out, 0) < 0) {
+                AF_LOGE("%s: cannot allocate the YUV420P conversion buffer\n", CICADA_HW_NAME);
+                return nullptr;
+            }
         }
 
         mPDecoder->swsCtx = sws_getCachedContext(static_cast<SwsContext *>(mPDecoder->swsCtx),
@@ -518,9 +731,13 @@ namespace Cicada {
 #if defined(CICADA_HW_DEVICE_TYPE)
 
         // Drop the in-flight copy-back buffers so a seek cannot hand the
-        // renderer a frame from before the flush.
-        if (mPDecoder->swFrame != nullptr) {
-            av_frame_unref(mPDecoder->swFrame);
+        // renderer a frame from before the flush. Only this decoder's own
+        // reference goes away; a frame already queued for rendering keeps its
+        // own, and the pool slot is simply reallocated when it comes round again.
+        for (AVFrame *&frame : mPDecoder->swFrames) {
+            if (frame != nullptr) {
+                av_frame_unref(frame);
+            }
         }
 
         if (mPDecoder->convFrame != nullptr) {
@@ -567,18 +784,29 @@ namespace Cicada {
          * the download disabled) - that is exactly how the green screen appeared.
          */
         if (mPDecoder->avFrame->format == mPDecoder->hwPixFmt) {
-            if (!mPDecoder->hwDecodeActive) {
+            if (mPDecoder->directOutput) {
+                /*
+                 * 零拷贝直通：GPU 纹理原样交出去，一个字节都不下载。
+                 *
+                 * 布局来自 FFmpeg hwcontext_d3d11va.c 的 d3d11va_get_buffer()：
+                 *   data[0] = ID3D11Texture2D*，data[1] = 数组切片索引。
+                 * 纹理的引用计数由 frame->buf[0]（AVD3D11FrameDescriptor）持有，
+                 * 而下面用 AVAFFrame 克隆一次，所以只要这一帧还活着，纹理就有效，
+                 * 解码器的表面池也回收不了它。
+                 */
+                outFrame = mPDecoder->avFrame;
+            } else if (!mPDecoder->hwDecodeActive) {
                 AF_LOGW("%s: dropping a hardware frame while hardware decoding is disabled\n",
                         CICADA_HW_NAME);
                 return -EAGAIN;
-            }
+            } else {
+                outFrame = retrieveHwFrame(mPDecoder->avFrame);
 
-            outFrame = retrieveHwFrame(mPDecoder->avFrame);
-
-            if (outFrame == nullptr) {
-                AF_LOGW("%s: dropping a hardware frame that could not be downloaded\n",
-                        CICADA_HW_NAME);
-                return -EAGAIN;
+                if (outFrame == nullptr) {
+                    AF_LOGW("%s: dropping a hardware frame that could not be downloaded\n",
+                            CICADA_HW_NAME);
+                    return -EAGAIN;
+                }
             }
         }
 

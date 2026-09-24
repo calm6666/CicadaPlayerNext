@@ -1,0 +1,206 @@
+<div class="bpx-player-ctrl-setting-box">
+                    <div class="bpx-player-ctrl-setting-menu bui bui-panel bui-dark"><div class="bui-area"><div class="bui-panel-wrap" style="width: 132px; height: 140px;">
+    <div class="bui-panel-move" style="width: 418px; transform: translateX(0px);">
+        
+        <div class="bui-panel-item bui-panel-item-active" style="width: 132px; height: 140px;"><div class="bpx-player-ctrl-setting-menu-left">
+                            <div class="bpx-player-ctrl-setting-mirror bui bui-switch"><div class="bui-area"><input class="bui-switch-input" type="checkbox" aria-label="镜像画面">
+<label class="bui-switch-label">
+    <span class="bui-switch-name">镜像画面</span>
+    <span class="bui-switch-body">
+        <span class="bui-switch-dot">
+            <span></span>
+        </span>
+    </span>
+</label>
+</div></div>
+                            <div class="bpx-player-ctrl-setting-loop bui bui-switch"><div class="bui-area"><input class="bui-switch-input" type="checkbox" aria-label="单集循环">
+<label class="bui-switch-label">
+    <span class="bui-switch-name">单集循环</span>
+    <span class="bui-switch-body">
+        <span class="bui-switch-dot">
+            <span></span>
+        </span>
+    </span>
+</label>
+</div></div>
+                            <div class="bpx-player-ctrl-setting-autoplay bui bui-switch"><div class="bui-area"><input class="bui-switch-input" type="checkbox" checked="" aria-label="自动开播">
+<label class="bui-switch-label">
+    <span class="bui-switch-name">自动开播</span>
+    <span class="bui-switch-body">
+        <span class="bui-switch-dot">
+            <span></span>
+        </span>
+    </span>
+</label>
+</div></div>
+                            <div class="bpx-player-ctrl-setting-oped" style="display: none;"></div>
+                            <div class="bpx-player-ctrl-setting-more">
+                                <span class="bpx-player-ctrl-setting-more-text" data-i18n="morePlaybackSettings">更多播放设置</span>
+                                <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" viewBox="0 0 16 16"><path d="m9.188 7.999-3.359 3.359a.75.75 0 1 0 1.061 1.061l3.889-3.889a.75.75 0 0 0 0-1.061L6.89 3.58a.75.75 0 1 0-1.061 1.061l3.359 3.358z"></path></svg></span>
+                            </div>
+                        </div></div>
+        
+        <div class="bui-panel-item" style="width: 286px; height: px;"><div class="bpx-player-ctrl-setting-menu-right">
+                            <div class="bpx-player-ctrl-setting-handoff">
+                                <div class="bpx-player-ctrl-setting-handoff-title" data-i18n="playbackMode">播放方式</div>
+                                <div class="bpx-player-ctrl-setting-handoff-content bui bui-radio bui-dark"><div class="bui-area"><div class="bui-radio-wrap bui-radio-button">
+    <div class="bui-radio-group" style="margin: 0 -4px;">
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="0" name="bui-radio1">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">自动切集</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="2" name="bui-radio1" checked="">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">播完暂停</span>
+        </span>
+    </label>
+    
+    </div>
+</div></div></div>
+                            </div>
+                            <div class="bpx-player-ctrl-setting-aspect">
+                                <div class="bpx-player-ctrl-setting-aspect-title" data-i18n="videoAspectRatio">视频比例</div>
+                                <div class="bpx-player-ctrl-setting-aspect-content bui bui-radio bui-dark"><div class="bui-area"><div class="bui-radio-wrap bui-radio-button">
+    <div class="bui-radio-group" style="margin: 0 -4px;">
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="0:0" name="bui-radio2" checked="">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">自动</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="4:3" name="bui-radio2">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">4:3</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="16:9" name="bui-radio2">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">16:9 </span>
+        </span>
+    </label>
+    
+    </div>
+</div></div></div>
+                            </div>
+                            
+                                <div class="bpx-player-ctrl-setting-codec">
+                                    <div class="bpx-player-ctrl-setting-codec-title" data-i18n="playbackStrategy">播放策略</div>
+                                    <div class="bpx-player-ctrl-setting-codec-content bui bui-radio bui-dark"><div class="bui-area"><div class="bui-radio-wrap bui-radio-button">
+    <div class="bui-radio-group" style="margin: 0 -4px;">
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="0" name="bui-radio3" checked="">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">默认</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="3" name="bui-radio3">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">AV1</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="1" name="bui-radio3">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">HEVC</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="2" name="bui-radio3">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">AVC</span>
+        </span>
+    </label>
+    
+    </div>
+</div></div></div>
+                                </div>
+                                
+                            <div class="bpx-player-ctrl-setting-loudness">
+                                <div class="bpx-player-ctrl-setting-loudness-title" data-i18n="volumeEqualization">音量均衡</div>
+                                <div class="bpx-player-ctrl-setting-loudness-content bui bui-radio bui-dark"><div class="bui-area"><div class="bui-radio-wrap bui-radio-button">
+    <div class="bui-radio-group" style="margin: 0 -4px;">
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="1" name="bui-radio4">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">标准</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="2" name="bui-radio4">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">高动态</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="0" name="bui-radio4" checked="">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">关闭</span>
+        </span>
+    </label>
+    
+    </div>
+</div></div></div>
+                            </div>
+                            
+                            <div class="bpx-player-ctrl-setting-others">
+                                <div class="bpx-player-ctrl-setting-others-title" data-i18n="additionalSettings">其他设置</div>
+                                <div class="bpx-player-ctrl-setting-others-content">
+                                    <div class="bpx-player-ctrl-setting-checkbox bpx-player-ctrl-setting-blackgap bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" checked="" aria-label="隐藏黑边">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">隐藏黑边</span>
+</label></div></div>
+                                    <div class="bpx-player-ctrl-setting-checkbox bpx-player-ctrl-setting-lightoff bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" aria-label="关灯模式">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">关灯模式</span>
+</label></div></div>
+                                    <div class="bpx-player-ctrl-setting-checkbox bpx-player-ctrl-setting-widesave" style="display: none;"></div>
+                                    <div class="bpx-player-ctrl-setting-checkbox bpx-player-ctrl-setting-panoram" style="display: none;"></div>
+                                    <div class="bpx-player-ctrl-setting-checkbox bpx-player-ctrl-setting-highenergy" style="display: none;"></div>
+                                    <div class="bpx-player-ctrl-setting-checkbox bpx-player-ctrl-setting-pip bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" aria-label="原生画中画">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">原生画中画</span>
+</label></div></div>
+
+                                </div>
+                            </div>
+                        </div></div>
+        
+    </div>
+</div></div></div>
+                </div>

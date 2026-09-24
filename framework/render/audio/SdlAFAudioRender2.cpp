@@ -31,10 +31,31 @@ SdlAFAudioRender2::~SdlAFAudioRender2()
 bool SdlAFAudioRender2::device_require_format(const IAFFrame::audioInfo &info)
 {
     int format = info.format;
-    if (format == AF_SAMPLE_FMT_S16 || format == AF_SAMPLE_FMT_S16P || format == AF_SAMPLE_FMT_FLT || format == AF_SAMPLE_FMT_FLTP) {
+
+    /*
+     * S32 / S32P are accepted here too.
+     *
+     * The list used to stop at 16 bit and float, and anything else - most
+     * visibly the S32 that a 24 bit FLAC decodes to - fell through, leaving
+     * inputSpec.format at 0 in init_device(). SDL then opened the device with
+     * that bogus format while device_write() queued real 32 bit samples into it,
+     * and the result was loud white noise ("sand") plus an audio clock that
+     * never settled, which in turn made the video drop frames continuously:
+     *   W/AlivcPlayerClock: TIMEPOS reSync time 8517 to -96000
+     *   W/AlivcPlayerClock: TIMEPOS reSync time 111008 to 0
+     *   KPI test total fps:27.9   5 dropped of 29 video frames
+     *
+     * The rest of the path is already format agnostic - getPCMDataLen() sizes
+     * the buffer from av_get_bytes_per_sample() and copyPCMData() interleaves
+     * planar input - so only the mapping below was missing.
+     */
+    if (format == AF_SAMPLE_FMT_S16 || format == AF_SAMPLE_FMT_S16P
+            || format == AF_SAMPLE_FMT_S32 || format == AF_SAMPLE_FMT_S32P
+            || format == AF_SAMPLE_FMT_FLT || format == AF_SAMPLE_FMT_FLTP) {
         mInputInfo = info;
         return true;
     }
+
     return false;
 }
 
@@ -57,6 +78,9 @@ int SdlAFAudioRender2::init_device()
         int format = mInputInfo.format;
         if (format == AF_SAMPLE_FMT_S16 || format == AF_SAMPLE_FMT_S16P) {
             inputSpec.format = AUDIO_S16SYS;
+        } else if (format == AF_SAMPLE_FMT_S32 || format == AF_SAMPLE_FMT_S32P) {
+            /* 24 bit content decodes to S32; see device_require_format(). */
+            inputSpec.format = AUDIO_S32SYS;
         } else if (format == AF_SAMPLE_FMT_FLT || format == AF_SAMPLE_FMT_FLTP) {
             inputSpec.format = AUDIO_F32SYS;
         }

@@ -9,6 +9,7 @@
 #define MediaPlayerConfig_h
 
 #include <cstdio>
+#include <cstdint>
 #include <string>
 #include <utils/CicadaType.h>
 #include <vector>

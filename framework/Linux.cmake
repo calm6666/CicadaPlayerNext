@@ -25,7 +25,10 @@ set(COMMON_INC_DIR ${COMMON_INC_DIR}
         # external/external/external/ffmpeg and does not exist. FFMPEG_SOURCE_DIR
         # below is the real source tree.
         ${INSTALL_DIR}/../external/ffmpeg/
-        /usr/include/SDL2
+        # NOTE: SDL2 is deliberately NOT hardcoded here any more. The tree
+        # includes <SDL2/SDL.h>, which needs the parent of the SDL2 directory,
+        # so the "/usr/include/SDL2" that used to sit on this line could never
+        # satisfy it. It is detected at the bottom of this file instead.
         ${PROJECT_SOURCE_DIR})
 
 
@@ -61,16 +64,32 @@ if (EXISTS ${CICADA_FFMPEG_CONFIG_H})
     file(READ ${CICADA_FFMPEG_CONFIG_H} _cicada_ffmpeg_config)
 
     if (_cicada_ffmpeg_config MATCHES "#define CONFIG_VAAPI 1")
-        # hwcontext_vaapi.c obtains a display through one of these; each is a
-        # separate library, and libva-drm / libva-x11 come from libva-dev. They
-        # are looked up with find_library so a machine that only has the base
-        # libva still links.
+        # hwcontext_vaapi.c reaches libva directly, plus a display backend, plus
+        # that backend's own dependencies. The transitive ones matter: modern
+        # distributions default to --no-copy-dt-needed-entries, so a library that
+        # is merely a dependency of another one has to be named explicitly, and
+        # omitting one gives the misleading
+        #   libavutil.a(hwcontext_vaapi.o): undefined reference to symbol
+        #       'drmGetRenderDeviceNameFromFd'
+        #   /lib/x86_64-linux-gnu/libdrm.so.2: error adding symbols:
+        #       DSO missing from command line
+        # drm comes from libva-drm, Xext/Xfixes from libva-x11.
+        #
+        # Everything is looked up with find_library and only the libraries that
+        # actually exist are linked, so a machine with a partial libva still
+        # builds - it simply gets a smaller set of VAAPI entry points.
         find_library(CICADA_VA_LIB NAMES va)
         find_library(CICADA_VA_DRM_LIB NAMES va-drm)
         find_library(CICADA_VA_X11_LIB NAMES va-x11)
+        find_library(CICADA_DRM_LIB NAMES drm)
+        find_library(CICADA_X11_LIB NAMES X11)
+        find_library(CICADA_XEXT_LIB NAMES Xext)
+        find_library(CICADA_XFIXES_LIB NAMES Xfixes)
 
         set(CICADA_VAAPI_LIBS "")
-        foreach (_va_lib ${CICADA_VA_LIB} ${CICADA_VA_DRM_LIB} ${CICADA_VA_X11_LIB})
+        foreach (_va_lib ${CICADA_VA_LIB} ${CICADA_VA_DRM_LIB} ${CICADA_VA_X11_LIB}
+                         ${CICADA_DRM_LIB} ${CICADA_X11_LIB} ${CICADA_XEXT_LIB}
+                         ${CICADA_XFIXES_LIB})
             if (_va_lib)
                 list(APPEND CICADA_VAAPI_LIBS ${_va_lib})
             endif ()
@@ -119,5 +138,55 @@ if (TRAVIS)
     set(ENABLE_CHEAT_RENDER ON)
 else ()
     set(ENABLE_SDL ON)
+endif ()
+
+# ---- SDL2 -------------------------------------------------------------------
+# Must come after ENABLE_SDL is set above.
+#
+# ENABLE_SDL is ON here, so the whole render path needs SDL2. Every include in
+# the tree is written as <SDL2/SDL.h> (framework/render/video/SdlAFVideoRender.h,
+# framework/render/audio/SdlAFAudioRender{,2}.h, cmdline/SDLEventReceiver.h, ...),
+# never as <SDL.h>. Two consequences:
+#
+#   1. The include path has to be the PARENT of the SDL2 directory. The
+#      /usr/include/SDL2 that used to be listed in COMMON_INC_DIR can never
+#      satisfy <SDL2/SDL.h> - it would only satisfy <SDL.h>.
+#   2. On a machine without libsdl2-dev the build did not fail here, it failed
+#      much later inside a header:
+#        SdlAFAudioRender2.h:9:10: fatal error: SDL2/SDL.h: No such file or directory
+#      which gives no hint that a package is missing. This block reports that
+#      directly instead.
+#
+# pkg-config knows where SDL2 actually lives (a distribution package puts it in
+# /usr/include, a source install in /usr/local/include), so it is asked first and
+# the two usual roots are only probed as a fallback.
+find_package(PkgConfig QUIET)
+
+if (PKG_CONFIG_FOUND)
+    pkg_check_modules(CICADA_SDL2 QUIET sdl2)
+endif ()
+
+set(CICADA_SDL2_FOUND FALSE)
+
+if (CICADA_SDL2_INCLUDE_DIRS)
+    list(APPEND COMMON_INC_DIR ${CICADA_SDL2_INCLUDE_DIRS})
+    set(CICADA_SDL2_FOUND TRUE)
+    message("Linux: SDL2 headers from pkg-config: ${CICADA_SDL2_INCLUDE_DIRS}")
+else ()
+    foreach (_sdl_root /usr/include /usr/local/include)
+        if (EXISTS ${_sdl_root}/SDL2/SDL.h)
+            list(APPEND COMMON_INC_DIR ${_sdl_root})
+            set(CICADA_SDL2_FOUND TRUE)
+            message("Linux: SDL2 headers found in ${_sdl_root}")
+        endif ()
+    endforeach ()
+endif ()
+
+if (ENABLE_SDL AND NOT CICADA_SDL2_FOUND)
+    message(FATAL_ERROR
+        "SDL2 headers not found, but ENABLE_SDL is enabled for Linux.\n"
+        "  Install them with:  sudo apt install libsdl2-dev\n"
+        "  (the whole render path includes <SDL2/SDL.h>, so the include path must\n"
+        "   be the parent of the SDL2 directory, not the SDL2 directory itself)")
 endif ()
 

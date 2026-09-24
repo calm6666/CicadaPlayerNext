@@ -5,6 +5,7 @@
 #ifndef CICADA_PLAYER_SEGMENTENCRYPTION_H
 #define CICADA_PLAYER_SEGMENTENCRYPTION_H
 
+#include <cstdint>
 #include <vector>
 #include <string>
 

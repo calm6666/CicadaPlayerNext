@@ -39,7 +39,9 @@ namespace Cicada {
 
     int IDemuxer::GetStreamMeta(unique_ptr<streamMeta> &meta, int index, bool sub) const
     {
-        Stream_meta Meta;
+        /* 同上（见 demuxer_service::GetStreamMeta）：streamMeta 浅拷贝 + 析构 releaseMeta，
+           栈上这份必须零初始化，否则底层少写一个指针字段就是对野指针 free。 */
+        Stream_meta Meta{};
         int ret = GetStreamMeta(&Meta, index, sub);
 
         if (ret < 0) {

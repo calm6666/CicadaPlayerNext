@@ -374,7 +374,16 @@ namespace Cicada {
 
     int demuxer_service::GetStreamMeta(std::unique_ptr<streamMeta> &meta, int index, bool sub)
     {
-        Stream_meta Meta;
+        /*
+         * 【必须值初始化（{}）】streamMeta 是**浅拷贝 + 析构里 releaseMeta()**
+         * （framework/utils/mediaTypeInternal.cpp:8-16 → framework/utils/mediaFrame.c:23-64
+         * 会 free extradata/lang/description/keyUrl/drmPssh/drmKeyId 并顺着 meta 链表走）。
+         * 只要底层 demuxer 有一次"返回 >=0 但没把每个指针字段都写出来"（生产者只写自己
+         * 关心的字段是很常见的写法），浅拷贝里剩下的就是栈垃圾，析构时就是对野指针 free
+         * —— ntdll 直接报 0xc0000374 堆损坏（用户 2026-09-19 的三次闪退就是这个码）。
+         * 零初始化后这些字段是 nullptr，free(nullptr) 是空操作，最坏也只是少释放。
+         */
+        Stream_meta Meta{};
         int ret = GetStreamMeta(&Meta, index, sub);
 
         if (ret < 0) {

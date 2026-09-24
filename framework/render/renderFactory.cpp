@@ -46,8 +46,26 @@
 #endif
 
 #include "video/DummyVideoRender.h"
+#include <utils/frame_work_log.h>
+/* PRIx64：日志里打 flags 用。 */
+#include <cinttypes>
 
 using namespace Cicada;
+
+/*
+ * 平台注入的视频渲染器工厂（见 renderFactory.h）。
+ *
+ * 用裸函数指针而不是 std::function：注入发生在程序启动阶段（UI 线程），读取发生
+ * 在播放器内部线程，写一次、读多次，指针赋值本身是原子的，不需要额外加锁，也
+ * 不会在每次创建渲染器时产生堆分配。
+ */
+static videoRenderFactory::RenderCreator g_videoRenderCreator = nullptr;
+
+void videoRenderFactory::setRenderCreator(RenderCreator creator)
+{
+    g_videoRenderCreator = creator;
+    AF_LOGI("video render creator %s\n", creator != nullptr ? "registered" : "cleared");
+}
 
 std::unique_ptr<IAudioRender> AudioRenderFactory::create()
 {
@@ -75,6 +93,27 @@ std::unique_ptr<IAudioRender> AudioRenderFactory::create()
 
 std::unique_ptr<IVideoRender> videoRenderFactory::create(uint64_t flags)
 {
+    /*
+     * 平台注入优先。
+     *
+     * 唯一的例外是 FLAG_DUMMY：那是播放器主动要求的"别渲染，把帧丢掉就行"
+     * （Android 上 tunnel 模式 / DRM 直出 / WideVine 那些场景，解码器直接把画面
+     * 送到 surface，框架不应该再插手）。这种语义下必须让 DummyVideoRender 接手，
+     * 否则注入的渲染器会让本该被丢掉的帧继续流下去。
+     */
+    if (g_videoRenderCreator != nullptr && (flags & IVideoRender::FLAG_DUMMY) == 0) {
+        std::unique_ptr<IVideoRender> render = g_videoRenderCreator();
+
+        if (render != nullptr) {
+            AF_LOGI("using the video render registered by the application (flags %" PRIx64 ")\n",
+                    flags);
+            return render;
+        }
+
+        AF_LOGW("the registered video render creator returned nothing, "
+                "falling back to the built-in render\n");
+    }
+
     if (flags & IVideoRender::FLAG_DUMMY) {
         return std::unique_ptr<IVideoRender>(new DummyVideoRender());
     }

@@ -180,6 +180,107 @@ enum AFCodecID AVCodec2CicadaCodec(enum AVCodecID codec)
         case AV_CODEC_ID_OPUS:
             return AF_CODEC_ID_OPUS;
 
+        /*
+         * Audio codecs the framework previously had no id for. Without these
+         * cases the stream is mapped to AF_CODEC_ID_NONE, then
+         * CodecID2AVCodecID() turns that into AV_CODEC_ID_NONE and
+         * avcodec_find_decoder() fails, so playback dies with
+         * codec_error_audio_not_support (-513) even though the decoder is
+         * compiled into FFmpeg.
+         */
+        case AV_CODEC_ID_FLAC:
+            return AF_CODEC_ID_FLAC;
+
+        case AV_CODEC_ID_VORBIS:
+            return AF_CODEC_ID_VORBIS;
+
+        case AV_CODEC_ID_ALAC:
+            return AF_CODEC_ID_ALAC;
+
+        case AV_CODEC_ID_DTS:
+            return AF_CODEC_ID_DCA;
+
+        case AV_CODEC_ID_APE:
+            return AF_CODEC_ID_APE;
+
+        case AV_CODEC_ID_WAVPACK:
+            return AF_CODEC_ID_WAVPACK;
+
+        case AV_CODEC_ID_TTA:
+            return AF_CODEC_ID_TTA;
+
+        case AV_CODEC_ID_WMAV1:
+            return AF_CODEC_ID_WMAV1;
+
+        case AV_CODEC_ID_WMAV2:
+            return AF_CODEC_ID_WMAV2;
+
+        case AV_CODEC_ID_WMAPRO:
+            return AF_CODEC_ID_WMAPRO;
+
+        case AV_CODEC_ID_TRUEHD:
+            return AF_CODEC_ID_TRUEHD;
+
+        case AV_CODEC_ID_MLP:
+            return AF_CODEC_ID_MLP;
+
+        case AV_CODEC_ID_SPEEX:
+            return AF_CODEC_ID_SPEEX;
+
+        case AV_CODEC_ID_AMR_NB:
+            return AF_CODEC_ID_AMR_NB;
+
+        case AV_CODEC_ID_AMR_WB:
+            return AF_CODEC_ID_AMR_WB;
+
+        case AV_CODEC_ID_SBC:
+            return AF_CODEC_ID_SBC;
+
+        case AV_CODEC_ID_ATRAC3:
+            return AF_CODEC_ID_ATRAC3;
+
+        case AV_CODEC_ID_COOK:
+            return AF_CODEC_ID_COOK;
+
+        case AV_CODEC_ID_RA_144:
+            return AF_CODEC_ID_RA_144;
+
+        case AV_CODEC_ID_NELLYMOSER:
+            return AF_CODEC_ID_NELLYMOSER;
+
+        /* Several FFmpeg ADPCM variants share one framework id. */
+        case AV_CODEC_ID_ADPCM_IMA_WAV:
+        case AV_CODEC_ID_ADPCM_MS:
+        case AV_CODEC_ID_ADPCM_YAMAHA:
+            return AF_CODEC_ID_ADPCM;
+
+        case AV_CODEC_ID_PCM_S24LE:
+            return AF_CODEC_ID_PCM_S24LE;
+
+        case AV_CODEC_ID_PCM_S24BE:
+            return AF_CODEC_ID_PCM_S24BE;
+
+        case AV_CODEC_ID_PCM_S32LE:
+            return AF_CODEC_ID_PCM_S32LE;
+
+        case AV_CODEC_ID_PCM_S32BE:
+            return AF_CODEC_ID_PCM_S32BE;
+
+        case AV_CODEC_ID_PCM_F32LE:
+            return AF_CODEC_ID_PCM_F32LE;
+
+        case AV_CODEC_ID_PCM_F64LE:
+            return AF_CODEC_ID_PCM_F64LE;
+
+        case AV_CODEC_ID_PCM_S8:
+            return AF_CODEC_ID_PCM_S8;
+
+        case AV_CODEC_ID_PCM_MULAW:
+            return AF_CODEC_ID_PCM_MULAW;
+
+        case AV_CODEC_ID_PCM_ALAW:
+            return AF_CODEC_ID_PCM_ALAW;
+
         /*Video*/
         case AV_CODEC_ID_H264:
             return AF_CODEC_ID_H264;
@@ -292,6 +393,42 @@ static codec_pair codec_pair_table[] = {
     {AF_CODEC_ID_VP9,       AV_CODEC_ID_VP9},
     {AF_CODEC_ID_OPUS,      AV_CODEC_ID_OPUS},
     {AF_CODEC_ID_MPEG4,     AV_CODEC_ID_MPEG4},
+    /* Audio codecs added alongside the ids appended to AFCodecID. */
+    {AF_CODEC_ID_FLAC,      AV_CODEC_ID_FLAC},
+    {AF_CODEC_ID_VORBIS,    AV_CODEC_ID_VORBIS},
+    {AF_CODEC_ID_ALAC,      AV_CODEC_ID_ALAC},
+    {AF_CODEC_ID_DCA,       AV_CODEC_ID_DTS},
+    {AF_CODEC_ID_APE,       AV_CODEC_ID_APE},
+    {AF_CODEC_ID_WAVPACK,   AV_CODEC_ID_WAVPACK},
+    {AF_CODEC_ID_TTA,       AV_CODEC_ID_TTA},
+    {AF_CODEC_ID_WMAV1,     AV_CODEC_ID_WMAV1},
+    {AF_CODEC_ID_WMAV2,     AV_CODEC_ID_WMAV2},
+    {AF_CODEC_ID_WMAPRO,    AV_CODEC_ID_WMAPRO},
+    {AF_CODEC_ID_TRUEHD,    AV_CODEC_ID_TRUEHD},
+    {AF_CODEC_ID_MLP,       AV_CODEC_ID_MLP},
+    {AF_CODEC_ID_SPEEX,     AV_CODEC_ID_SPEEX},
+    {AF_CODEC_ID_AMR_NB,    AV_CODEC_ID_AMR_NB},
+    {AF_CODEC_ID_AMR_WB,    AV_CODEC_ID_AMR_WB},
+    {AF_CODEC_ID_SBC,       AV_CODEC_ID_SBC},
+    {AF_CODEC_ID_ATRAC3,    AV_CODEC_ID_ATRAC3},
+    {AF_CODEC_ID_COOK,      AV_CODEC_ID_COOK},
+    {AF_CODEC_ID_RA_144,    AV_CODEC_ID_RA_144},
+    {AF_CODEC_ID_NELLYMOSER, AV_CODEC_ID_NELLYMOSER},
+    /* One framework id covers the ADPCM variants; the IMA/MS form is the one
+     * that shows up in WAV, so it is the one the decoder lookup asks for. */
+    {AF_CODEC_ID_ADPCM,     AV_CODEC_ID_ADPCM_IMA_WAV},
+    {AF_CODEC_ID_PCM_S24LE, AV_CODEC_ID_PCM_S24LE},
+    {AF_CODEC_ID_PCM_S24BE, AV_CODEC_ID_PCM_S24BE},
+    {AF_CODEC_ID_PCM_S32LE, AV_CODEC_ID_PCM_S32LE},
+    {AF_CODEC_ID_PCM_S32BE, AV_CODEC_ID_PCM_S32BE},
+    {AF_CODEC_ID_PCM_F32LE, AV_CODEC_ID_PCM_F32LE},
+    {AF_CODEC_ID_PCM_F64LE, AV_CODEC_ID_PCM_F64LE},
+    {AF_CODEC_ID_PCM_S8,    AV_CODEC_ID_PCM_S8},
+    {AF_CODEC_ID_PCM_MULAW, AV_CODEC_ID_PCM_MULAW},
+    {AF_CODEC_ID_PCM_ALAW,  AV_CODEC_ID_PCM_ALAW},
+    /* Already had ids, but no table row, so they could never be requested. */
+    {AF_CODEC_ID_PCM_S16BE, AV_CODEC_ID_PCM_S16BE},
+    {AF_CODEC_ID_PCM_U8,    AV_CODEC_ID_PCM_U8},
     {AF_CODEC_ID_NONE,      AV_CODEC_ID_NONE},
 };
 
@@ -316,16 +453,38 @@ typedef struct pix_fmt_pair_t {
     enum AVPixelFormat avId;
 } pix_fmt_pair;
 
+/*
+ * 这张表必须覆盖所有会从解码器走到渲染器的像素格式，否则
+ * AVPixFmt2Cicada() 会返回 AF_PIX_FMT_NONE，调用方看到的是一个“未知格式”，
+ * 只留下 "AVPixelFormat 23 not found" 这种日志——硬解 copy-back 直通 NV12 时
+ * 就是这么变成整屏绿色的：渲染方以为拿到的是 YUV420P。
+ */
 static pix_fmt_pair pix_fmt_pair_table[] = {
         {AF_PIX_FMT_NONE, AV_PIX_FMT_NONE},
         {AF_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P},
         {AF_PIX_FMT_YUV422P, AV_PIX_FMT_YUV422P},
+        {AF_PIX_FMT_YUV444P, AV_PIX_FMT_YUV444P},
         {AF_PIX_FMT_YUVJ420P, AV_PIX_FMT_YUVJ420P},
         {AF_PIX_FMT_YUVJ422P, AV_PIX_FMT_YUVJ422P},
+        {AF_PIX_FMT_YUVJ444P, AV_PIX_FMT_YUVJ444P},
+        {AF_PIX_FMT_NV12, AV_PIX_FMT_NV12},
+        {AF_PIX_FMT_NV21, AV_PIX_FMT_NV21},
+        {AF_PIX_FMT_YUYV422, AV_PIX_FMT_YUYV422},
+        {AF_PIX_FMT_UYVY422, AV_PIX_FMT_UYVY422},
+        {AF_PIX_FMT_RGB24, AV_PIX_FMT_RGB24},
+        {AF_PIX_FMT_BGR24, AV_PIX_FMT_BGR24},
+        {AF_PIX_FMT_GRAY8, AV_PIX_FMT_GRAY8},
         {AF_PIX_FMT_YUV420P10BE, AV_PIX_FMT_YUV420P10BE},
         {AF_PIX_FMT_YUV420P10LE, AV_PIX_FMT_YUV420P10LE},
         {AF_PIX_FMT_D3D11, AV_PIX_FMT_D3D11},
         {AF_PIX_FMT_DXVA2_VLD, AV_PIX_FMT_DXVA2_VLD},
+        /*
+         * Linux 硬解直通：解码帧就是 VAAPI surface（data[3] 是 VASurfaceID）。
+         * 漏掉这一行的话 AVPixFmt2Cicada() 会把它变成 AF_PIX_FMT_NONE，
+         * 呈现方既认不出这是 GPU 帧、也没法拒绝它——把 surface ID 当像素指针用
+         * 就是崩溃或者满屏花屏。
+         */
+        {AF_PIX_FMT_VAAPI, AV_PIX_FMT_VAAPI},
 };
 
 int AVPixFmt2Cicada(enum AVPixelFormat fmt)

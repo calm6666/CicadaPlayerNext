@@ -1,0 +1,296 @@
+<div class="bpx-player-dm-setting-wrap" style="display: none;">
+        <div class="bpx-player-dm-setting-box bui bui-panel bui-dark">
+            <div class="bui-area"><div class="bui-panel-wrap" style="width: 320px; height: 322px;">
+    <div class="bui-panel-move" style="width: 586px; transform: translateX(0px);">
+        
+        <div class="bui-panel-item bui-panel-item-active" style="width: 320px; height: 322px;"><div class="bpx-player-dm-setting-left">
+                <div class="bpx-player-dm-setting-left-block">
+                    <div class="bpx-player-dm-setting-left-block-title" data-i18n="filterDanmuByType">按类型过滤</div>
+                    <div class="bpx-player-dm-setting-left-block-content">
+                <div class="bpx-player-block-filter-type bpx-player-block-typeScroll" data-type="typeScroll">
+                    <span class="bpx-player-block-filter-image"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" style="enable-background:new 0 0 28 28" viewBox="0 0 28 28"><path d="M23 3H5a4 4 0 0 0-4 4v14a4 4 0 0 0 4 4h18a4 4 0 0 0 4-4V7a4 4 0 0 0-4-4zM11 9h6a1 1 0 0 1 0 2h-6a1 1 0 0 1 0-2zm-3 2H6V9h2v2zm4 4h-2v-2h2v2zm9 0h-6a1 1 0 0 1 0-2h6a1 1 0 0 1 0 2z"></path></svg></span>
+                    <span class="bpx-player-block-filter-label"><span data-i18n="scroll">滚动</span></span>
+                </div>
+            
+                <div class="bpx-player-block-filter-type bpx-player-block-typeTopBottom" data-type="typeTopBottom">
+                    <span class="bpx-player-block-filter-image"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" style="enable-background:new 0 0 28 28" viewBox="0 0 28 28"><path d="M23 3H5a4 4 0 0 0-4 4v14a4 4 0 0 0 4 4h18a4 4 0 0 0 4-4V7a4 4 0 0 0-4-4zM9 9H7V7h2v2zm4 0h-2V7h2v2zm4 0h-2V7h2v2zm4 0h-2V7h2v2z"></path></svg></span>
+                    <span class="bpx-player-block-filter-label"><span data-i18n="pin">固定</span></span>
+                </div>
+            
+                <div class="bpx-player-block-filter-type bpx-player-block-typeColor" data-type="typeColor">
+                    <span class="bpx-player-block-filter-image"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" style="enable-background:new 0 0 28 28" viewBox="0 0 28 28"><path d="M17.365 11.118c0-.612-.535-1.147-1.147-1.147s-1.147.535-1.147 1.147c0 .611.535 1.147 1.147 1.147s1.147-.536 1.147-1.147zM12.93 9.665c-.764 0-1.376.611-1.376 1.3 0 .689.612 1.301 1.376 1.301s1.376-.612 1.376-1.301-.612-1.3-1.376-1.3zM9.794 11.883c-.764 0-1.376.612-1.376 1.3 0 .689.612 1.3 1.376 1.3s1.376-.611 1.376-1.3c.001-.688-.611-1.3-1.376-1.3zM10.023 15.171c-.612 0-1.147.536-1.147 1.148 0 .611.535 1.146 1.147 1.146s1.147-.535 1.147-1.146c.001-.612-.535-1.148-1.147-1.148zM17.823 12.953c-.611 0-1.147.535-1.147 1.147s.536 1.147 1.147 1.147c.612 0 1.148-.535 1.148-1.147s-.536-1.147-1.148-1.147z"></path><path d="M23.177 3H4.824C2.683 3 1 4.833 1 7.167v13.665C1 23.167 2.683 25 4.824 25h18.353C25.318 25 27 23.167 27 20.833V7.167C27 4.833 25.318 3 23.177 3zm-3.442 13.624c-1.987.612-4.129-.154-5.046.764-.918.918 1.529 1.606 0 2.219-1.988.84-7.341-.535-8.182-4.053-.841-3.441 2.905-6.5 5.888-7.035 2.906-.535 6.041.841 8.181 2.982 2.065 2.141.765 4.74-.841 5.123z"></path></svg></span>
+                    <span class="bpx-player-block-filter-label"><span data-i18n="colored">彩色</span></span>
+                </div>
+            
+                <div class="bpx-player-block-filter-type bpx-player-block-typeSpecial" data-type="typeSpecial">
+                    <span class="bpx-player-block-filter-image"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" style="enable-background:new 0 0 28 28" viewBox="0 0 28 28"><path d="M23 3H5a4 4 0 0 0-4 4v14a4 4 0 0 0 4 4h18a4 4 0 0 0 4-4V7a4 4 0 0 0-4-4zM7.849 11.669l.447-.828.492.782.894.184-.536.736.134.966-.85-.321-.804.414.045-.967L7 11.946l.849-.277zm3.352 7.101-1.43-.506L8.43 19v-1.565L7.357 16.33l1.43-.506.67-1.381.894 1.289 1.475.23-.894 1.289.269 1.519zm7.95-3.9-2.816-.69-2.458 1.565-.223-2.946-2.145-1.933 2.637-1.151L15.263 7l1.877 2.255 2.86.23-1.52 2.531.671 2.854z"></path></svg></span>
+                    <span class="bpx-player-block-filter-label"><span data-i18n="advanced">高级</span><span class="bpx-player-block-advanced-more"><svg xmlns="http://www.w3.org/2000/svg" fill="none" data-pointer="none" viewBox="0 0 14 14"><path fill="#9499A0" d="M7 2.041a4.958 4.958 0 1 0 0 9.917A4.958 4.958 0 0 0 7 2.04ZM1.167 7a5.833 5.833 0 1 1 11.666 0A5.833 5.833 0 0 1 1.166 7Z"></path><path fill="#9499A0" d="M7.51 9.296a.51.51 0 1 1-1.02 0 .51.51 0 0 1 1.02 0ZM7 5.177a.73.73 0 0 0-.729.729.437.437 0 1 1-.875 0 1.604 1.604 0 0 1 3.208 0 1.5 1.5 0 0 1-.36.991c-.096.118-.202.22-.297.307l-.081.074c-.067.061-.127.116-.187.177-.147.146-.199.25-.22.31a.5.5 0 0 0-.021.182.437.437 0 1 1-.875 0c0-.118.006-.284.07-.469.071-.206.204-.42.427-.642a6.966 6.966 0 0 1 .293-.274c.089-.083.159-.151.216-.22a.629.629 0 0 0 .16-.436.73.73 0 0 0-.729-.73Z"></path></svg></span></span>
+                </div>
+            </div>
+                </div>
+                <div class="bpx-player-dm-setting-left-radio">
+                    <span class="bpx-player-dm-setting-left-fs bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" checked="" aria-label="弹幕随屏幕缩放">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">弹幕随屏幕缩放</span>
+</label></div></span>
+                    <span class="bpx-player-dm-setting-left-ps bui bui-checkbox bui-dark" data-text="视频底部15%部分为空白保留区" data-i18n-attr="data-text:videoBottom15PercentBlankReservedArea"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" aria-label="防挡字幕">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">防挡字幕</span>
+</label></div></span>
+                    <span class="bpx-player-dm-setting-left-mask bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" checked="" aria-label="智能防挡弹幕">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">智能防挡弹幕</span>
+</label></div></span>
+                </div>
+
+                <div class="bpx-player-dm-setting-left-preventshade">
+                    <span class="bpx-player-dm-setting-left-preventshade-box" data-tooltip="2" data-text="视频底部15%部分为空白保留区" data-i18n-attr="data-text:videoBottom15PercentBlankReservedArea" data-position="top-left" data-change-mode="1"></span>
+                </div>
+                <div class="bpx-player-dm-setting-left-danmaku-mask" style="display: none">
+                    <span class="bpx-player-dm-setting-left-danmaku-mask-box"></span>
+                </div>
+                <div class="bpx-player-dm-setting-left-block-word">
+                            <div class="bpx-player-dm-setting-left-block-add" data-i18n="danmuViewingBlockKeywords">弹幕观看屏蔽词</div>
+                             <div class="bpx-player-dm-setting-left-block-sync" data-i18n="syncBlockList">同步屏蔽列表</div>
+                        </div>
+                
+                <div class="bpx-player-dm-setting-left-area bui bui-progress"><div class="bpx-player-dm-setting-left-area-title" data-i18n="danmuDisplayArea">显示区域</div><div class="bpx-player-dm-setting-left-area-content">
+                        <div class="bpx-player-dm-setting-ui-area"></div>
+                    </div><div class="bui-area"><div class="bui-progress-wrap">
+    <div class="bui-progress-bar" style="width: 75%;">
+        <span class="bui-progress-dot"></span>
+    </div>
+    
+    <div class="bui-progress-step">
+        
+        <div class="bui-progress-item" style="left:0%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:25%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:50%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:75%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:100%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+    </div>
+    
+    </div>
+
+
+<div class="bui-progress-val" style="width:60px">75%</div>
+
+</div></div>
+                    <div class="bpx-player-dm-setting-left-dmDensity" style="display: none;">
+                        <div class="bpx-player-dm-setting-left-dmDensity-left-area" data-i18n="danmuDensity">弹幕密度</div>
+                        <div class="bpx-player-dm-setting-left-dmDensity-right-area">
+                            <span class="bpx-player-dm-setting-density active" data-density="normal" data-i18n="normalDanmuDensity">正常</span>
+                            <span class="bpx-player-dm-setting-density" data-density="more" data-i18n="increasedDanmuDensity">较多</span>
+                            <span class="bpx-player-dm-setting-density" data-density="most" data-i18n="overlappingDanmuDensity">重叠</span>
+                        </div>
+                    </div>
+                
+                <div class="bpx-player-dm-setting-left-opacity bui bui-progress"><div class="bpx-player-dm-setting-left-opacity-title" data-i18n="danmuOpacity">不透明度</div><div class="bpx-player-dm-setting-left-opacity-content">
+                        <div class="bpx-player-dm-setting-ui-opacity"></div>
+                    </div><div class="bui-area"><div class="bui-progress-wrap">
+    <div class="bui-progress-bar" style="width: 100%;">
+        <span class="bui-progress-dot"></span>
+    </div>
+    
+    </div>
+
+
+<div class="bui-progress-val" style="width:60px">100%</div>
+
+</div></div>
+                <div class="bpx-player-dm-setting-left-fontsize bui bui-progress"><div class="bpx-player-dm-setting-left-fontsize-title" data-i18n="danmuFontSize">弹幕字号</div><div class="bpx-player-dm-setting-left-fontsize-content">
+                        <div class="bpx-player-dm-setting-ui-fontsize"></div>
+                    </div><div class="bui-area"><div class="bui-progress-wrap">
+    <div class="bui-progress-bar" style="width: 42%;">
+        <span class="bui-progress-dot"></span>
+    </div>
+    
+    </div>
+
+
+<div class="bui-progress-val" style="width:60px">100%</div>
+
+</div></div>
+                <div class="bpx-player-dm-setting-left-speedplus bui bui-progress"><div class="bpx-player-dm-setting-left-speedplus-title" data-i18n="danmuSpeed">弹幕速度</div><div class="bpx-player-dm-setting-left-speedplus-content">
+                        <div class="bpx-player-dm-setting-ui-speedplus"></div>
+                    </div><div class="bui-area"><div class="bui-progress-wrap">
+    <div class="bui-progress-bar" style="width: 50%;">
+        <span class="bui-progress-dot"></span>
+    </div>
+    
+    <div class="bui-progress-step">
+        
+        <div class="bui-progress-item" style="left:0%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:25%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:50%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:75%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+        <div class="bui-progress-item" style="left:100%">
+            <div class="bui-progress-lab"></div>
+        </div>
+        
+    </div>
+    
+    </div>
+
+
+<div class="bui-progress-val" style="width:60px">适中</div>
+
+</div></div>
+                <div class="bpx-player-dm-setting-left-more"><span class="bpx-player-dm-setting-left-more-text" data-i18n="advancedSettings">高级设置</span><span class="bpx-player-dm-setting-left-more-senior-text" data-i18n="newHardcoreMemberDanmuMode">全新【硬核会员弹幕模式】</span><span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" viewBox="0 0 16 16"><path d="m9.188 7.999-3.359 3.359a.75.75 0 1 0 1.061 1.061l3.889-3.889a.75.75 0 0 0 0-1.061L6.89 3.58a.75.75 0 1 0-1.061 1.061l3.359 3.358z"></path></svg></span>
+        </div>
+            </div></div>
+        
+        <div class="bui-panel-item" style="width: 266px; height: 250px;"><div class="bpx-player-dm-setting-right">
+                <div class="bpx-player-dm-setting-right-more">
+                    <span class="bpx-common-svg-icon"><svg xmlns="http://www.w3.org/2000/svg" xml:space="preserve" data-pointer="none" viewBox="0 0 16 16"><path d="m6.811 8.001 3.359-3.359a.75.75 0 1 0-1.061-1.061L5.22 7.471a.75.75 0 0 0 0 1.061l3.889 3.888a.75.75 0 1 0 1.061-1.061L6.811 8.001z"></path></svg></span>
+                    <span class="bpx-player-dm-setting-right-more-text" data-i18n="moreDanmuSettings">更多弹幕设置</span>
+                </div>
+                <div class="bpx-player-dm-setting-right-separator"></div>
+                <div class="bpx-player-dm-setting-right-speedsync">
+                    <span class="bpx-player-dm-setting-right-speedsync-box bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" aria-label="弹幕速度同步播放倍数">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">弹幕速度同步播放倍数</span>
+</label></div></span>
+                </div>
+                <div class="bpx-player-dm-setting-right-font">
+                    <div class="bpx-player-dm-setting-right-font-title" data-i18n="danmuFont">弹幕字体</div>
+                    <div class="bpx-player-dm-setting-right-font-content">
+                        <div class="bpx-player-dm-setting-right-font-content-fontfamily bui bui-select bui-dark"><div class="bui-area bui-select-bscroll"><div class="bui-select-wrap">
+    <div class="bui-select-border">
+        <div class="bui-select-header">
+            <span class="bui-select-result">黑体</span>
+            <span class="bui-select-arrow">
+                <span class="bui-select-arrow-down"></span>
+            </span>
+        </div>
+        <div class="bui-select-list-wrap" style="max-height: 100px; touch-action: pan-x; user-select: none; -webkit-user-drag: none; -webkit-tap-highlight-color: rgba(0, 0, 0, 0);">
+            <ul class="bui-select-list" style="transition-timing-function: cubic-bezier(0.165, 0.84, 0.44, 1); transition-duration: 0ms; transform: translate(0px, 0px) scale(1) translateZ(0px); height: 0px; border-width: medium; border-style: none; border-color: currentcolor; border-image: none;">
+                
+                <li class="bui-select-item
+                        
+                        
+                         bui-select-item-active" data-value="SimHei, 'Microsoft JhengHei'">黑体</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="SimSun">宋体</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="NSimSun">新宋体</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="FangSong">仿宋</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="'Microsoft YaHei'">微软雅黑</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="'Microsoft Yahei UI Light'">微软雅黑 Light</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="'Noto Sans CJK SC DemiLight'">Noto Sans DemiLight</li>
+                
+                <li class="bui-select-item
+                        
+                        
+                        " data-value="'Noto Sans CJK SC Regular'">Noto Sans Regular</li>
+                
+            </ul>
+        <div class="bscroll-vertical-scrollbar" style="position: absolute; z-index: 9999; width: 7px; bottom: 2px; top: 2px; right: 1px; overflow: hidden; opacity: 0; transition-duration: 500ms;"><div class="bscroll-indicator" style="box-sizing: border-box; position: absolute; background: rgba(0, 0, 0, 0.5); border: 1px solid rgba(255, 255, 255, 0.9); border-radius: 3px; width: 100%; transition-timing-function: cubic-bezier(0.165, 0.84, 0.44, 1); transition-duration: 0ms; transform: translateY(0px) translateZ(0px); height: 58px;"></div></div></div>
+    </div>
+</div></div></div>
+                    </div>
+                    <div class="bpx-player-dm-setting-right-font-bold">
+                        <span class="bpx-player-dm-setting-right-font-bold-box bui bui-checkbox bui-dark"><div class="bui-area"><input class="bui-checkbox-input" type="checkbox" aria-label="粗体">
+<label class="bui-checkbox-label">
+    <span class="bui-checkbox-icon bui-checkbox-icon-default"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="M8 6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2H8zm0-2h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-icon bui-checkbox-icon-selected"><svg xmlns="http://www.w3.org/2000/svg" data-pointer="none" viewBox="0 0 32 32"><path d="m13 18.25-1.8-1.8c-.6-.6-1.65-.6-2.25 0s-.6 1.5 0 2.25l2.85 2.85c.318.318.762.468 1.2.448.438.02.882-.13 1.2-.448l8.85-8.85c.6-.6.6-1.65 0-2.25s-1.65-.6-2.25 0l-7.8 7.8zM8 4h16c2.21 0 4 1.79 4 4v16c0 2.21-1.79 4-4 4H8c-2.21 0-4-1.79-4-4V8c0-2.21 1.79-4 4-4z"></path></svg></span>
+    <span class="bui-checkbox-name">粗体</span>
+</label></div></span>
+                    </div>
+                </div>
+                <div class="bpx-player-dm-setting-right-fontborder">
+                    <div class="bpx-player-dm-setting-right-fontborder-title" data-i18n="outlineType">描边类型</div>
+                    <div class="bpx-player-dm-setting-right-fontborder-content bui bui-radio bui-dark"><div class="bui-area"><div class="bui-radio-wrap bui-radio-button">
+    <div class="bui-radio-group" style="margin: 0 -4px;">
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="0" name="bui-radio5" checked="">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">重墨</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="1" name="bui-radio5">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">描边</span>
+        </span>
+    </label>
+    
+    <label class="bui-radio-item" style="margin: 0 4px;">
+        <input type="radio" class="bui-radio-input" value="2" name="bui-radio5">
+        <span class="bui-radio-label">
+            
+            <span class="bui-radio-text">45°投影</span>
+        </span>
+    </label>
+    
+    </div>
+</div></div></div>
+                </div>
+                <div class="bpx-player-dm-setting-right-separator"></div>
+                <div class="bpx-player-dm-setting-right-reset bui bui-button"><div class="bui-area bui-button-transparent"><span data-i18n="restoreDefaultSettings">恢复默认设置</span></div></div>
+            </div></div>
+        
+    </div>
+</div></div></div>
+        </div>

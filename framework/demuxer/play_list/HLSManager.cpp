@@ -577,10 +577,10 @@ namespace Cicada {
 
         for (auto &i : mStreamInfoList) {
             if (i->mPStream->getId() == from) {
-                // TODO: use seg start Time to Align the to stream seg num
-                // TODO: deal when from is switching
-                i->stopOnSegEnd = true;
-                i->mPStream->stopOnSegEnd(true);
+                /* 双 decoder 切换期间旧 HLS 流不能在分片边界提前关闭。
+                 * 目标路需要从 init/关键帧追到主时钟，旧路负责持续上屏；
+                 * 待 SuperMediaPlayer 确认目标帧已渲染后再 CloseStream。
+                 * stopOnSegEnd 仅用于普通 seek/非双路切换流程。 */
                 i->toStreamId = to;
                 break;
             }

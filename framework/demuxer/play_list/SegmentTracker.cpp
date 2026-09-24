@@ -364,9 +364,43 @@ namespace Cicada {
             // mediaPlayList only have one Representation
             if (pPlayList != nullptr) {
                 std::unique_lock<std::recursive_mutex> locker(mMutex);
+
+                /*
+                 * 【★ 先逐层判空，再解引用 ★】
+                 *
+                 * 下面这一行原来是连着三个 begin() 解引用：
+                 *     (*(*(*pPlayList->GetPeriods().begin())->GetAdaptSets().begin())
+                 *          ->getRepresentations().begin())
+                 * 只要解析出来的清单里**一个 Period / AdaptationSet / Representation 都没有**
+                 * （空媒体清单；只有 #EXT-X-MAP 而没有任何可用的 #EXTINF；字段缺失被解析器跳过…），
+                 * 取到的就是 end()，解引用 end() 是未定义行为 —— 实测表现是"点 HLS 播放
+                 * 直接闪退"，而且日志里一条错误都没有（崩在解引用上，后面的日志根本没机会打）。
+                 * 所以在这里宁可报错返回，也不拿 end() 去解。
+                 */
+                if (pPlayList->GetPeriods().empty()
+                    || ((*pPlayList->GetPeriods().begin())->GetAdaptSets().empty())
+                    || ((*(*pPlayList->GetPeriods().begin())->GetAdaptSets().begin())->getRepresentations().empty())) {
+                    AF_LOGE("playlist parsed but has no period/adaptation/representation：%s\n", uri.c_str());
+                    delete pPlayList;
+                    delete parser;
+                    return -EINVAL;
+                }
+
                 Representation *rep = (*(*(*pPlayList->GetPeriods().begin())->GetAdaptSets().begin())->getRepresentations().begin());
                 SegmentList *sList = rep->GetSegmentList();
                 SegmentList *pList = mRep->GetSegmentList();
+
+                /*
+                 * 清单里一条分片都没有：下面 init() 会拿 representation 的分片列表去
+                 * getFirstSeqNum()（SegmentTracker.cpp 里那段），null 一样是当场崩。
+                 */
+                if (sList == nullptr) {
+                    AF_LOGE("playlist has no segment list：%s\n", uri.c_str());
+                    delete pPlayList;
+                    delete parser;
+                    return -EINVAL;
+                }
+
                 mTargetDuration = rep->targetDuration;
                 mPartTargetDuration = rep->partTargetDuration;
 
@@ -516,15 +550,28 @@ namespace Cicada {
         }
 
         // start from a num
+        SegmentList *trackerList = (mRep != nullptr) ? mRep->GetSegmentList() : nullptr;
+
+        /*
+         * 【分片列表为空就不能往下走】下面两处会直接解引用它：
+         *     mCurSegNum = mRep->GetSegmentList()->getFirstSeqNum();
+         * 清单没读出分片（空清单 / 解析被跳过）时这是 null 解引用 —— 当场闪退。
+         * 这里报错返回，让上层把"这个源放不了"如实报出来。
+         */
+        if (trackerList == nullptr) {
+            AF_LOGE("no segment list on representation（清单里没有可用分片）\n");
+            return -EINVAL;
+        }
+
         if (mCurSegNum == 0) {
             std::unique_lock<std::recursive_mutex> locker(mMutex);
-            mCurSegNum = mRep->GetSegmentList()->getFirstSeqNum();
+            mCurSegNum = trackerList->getFirstSeqNum();
         }
 
         if (mCurSegPos > 0) {
             AF_LOGD("%d mCurSegNum = %llu , mCurSegPos = %llu \n", __LINE__, mCurSegNum,
                     mCurSegPos);
-            mCurSegNum = mRep->GetSegmentList()->getFirstSeqNum() + mCurSegPos;
+            mCurSegNum = trackerList->getFirstSeqNum() + mCurSegPos;
             AF_LOGD("%d mCurSegNum = %llu\n", __LINE__, mCurSegNum);
             mCurSegPos = 0;
         }

@@ -47,6 +47,13 @@ namespace Cicada {
 
         int64_t ClearPacketBeforePts(BUFFER_TYPE type, int64_t pts);
 
+        /*
+         * 一次性丢掉某个 streamIndex 的全部包（见 MediaPacketQueue::DropPacketsByStream）。
+         * 清晰度切换提交后用它把退役 Representation 的残留包一次清掉，避免解码循环
+         * 以主循环频率（实测 ~82 个/秒）逐个丢，把新路的包饿死。
+         */
+        int DropPacketsByStream(BUFFER_TYPE type, int streamIndex);
+
         int64_t GetKeyTimePositionBefore(BUFFER_TYPE type, int64_t pts);
 
         int64_t GetKeyTimePositionBeforeUtcTime(BUFFER_TYPE type, int64_t time);
@@ -54,6 +61,24 @@ namespace Cicada {
         void Rewind(BUFFER_TYPE type);
 
         int64_t GetFirstKeyPTS(BUFFER_TYPE type, int64_t pts);
+
+        /*
+         * pts 之后（含）的第一个关键帧。只在还没被读走的区间里找；
+         * 和 GetFirstKeyPTS() 不是一回事，后者给的是已经交给解码器那一段里
+         * “之前/当前”的关键帧。
+         * 【当前状态（2026-09-23）】原来的周期性“丢包追赶”已删除，内核里没有调用者，
+         * 作为公共 API 保留。
+         */
+        int64_t GetFirstKeyPTSAfter(BUFFER_TYPE type, int64_t pts);
+
+        /*
+         * pts 之前（含）的最后一个关键帧 pts。当时那次周期性“丢包追赶”要用它，
+         * 而不是 GetFirstKeyPTSAfter()。见 media_packet_queue.h 里的详细说明：
+         * 跳到“主时钟之后的第一个关键帧”会把画面停在时钟**前面**，反而永久冻死。
+         * 【当前状态（2026-09-23）】那套追赶已删除，本接口在内核里没有调用者，
+         * 作为公共 API 保留。
+         */
+        int64_t GetLastKeyPTSAtOrBefore(BUFFER_TYPE type, int64_t pts);
 
         int64_t GetPacketLastTimePos(BUFFER_TYPE type);
 

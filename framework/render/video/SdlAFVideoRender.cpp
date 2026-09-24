@@ -9,6 +9,10 @@
 #include <render/video/vsync/VSyncFactory.h>
 #include <thread>
 #include <utils/frame_work_log.h>
+#include <utils/globalSettings.h>
+#include <utils/property.h>
+#include <cstdlib>
+#include <string>
 #ifdef __APPLE__
 #include <base/media/PBAFFrame.h>
 #endif
@@ -18,6 +22,20 @@ static int SDLCALL SdlWindowSizeEventWatch(void *userdata, SDL_Event *event);
 static void sdlLogCb(void *userdata, int category, SDL_LogPriority priority, const char *message)
 {
     AF_LOGI("sdl log: %d %d %s", category, priority, message);
+}
+
+static float getRequestedRenderHz()
+{
+    /* 属性是浮点字符串（例如 "119.88"）；没设、解析失败、不是正数都当作"不改"。 */
+    const std::string value =
+        Cicada::globalSettings::getSetting().getProperty(PROPERTY_KEY_VIDEO_RENDER_HZ);
+
+    if (value.empty()) {
+        return 0;
+    }
+
+    const float hz = static_cast<float>(atof(value.c_str()));
+    return (hz > 1.0f && hz < 1000.0f) ? hz : 0;
 }
 
 SdlAFVideoRender::SdlAFVideoRender()
@@ -35,6 +53,12 @@ SdlAFVideoRender::~SdlAFVideoRender()
         SDL_DestroyTexture(mVideoTexture);
         mVideoTexture = nullptr;
         mInited = false;
+    }
+    if (mVideoNv12Texture != nullptr) {
+        SDL_DestroyTexture(mVideoNv12Texture);
+        mVideoNv12Texture = nullptr;
+        mVideoNv12Width = 0;
+        mVideoNv12Height = 0;
     }
     if (mRenderNeedRelease) {
         SDL_DelEventWatch(SdlWindowSizeEventWatch, this);
@@ -218,6 +242,23 @@ int SdlAFVideoRender::onVSync(int64_t tick)
 
 int SdlAFVideoRender::onVSyncInner(int64_t tick)
 {
+    /*
+     * 回调频率：默认 60Hz（配合 SDL 自己的呈现）。应用把
+     * PROPERTY_KEY_VIDEO_RENDER_HZ 设成显示器刷新率后跟着它走——零拷贝直通
+     * 时呈现由呈现方按刷新率节流，回调格子细一点，高刷屏上的 24fps 片源才不
+     * 会因为落在 60Hz 的格子上而出现 3:2 抖动。只读一次（第一次回调时属性
+     * 一定已经设好了）。
+     */
+    if (!mRenderHzApplied) {
+        mRenderHzApplied = true;
+        const float hz = getRequestedRenderHz();
+
+        if (hz > 0) {
+            mVSync->setHz(hz);
+            AF_LOGI("render callback rate set to %.2f Hz\n", hz);
+        }
+    }
+
     std::unique_ptr<IAFFrame> frame;
     {
         std::unique_lock<std::mutex> lock(mRenderMutex);
@@ -246,12 +287,22 @@ int SdlAFVideoRender::onVSyncInner(int64_t tick)
     }
     if (!rendered) {
         IAFFrame::videoInfo &videoInfo = frame->getInfo().video;
-        recreateTextureIfNeed(videoInfo.width, videoInfo.height);
+        /*
+         * mVideoWidth/mVideoHeight 只由 recreateTextureIfNeed() 维护，而 NV12
+         * 直通根本不用那张 IYUV 纹理，所以那条路径下必须用帧自己的尺寸，
+         * 否则 srcRect 会是 0x0，更新等于没做（同样是整屏绿色）。
+         */
+        const bool nv12Frame = (videoInfo.format == AF_PIX_FMT_NV12);
+
+        if (!nv12Frame) {
+            recreateTextureIfNeed(videoInfo.width, videoInfo.height);
+        }
+
         SDL_Rect srcRect{};
         srcRect.x = 0;
         srcRect.y = 0;
-        srcRect.w = mVideoWidth;
-        srcRect.h = mVideoHeight;
+        srcRect.w = nv12Frame ? videoInfo.width : mVideoWidth;
+        srcRect.h = nv12Frame ? videoInfo.height : mVideoHeight;
         int angle = (mRotate + mVideoRotate) % 360;
         SDL_RendererFlip flip = convertFlip();
         SDL_Rect dstRect = getDestRet();
@@ -260,18 +311,66 @@ int SdlAFVideoRender::onVSyncInner(int64_t tick)
             uint8_t **data = frame->getData();
             int *lineSize = frame->getLineSize();
 
-            if (mVideoRender != nullptr && mVideoTexture != nullptr) {
-                SDL_UpdateYUVTexture(mVideoTexture, &srcRect, data[0], lineSize[0], data[1], lineSize[1], data[2], lineSize[2]);
-                SDL_RenderClear(mVideoRender);
-                SDL_RenderCopyEx(mVideoRender, //SDL_Renderer*          renderer,
-                                 mVideoTexture,//SDL_Texture*           texture,
-                                 &srcRect,     //const SDL_Rect*        srcrect,
-                                 &dstRect,     //const SDL_Rect*        dstrect,
-                                 angle,        //const double           angle,
-                                 nullptr,      //const SDL_Point*       center,
-                                 flip          //const SDL_RendererFlip flip
-                );
-                SDL_RenderPresent(mVideoRender);
+            if (mVideoRender != nullptr && data != nullptr && lineSize != nullptr && data[0] != nullptr) {
+                /*
+                 * 硬解 copy-back 直通时解码器交来的是 NV12：两块平面（Y 一块、
+                 * UV 交错一块），用 SDL_UpdateYUVTexture() 传三个平面会直接
+                 * 失败（"Parameter 'Vplane' is invalid"），纹理保持全零，
+                 * 而 Y=U=V=0 恰好就是整屏绿色。所以这里按格式分开处理。
+                 */
+                if (videoInfo.format == AF_PIX_FMT_NV12 && data[1] != nullptr) {
+                    if (mVideoNv12Texture == nullptr ||
+                        mVideoNv12Width != videoInfo.width || mVideoNv12Height != videoInfo.height) {
+                        if (mVideoNv12Texture != nullptr) {
+                            SDL_DestroyTexture(mVideoNv12Texture);
+                            mVideoNv12Texture = nullptr;
+                        }
+
+                        /* SDL 的 D3D11 后端用 UpdateSubresource 更新 NV12，
+                         * 需要 DEFAULT 用法，所以先按 STATIC 建，不行再退。 */
+                        mVideoNv12Texture = SDL_CreateTexture(mVideoRender, SDL_PIXELFORMAT_NV12,
+                                                              SDL_TEXTUREACCESS_STATIC,
+                                                              videoInfo.width, videoInfo.height);
+
+                        if (mVideoNv12Texture == nullptr) {
+                            AF_LOGW("SDL_PIXELFORMAT_NV12 with STATIC access failed (%s), trying STREAMING\n",
+                                    SDL_GetError());
+                            mVideoNv12Texture = SDL_CreateTexture(mVideoRender, SDL_PIXELFORMAT_NV12,
+                                                                  SDL_TEXTUREACCESS_STREAMING,
+                                                                  videoInfo.width, videoInfo.height);
+                        }
+
+                        mVideoNv12Width = videoInfo.width;
+                        mVideoNv12Height = videoInfo.height;
+
+                        if (mVideoNv12Texture == nullptr) {
+                            AF_LOGE("NV12 texture could not be created! SDL_Error: %s\n", SDL_GetError());
+                        }
+                    }
+
+                    if (mVideoNv12Texture != nullptr) {
+                        if (SDL_UpdateNVTexture(mVideoNv12Texture, &srcRect,
+                                                data[0], lineSize[0], data[1], lineSize[1]) != 0) {
+                            AF_LOGE("SDL_UpdateNVTexture failed: %s\n", SDL_GetError());
+                        }
+
+                        SDL_RenderClear(mVideoRender);
+                        SDL_RenderCopyEx(mVideoRender, mVideoNv12Texture, &srcRect, &dstRect, angle, nullptr, flip);
+                        SDL_RenderPresent(mVideoRender);
+                    }
+                } else if (mVideoTexture != nullptr) {
+                    SDL_UpdateYUVTexture(mVideoTexture, &srcRect, data[0], lineSize[0], data[1], lineSize[1], data[2], lineSize[2]);
+                    SDL_RenderClear(mVideoRender);
+                    SDL_RenderCopyEx(mVideoRender, //SDL_Renderer*          renderer,
+                                     mVideoTexture,//SDL_Texture*           texture,
+                                     &srcRect,     //const SDL_Rect*        srcrect,
+                                     &dstRect,     //const SDL_Rect*        dstrect,
+                                     angle,        //const double           angle,
+                                     nullptr,      //const SDL_Point*       center,
+                                     flip          //const SDL_RendererFlip flip
+                    );
+                    SDL_RenderPresent(mVideoRender);
+                }
             }
         }
     }

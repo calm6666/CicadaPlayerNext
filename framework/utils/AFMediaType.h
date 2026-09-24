@@ -79,6 +79,57 @@ enum AFCodecID {
     //    AF_CODEC_ID_TEXT,
     AF_CODEC_ID_ASS,
     //    AF_CODEC_ID_SRT,
+
+    /*
+     * Audio codecs that the FFmpeg build has always contained but that the
+     * framework had no id for. They are appended at the END on purpose: the
+     * places they logically belong are still commented out above, but
+     * uncommenting one of those would shift every later enumerator, and this
+     * value travels inside Stream_meta. Appending keeps every existing id
+     * stable.
+     *
+     * Each id needs three coordinated edits, otherwise the codec is compiled
+     * into FFmpeg but the framework never asks for it and playback fails with
+     * codec_error_audio_not_support (-513):
+     *   1. here,
+     *   2. a case in AVCodecID2CodecID  (ffmpeg_utils.c)
+     *   3. a row in codec_pair_table    (ffmpeg_utils.c)
+     *
+     * FLAC in an MKV is the case that surfaced this: the demuxer reported
+     * AV_CODEC_ID_FLAC, the reverse map had no case for it, the stream came out
+     * as AF_CODEC_ID_NONE, and avcodec_find_decoder() was handed
+     * AV_CODEC_ID_NONE.
+     */
+    AF_CODEC_ID_FLAC,
+    AF_CODEC_ID_VORBIS,
+    AF_CODEC_ID_ALAC,
+    AF_CODEC_ID_DCA,
+    AF_CODEC_ID_APE,
+    AF_CODEC_ID_WAVPACK,
+    AF_CODEC_ID_TTA,
+    AF_CODEC_ID_WMAV1,
+    AF_CODEC_ID_WMAV2,
+    AF_CODEC_ID_WMAPRO,
+    AF_CODEC_ID_TRUEHD,
+    AF_CODEC_ID_MLP,
+    AF_CODEC_ID_SPEEX,
+    AF_CODEC_ID_AMR_NB,
+    AF_CODEC_ID_AMR_WB,
+    AF_CODEC_ID_SBC,
+    AF_CODEC_ID_ATRAC3,
+    AF_CODEC_ID_COOK,
+    AF_CODEC_ID_RA_144,
+    AF_CODEC_ID_NELLYMOSER,
+    AF_CODEC_ID_ADPCM,
+    AF_CODEC_ID_PCM_S24LE,
+    AF_CODEC_ID_PCM_S24BE,
+    AF_CODEC_ID_PCM_S32LE,
+    AF_CODEC_ID_PCM_S32BE,
+    AF_CODEC_ID_PCM_F32LE,
+    AF_CODEC_ID_PCM_F64LE,
+    AF_CODEC_ID_PCM_S8,
+    AF_CODEC_ID_PCM_MULAW,
+    AF_CODEC_ID_PCM_ALAW,
 };
 
 
@@ -130,8 +181,14 @@ enum AFPixelFormat {
     AF_PIX_FMT_YUV420P10BE = 63,///< planar YUV 4:2:0, 15bpp, (1 Cr & Cb sample per 2x2 Y samples), big-endian
     AF_PIX_FMT_YUV420P10LE,     ///< planar YUV 4:2:0, 15bpp, (1 Cr & Cb sample per 2x2 Y samples), little-endian
 
-    AF_PIX_FMT_D3D11 = 900,
+    /*
+     * 硬件解码器的“原生句柄”格式（不是 CPU 可读的像素数据，data[] 里放的是
+     * GPU 对象/ID，绝对不能交给 swscale 或 QImage）。
+     * 值从 900 起，刻意避开上面那些与 AV_PIX_FMT_* 数值对齐的普通格式。
+     */
+    AF_PIX_FMT_D3D11 = 900,       ///< data[0] = ID3D11Texture2D*，data[1] = 数组切片号
     AF_PIX_FMT_DXVA2_VLD,
+    AF_PIX_FMT_VAAPI = 902,       ///< Linux：data[3] = VASurfaceID（VAAPI 表面）
 
     AF_PIX_FMT_APPLE_PIXEL_BUFFER = 1000,
     AF_PIX_FMT_CICADA_AF,         //framework VideoFrame

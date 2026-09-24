@@ -418,19 +418,45 @@ namespace Cicada {
 
         if (index == MC_ERROR) {
             AF_LOGE("dequeue_in error.");
-            // TODO: value
-            return -ENOSPC;
-        } else if (index == MC_INFO_TRYAGAIN) {
-            // 对齐 ExoPlayer：codec 失效（典型：surface 销毁后 flush 导致华为
-            // codec 进入僵尸态，dequeueInput 永远 TRY_AGAIN）时，检测到连续
-            // 拿不到输入缓冲即优雅关闭解码器并结束解码线程，由上层
-            // （demo 的 reload/重建）恢复；避免在同一包上死循环刷屏
-            mInputTryAgainCount++;
-            if (mInputTryAgainCount > 100) {   // 100 × ~10ms ≈ 1 秒
-                AF_LOGE("codec input stuck, close decoder for recreation");
+            /*
+             * 输入侧硬错误说明这个 codec 已经不能用了。这里不能只返回一个负值：
+             * ActiveDecoder::decode_func() 对任何非 -EAGAIN 的返回值都会把当前包
+             * 丢掉并继续取下一包，于是一次故障会以每秒数百包的速度把视频包队列
+             * 吃空 —— 队列队首在音频时钟不动（暂停中）时凭空前进几十秒，恢复后
+             * 每一帧都被判成"太早"而不上屏（2026-09-23 22:32 日志：errorFrames
+             * 恰好 1001，25fps 即 40.0 秒，正对应实测的超前 43996 ms）。
+             * 按本文件已有的约定优雅关闭并结束解码线程：最多只影响当前这一包，
+             * 剩下的队列保持原样，交给上层重建解码器后从正确位置继续。
+             * 音频路不这样做：音频没有重建通路，关掉它只会让声音彻底消失。
+             */
+            if (codecType == CODEC_VIDEO) {
                 close_decoder();
                 return STATUS_EOS;
             }
+
+            return -ENOSPC;
+        } else if (index == MC_INFO_TRYAGAIN) {
+            /*
+             * 这里以前连续约 1 秒拿不到输入缓冲就 close_decoder() 结束解码线程。
+             * 那个判据站不住：拿不到输入缓冲最常见的原因恰恰是正常背压 —— codec
+             * 的输出缓冲还没被释放时它当然不会再给输入缓冲，而暂停期间帧队列
+             * 不再消费，输出缓冲必然一直满着。于是"暂停超过 1 秒"必然把视频
+             * 解码器拆掉（2026-09-23 22:37:56.581 按下暂停，22:37:59.690 就打了
+             * codec input stuck，此后没有任何路径重建它，恢复后画面永久冻住、
+             * 声音正常、位置照走）。
+             * 主流播放器不用计时器判 codec 死活（ExoPlayer 只由 codec 报错触发
+             * releaseCodec 加 maybeInitCodec）；真正僵死的 codec 由上层
+             * doRender() 里那条"有包却不消费、且长时间没有帧真的上屏"的探测
+             * 重建 —— 那条判据不丢包，也不会把一次暂停误判成故障。
+             * 所以这里只回报 -EAGAIN：包不丢、解码器不拆，等缓冲被释放后继续。
+             */
+            mInputTryAgainCount++;
+
+            if (mInputTryAgainCount == 100) {
+                AF_LOGW("codec has had no input buffer for about 1 s (output buffers still held: "
+                        "paused or back-pressured) — keep waiting, no teardown\n");
+            }
+
             return -EAGAIN;
         }
 

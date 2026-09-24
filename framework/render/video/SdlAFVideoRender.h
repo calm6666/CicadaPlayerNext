@@ -90,6 +90,14 @@ private:
     bool mInited = false;
     SDL_Window *mVideoWindow = nullptr;
     SDL_Texture *mVideoTexture = nullptr;
+    /*
+     * 硬解 copy-back 直通 NV12 时用的两平面纹理（见 onVSyncInner）。只有
+     * 解码器确实交来 AF_PIX_FMT_NV12 时才会创建；默认关闭，因为默认路径会
+     * 先转成 YUV420P。
+     */
+    SDL_Texture *mVideoNv12Texture = nullptr;
+    int mVideoNv12Width = 0;
+    int mVideoNv12Height = 0;
     SDL_Renderer *mVideoRender = nullptr;
     bool mWindowNeedRelease{false};
     bool mRenderNeedRelease{false};
@@ -113,6 +121,12 @@ private:
 
     std::mutex mRenderMutex;
     std::unique_ptr<IVSync> mVSync{nullptr};
+
+    /*
+     * 渲染回调频率只从 property 里读一次（第一次回调时读，那时属性一定已经由
+     * 应用设好了），见 onVSyncInner 和 PROPERTY_KEY_VIDEO_RENDER_HZ。
+     */
+    bool mRenderHzApplied = false;
 
 #ifdef __WINDOWS__
     std::mutex mWindowSizeChangeMutex{};

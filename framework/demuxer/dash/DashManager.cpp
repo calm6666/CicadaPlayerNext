@@ -84,6 +84,10 @@ int DashManager::init()
         i->mPStream->enableCache(bEnableCache);
     }
 
+    /* 冷路径一行：清单里的码率档数（清晰度菜单就是从这里出来的） */
+    AF_LOGI("[dash] 清单里有 %d 条视频档、共 %d 条流（最低档 id=%d）\n",
+            videoStreamCount, (int) mStreamInfoList.size(), mLowestBandwidthVideoId);
+
     if (mStreamInfoList.size() == 1) {
         ret = (*mStreamInfoList.begin())->mPStream->open();
         if (ret >= 0) {
@@ -556,10 +560,15 @@ int DashManager::SwitchStreamAligned(int from, int to)
 
     for (auto &i : mStreamInfoList) {
         if (i->mPStream->getId() == from) {
-            // TODO: use seg start Time to Align the to stream seg num
-            // TODO: deal when from is switching
-            i->stopOnSegEnd = true;
-            i->mPStream->stopOnSegEnd(true);
+            /*
+             * 清晰度切换由 SuperMediaPlayer 的双路 decoder 状态机完成：
+             * 旧流必须继续 selected 并持续产包，直到目标 decoder 的首帧
+             * 真正送入渲染器。这里若设置 stopOnSegEnd，Seek() 会在旧流
+             * 到达分片边界时立即 CloseStream，pending decoder 就会失去
+             * 时钟对齐期间所需的旧路保护，表现为卡帧、EOS 或音画不同步。
+             * 普通 seek 仍然保留原有 stopOnSegEnd 路径；这里只记录目标，
+             * 实际关闭由 SuperMediaPlayer::RenderVideo() 在提交后执行。
+             */
             i->toStreamId = to;
             break;
         }
@@ -638,13 +647,31 @@ int64_t DashManager::getBufferDuration(int index) const
 
 std::list<AdaptationSet *> DashManager::FindSuitableAdaptationSets(Period* period)
 {
+    /*
+     * 【为什么要收下**全部**视频/音频 AdaptationSet，而不是"每种各挑第一条"】
+     *
+     * 下面 DashManager::init() 的模型是"**每个 Representation 一条流**"（每档清晰度 =
+     * 一条可切换的流，播放器那三档清晰度菜单读的就是这个流列表）。
+     *
+     * 而 MPD 有两种写法：
+     *   * 常见写法：一个 AdaptationSet 里挂整条清晰度阶梯（多条 Representation）——
+     *     只挑第一条 AdaptationSet 也够用，因为阶梯都在它里面；
+     *   * 另一种（参考实现 dash.js 的 manifest-to-dash 就明确这么写："每个 Representation
+     *     单独一个 AdaptationSet，与 MPD 原始格式一致"）：**一档一个 AdaptationSet**。
+     *
+     * 旧代码遇到第一条视频就 `continue`，于是第二种写法下**只剩下第一档**（而且是文件里
+     * 排最前的那档）。用户实测：播 DASH 时清晰度菜单里只有"自动 + 2160p"，其余档位全没了。
+     *
+     * 所以这里把视频/音频的 AdaptationSet 全部收进来 —— 每档都会在 init() 里变成一条流，
+     * 清晰度菜单自然就全了。第一种写法行为不变（本来就只有一个视频 AdaptationSet）。
+     */
     std::list<AdaptationSet *> &adaptSetList = period->GetAdaptSets();
-    AdaptationSet *suitableVideo = nullptr;
-    AdaptationSet *suitableAudio = nullptr;
+    std::list<AdaptationSet *> ret;
 
     for (auto &ait : adaptSetList) {
         auto representList = ait->getRepresentations();
         std::string mimeType = ait->getMimeType();
+
         if (mimeType.empty()) {
             for (auto &rit : representList) {
                 mimeType = rit->getMimeType();
@@ -653,26 +680,14 @@ std::list<AdaptationSet *> DashManager::FindSuitableAdaptationSets(Period* perio
                 }
             }
         }
-        if (mimeType == "video/mp4") {
-            if (suitableVideo) {
-                continue;
-            }
-            suitableVideo = ait;
-        } else if (mimeType == "audio/mp4") {
-            if (suitableAudio) {
-                continue;
-            }
-            suitableAudio = ait;
+
+        /* 判据和 Representation::updateStreamType() 一致（那边也是比这两个字符串） */
+        if (mimeType == "video/mp4" || mimeType == "audio/mp4") {
+            ret.push_back(ait);
         }
         // TODO: subtitle
     }
-    std::list<AdaptationSet *> ret;
-    if (suitableVideo) {
-        ret.push_back(suitableVideo);
-    }
-    if (suitableAudio) {
-        ret.push_back(suitableAudio);
-    }
+
     return ret;
 }
 UTCTimer *DashManager::getUTCTimer()

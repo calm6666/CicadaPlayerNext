@@ -8,6 +8,7 @@
 #ifndef SegmentPart_h
 #define SegmentPart_h
 
+#include <cstdint>
 #include <string>
 
 namespace Cicada {

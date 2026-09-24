@@ -30,6 +30,9 @@ set(SOURCE_FILES
         cJSON.c
         globalSettings.cpp
         property.cpp
+        # 硬件解码设备桥：平台集成（Qt）把已有的 GPU 设备交给 FFmpeg，零拷贝前提。
+        hwDeviceBridge.cpp
+        hwDeviceBridge.h
         err.cpp
         err.h
         CicadaType.h

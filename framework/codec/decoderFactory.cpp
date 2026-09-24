@@ -5,6 +5,12 @@
 #include <drm/DrmInfo.h>
 #include "decoderFactory.h"
 
+#if defined(__APPLE__)
+/* 判断要不要走 FFmpeg 的 videotoolbox 硬解（零拷贝用），见 property.h。 */
+#include <utils/globalSettings.h>
+#include <utils/property.h>
+#endif
+
 #ifdef ANDROID
 
     #include "Android/mediaCodecDecoder.h"
@@ -50,6 +56,18 @@ unique_ptr<IDecoder> decoderFactory::createBuildIn(const AFCodecID &codec, uint6
 #endif
 #endif
 #ifdef __APPLE__
+        /*
+         * Apple 默认用自研的 AFVTBDecoder。但如果应用显式打开了
+         * "video.decoder.ffmpeg_videotoolbox"（Qt 集成为了零拷贝会打开它），
+         * 就走 FFmpeg 的 videotoolbox hwaccel：那条路交出来的是 CVPixelBuffer，
+         * macOS 上可以用 CVMetalTextureCache 直接包成 MTLTexture 交给 Metal
+         * 场景图，硬解 + 零拷贝。默认不打开，其它 Apple 应用的行为完全不变。
+         */
+        if (globalSettings::getSetting().getProperty(PROPERTY_KEY_DECODER_FFMPEG_VT) == "ON") {
+            return unique_ptr<IDecoder>(new avcodecDecoder());
+        }
+#endif
+#ifdef __APPLE__
 #ifdef ENABLE_VTB_DECODER
 
         if (AFVTBDecoder::is_supported(codec)) {
@@ -69,18 +87,24 @@ unique_ptr<IDecoder> decoderFactory::createBuildIn(const AFCodecID &codec, uint6
         }
 #endif
 #endif
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__linux__)
         /*
-         * Windows has no separate hardware decoder class: FFmpeg's D3D11VA
-         * hwaccel runs inside avcodecDecoder, which downloads each decoded
-         * surface back to system memory for the RAM based SDL renderer.
+         * Neither Windows nor Linux has a separate hardware decoder class:
+         * FFmpeg's hwaccel runs inside avcodecDecoder, with the device type
+         * chosen per platform (D3D11VA on Windows, VAAPI on Linux - see
+         * CICADA_HW_DEVICE_TYPE in avcodecDecoder.h) and every decoded surface
+         * downloaded back to system memory.
          *
-         * avcodecDecoder::open() decides whether the hwaccel is actually
-         * available and reports DECFLAG_SW when it is not, so the caller in
-         * SuperMediaPlayer transparently retries with CreateVideoDecoder(false).
-         * That is why every codec can be handed to it here instead of keeping a
-         * hardcoded list: with the stock prebuilt libffmpeg.dll
-         * (--disable-hwaccels) it simply always falls back to software.
+         * avcodecDecoder::open() decides at run time, through
+         * avcodec_get_hw_config(), whether the hwaccel is actually present in the
+         * linked FFmpeg, and otherwise keeps decoding in software. That is why
+         * every codec can be handed to it instead of keeping a hardcoded list.
+         *
+         * Leaving Linux out of this branch was a real bug: a DECFLAG_HW request
+         * fell through to the software case below, matched nothing, and returned
+         * nullptr, so CreateVideoDecoder reported codec_error_video_not_support
+         * (-512) and the framework quietly switched to the software decoder -
+         * the VAAPI support in avcodecDecoder was never reached at all.
          */
         return unique_ptr<IDecoder>(new avcodecDecoder());
 #endif

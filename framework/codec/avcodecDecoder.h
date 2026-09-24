@@ -25,6 +25,7 @@ typedef struct cicada_decoder_handle_v_t cicada_decoder_handle_v;
  *
  *   Windows : D3D11VA / AV_PIX_FMT_D3D11
  *   Linux   : VAAPI   / AV_PIX_FMT_VAAPI
+ *   macOS   : VideoToolbox / AV_PIX_FMT_VIDEOTOOLBOX（**默认关闭**，见下）
  *
  * Both are detected at run time through avcodec_get_hw_config(), so a build
  * whose FFmpeg has no such hwaccel (the Windows D3D11VA list is compiled out of
@@ -32,20 +33,47 @@ typedef struct cicada_decoder_handle_v_t cicada_decoder_handle_v;
  * missing) simply reports no hardware configuration and falls back to software.
  * Nothing extra needs to be compiled out on either side.
  *
- * There is no equivalent block for Android, Apple or OHOS: those platforms have
- * dedicated decoder classes in framework/codec/{Android,Apple,OHOS}.
+ * Apple 是特例：framework/codec/Apple 有一套自己的 AFVTBDecoder（直接用
+ * VideoToolbox 框架），历来不走 FFmpeg 的 hwaccel。macOS 上要做零拷贝必须拿到
+ * CVPixelBuffer，所以这里也定义了 VideoToolbox 的宏，但**只有**应用显式打开全局
+ * 设置 "video.decoder.ffmpeg_videotoolbox" 时才会激活（Qt 集成为了零拷贝会打开
+ * 它），其它 Apple 应用的行为与改动前完全一致 —— 这层运行时开关在
+ * initHwDecoder() 的开头。
+ *
+ * There is no equivalent block for Android or OHOS: those platforms have
+ * dedicated decoder classes in framework/codec/{Android,OHOS}.
  */
 #if defined(_WIN32)
 #define CICADA_HW_DEVICE_TYPE AV_HWDEVICE_TYPE_D3D11VA
 #define CICADA_HW_PIX_FMT     AV_PIX_FMT_D3D11
 #define CICADA_HW_NAME        "D3D11VA"
+/* 只有 D3D11 需要"借用外部设备"（Qt RHI 的 ID3D11Device）。 */
+#define CICADA_HW_SUPPORTS_EXTERNAL_DEVICE 1
 #elif defined(__linux__)
 #define CICADA_HW_DEVICE_TYPE AV_HWDEVICE_TYPE_VAAPI
 #define CICADA_HW_PIX_FMT     AV_PIX_FMT_VAAPI
 #define CICADA_HW_NAME        "VAAPI"
+#elif defined(__APPLE__)
+/*
+ * VideoToolbox：解码结果是 CVPixelBuffer（AVFrame::data[3]），macOS 上可以用
+ * CVMetalTextureCache 直接包成 MTLTexture 交给 Qt 的 Metal 场景图，硬件解码 +
+ * 零拷贝。默认不激活，理由见上面的大段说明。
+ */
+#define CICADA_HW_DEVICE_TYPE AV_HWDEVICE_TYPE_VIDEOTOOLBOX
+#define CICADA_HW_PIX_FMT     AV_PIX_FMT_VIDEOTOOLBOX
+#define CICADA_HW_NAME        "VideoToolbox"
 #endif
 
 namespace Cicada{
+    /*
+     * 硬解下载缓冲池的槽数。池子存在的唯一目的是别再每帧 malloc/munmap
+     * 12.4MB（4K 一帧的大小）：一轮有 4~5 帧同时在解码器输出队列、播放器帧
+     * 队列和渲染器手里，所以取 6 个槽就能稳定命中一个已经没人持有的缓冲。
+     * 槽位仍然被占用时不会强行复用，而是照旧重新分配，绝不会把正在上屏的
+     * 数据改花。
+     */
+#define CICADA_HW_SW_FRAME_POOL 6
+
     class CICADA_CPLUS_EXTERN avcodecDecoder : public ActiveDecoder, private codecPrototype {
     private:
         struct decoder_handle_v {
@@ -58,7 +86,7 @@ namespace Cicada{
              * Hardware decoding (copy-back) state.
              *
              * The decoder feeds the GPU through hwDeviceRef, and each decoded
-             * surface is downloaded back to system memory (swFrame) so the
+             * surface is downloaded back to system memory (swFrames) so the
              * existing SDL renderer keeps working unchanged.
              *
              * hwDecodeActive stays false - and none of these are used - when the
@@ -69,13 +97,32 @@ namespace Cicada{
             AVBufferRef *hwDeviceRef;
             enum AVPixelFormat hwPixFmt;
             enum AVPixelFormat swPixFmt;
-            AVFrame *swFrame;
+            /*
+             * 下载缓冲池：每帧下载出来的 NV12 放在其中一个槽里，轮转使用。
+             * 槽里的缓冲只在“没人再持有它”时才被覆盖，否则重新分配，因此
+             * 交给渲染器的帧不会被后来的帧改花。
+             */
+            AVFrame *swFrames[CICADA_HW_SW_FRAME_POOL];
+            int swFrameIndex;
             AVFrame *convFrame;
             // Kept as void* so this header does not have to pull in
             // libswscale/swscale.h; cast to SwsContext* at the single use site.
             void *swsCtx;
             bool hwDecodeActive;
             bool hwDownloadLogged;
+            /*
+             * 是否把下载后的 NV12 直接交给渲染器（跳过 swscale 转换）。
+             * 由全局设置 "video.render.hw.copyback_nv12" 决定，只有明确声明
+             * 自己能吃 NV12 的呈现方（cmdline 的 onVideoRendering）才会打开，
+             * 默认关闭即维持原来的 YUV420P 行为。
+             */
+            bool outputNv12;
+            /*
+             * 零拷贝直通：解码出来的 GPU 纹理不下载，原样交给上层去画。
+             * 由全局设置 "video.render.hw.direct_texture" 打开，只有自己会用
+             * D3D11 呈现解码纹理的调用方（cmdline -direct）才应该打开。
+             */
+            bool directOutput;
 #endif
             int flags;
         };

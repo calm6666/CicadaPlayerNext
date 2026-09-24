@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  Windows 应用程序清单（appQtPlayer.exe 用，见 CMakeLists.txt 里那个 target_sources）。
+
+  为什么必须要有它：
+    * **Common-Controls v6**：没有这一条依赖时，进程拿到的是"经典"视觉样式，
+      系统原生对话框（打开文件那个 #32770）会画成 Win95 那种方框按钮 + 经典列表 ——
+      看起来就像"Qt 自己画的文件选择器"，其实它一直是系统原生的那个。
+      加上这一段之后才是资源管理器那套现代外观（这正是用户反馈"怎么是 Qt 的选择器"的原因）。
+      这一条**只能在清单里给**：激活上下文没法用代码设置。
+    * **PerMonitorV2**：多屏不同缩放时按显示器各自的比例渲染。Qt 侧自己也会设
+      DPI awareness，这里写上是标准做法，两者一致不冲突。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <assemblyIdentity type="win32" name="CicadaPlayer.QtPlayer" version="1.0.0.0"
+                    processorArchitecture="*"/>
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity type="win32" name="Microsoft.Windows.Common-Controls" version="6.0.0.0"
+                        processorArchitecture="*" publicKeyToken="6595b64144ccf1df" language="*"/>
+    </dependentAssembly>
+  </dependency>
+  <application xmlns="urn:schemas-microsoft-com:asm.v3">
+    <windowsSettings>
+      <dpiAwareness xmlns="http://schemas.microsoft.com/SMI/2016/WindowsSettings">PerMonitorV2</dpiAwareness>
+    </windowsSettings>
+  </application>
+</assembly>

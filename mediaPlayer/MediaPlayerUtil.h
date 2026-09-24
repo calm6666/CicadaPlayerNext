@@ -10,6 +10,7 @@
 #define ApsaraPlayerUtil_h
 
 #include <atomic>
+#include <cstdint>
 #include <string>
 //#include "render_engine/math/geometry.h"
 

@@ -439,6 +439,8 @@ namespace Cicada {
 
         static void streamChangedSucCallback(int64_t type, const void *Info, void *userData);
 
+        static void videoQualitySwitchCallback(int64_t status, int64_t streamIndex, const void *desc, void *userData);
+
         static void PlayerSeeking(int64_t seekInCache, void *userData);
 
         static void PlayerSeekEnd(int64_t seekInCache, void *userData);

@@ -122,10 +122,30 @@ void UrlUtils::parseUrl(URLComponents &urlComponents, const std::string &url)
     urlComponents.port = port;
 }
 
-// OHOS uses musl, which already declares strlcpy in <string.h>; defining our
-// own static one here fails with "static declaration follows non-static
-// declaration". (clang targets OHOS as *-linux-ohos, so __linux__ is set.)
-#if defined(WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__))
+/*
+ * Define strlcpy only where the C library does not already provide one.
+ *
+ *   - the Windows CRT has none, so it is always needed there;
+ *   - glibc only gained strlcpy in 2.38 (Ubuntu 24.04 ships 2.39). From that
+ *     version <string.h> declares it, and this static definition then collides
+ *     with the extern declaration:
+ *       UrlUtils.cpp:130: error: 'size_t strlcpy(char*, const char*, size_t)'
+ *       was declared 'extern' and later 'static' [-fpermissive]
+ *     This is not related to any forced include: this file includes <cstring>
+ *     itself a few lines above, so the clash appears on any glibc >= 2.38.
+ *   - musl (OHOS, Android) and the BSDs/Apple already declare it, which is why
+ *     OHOS and Android were excluded here from the start.
+ *
+ * __GLIBC__ / __GLIBC_MINOR__ come from <features.h>, which <string.h> pulls in
+ * and this file already includes through <cstring>.
+ */
+#if defined(__GLIBC__) && !defined(__ANDROID__) && !defined(__OHOS__)
+#    if __GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 38)
+#        define CICADA_LIBC_DECLARES_STRLCPY 1
+#    endif
+#endif
+
+#if defined(WIN32) || (defined(__linux__) && !defined(__ANDROID__) && !defined(__OHOS__) && !defined(CICADA_LIBC_DECLARES_STRLCPY))
 // from ffmpeg/avstring.c
 static size_t strlcpy(char *dst, const char *src, size_t size)
 {

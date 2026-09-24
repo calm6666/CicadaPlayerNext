@@ -129,6 +129,15 @@ uint64_t AttrsNode::inheritStartNumber() const
     return std::numeric_limits<uint64_t>::max();
 }
 
+uint64_t AttrsNode::inheritEndNumber() const
+{
+    const AbstractAttr *p = inheritAttribute(Type::EndNumber);
+    if (p && p->isValid()) {
+        return (const uint64_t &) *(static_cast<const EndnumberAttr *>(p));
+    }
+    return 0;
+}
+
 Timescale AttrsNode::inheritTimescale() const
 {
     const AbstractAttr *p = inheritAttribute(Type::Timescale);

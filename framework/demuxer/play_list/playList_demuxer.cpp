@@ -9,6 +9,8 @@
 #include "HlsParser.h"
 #include "demuxer/dash/DashManager.h"
 #include "demuxer/dash/MPDParser.h"
+/* AF_LOGI/AF_LOGE（本文件上面已经 #define 了 LOG_TAG） */
+#include "utils/frame_work_log.h"
 
 namespace Cicada {
     playList_demuxer playList_demuxer::se(0);
@@ -51,6 +53,7 @@ namespace Cicada {
         if (mPPlayList) {
             //   mPPlayList->dump();
         } else {
+            AF_LOGE("[playlist] 清单解析失败（%s）\n", mPath.c_str());
             return -EINVAL;
         }
 
@@ -71,6 +74,10 @@ namespace Cicada {
         playlistManager->setUrlToUniqueIdCallback(mUrlHashCb, mUrlHashCbUserData);
         mPPlaylistManager = playlistManager;
         ret = playlistManager->init();
+
+        /* 冷路径一行：DASH/HLS 的 manager 初始化到哪一步、返回了什么值（崩溃定位用） */
+        AF_LOGI("[playlist] %s manager init 返回 %d（%s）\n",
+                mType == playList_type_hls ? "hls" : "dash", ret, mPath.c_str());
 
         if (mFirstSeekPos != INT64_MIN) {
             playlistManager->seek(mFirstSeekPos, 0, -1);
