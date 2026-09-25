@@ -34,7 +34,7 @@ data class ApiConfig(
          * 说明：Android 模拟器中 10.0.2.2 指向宿主机（本机后端），真机调试请
          * 改为局域网 IP；生产环境务必使用 https 域名并移除清单中的明文流量开关。
          */
-        fun default(): ApiConfig = ApiConfig(baseUrl = "http://10.0.2.2:8080")
+        fun default(): ApiConfig = ApiConfig(baseUrl = "http://192.168.0.15:8080")
     }
 }
 

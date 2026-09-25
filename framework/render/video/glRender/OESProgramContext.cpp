@@ -30,8 +30,10 @@ static const char OES_FRAGMENT_SHADER[] = R"(
         precision mediump float;
         varying vec2 vTextureCoord;
         uniform samplerExternalOES sTexture;
+        uniform mat3 uColorMatrix;
         void main() {
-            gl_FragColor = texture2D(sTexture, vTextureCoord);
+            vec3 rgb = texture2D(sTexture, vTextureCoord).rgb;
+            gl_FragColor = vec4(clamp(uColorMatrix * rgb, 0.0, 1.0), 1.0);
         }
 )";
 
@@ -320,6 +322,25 @@ void OESProgramContext::updateFlip(IVideoRender::Flip flip) {
     }
 }
 
+/*
+ * 【色觉辅助滤镜 / 回退点 S1】只存矩阵；GL 下发在 drawTexture() 里每帧做
+ * （program 只在创建时初始化一次，所以不能只在 updateColorMatrix 里下发）。
+ */
+void OESProgramContext::updateColorMatrix(const float matrix[9]) {
+    if (matrix == nullptr) {
+        return;
+    }
+
+    for (int i = 0; i < 9; i++) {
+        mColorMatrix[i] = matrix[i];
+    }
+
+    /* 视频后处理那条中间路（OES → FBO）用的是另一个 program，同步过去 */
+    if (mOES2FBOProgram != nullptr) {
+        mOES2FBOProgram->updateColorMatrix(mColorMatrix);
+    }
+}
+
 int OESProgramContext::updateFrame(std::unique_ptr<IAFFrame> &frame) {
 
     if (mOESProgram == 0) {
@@ -405,6 +426,9 @@ int OESProgramContext::updateFrame(std::unique_ptr<IAFFrame> &frame) {
             drawTexture(GL_TEXTURE_EXTERNAL_OES, mOESTextureId, false);
             return 0;
         }
+        /* 【色觉辅助滤镜 / 回退点 S1】把当前矩阵同步给后处理 program（它自己不会收到
+         * GLRender 的下发）。不这么做时，开了视频后处理/超分那条路滤镜会失效。 */
+        mOES2FBOProgram->updateColorMatrix(mColorMatrix);
     }
 
     bool updateFrameBuffer = mOES2FBOProgram->updateFrameBuffer(mFrameWidth, mFrameHeight);
@@ -485,6 +509,8 @@ void OESProgramContext::getShaderLocations() {
     mMVPMatrixLocation = glGetUniformLocation(mOESProgram, "uMVPMatrix");
     mSTMatrixLocation = glGetUniformLocation(mOESProgram, "uSTMatrix");
     mTextureLocation = glGetUniformLocation(mOESProgram, "sTexture");
+    /* 【色觉辅助滤镜 / 回退点 S1】 */
+    mColorMatrixLocation = glGetUniformLocation(mOESProgram, "uColorMatrix");
 }
 
 void OESProgramContext::drawTexture(GLenum target, GLuint textureId, bool toFBO)
@@ -529,6 +555,9 @@ void OESProgramContext::drawTexture(GLenum target, GLuint textureId, bool toFBO)
         glUniformMatrix4fv(mMVPMatrixLocation, 1, GL_FALSE, mOESMVMatrix);
         glUniformMatrix4fv(mSTMatrixLocation, 1, GL_FALSE, mOESSTMatrix);
         glUniform1i(mTextureLocation, 0);
+        /* 【色觉辅助滤镜 / 回退点 S1】每帧下发（program 只在创建时初始化一次）。
+         * location 为 -1（老驱动/极端情况下优化掉）时 glUniformMatrix3fv 是 no-op，安全。 */
+        glUniformMatrix3fv(mColorMatrixLocation, 1, GL_FALSE, mColorMatrix);
     } else {
         mOES2FBOProgram->enableDrawRegion(drawRegion);
         mOES2FBOProgram->enableFlipCoords(flipCoords);

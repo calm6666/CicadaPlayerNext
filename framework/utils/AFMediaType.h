@@ -477,6 +477,14 @@ enum dec_flag {
     dec_flag_passthrough_info,
     // adjust setting to output frames as soon as possiable.
     dec_flag_output_frame_asap,
+    /*
+     * B2：pending（切档目标）解码器用 1x1 占位 Surface 配置（surface 模式），
+     * 提交时再 setOutputSurface 换到真 Surface。**只能追加在末尾**：
+     * 改动既有枚举项的位序/取值会让所有已按旧位序编译的目标文件错位。
+     * 位值 = bit8（0x100），与既有 bit0~bit7（dummy/hw/sw/out/direct/adaptive/
+     * passthrough_info/output_frame_asap）都不冲突。
+     */
+    dec_flag_placeholder_surface,
 };
 #define DECFLAG_DUMMY  1u << dec_flag_dummy
 #define DECFLAG_HW     (1u << dec_flag_hw)
@@ -486,6 +494,7 @@ enum dec_flag {
 #define DECFLAG_ADAPTIVE (1u << dec_flag_adaptive)
 #define DECFLAG_PASSTHROUGH_INFO (1 << dec_flag_passthrough_info)
 #define DECFLAG_OUTPUT_FRAME_ASAP (1u << dec_flag_output_frame_asap)
+#define DECFLAG_PLACEHOLDER_SURFACE (1u << dec_flag_placeholder_surface)
 
 typedef struct mediaFrame_t mediaFrame;
 

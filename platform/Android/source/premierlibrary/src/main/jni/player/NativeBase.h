@@ -120,6 +120,9 @@ public:
 
     static jint java_GetMirrorMode(JNIEnv *env, jobject instance);
 
+    /* 【色觉辅助滤镜 / 回退点 J1】照 java_SetMirrorMode 的写法，多一个数组参数 */
+    static void java_SetColorMatrix(JNIEnv *env, jobject instance, jfloatArray matrix);
+
     static void java_SetSpeed(JNIEnv *env, jobject instance, jfloat speed);
 
     static jfloat java_GetSpeed(JNIEnv *env, jobject instance);

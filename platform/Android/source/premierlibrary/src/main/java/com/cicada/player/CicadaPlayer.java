@@ -409,6 +409,31 @@ public interface CicadaPlayer {
     abstract public MirrorMode getMirrorMode();
 
     /**
+     * 【色觉辅助滤镜 / 回退点 J3】设置 3x3 颜色矩阵（行主序，9 个 float）。
+     *
+     * 计算方式：显示时 rgb = clamp(matrix * rgb, 0, 1)。**单位矩阵 = 关闭**，
+     * 传 null 或长度不是 9 也按"关闭"处理（见 NativePlayerBase.setColorMatrix）。
+     *
+     * 照 setMirrorMode 那条通道新增的**独立一条通道**，不改任何已有接口语义。
+     * 已知限制：隧道/direct 渲染（HDR、Widevine 被内核强制走那条）没有着色器 ⇒ 滤镜无效；
+     * 截图（snapshot）抓的是加滤镜之前的画面 ⇒ 截图不带滤镜。
+     *
+     * 这里给**非抽象的空实现**（而不是 abstract）：新增功能不该让所有实现类编译不过。
+     * 真正的实现在 CicadaPlayerImpl。
+     *
+     * 【编译修复：必须写 default】CicadaPlayer 是 **interface**（本文件 :20），接口里
+     * 带方法体的方法只能写成 `default`（Java 8+ 的默认方法）。原来只写
+     * `public void setColorMatrix(...) { }`，javac 直接报
+     * "interface abstract methods cannot have body"。
+     * 同文件已有的 `default void setDataSource(...)`（:649）就是同一个写法。
+     *
+     * @param matrix 9 个 float，行主序；null / 非 9 长度 = 关闭
+     */
+    default void setColorMatrix(float[] matrix) {
+        /* no-op：默认实现什么都不做（旧实现/外部扩展不实现本功能也能编译通过） */
+    }
+
+    /**
      * 旋转模式
      */
     /****

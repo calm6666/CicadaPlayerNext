@@ -240,6 +240,13 @@ void CicadaSetMirrorMode(playerHandle *pHandle, MirrorMode mode);
 void CicadaSetVideoBackgroundColor(playerHandle *pHandle, uint32_t color);
 
 /**
+ * 【色觉辅助滤镜】设置 3x3 颜色矩阵（行主序 9 个 float，单位矩阵 = 关闭）。
+ *
+ * 【回退点 C3】删掉本声明 + media_player_api.cpp 里的实现即可。
+ */
+void CicadaSetColorMatrix(playerHandle *pHandle, const float *matrix);
+
+/**
  * get rending mirror mode
  */
 MirrorMode CicadaGetMirrorMode(playerHandle *player);

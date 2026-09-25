@@ -288,6 +288,14 @@ namespace Cicada {
         MirrorMode GetMirrorMode();
 
         /*
+         * 【色觉辅助滤镜】设置 3x3 颜色矩阵（行主序，9 个 float）。
+         * 与 SetMirrorMode 同一层转发语义：转发到 native handle 的 SetColorMatrix。
+         *
+         * 【回退点 C2】删掉本声明 + MediaPlayer.cpp 里的实现（2 处，可独立回退）。
+         */
+        void SetColorMatrix(const float matrix[9]);
+
+        /*
          * set clear color
          */
         void SetVideoBackgroundColor(uint32_t color);

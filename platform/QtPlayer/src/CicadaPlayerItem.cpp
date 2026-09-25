@@ -7,6 +7,8 @@
 #include "CicadaPlayerItem.h"
 #include "CicadaVideoTexture.h"
 #include "CicadaHardwareDevice.h"
+/* 对象方式入口（setManifest(builder)）需要构造器的定义；头文件里只前向声明。 */
+#include "CicadaManifestBuilder.h"
 /* 截屏结果的出口：QML 的 Image 通过 image://snapshot/<rev> 向它取图（见文件头）。 */
 #include "SnapshotImageProvider.h"
 
@@ -636,26 +638,12 @@ namespace cicadaqt {
          */
 
         /*
-         * seek 看门狗（单次触发）。正常情况下每次 seek 都会在框架发出 SeekEnd 时被停掉，
-         * 只有 seek 卡在框架里才会响；响了就说明"这次 seek 不会回来了"，见 onSeekWatchdog。
-         *
-         * 【2026-09-21 修：2000 → 6000 ms】
-         * 2000ms 是按"本地小文件 seek 几十毫秒"定的，对 DASH/HLS 的精确 seek 太紧：
-         * 实测 seek 到 18.246s 时，DASH 的 tracker 落在**前一个分片**（首包 12.5s），
-         * 框架必须从那里的关键帧开始解码到目标点 —— 5.7 秒 4K H.264 大约要 2.6 秒
-         * 真实时间。也就是说 2 秒的看门狗**正常情况就会响**，日志里
-         * "no SeekEnd from the player within 2000 ms" 就是这么来的。它一响就清掉
-         * 在途状态，用户的后续拖动被当成"新的 seek"再发一次，和框架里还没结束的
-         * 那次 seek 叠在一起 —— 越拖越慢。
-         *
-         * 6000ms 的取值依据：框架自己救视频路的窗口是 VIDEO_PATH_STALL_FLUSH_MS=3000ms
-         * （SuperMediaPlayer 的视频路看门狗），一次正常的精确 seek 无论如何应该在
-         * 两个 3 秒窗口内结束；超过 6 秒就真的是卡死了，那时再放锁、重发才对。
+         * 这里原来有一个 seek 看门狗（QTimer，2000 → 6000ms）。本轮按红线删除：
+         * 它用"等 N 毫秒还没收到 SeekEnd"推断"seek 卡住了"，然后替框架清掉在途状态 ——
+         * 这既是看门狗，又会和框架里仍在跑的那次 seek 叠加（日志实测"越拖越慢"）。
+         * 正确做法：seek 的终态只由框架事件（Seeking / SeekEnd）驱动 ——
+         * 内核侧已保证"落点帧上屏即结束 seek"（SuperMediaPlayer 的 K1）。
          */
-        m_seekWatchdog.setSingleShot(true);
-        m_seekWatchdog.setInterval(6000);
-        m_seekWatchdog.setTimerType(Qt::CoarseTimer);
-        connect(&m_seekWatchdog, &QTimer::timeout, this, &CicadaPlayerItem::onSeekWatchdog);
     }
 
     CicadaPlayerItem::~CicadaPlayerItem()
@@ -1131,6 +1119,30 @@ namespace cicadaqt {
         const QJsonDocument doc(QJsonObject::fromVariantMap(manifest));
 
         return setManifestJson(QString::fromUtf8(doc.toJson(QJsonDocument::Compact)));
+    }
+
+    /*
+     * **对象方式入口**：直接接 CicadaManifest::Builder 的产物。
+     *
+     * 与 setManifest(QVariantMap) **完全同一条路**，唯一区别是"对象从哪来"：
+     *   builder.toJsonString()  ->  setManifestJson(json)  ->  SetDataSource(std::string)
+     *     ->  内核 cJSON 解析 -> ManifestDemuxer::buildPlayList()
+     * 也就是说对象方式和 JSON 文本方式在运行时**是同一份 JSON 文本、同一条内核路径**，
+     * 行为与性能完全一致；本函数不做任何解析、补全或分片展开。
+     *
+     * 注意：往核心传清单**必须传 std::string**（见 createPlayer() 里的说明），
+     * 传 const char* 会命中 SetDataSource(const char *url)，清单会被当成 URL。
+     */
+    bool CicadaPlayerItem::setManifest(const CicadaManifest::Builder &builder)
+    {
+        const QString json = builder.toJsonString();
+
+        if (json.isEmpty() || json == QStringLiteral("{}")) {
+            AF_LOGW("setManifest(builder): 空对象，忽略\n");
+            return false;
+        }
+
+        return setManifestJson(json);
     }
 
     /*
@@ -2501,29 +2513,23 @@ namespace cicadaqt {
 
         m_seekInFlight = true;
         /*
-         * 【进度条不许来回弹的地板】
-         * 见 m_seekUiFloorMs 的说明：seek 一发起就把目标点记下来并**立刻把位置报给界面**，
-         * 之后直到这次 seek 结束，任何比它小的位置更新都被忽略 —— 否则会看到
-         * "点了 → 跳到目标 → 又跳回原处 → 最后才跳到目标"。
+         * 位置地板**不再由端侧维护**（本轮收敛到内核一处）：
+         * 内核 SuperMediaPlayer 的 mSeekPositionFloorUs 会在 seek 一发起就把上报位置
+         * 钉在目标点，直到管道真的走到它 —— 端侧再挡一次是重复实现。
+         * 这里只做"乐观地把目标立刻报给界面"，避免松手瞬间闪回旧位置。
          */
-        m_seekUiFloorMs = positionMs;
-
         if (m_position < positionMs) {
             m_position = positionMs;
             emit positionChanged();
         }
 
-        /* 兜底：框架要是压根不发 SeekEnd，看门狗负责把这个状态收掉（见 onSeekWatchdog）。 */
-        m_seekWatchdog.start();
+        /* 终态由框架事件驱动（Seeking / SeekEnd），这里不再起任何看门狗。 */
         m_player->SeekTo(positionMs, SEEK_MODE_ACCURATE);
     }
 
     void CicadaPlayerItem::finishSeek()
     {
         m_seekInFlight = false;
-        m_seekWatchdog.stop();
-        /* 这次 seek 结束了（位置已经真的走到那儿），地板可以撤掉 */
-        m_seekUiFloorMs = -1;
 
         if (m_seekPending >= 0) {
             const qint64 next = m_seekPending;
@@ -2549,32 +2555,7 @@ namespace cicadaqt {
         finishSeek();
     }
 
-    void CicadaPlayerItem::onSeekWatchdog()
-    {
-        if (!m_seekInFlight) {
-            return;
-        }
-
-        /*
-         * 框架在 6 秒内没给 SeekEnd。这种情况意味着 seek 卡在框架里了（精确 seek 在等
-         * "目标帧渲染出来"，而那需要视频路继续出帧；一旦视频路自己停了，这个等待就永远
-         * 不会结束 —— SuperMediaPlayer 里那个视频路看门狗负责救它）。
-         *
-         * 我们这边能做的、也必须做的是：**不要把自己锁死**。否则一次卡住的 seek 会让
-         * 组件此后再也不发 seek（"后面怎么拖都不动了"）。清掉状态，如果有挂起的目标就
-         * 接着发一次；再卡就再打一条日志，但界面始终是可操作的。
-         *
-         * 已知的局限（可以接受）：看门狗超时之后，那次 seek 的 SeekEnd 可能还会迟到，
-         * 那时我们已经把状态清了，于是它会被当成"当前这次 seek 结束"—— 最多也就是允许
-         * 一次 seek 和框架里残留的 seek 重叠，比"永久锁死"好得多。框架的 SeekEnd 回调
-         * 不带"是哪一次 seek"的信息（参数是 inCache 标记），所以没法精确配对。
-         */
-        AF_LOGW("no SeekEnd from the player within %d ms — clearing the pending seek state "
-                "so seeking keeps working (this indicates the seek is stuck inside the player)\n",
-                static_cast<int>(m_seekWatchdog.interval()));
-
-        finishSeek();
-    }
+    /* onSeekWatchdog 已删除（本轮）：seek 终态只由框架的 Seeking / SeekEnd 事件驱动。 */
 
     /* ------------------------------------------------------------------ */
     /* 播放器生命周期                                                     */
@@ -2861,7 +2842,6 @@ namespace cicadaqt {
          * 上一个 seek 的 SeekEnd 永远不会来了，不清掉的话新播放器上的 seek 会被
          * m_seekInFlight 一直挡住（"换完片子之后进度条就拖不动了"）。
          */
-        m_seekWatchdog.stop();
         m_seekInFlight = false;
         m_seekPending = -1;
 
@@ -3475,19 +3455,12 @@ namespace cicadaqt {
     void CicadaPlayerItem::notifyPosition(qint64 positionMs)
     {
         /*
-         * 【seek 期间的位置地板】别删：这是"进度条点了跳过去、又跳回原处、最后才跳到
-         * seek 点"那个来回弹的修复。
-         *
-         * 时序是：用户点了进度条 → 我们立刻把目标报给界面（issueSeek 里） →
-         * 框架那边 seek 还没走完，期间仍可能推来几条**旧位置**的 PositionUpdate
-         * （渲染线程上那帧还没换、或消息队列里排着 seek 之前的那条）→ 界面于是往回跳。
-         * 这里直接把这些"比 seek 目标小"的更新丢掉，等这次 seek 结束（SeekEnd /
-         * 看门狗）再恢复正常。
+         * 位置地板只保留内核那一处（本轮收敛完成）：
+         * SuperMediaPlayer::getCurrentPosition() 用 mSeekPositionFloorUs 把上报位置钉在
+         * seek 目标点，直到管道真的走到它为止，所以框架推过来的位置**天然不会回退**。
+         * 端侧以前再挡一次（m_seekUiFloorMs）是重复实现，而且它要靠"端侧自己判断 seek
+         * 结束"来撤地板 —— 那套判断正是看门狗的来源，已删。
          */
-        if (m_seekUiFloorMs >= 0 && positionMs < m_seekUiFloorMs) {
-            return;
-        }
-
         if (positionMs == m_position) {
             return;
         }

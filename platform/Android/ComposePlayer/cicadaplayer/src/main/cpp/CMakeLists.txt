@@ -19,8 +19,28 @@ cmake_minimum_required(VERSION 3.6)
 project(CicadaPlayer C CXX)
 
 if(NOT DEFINED CICADA_ROOT)
-    # src/main/cpp → src/main → src → cicadaplayer → JetpackComposePlayer → platform → CicadaPlayerNext
-    set(CICADA_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../..)
+    # **位置无关**：按候选深度逐个探测内核根，判定标准是同时存在 plugin/ 与 mediaPlayer/。
+    # （Gradle 侧已按同样规则算出 cicadaRoot 并优先用 -DCICADA_ROOT 传进来，这里只是兜底：
+    #  直接在 AS 里 configure、或别人手动跑 cmake 时也能落到正确目录。）
+    set(_CICADA_CANDIDATES
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.."          # platform/JetpackComposePlayer/…
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../.."       # platform/Android/<工程名>/…
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../.."    # platform/Android/source/<工程名>/…
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../../../../.." # 再深一层（防未来再搬）
+            )
+    foreach(_cand ${_CICADA_CANDIDATES})
+        get_filename_component(_cand "${_cand}" ABSOLUTE)
+        if(EXISTS "${_cand}/plugin" AND EXISTS "${_cand}/mediaPlayer")
+            set(CICADA_ROOT "${_cand}")
+            break()
+        endif()
+    endforeach()
+
+    if(NOT DEFINED CICADA_ROOT)
+        message(FATAL_ERROR
+                "找不到内核 CicadaPlayerNext（plugin/ 与 mediaPlayer/ 都不在候选路径上）。"
+                "请在 Gradle 里传 -DCICADA_ROOT=<内核根>，或在 gradle.properties 写 cicadaRoot=<内核根>。")
+    endif()
 endif()
 if(NOT DEFINED CICADA_JNI_DIR)
     set(CICADA_JNI_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../jni)

@@ -80,6 +80,14 @@ namespace Cicada {
 
         MirrorMode GetMirrorMode() override;
 
+        /*
+         * 【色觉辅助滤镜 / 回退点 C9】ICicadaPlayer::SetColorMatrix 是纯虚的，所以这个
+         * "ExternalPlayer"（AVPlayer 直出，不经内核 GL 渲染器）**必须**给个实现才能编译。
+         * 就像它的 SetVideoBackgroundColor 一样做成空实现：这条路的画面根本不经过
+         * 内核着色器，滤镜不适用（与隧道/direct 渲染同一类限制）。
+         */
+        void SetColorMatrix(const float matrix[9]) override;
+
         int GetCurrentStreamIndex(StreamType type) override;
 
         StreamInfo *GetCurrentStreamInfo(StreamType type) override;

@@ -12,7 +12,6 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.drag
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
@@ -64,7 +63,6 @@ import com.cicada.player.compose.ui.theme.PlayerTheme
 import kotlin.math.abs
 import kotlin.math.roundToLong
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
 
 /**
@@ -98,8 +96,7 @@ fun formatPlayerTime(timeMs: Long): String {
  */
 private const val SEEK_SETTLE_TOLERANCE_MS = 700L
 
-/** 松手 seek 后挂起目标位置的兜底时长：超时仍未对上就交还给 `positionMs`（seek 被忽略时用） */
-private const val SEEK_SETTLE_TIMEOUT_MS = 2500L
+/** 松手 seek 后挂起目标位置的兜底时长：已删除（本轮按"禁止看门狗/超时兜底"清理） */
 
 /**
  * **常驻细进度条**（控制栏隐藏后仍然显示，贴在播放器**最底部**）。
@@ -188,12 +185,12 @@ fun PlayerProgressBar(
         val target = pendingSeekMs ?: return@LaunchedEffect
         if (abs(positionMs - target) <= SEEK_SETTLE_TOLERANCE_MS) pendingSeekMs = null
     }
-    /* 兜底：SEEK_SETTLE_TIMEOUT_MS 内没追上也不再挂着 */
-    LaunchedEffect(pendingSeekMs) {
-        val target = pendingSeekMs ?: return@LaunchedEffect
-        delay(SEEK_SETTLE_TIMEOUT_MS)
-        if (pendingSeekMs == target) pendingSeekMs = null
-    }
+    /*
+     * 这里原来有一个"SEEK_SETTLE_TIMEOUT_MS 内没追上就不再挂着"的超时兜底。
+     * 本轮按红线（禁止看门狗 / 超时兜底）删除：挂起状态只由**位置事件**收敛
+     * （上面那条 LaunchedEffect 的 ±SEEK_SETTLE_TOLERANCE_MS 判据），
+     * 不再用墙钟去猜"大概完事了"。
+     */
 
     val safeDuration = durationMs.coerceAtLeast(1L)
     val pendingRatio = pendingSeekMs?.let { (it.toFloat() / safeDuration).coerceIn(0f, 1f) }
@@ -247,6 +244,12 @@ fun PlayerProgressBar(
                     awaitEachGesture {
                         val down = awaitFirstDown()
                         dragging = true
+                        /*
+                         * 新的一次拖动 = 新的意图：清掉上一次还挂着的目标。
+                         * （本轮删掉了"超时兜底"，所以这里必须显式清 —— 否则上一次没对上的
+                         *  目标会一直压着进度条。正常路径由上面的位置事件收敛清掉。）
+                         */
+                        pendingSeekMs = null
                         onSeekStart()
 
                         fun report(x: Float) {
@@ -613,11 +616,26 @@ fun PlayerBottomBar(
                     onFocusChanged = onDanmakuInputFocusChanged,
                 )
 
+                /*
+                 * 【顺序与位置对齐 Qt 的 RightControls.qml 那一排】
+                 * Qt 从右往左是 全屏 ← 设置 ← 音量 ← 字幕 ← 倍速 ← 选集 ← 清晰度，
+                 * 也就是从左往右 **清晰度 → 倍速 → 字幕**。这里按同一相对顺序把三个
+                 * 同级文字入口排进**同一行**（原来"字幕"单独占下面一行，用户明确
+                 * 要求"字幕和倍速、清晰度是同级的、横着排过来，不是在清晰度下面"）。
+                 *
+                 * 宽度取舍：这一行左边是弹幕输入框（weight(1f)，会被挤）、右边是这三颗
+                 * 文字按钮。多一颗"字幕"约 45dp，横屏全屏（2000+px）无影响；竖屏全屏
+                 * （1080px）下输入框仍能拿到 ~150dp，可输入。若以后要在更窄的屏上用，
+                 * 优先缩短按钮文案/在竖屏全屏隐藏输入框，**不要**让输入框退化到不可用。
+                 */
+                BarText(qualityLabel ?: "自动") {
+                    onInteraction(); onQualityClick()
+                }
                 BarText(if (speedLabel.isNullOrEmpty()) "倍速" else speedLabel) {
                     onInteraction(); onSpeedClick()
                 }
-                BarText(qualityLabel ?: "自动") {
-                    onInteraction(); onQualityClick()
+                BarText("字幕") {
+                    onInteraction(); onSubtitleClick()
                 }
             } else {
                 Spacer(Modifier.width(6.dp))
@@ -631,11 +649,15 @@ fun PlayerBottomBar(
 
                 Spacer(Modifier.weight(1f))
 
+                /* 与全屏行同一顺序（清晰度 → 倍速 → 字幕），见上面那段 Qt 对齐说明 */
+                BarText(qualityLabel ?: "自动") {
+                    onInteraction(); onQualityClick()
+                }
                 BarText(if (speedLabel.isNullOrEmpty()) "倍速" else speedLabel) {
                     onInteraction(); onSpeedClick()
                 }
-                BarText(qualityLabel ?: "自动") {
-                    onInteraction(); onQualityClick()
+                BarText("字幕") {
+                    onInteraction(); onSubtitleClick()
                 }
 
                 /* 截图 1：竖屏胶囊 + 竖屏 SVG + 全屏 SVG */
@@ -663,12 +685,11 @@ fun PlayerBottomBar(
             }
         }
 
-        /* 字幕只在全屏那一行（截图 2）；放这里保持和截图一致的行内顺序 */
-        if (isFullscreen) {
-            Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-                BarText("字幕") { onInteraction(); onSubtitleClick() }
-            }
-        }
+        /*
+         * 字幕按钮**不再单独占一行**：它现在和清晰度/倍速同级、横向排在上面那一行里
+         * （用户要求："字幕和倍速、清晰度是同级的、横着排过来，不是在清晰度下面"）。
+         * 原来这里是 `if (isFullscreen) Row(Arrangement.End) { BarText("字幕") }`。
+         */
     }
 }
 

@@ -64,6 +64,7 @@ jmethodID gj_NativePlayer_onSubtitleExtAdded = nullptr;
 jmethodID gj_NativePlayer_onCurrentDownloadSpeed = nullptr;
 jmethodID gj_NativePlayer_onVideoRendered = nullptr;
 jmethodID gj_NativePlayer_onAudioRendered = nullptr;
+jmethodID gj_NativePlayer_onVideoQualitySwitch = nullptr;
 
 jmethodID gj_NativePlayer_requestProvision = nullptr;
 jmethodID gj_NativePlayer_requestKey = nullptr;
@@ -113,6 +114,15 @@ void NativeBase::java_Construct(JNIEnv *env, jobject instance, jstring name)
     listener.CurrentDownLoadSpeed = jni_onCurrentDownloadSpeed;
     listener.VideoRendered = jni_onVideoRendered;
     listener.AudioRendered = jni_onAudioRendered;
+    /*
+     * 清晰度切换状态（STARTED / READY / FAILED / CANCELED）。
+     *
+     * 这是 Android 端挂上这个回调的**唯一**一处：内核 PlayerNotifier 在
+     * mListener.VideoQualitySwitch 为空时直接 return（mediaPlayer/player_notifier.cpp:427），
+     * 所以在这之前 Android 完全收不到质量切换事件（Qt 端一直挂着，
+     * 见 CicadaPlayerItem.cpp:2637 —— 这一处就是与它对齐）。
+     */
+    listener.VideoQualitySwitch = jni_onVideoQualitySwitch;
     auto *apsaraPlayer = privateData->player;
     apsaraPlayer->SetListener(listener);
     apsaraPlayer->setDrmRequestCallback([userData](const Cicada::DrmRequestParam &drmRequestParam) -> Cicada::DrmResponseData * {
@@ -666,6 +676,45 @@ jint NativeBase::java_GetMirrorMode(JNIEnv *env, jobject instance)
     return player->GetMirrorMode();
 }
 
+/*
+ * 【色觉辅助滤镜 / 回退点 J1】jfloatArray(9) → float[9]。
+ * GetFloatArrayElements/ReleaseFloatArrayElements 成对；JNI_ABORT 表示只读不改，不写回 Java 数组。
+ * 长度不足 9 或为 null 时直接返回（上层 Java 已把 null 归一成单位矩阵，这里是兜底）。
+ */
+void NativeBase::java_SetColorMatrix(JNIEnv *env, jobject instance, jfloatArray matrix)
+{
+    AF_TRACE;
+
+    if (matrix == nullptr) {
+        return;
+    }
+
+    if (env->GetArrayLength(matrix) < 9) {
+        return;
+    }
+
+    MediaPlayer *player = getPlayer(env, instance);
+
+    if (player == nullptr) {
+        return;
+    }
+
+    jfloat *elements = env->GetFloatArrayElements(matrix, nullptr);
+
+    if (elements == nullptr) {
+        return;
+    }
+
+    float colorMatrix[9];
+    for (int i = 0; i < 9; i++) {
+        colorMatrix[i] = elements[i];
+    }
+
+    env->ReleaseFloatArrayElements(matrix, elements, JNI_ABORT);
+
+    player->SetColorMatrix(colorMatrix);
+}
+
 
 jfloat NativeBase::java_GetSpeed(JNIEnv *env, jobject instance)
 {
@@ -1055,6 +1104,8 @@ void NativeBase::init(JNIEnv *env)
         gj_NativePlayer_onCurrentDownloadSpeed = env->GetMethodID(gj_NativePlayer_Class, "onCurrentDownloadSpeed", "(J)V");
         gj_NativePlayer_onVideoRendered = env->GetMethodID(gj_NativePlayer_Class, "onVideoRendered", "(JJ)V");
         gj_NativePlayer_onAudioRendered = env->GetMethodID(gj_NativePlayer_Class, "onAudioRendered", "(JJ)V");
+        gj_NativePlayer_onVideoQualitySwitch =
+                env->GetMethodID(gj_NativePlayer_Class, "onVideoQualitySwitch", "(IILjava/lang/String;)V");
         gj_NativePlayer_requestProvision = env->GetMethodID(gj_NativePlayer_Class, "requestProvision", "(Ljava/lang/String;[B)[B");
         gj_NativePlayer_requestKey = env->GetMethodID(gj_NativePlayer_Class, "requestKey", "(Ljava/lang/String;[B)[B");
         JniException::clearException(env);
@@ -1112,6 +1163,10 @@ static JNINativeMethod nativePlayer_method_table[] = {
         {"nGetRotateMode", "()I", (void *) NativeBase::java_GetRotateMode},
         {"nSetMirrorMode", "(I)V", (void *) NativeBase::java_SetMirrorMode},
         {"nGetMirrorMode", "()I", (void *) NativeBase::java_GetMirrorMode},
+        /* 【色觉辅助滤镜 / 回退点 J1】声明 (3/3)：JNI 方法表。签名必须和
+         * NativePlayerBase.nSetColorMatrix(float[]) 一致，写错不会编译报错、
+         * 只在运行期抛 NoSuchMethodError/UnsatisfiedLinkError。 */
+        {"nSetColorMatrix", "([F)V", (void *) NativeBase::java_SetColorMatrix},
         {"nSetSpeed", "(F)V", (void *) NativeBase::java_SetSpeed},
         {"nGetSpeed", "()F", (void *) NativeBase::java_GetSpeed},
         {"nSetTraceID", "(Ljava/lang/String;)V", (void *) NativeBase::java_SetTraceID},
@@ -1664,5 +1719,40 @@ void NativeBase::jni_onSwitchStreamSuccess(int64_t type, const void *item, void 
     mEnv->CallVoidMethod((jobject) userData, gj_NativePlayer_onSwitchStreamSuccess,
                          jStreamInfoNew);
     mEnv->DeleteLocalRef(jStreamInfoNew);
+    JniException::clearException(mEnv);
+}
+
+/*
+ * 清晰度切换状态回调（内核 NotifyVideoQualitySwitch → playerListener.VideoQualitySwitch）。
+ *
+ * 为什么必须在 Android 挂上它：内核 PlayerNotifier::NotifyVideoQualitySwitch() 在
+ * mListener.VideoQualitySwitch 为空时**直接返回**，而 Android 的 java_Construct() 原来
+ * 只挂了 StreamSwitchSuc —— 内核发的 STARTED / READY / FAILED / CANCELED 就全部丢在
+ * 这里，界面无从知道"正在换档 / 换好了 / 换失败了"。Qt 端一直挂着（CicadaPlayerItem.cpp
+ * 的 onVideoQualitySwitchCb → notifyQualitySwitchStatus → PlayerView.qml 的提示），
+ * 这一处就是把它补齐到同一条事件链上。
+ *
+ * desc（第三个参数）可以是 nullptr：NewStringUTF 对空指针是安全的，会得到一个 null
+ * jstring，Java 侧按"内核没给说明"处理，不在这里编造文字。
+ *
+ * 注意 item 语义：这里是 (status, streamIndex, desc)，不是 StreamInfo 指针，
+ * 所以不能照抄上面 jni_onSwitchStreamSuccess 的 item != nullptr 判断。
+ */
+void NativeBase::jni_onVideoQualitySwitch(int64_t status, int64_t streamIndex, const void *desc, void *userData)
+{
+    if (userData == nullptr) {
+        return;
+    }
+
+    JniEnv Jenv;
+    JNIEnv *mEnv = Jenv.getEnv();
+
+    if (mEnv == nullptr) {
+        return;
+    }
+
+    NewStringUTF jDescription(mEnv, static_cast<const char *>(desc));
+    mEnv->CallVoidMethod((jobject) userData, gj_NativePlayer_onVideoQualitySwitch,
+                         (jint) status, (jint) streamIndex, jDescription.getString());
     JniException::clearException(mEnv);
 }

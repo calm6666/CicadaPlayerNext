@@ -10,6 +10,16 @@
 #include "demuxer/DemuxerMeta.h"
 #include "demuxer/IDemuxer.h"
 #include "demuxer/play_list/Helper.h"
+/*
+ * 【为什么必须包含】DashStream::seek() 里要取"tracker 真正选中分片的起点"：
+ *     mPTracker->getCurrentRepresentation()->getMediaSegmentStartTime(num)
+ * 而 DashSegmentTracker.h(:18) 只对 Representation 做了**前向声明** ⇒ 直接这样调用会报
+ *   error: member access into incomplete type 'Cicada::Representation'
+ * 这里包含它的**定义**（framework/demuxer/play_list/Representation.h:24，继承
+ * Dash::SegmentInformation；getMediaSegmentStartTime 实现见
+ * demuxer/dash/SegmentInformation.cpp:52）。回退：删掉本 include 即复现该编译错误。
+ */
+#include "demuxer/play_list/Representation.h"
 #include "utils/af_string.h"
 #include "utils/errors/framework_error.h"
 #include "utils/frame_work_log.h"
@@ -858,13 +868,62 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
 
         if (mStreamStartTimeMap[streamIndex].seamlessPoint) {
             if (packet->getInfo().pts != INT64_MIN) {
-                mStreamStartTimeMap[streamIndex].time2ptsDelta = mStreamStartTimeMap[streamIndex].timePosition - packet->getInfo().pts;
-                if (mStreamStartTimeMap[streamIndex].utcTime >= 0) {
-                    mStreamStartTimeMap[streamIndex].utc2ptsDelta = mStreamStartTimeMap[streamIndex].utcTime - packet->getInfo().pts;
+                const int64_t manifestDelta = mStreamStartTimeMap[streamIndex].timePosition - packet->getInfo().pts;
+                const int64_t lastPts = mStreamStartTimeMap[streamIndex].lastFramePts;
+
+                /*
+                 * ============ 按 DASH 规范：PTO 是**每个 Representation 的常量** ============
+                 *
+                 * ISO/IEC 23009-1 / DASH-IF IOP 定义三条时间轴，换算关系是
+                 *     presentationTime = PeriodStart + (mediaTime − presentationTimeOffset)
+                 * 其中 `@presentationTimeOffset`（PTO）**每路 Representation 只有一个常量**、
+                 * 缺省 0；MPD 里 SegmentTimeline/@t 或 SegmentTemplate 累积出来的分片起始时间
+                 * 属于 Period/Presentation 轴，作用是**索引/寻址**（选段与 seek），
+                 * 不是"每个分片重新定义一次媒体↔节目的换算"。
+                 *
+                 * 我们这里原来的写法是**每段**用 mCurSeg->fixedStartTime 重算 time2ptsDelta，
+                 * 等于"每段重新推一次 PTO" —— 规范里没有这种事。它的实际效果是把
+                 * "MPD 声明的时间"与"媒体自己的时间戳"之间的不一致一段段吸收掉：
+                 *   · 真机实测（同一份 m4s，mpd/m3u8 两种清单，Android+Qt 都复现）：
+                 *     音频这一路两轴差恒 ≈ +10 ms（与 MPD 一致），而**视频**这一路
+                 *     每个分片差 427 ms（40/80/110/140/170 s 落点 = −1708/−3416/−4697/
+                 *     −5979/−7260 ms）⇒ 每段重算就把视频的漂移"隐藏"进节目轴，
+                 *     于是音频与视频被拆成两条速率不同的轴：**声音越来越慢、越播越偏**。
+                 *   · 按规范（PTO 恒定）处理时，两路都跟着**自己的媒体时间戳**推进，
+                 *     音画关系与媒体本身一致；HLS 那侧（HLSStream.cpp:1295 用播放列表累计
+                 *     时长，本片源与媒体一致、差恒 0）本来就是这个行为 ⇒ 同一份 m4s 走 HLS 没事。
+                 *
+                 * 处置：**只在媒体时间戳真的重置时**（换 Period / 编码器重启 —— 那才是
+                 * PTO 允许重新定义的时刻）才接受清单给的新锚点；连续时保持原 delta。
+                 * ⚠「跳段 / seek」不算重置：seek 前最后一个包与 seek 后第一个包的 pts
+                 * 必然差很远，所以旧判据（与"上一帧 pts + 帧长"差出 ±100ms 就算不连续）
+                 * **每 seek 一次就重锚一次**，等于把 MPD 的"名义段长 vs 真实段长"误差
+                 * 当偏移量灌进演示轴（真机实测：30s 落点 −1281250µs = 3×(−427083)、
+                 * 130s 落点 −5552083µs = 13×(−427083)，而 −427083µs 正是 MPD 声明
+                 * 10.000000s 与媒体真实 10.427083s 之差）。这正是"还是一样的"的原因。
+                 * 判据是纯状态判断（新包 pts 相对上一包**回退** > 5s），没有计时器；
+                 * DashStream::seek() 会把 lastFramePts 清成 INT64_MIN，保证 seek
+                 * （前进或后退）都不会被误判成 Period 切换。
+                 * timePosition 的算法仍是 pts + delta，下游（seek 落点、位置地板、
+                 * 读前闸门、渲染归一化）一行都不用改。
+                 */
+                const bool firstAnchor = (mStreamStartTimeMap[streamIndex].time2ptsDelta == INT64_MIN);
+                // mSeekSuppressResetOnce：seek 后第一个分片点不参与"媒体重置"判断
+                // （seek 前最后一个包与 seek 后第一个包的 pts 必然差很远，那不是 Period 切换）
+                const bool mediaReset = (!mSeekSuppressResetOnce && lastPts != INT64_MIN &&
+                                         packet->getInfo().pts < lastPts - 5 * 1000 * 1000);
+
+                if (firstAnchor || mediaReset) {
+                    mStreamStartTimeMap[streamIndex].time2ptsDelta = manifestDelta;
+
+                    if (mStreamStartTimeMap[streamIndex].utcTime >= 0) {
+                        mStreamStartTimeMap[streamIndex].utc2ptsDelta = mStreamStartTimeMap[streamIndex].utcTime - packet->getInfo().pts;
+                    }
                 }
             }
 
             mStreamStartTimeMap[streamIndex].seamlessPoint = false;
+            mSeekSuppressResetOnce = false;      // 只对 seek 后的第一个分片点生效
         }
 
         if (packet->getInfo().duration > 0) {
@@ -1070,6 +1129,40 @@ int64_t DashStream::seek(int64_t us, int flags)
     //   int ret = mPTracker->init();
     bool b_ret = mPTracker->getSegmentNumberByTime(usSought, num);
 
+    /*
+     * 【seek 落点修复 / 回退点 A】把返回值从"请求值"改成"tracker 真正选中的分片起点"。
+     *
+     * 为什么：DashManager::seek() 的既有设计是"2. 先 seek 视频、取回 seekedUs；
+     * 3. 用 seekedUs 去 seek 其余流"（DashManager.cpp:481-512），它**完全依赖本函数的返回值**。
+     * 而本函数原来返回 usSought = 请求值（下面 :1153 一带的注释自己就写明"usSeeked 打的是请求值"），
+     * 于是第 3 步退化成"音频也 seek 到同一个请求目标" ⇒ 音频落在**音频自己的分片网格**、
+     * 视频落在**视频自己的分片网格**。实测 output.mpd（视频片 19.9866s、音频片 9.984s）：
+     * 目标 56.141s 时视频落点 39.973s、音频落点 49.92s ⇒ 音频首帧超前主时钟 10.03s，
+     * SuperMediaPlayer 的"音频超前就 hold"门（reason=1）静音整整 10s（用户报的"声音断一下再回来"）。
+     *
+     * 改成返回分片起点后：视频返回 39.973s ⇒ 第 3 步把音频 seek 到 39.973s ⇒ 音频落到
+     * 包含它的音频分片起点 39.936s（略**早于**视频落点，正是安全方向：音频不超前、
+     * 那道门不会被触发）。时间轴与视频包 timePosition / 播放器侧 landing 同一把尺子
+     * （见本文件 :846 `timePosition = mCurSeg->fixedStartTime`）。
+     *
+     * 只改这一条语义：不动请求目标、不动落点/位置上报（mSeekPositionFloorUs 等一概不碰）；
+     * 消费方安全性已核：Seek() 的返回值只被用作 `ret < 0` 错误判断
+     * （SMPMessageControllerListener.cpp:733-737、SuperMediaPlayer.cpp:8837-8847，
+     * 另两处直接丢弃返回值），且 DASH 多流路径的 manager 返回值恒为 0（DashManager.cpp:518）。
+     * 回退：删掉 landingUs 的计算、把末尾 `return landingUs;` 换回 `return usSought;`。
+     */
+    int64_t landingUs = us;
+
+    if (b_ret && mPTracker->getCurrentRepresentation() != nullptr) {
+        const int64_t segStartUs = mPTracker->getCurrentRepresentation()->getMediaSegmentStartTime(num);
+
+        /* 取不到（<0）就退回请求值：绝不让本节返回值变成负数 ——
+         * DashManager 第 3 步把负值当"seek 失败"（DashManager.cpp:504-506）。 */
+        if (segStartUs >= 0) {
+            landingUs = segStartUs;
+        }
+    }
+
     if (!b_ret) {
         AF_LOGE("(%d)getSegmentNumberByTime error us is %lld\n", mPTracker->getStreamType(), us);
         // us's accuracy is ms, so change duration's accuracy to ms
@@ -1156,11 +1249,23 @@ int64_t DashStream::seek(int64_t us, int flags)
         mDemuxerMeta->bContinue = false;
     }
 
+    /*
+     * 【跨 seek 保持演示轴】seek 不是"媒体时间戳不连续"，只是换了个读取位置：
+     * 让 seek 后的第一个分片点不参与 readPacket 里"媒体重置"的判断，于是
+     * time2ptsDelta（等价于 −PTO 的那个常量）跨 seek 保持不变 —— 否则 MPD 的
+     * 名义段长误差会在每次 seek 时被当成新锚点灌进来（音画越播越偏的根因）。
+     * 这里只置一个开关，不动 lastFramePts/frameDuration，避免影响"pts 缺失时用
+     * lastFramePts + frameDuration 补值"的兜底分支。
+     * 回退：删掉下面这一行赋值即可恢复"每次 seek 重锚"的老行为。
+     */
+    mSeekSuppressResetOnce = true;
+
     if (mThreadPtr) {
         mThreadPtr->start();
     }
 
-    return usSought;
+    /* 【seek 落点修复 / 回退点 A】原来是 `return usSought;`（请求值）—— 见本函数开头那段说明 */
+    return landingUs;
 }
 
 int64_t DashStream::seek_internal(uint64_t segNum, int64_t us)

@@ -30,6 +30,9 @@ namespace Cicada {
         MSG_SET_ROTATE_MODE,
         MSG_SET_MIRROR_MODE,
         MSG_SET_VIDEO_BACKGROUND_COLOR,
+        /* 【色觉辅助滤镜 / 回退点 C5】照 MSG_SET_MIRROR_MODE 新增的一条消息；
+         * 矩阵本体存在 mSet->colorMatrix（与 mirrorMode 同一套写法），消息只是个触发信号。 */
+        MSG_SET_COLOR_MATRIX,
 
         MSG_ADD_EXT_SUBTITLE,
         MSG_SELECT_EXT_SUBTITLE,
@@ -147,6 +150,9 @@ namespace Cicada {
         virtual void ProcessSetMirrorMode() = 0;
 
         virtual void ProcessSetVideoBackgroundColor() = 0;
+
+        /* 【色觉辅助滤镜 / 回退点 C5】与 ProcessSetMirrorMode 同一形态 */
+        virtual void ProcessSetColorMatrix() = 0;
 
         virtual void ProcessSetViewMsg(void *view) = 0;
 

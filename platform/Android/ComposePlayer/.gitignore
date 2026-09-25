@@ -13,3 +13,10 @@
 .externalNativeBuild
 .cxx
 local.properties
+
+# ============ release 签名（绝不入库）============
+# keystore.properties 里是库口令；*.jks/*.keystore 是私钥本体。
+# 丢了就再也发不出同包名的更新 —— 请自行离线备份，不要提交。
+keystore.properties
+*.jks
+*.keystore

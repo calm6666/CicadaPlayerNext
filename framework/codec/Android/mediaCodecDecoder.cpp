@@ -36,11 +36,39 @@ namespace Cicada {
         mName = "VD.mediaCodec";
         mFlags |= DECFLAG_HW;
         mDecoder = new MediaCodec_Decoder();
+        /* B5-4：帧释放回调的共享状态（见头文件里的完整说明）。 */
+        mReleaseState = std::make_shared<FrameReleaseState>();
+        mReleaseState->decoder = mDecoder;
     }
 
     mediaCodecDecoder::~mediaCodecDecoder() {
         mCSDList.clear();
-        delete mDecoder;
+        /*
+         * B5-4：**在同一把锁内**置"已销毁"并 delete JNI 包装 —— 与帧释放回调的临界区
+         * 互斥：要么回调先跑完（那时对象还活着），要么回调看到 alive==false 直接短路。
+         * 不持锁就 delete 的话，"旧代帧等下一次 VSync 才析构"就是真实的 use-after-free
+         * （真机路径：切档提交把旧解码器移入 retired → 播放线程同步销毁它 →
+         *  渲染线程下一次 VSync 才析构它解出的帧）。
+         */
+        if (mReleaseState != nullptr) {
+            std::lock_guard<std::mutex> lock(mReleaseState->mutex);
+            mReleaseState->alive = false;
+            mReleaseState->decoder = nullptr;
+            delete mDecoder;
+            mDecoder = nullptr;
+        } else {
+            delete mDecoder;
+            mDecoder = nullptr;
+        }
+    }
+
+    void mediaCodecDecoder::invalidateFrameReleases() {
+        if (mReleaseState == nullptr) {
+            return;
+        }
+
+        std::lock_guard<std::mutex> lock(mReleaseState->mutex);
+        ++mReleaseState->flushGen;
     }
 
     bool mediaCodecDecoder::checkSupport(const Stream_meta &meta, uint64_t flags, int maxSize) {
@@ -102,6 +130,23 @@ namespace Cicada {
 
         if (flags & DECFLAG_DIRECT) {
             mFlags |= DECFLAG_OUT;
+        }
+        /*
+         * B2 的前提条件（**缺了它整个占位 Surface 方案不会生效**）：
+         * mFlags（IDecoder.h 里的 int mFlags）不是 open 的入参，它只会被本处
+         * 与构造函数显式 OR 进来 —— 之前只把 DECFLAG_DIRECT 转成 DECFLAG_OUT，
+         * DECFLAG_PLACEHOLDER_SURFACE 从来没有进过 mFlags。
+         *
+         * 真机证据（2026-09-24 那份 323KB 日志）：pending 解码器明明是带
+         * DECFLAG_PLACEHOLDER_SURFACE 建的（`pending video decoder is up … flag=0x12a`
+         * 含 0x100），但 configDecoder() 里 `(mFlags & DECFLAG_PLACEHOLDER_SURFACE)`
+         * 恒为 0 ⇒ Java 收到 usePlaceholderSurface=false ⇒ configure(null) 退成
+         * ByteBuffer 模式 ⇒ 提交时 setOutputSurface 抛
+         * "codec was not configured for an output surface"（ret=-2），
+         * 新解码器永远接不上真 Surface。
+         */
+        if (flags & DECFLAG_PLACEHOLDER_SURFACE) {
+            mFlags |= DECFLAG_PLACEHOLDER_SURFACE;
         }
 
         if (meta->codec == AF_CODEC_ID_H264) {
@@ -297,6 +342,13 @@ namespace Cicada {
         {
             std::lock_guard<std::mutex> l(mFlushInterruptMuex);
             mFlushState = 1;
+            /*
+             * B5-4：平台 flush 之后所有"已出队未释放"的 buffer index 都会失效，
+             * 而它们的帧还压在渲染器队列里（下一次 VSync 才析构）。先在锁内把这一代
+             * 作废，回调就不会拿着失效 index 去 release（消掉
+             * `releaseOutputBuffer fail Error 0xfffffff3`）。
+             */
+            invalidateFrameReleases();
             int ret = mDecoder->flush();
             AF_LOGI("clearCache. ret %d, flush state %d", ret, mFlushState);
         }
@@ -312,6 +364,13 @@ namespace Cicada {
         mRenderHold = false;
         mRenderGatePts = INT64_MIN;
         mRenderGateHit = false;
+
+        /*
+         * B5-4：stop + release 之后旧 index 同样失效（而且 stop/换源路径上必然还有
+         * 旧代帧压在渲染器队列里）—— 一并作废这一代，避免它们去 release 刷 E。
+         * 注意它**不**释放/销毁 anything：只是让回调短路。
+         */
+        invalidateFrameReleases();
 
         // stop decoder.
         // must before destructor producer because inner thread will use surface.
@@ -608,9 +667,37 @@ namespace Cicada {
             // AF_LOGD("mediacodec out pts %" PRId64, out.buf.pts);
             if (codecType == CODEC_VIDEO) {
                 const int64_t framePts = out.buf.pts;
+                /*
+                 * B5-4：帧**按值持有**释放状态（shared_ptr）+ 自己所属的代。
+                 * 这样即使 mediaCodecDecoder 已经析构（切档提交后旧解码器是同步销毁的），
+                 * 回调也不会在已释放的对象上读成员 —— 它先在同一把锁内校验：
+                 *   · 对象已销毁 / JNI 包装已销毁 → 短路；
+                 *   · 平台已 flush 或已 close（index 失效）→ 短路（不进 Java）。
+                 */
+                std::shared_ptr<FrameReleaseState> releaseState = mReleaseState;
+                const uint64_t frameGen =
+                        (releaseState != nullptr) ? releaseState->flushGen.load() : 0;
+
                 pFrame = unique_ptr<AFMediaCodecFrame>(
                         new AFMediaCodecFrame(IAFFrame::FrameTypeVideo, index,
-                                              [this, framePts](int index, bool render) {
+                                              [this, framePts, releaseState, frameGen](int index, bool render) {
+                                                  if (releaseState == nullptr) {
+                                                      return;
+                                                  }
+
+                                                  std::lock_guard<std::mutex> lock(releaseState->mutex);
+
+                                                  if (!releaseState->alive || releaseState->decoder == nullptr ||
+                                                      frameGen != releaseState->flushGen.load()) {
+                                                      /*
+                                                       * 解码器已销毁，或平台已经 flush/close 过（buffer index 已失效）：
+                                                       * 这次释放注定失败，直接短路 —— 不进 Java（消掉
+                                                       * `releaseOutputBuffer fail Error 0xfffffff3`），也不碰
+                                                       * 任何可能已释放的成员。buffer 已由平台收回，不会泄漏。
+                                                       */
+                                                      return;
+                                                  }
+
                                                   // 暂停帧恢复：只放行 PTS 精确等于门值的
                                                   // 那一帧，其余帧不上屏（避免 GOP 闪帧）
                                                   if (mRenderHold.load()) {
@@ -626,7 +713,7 @@ namespace Cicada {
                                                       mPrevRenderedVideoPts = mLastRenderedVideoPts.load();
                                                       mLastRenderedVideoPts = framePts;
                                                   }
-                                                  mDecoder->releaseOutputBuffer(index, render);
+                                                  releaseState->decoder->releaseOutputBuffer(index, render);
                                               }));
                 pFrame->getInfo().video.width = width;
                 pFrame->getInfo().video.height = height;
@@ -692,7 +779,8 @@ namespace Cicada {
                 angle = (360 - mMeta.rotate) % 360;
             }
             ret = mDecoder->configureVideo(mMime, mMeta.width, mMeta.height, angle,
-                                           static_cast<jobject>(mVideoOutObser));
+                                           static_cast<jobject>(mVideoOutObser),
+                                           (mFlags & DECFLAG_PLACEHOLDER_SURFACE) != 0);
         } else if (codecType == CODEC_AUDIO) {
             ret = mDecoder->configureAudio(mMime, mMeta.samplerate, mMeta.channels,isADTS);
         }

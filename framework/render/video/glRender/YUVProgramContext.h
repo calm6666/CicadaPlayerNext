@@ -23,6 +23,9 @@ private:
 
     void updateFlip(IVideoRender::Flip flip) override ;
 
+    /* 【色觉辅助滤镜 / 回退点 S3】覆写 IProgramContext 的空默认实现 */
+    void updateColorMatrix(const float matrix[9]) override;
+
     void updateRotate(IVideoRender::Rotate rotate) override ;
 
     void updateBackgroundColor(uint32_t color) override;
@@ -83,6 +86,8 @@ private:
     GLint mProjectionLocation;
     GLint mColorSpaceLocation;
     GLint mColorRangeLocation;
+    /* 【色觉辅助滤镜 / 回退点 S3】uColorMatrix 的 uniform 位置 */
+    GLint mColorMatrixLocation = -1;
     GLuint mPositionLocation;
     GLuint mTexCoordLocation;
     GLuint mYUVTextures[3];
@@ -108,6 +113,14 @@ private:
     int mColorSpace = 0;
     GLfloat  mUColorRange[3] = {0.0f};
     int mColorRange = 0;
+
+    /*
+     * 【色觉辅助滤镜 / 回退点 S3】当前颜色矩阵，默认单位矩阵 = 关闭。
+     * 只在渲染线程内被 updateColorMatrix 写、updateFrame 读，不需要原子/锁。
+     */
+    GLfloat  mUColorMatrix[9] = {1.0f, 0.0f, 0.0f,
+                                 0.0f, 1.0f, 0.0f,
+                                 0.0f, 0.0f, 1.0f};
 
     uint32_t mBackgroundColor = 0xff000000;
     bool mBackgroundColorChanged = true;

@@ -6,6 +6,8 @@ import android.view.SurfaceHolder;
 
 import com.cicada.player.bean.ErrorInfo;
 import com.cicada.player.bean.InfoBean;
+/* 对象方式入口（setDataSource(MediaManifest)）用的类型化模型，见 manifest/MediaManifest.java */
+import com.cicada.player.manifest.MediaManifest;
 import com.cicada.player.nativeclass.CacheConfig;
 import com.cicada.player.nativeclass.MediaInfo;
 import com.cicada.player.nativeclass.PlayerConfig;
@@ -409,6 +411,32 @@ public interface CicadaPlayer {
     abstract public MirrorMode getMirrorMode();
 
     /**
+     * 【色觉辅助滤镜 / 回退点 J3】设置 3x3 颜色矩阵（行主序，9 个 float）。
+     *
+     * 计算方式：显示时 rgb = clamp(matrix * rgb, 0, 1)。**单位矩阵 = 关闭**，
+     * 传 null 或长度不是 9 也按"关闭"处理（见 NativePlayerBase.setColorMatrix）。
+     *
+     * 这是照 setMirrorMode 那条通道新增的**独立一条通道**，不改任何已有接口语义。
+     * 已知限制：隧道/direct 渲染（HDR、Widevine 被内核强制走那条）没有着色器 ⇒ 滤镜无效；
+     * 截图（snapshot）抓的是加滤镜之前的画面 ⇒ 截图不带滤镜。
+     *
+     * 这里给**非抽象的空实现**（而不是 abstract），是为了不让"实现了 CicadaPlayer 的"
+     * 外部/派生类因为这个新增方法而编译不过 —— setMirrorMode 那种写法会把派生类全部
+     * 打断，加功能不该有这个代价。真正的实现在 CicadaPlayerImpl。
+     *
+     * 【编译修复：必须写 default】CicadaPlayer 是 **interface**（本文件 :22），接口里
+     * 带方法体的方法只能写成 `default`（Java 8+ 的默认方法）。原来只写
+     * `public void setColorMatrix(...) { }`，javac 直接报
+     * "interface abstract methods cannot have body"（本轮审查找出的唯一硬编译错误）。
+     * 同文件已有的 `default void setDataSource(...)`（:652）就是同一个写法。
+     *
+     * @param matrix 9 个 float，行主序；null / 非 9 长度 = 关闭
+     */
+    default void setColorMatrix(float[] matrix) {
+        /* no-op：默认实现什么都不做（旧实现/外部扩展不实现本功能也能编译通过） */
+    }
+
+    /**
      * 旋转模式
      */
     /****
@@ -633,6 +661,29 @@ public interface CicadaPlayer {
      */
     default void setDataSourceManifest(String mediaManifestJson) {
         throw new UnsupportedOperationException("object-based playback not supported by this player");
+    }
+
+    /**
+     * 对象模式播放（**对象方式**）：直接传 {@link com.cicada.player.manifest.MediaManifest}
+     * 类型化对象。SDK 只做一件事：{@code manifest.toJsonString()}，然后走**既有**的
+     * {@link #setDataSourceManifest(String)} 字符串路径。
+     *
+     * <p>也就是说对象方式与 JSON 文本方式**最终是同一份 JSON 文本**，由播放器内核用
+     * cJSON 解析成同一个 MediaManifest，运行时行为与性能完全一致；SDK 里**不会**再解析一次。
+     * 对象方式的好处只有一条：类型安全 + IDE 补全 + 字段写错在编译期发现。
+     *
+     * <p>需要 API 26 及以上（接口 default 方法）；老写法 {@code setDataSource(String)} /
+     * {@code setDataSource(JSONObject)} 语义与签名一律不变。
+     */
+    default void setDataSource(MediaManifest manifest) {
+        setDataSourceManifest(manifest != null ? manifest.toJsonString() : "{}");
+    }
+
+    /**
+     * 对象模式播放（**对象方式**），语义同 {@link #setDataSource(MediaManifest)}。
+     */
+    default void setDataSourceManifest(MediaManifest manifest) {
+        setDataSourceManifest(manifest != null ? manifest.toJsonString() : "{}");
     }
 
     /**
@@ -1450,4 +1501,58 @@ public interface CicadaPlayer {
      * 设置drm请求。比如播放WideVine时。
      */
     abstract public void setDrmCallback(DrmCallback callback);
+
+    /**
+     * 清晰度切换状态通知。
+     *
+     * 与 Qt 端一一对应：platform/QtPlayer/src/CicadaPlayerItem.cpp 的
+     * onVideoQualitySwitchCb / notifyQualitySwitchStatus —— 内核在"开始拉取目标流"时发
+     * STARTED，在"目标档位的首帧真的上屏"时发 READY，目标解码器失败或超过内核死线发
+     * FAILED，期间发生 seek / stop / 又切了别的档则发 CANCELED。
+     *
+     * 【只用事件驱动，不要加超时兜底】状态机在内核里已经收敛：每个 STARTED 都必然以
+     * READY / FAILED / CANCELED 之一收尾，界面据此显示/收起提示即可，端侧不需要定时器。
+     */
+    /****
+     * Quality switch status callback.
+     *
+     * Mirrors the Qt shell: STARTED when the target stream starts being fetched,
+     * READY when the first frame of the target rendition is really on screen,
+     * FAILED when the target decoder fails or the core deadline expires, and
+     * CANCELED when a seek / stop / another switch interrupts it.
+     */
+    public interface OnVideoQualitySwitchListener {
+        /** 开始切换（目标流已开始拉取） */
+        int STATUS_STARTED = 0;
+        /** 切换完成（目标档位首帧已上屏） */
+        int STATUS_READY = 1;
+        /** 切换失败（目标解码器失败或超过内核死线） */
+        int STATUS_FAILED = 2;
+        /** 切换被取消（seek / stop / 又切了别的档），当前档位保持不变 */
+        int STATUS_CANCELED = 3;
+
+        /**
+         * @param status      见上面的 STATUS_*，取值与内核 player_quality_switch_status 相同
+         * @param streamIndex 目标视频流下标（与 MediaInfo 里 TrackInfo.getIndex() 同一套编号）
+         * @param description 内核给的说明文字，可能为 null
+         */
+        /****
+         * @param status      One of the STATUS_* values above (same numbering as the core).
+         * @param streamIndex Target video stream index (same numbering as TrackInfo.getIndex()).
+         * @param description Description from the core; may be null.
+         */
+        void onVideoQualitySwitch(int status, int streamIndex, String description);
+    }
+
+    /**
+     * 设置清晰度切换状态通知
+     *
+     * @param l 清晰度切换状态通知
+     */
+    /****
+     * Set the quality switch status callback.
+     *
+     * @param l The quality switch status notification.
+     */
+    abstract public void setOnVideoQualitySwitchListener(OnVideoQualitySwitchListener l);
 }

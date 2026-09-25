@@ -23,19 +23,28 @@ plugins {
 }
 
 /**
- * 内核 CicadaPlayerNext 的位置（自动认两种布局，谁先存在用谁）：
+ * 内核 CicadaPlayerNext 的位置（**位置无关**：按候选路径逐个探测，谁先存在用谁）。
  *
- *   ① 推荐：本工程与内核**并排**，工程目录不在内核树里面
- *        D:\hilihili\JetpackComposePlayer
- *        D:\hilihili\CicadaPlayerNext
- *   ② 旧布局：本工程还在 CicadaPlayerNext\platform\JetpackComposePlayer 下（../..）
+ * 候选顺序：
+ *   ⓪ 显式覆盖：`gradle.properties` 里写 `cicadaRoot=D:/hilihili/CicadaPlayerNext`
+ *      （推荐用于任何非常规布局；改目录时不用动这个文件）
+ *   ① 本工程与内核**并排**：            D:\hilihili\JetpackComposePlayer
+ *   ② 还在内核树的 platform 下：        platform\JetpackComposePlayer      （历史布局，往上 2 层）
+ *   ③ platform\Android\<工程名>        （2026-09 搬迁后布局，往上 3 层）
+ *   ④ platform\Android\source\<工程名> （与 releaseLibs/AAR 同级，往上 4 层）
+ *
+ * 判定标准是"该目录下同时有 mediaPlayer/ 与 framework/"，所以候选写多了也不会误命中。
  */
-val cicadaRoot: File = listOf(
+val cicadaRoot: File = listOfNotNull(
+    (project.findProperty("cicadaRoot") as String?)?.let { file(it) },
     rootProject.file("../CicadaPlayerNext"),   // ① 并排
-    rootProject.file("../..")                  // ② 还在 platform 下
+    rootProject.file("../.."),                 // ② platform/JetpackComposePlayer
+    rootProject.file("../../.."),              // ③ platform/Android/<工程名>
+    rootProject.file("../../../..")            // ④ platform/Android/source/<工程名>
 ).firstOrNull { File(it, "mediaPlayer").isDirectory && File(it, "framework").isDirectory }
     ?: throw GradleException(
-        "找不到内核 CicadaPlayerNext：请把本工程放在 D:\\hilihili\\JetpackComposePlayer（与 CicadaPlayerNext 同级）"
+        "找不到内核 CicadaPlayerNext。请任选一种：① 把本工程放在 D:\\hilihili\\JetpackComposePlayer（与 CicadaPlayerNext 同级）；" +
+            "② 或在 gradle.properties 里显式写 cicadaRoot=D:/hilihili/CicadaPlayerNext"
     )
 
 /**
@@ -63,11 +72,13 @@ android {
 
         externalNativeBuild {
             cmake {
-                // 只传内核依赖目录 + 工具链/STL；内核根、JNI 目录由 src/main/cpp/CMakeLists.txt 自己算
+                // 内核依赖目录 + 工具链/STL；**内核根显式传进去**（上面 cicadaRoot 已按位置无关
+                // 规则探测过），这样工程目录以后再搬也不需要改 src/main/cpp/CMakeLists.txt。
                 arguments.addAll(
                     listOf(
                         "-DANDROID_TOOLCHAIN=clang",
                         "-DANDROID_STL=c++_static",
+                        "-DCICADA_ROOT=${cmakePath(cicadaRoot)}",
                         "-DFFMPEG_INSTALL_DIR_ANDROID=${cmakePath(ffmpegAndroid)}/",
                         "-DEXTERN_INSTALL_DIR_ANDROID=${cmakePath(File(cicadaRoot, "external/install"))}/"
                     )

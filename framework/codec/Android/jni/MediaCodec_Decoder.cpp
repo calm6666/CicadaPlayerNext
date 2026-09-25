@@ -52,7 +52,7 @@ void MediaCodec_Decoder::init(JNIEnv *env) {
         jMediaCodec_setForceInsecureDecoder = env->GetMethodID(jMediaCodecClass, "setForceInsecureDecoder",
                                                   "(Z)V");
         jMediaCodec_configureVideo = env->GetMethodID(jMediaCodecClass, "configureVideo",
-                                                      "(Ljava/lang/String;IIILjava/lang/Object;)I");
+                                                      "(Ljava/lang/String;IIILandroid/view/Surface;Z)I");
         jMediaCodec_configureAudio = env->GetMethodID(jMediaCodecClass, "configureAudio",
                                                       "(Ljava/lang/String;III)I");
         jMediaCodec_setOutputSurface = env->GetMethodID(jMediaCodecClass, "setOutputSurface",
@@ -173,7 +173,7 @@ void MediaCodec_Decoder::setForceInsecureDecoder(bool force)
 }
 
 int MediaCodec_Decoder::configureVideo(const std::string &mime, int width, int height, int angle,
-                                       void *surface) {
+                                       void *surface, bool usePlaceholderSurface) {
     JniEnv jniEnv{};
 
     JNIEnv *env = jniEnv.getEnv();
@@ -188,7 +188,8 @@ int MediaCodec_Decoder::configureVideo(const std::string &mime, int width, int h
     mCodecCategory = CATEGORY_VIDEO;
     NewStringUTF jMime(env, mime.c_str());
     int ret = env->CallIntMethod(mMediaCodec, jMediaCodec_configureVideo, jMime.getString(),
-                                 (jint) width, (jint) height, (jint) angle, (jobject) surface);
+                                 (jint) width, (jint) height, (jint) angle, (jobject) surface,
+                                 (jboolean) usePlaceholderSurface);
 
     return ret;
 }

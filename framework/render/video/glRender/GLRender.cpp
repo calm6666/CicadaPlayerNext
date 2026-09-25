@@ -9,6 +9,7 @@
 #include <utils/timer.h>
 #include <utils/AFMediaType.h>
 #include <cassert>
+#include <chrono>
 #include <cstdlib>
 #include <render/video/glRender/base/utils.h>
 
@@ -34,6 +35,11 @@ using namespace Cicada;
 
 GLRender::GLRender(float Hz)
 {
+    /*
+     * 【色觉辅助滤镜 / 回退点 R3-b】颜色矩阵的初值（单位矩阵 = 关闭）现在写在
+     * GLRender.h 的成员声明处（普通 float[9] 可以直接聚合初始化）。
+     * 原来这里那 9 次逐元素 .store() 是 std::atomic<float>[9] 时代的写法，已删除。
+     */
     mVSync = VSyncFactory::create(*this, Hz);
     mHz = 0;
     mVSyncPeriod = static_cast<int64_t>(1000000 / Hz);
@@ -116,6 +122,31 @@ int GLRender::setFlip(IVideoRender::Flip flip)
     AF_LOGD("-----> setFlip");
     mFlip = flip;
     return 0;
+}
+
+/*
+ * 【色觉辅助滤镜 / 回退点 R3】
+ * 只存矩阵，不下发：真正的 GL 调用集中在 renderActually()（持 EGL context 的渲染线程），
+ * 这里碰 GL 会踩到"非渲染线程操作 GL"的老坑。存下来后，renderActually 每帧都会带上
+ * ——所以"切格式（硬解 OES ↔ 软解 YUV）之后滤镜仍然生效"是自然成立的，不需要额外补下发。
+ * 单位矩阵 = 关闭（着色器里乘上去等于没乘），不做"是否设置过"的判断。
+ */
+void GLRender::setColorMatrix(const float matrix[9])
+{
+    if (matrix == nullptr) {
+        return;
+    }
+
+    AF_LOGI("-----> setColorMatrix");
+    /*
+     * 【回退点 R3-b】锁只护这 9 个 float 的拷贝：本函数不碰 GL、也没有别的判断，
+     * 所以锁的范围到此为止（AF_LOGI 放在锁外，不持锁打日志）。
+     */
+    std::lock_guard<std::mutex> locker(mColorMatrixMutex);
+
+    for (int i = 0; i < 9; i++) {
+        mColorMatrix[i] = matrix[i];
+    }
 }
 
 int GLRender::setScale(IVideoRender::Scale scale)
@@ -251,6 +282,9 @@ int GLRender::VSyncOnInit()
 void GLRender::VSyncOnDestroy()
 {
     mPrograms.clear();
+    /* B5：program/纹理随 GL context 一起销毁，"就绪"闩必须复位，
+     * 否则下一次 getSurface() 会拿到一个已经失效的面。 */
+    mOutTextureReady = false;
 
     if (mContext == nullptr) {
         return;
@@ -295,8 +329,45 @@ bool GLRender::renderActually()
 #ifdef __ANDROID__
 
     if (needCreateOutTexture) {
+        /*
+         * program / OES 纹理 / DecoderSurface 都只能在**持有 EGL context 的渲染线程**
+         * 上创建（context 在 onVsyncInner → VSyncOnInit 里 makeCurrent）。
+         * 这里创建成功后置 mOutTextureReady，getSurface() 的等待者据此判断"面真的有了"。
+         * 建不出来（program==nullptr，例如 EGL 初始化失败）时**也要通知**，否则等待者
+         * 只能靠超时返回 —— 通知前不置 ready，等待者拿到 nullptr，上层按"没有输出面"处理。
+         */
         IProgramContext *programContext = getProgram(AF_PIX_FMT_CICADA_MEDIA_CODEC);
-        programContext->createSurface();
+
+        if (programContext != nullptr) {
+            programContext->createSurface();
+            mOutTextureReady = (programContext->getSurface() != nullptr);
+        } else {
+            AF_LOGE("GLRender: could not create the media-codec program on the render thread; the "
+                    "video render path will report 'no decoder surface'\n");
+        }
+
+        /*
+         * ============ 【预热】软解用的 YUV 程序也在这里先建好 ============
+         *
+         * 为什么必须现在建：GL 程序**第一次** initProgram() 要真编译/链接着色器，Android 驱动
+         * 只有在编译过一次之后才会把它写进 App 私有 shader cache。而 getProgram() 平时是
+         * **懒创建**（第一次真正用到该格式时才编译）—— 实测表现就是：
+         *   · 首次安装后打开第一个视频，**第一次 seek** 卡住一段时间后自己恢复；
+         *   · 之后（包括杀进程重开）都不卡，只有卸载/清数据才会重新出现；
+         *   · Qt 侧走 D3D11VA，着色器路径完全不同 ⇒ 从来不受影响。
+         * 放在这里而不是等按需触发，有三个好处：
+         *   ① 位置正确：已在渲染线程、EGL context 已 makeCurrent（program/纹理只能在
+         *      这个线程建，见上面 needCreateOutTexture 的说明）；
+         *   ② 成本被藏起来：此刻正处在"起播/首帧"这个用户本来就在等加载的窗口里；
+         *   ③ 一次覆盖全部后续路径：seek、切档、软硬解切换都不再触发冷编译，
+         *      首帧渲染本身也会更快。
+         * 失败不改变任何行为：返回 nullptr 就当作没预热，后续仍走原来的懒创建路径。
+         * 回退：删掉下面这个 if 块即可恢复"按需懒创建"的旧行为。
+         */
+        if (getProgram(AF_PIX_FMT_YUV420P) == nullptr) {
+            AF_LOGW("GLRender: YUV program pre-warm failed, it will be created lazily as before\n");
+        }
+
         std::unique_lock<std::mutex> locker(mCreateOutTextureMutex);
         needCreateOutTexture = false;
         mCreateOutTextureCondition.notify_all();
@@ -380,6 +451,29 @@ bool GLRender::renderActually()
     mProgramContext->updateRotate(finalRotate);
     mProgramContext->updateWindowSize(mWindowWidth, mWindowHeight, displayViewChanged);
     mProgramContext->updateFlip(mFlip);
+    /*
+     * 【色觉辅助滤镜 / 回退点 R3】与上一行 updateFlip 并排：**每帧**都下发（和 mFlip 一样）。
+     * 好处是程序在 getProgram() 里被缓存/复用时（同格式复用旧 program，不会重新初始化）
+     * 也一定带上当前矩阵；「硬解 OES ↔ 软解 YUV」切格式后的第一帧同样带上。
+     * 注意 captureScreen 抓的是**加滤镜之前**的画面（它读的是这里的 framebuffer 结果，
+     * 而这个矩阵是画上去之前乘的）——截图不带滤镜是预期行为，和 Qt 截图链路同源。
+     */
+    {
+        /*
+         * 【回退点 R3-b】锁内只做一次 9 float 拷贝（与 setColorMatrix 成对：
+         * 保证这里拿到的是**同一代**写入的整组系数，不会半新半旧）；
+         * updateColorMatrix 在锁外调用 —— GL 调用绝不进锁。
+         */
+        float colorMatrix[9];
+        {
+            std::lock_guard<std::mutex> locker(mColorMatrixMutex);
+
+            for (int i = 0; i < 9; i++) {
+                colorMatrix[i] = mColorMatrix[i];
+            }
+        }
+        mProgramContext->updateColorMatrix(colorMatrix);
+    }
     mProgramContext->updateBackgroundColor(mBackgroundColor);
     int ret = -1;
     if (mScreenCleared && frame == nullptr) {
@@ -515,20 +609,48 @@ void GLRender::captureScreen(std::function<void(uint8_t *, int, int)> func)
 void *GLRender::getSurface(bool cached)
 {
 #ifdef __ANDROID__
-    IProgramContext *programContext = getProgram(AF_PIX_FMT_CICADA_MEDIA_CODEC);
-
-    if (programContext == nullptr || programContext->getSurface() == nullptr || !cached) {
+    /*
+     * ============ 【B5 修：program / OES 纹理只能由渲染线程创建】============
+     *
+     * 旧写法第一句就是 `getProgram(AF_PIX_FMT_CICADA_MEDIA_CODEC)` —— 那会在**调用线程**
+     * （播放线程：SuperMediaPlayer::CreateVideoDecoder 里的 `getSurface()`）上
+     * new OESProgramContext + initProgram()，而此刻 EGL context 只由渲染线程
+     * makeCurrent（onVsyncInner → VSyncOnInit）⇒ glCreateProgram / glCompileShader
+     * 一律失败，每次冷启动都刷一条
+     *   `[GLRender_OESContext] compileShader mVertShader failed. ret = -1`
+     * 的 E 级日志（真机 2026-09-25 11:02:16.412 那条就是它），而且白做一次无用功。
+     *
+     * 现在：调用线程只"向渲染线程要"，创建一律发生在渲染线程（context 一定 current）；
+     * 渲染线程建好后置 mOutTextureReady。调用线程拿到的必然是已建好并缓存的那个
+     * program，因此这里**不再调用 getProgram()**（它会在 cache miss 时触发创建）。
+     *
+     * 等待有上限（2s）：渲染线程若因 GL 初始化失败而永远建不出来，这里返回 nullptr，
+     * 由上层按"没有解码器输出面"处理，而不是把播放线程无限挂住（旧写法是无超时 wait）。
+     */
+    if (!mOutTextureReady.load() || !cached) {
         std::unique_lock<std::mutex> locker(mCreateOutTextureMutex);
         needCreateOutTexture = true;
-        mCreateOutTextureCondition.wait(locker, [this]() -> int {
-            return !needCreateOutTexture;
-        });
+
+        if (!mCreateOutTextureCondition.wait_for(locker, std::chrono::seconds(2),
+                                                 [this]() { return !needCreateOutTexture; })) {
+            needCreateOutTexture = false;
+            AF_LOGE("GLRender::getSurface timed out after 2s waiting for the render thread to create the "
+                    "decoder surface — returning nullptr instead of blocking the caller forever\n");
+            return nullptr;
+        }
     }
 
-    programContext = getProgram(AF_PIX_FMT_CICADA_MEDIA_CODEC);
-    if (programContext) {
-        return programContext->getSurface();
+    if (!mOutTextureReady.load()) {
+        return nullptr;
     }
+
+    /* 只读缓存（不创建）：见上面说明，创建只发生在渲染线程。 */
+    auto it = mPrograms.find(AF_PIX_FMT_CICADA_MEDIA_CODEC);
+
+    if (it != mPrograms.end() && it->second != nullptr) {
+        return it->second->getSurface();
+    }
+
 #endif
     return nullptr;
 }

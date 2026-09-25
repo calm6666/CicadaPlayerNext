@@ -653,6 +653,15 @@ import java.lang.ref.WeakReference;
         return mCorePlayer.getMirrorMode();
     }
 
+    /**
+     * 【色觉辅助滤镜 / 回退点 J4】照 setMirrorMode 的透传写法（mCorePlayer = NativePlayerBase）。
+     * null / 长度非 9 由 NativePlayerBase.setColorMatrix 归一成单位矩阵（= 关闭）。
+     */
+    @Override
+    public void setColorMatrix(float[] matrix) {
+        mCorePlayer.setColorMatrix(matrix);
+    }
+
 
     @Override
     public void setRotateMode(RotateMode rotateMode) {

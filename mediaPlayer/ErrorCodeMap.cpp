@@ -41,6 +41,10 @@ void ErrorCodeMap::init()
     codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_DEMUXER_OPENSTREAM, 0x20030003));
     codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_LOADING_TIMEOUT, 0x20030004));
     codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_DATASOURCE_EMPTYURL, 0x20030005));
+    /* 对象模式（MediaManifest JSON）解析失败：0x20030006 已被
+     * MEDIA_PLAYER_ERROR_DEMUXER_OPEN_CACHEFILE 占用（仅顺序取值、未登记），
+     * 因此这里用同一段的下一号 0x20030007，与枚举里的顺序值一一对应，不冲突。 */
+    codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_DEMUXER_MANIFEST_PARSE, 0x20030007));
     codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_DECODE_BASE, 0x20040000));
     codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_DECODE_VIDEO, 0x20040001));
     codeMap.insert(pair<int, int>(MEDIA_PLAYER_ERROR_DECODE_AUDIO, 0x20040002));

@@ -673,6 +673,17 @@ namespace Cicada {
         return CicadaGetMirrorMode(handle);
     }
 
+    /* 【色觉辅助滤镜 / 回退点 C2】照 SetMirrorMode 的写法转发，无 analytics 上报（新增通道，不动已有上报体系） */
+    void MediaPlayer::SetColorMatrix(const float matrix[9])
+    {
+        if (matrix == nullptr) {
+            return;
+        }
+
+        GET_PLAYER_HANDLE
+        CicadaSetColorMatrix(handle, matrix);
+    }
+
     void MediaPlayer::SetVideoBackgroundColor(uint32_t color)
     {
         GET_PLAYER_HANDLE

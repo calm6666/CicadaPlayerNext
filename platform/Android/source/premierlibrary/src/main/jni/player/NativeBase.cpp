@@ -666,6 +666,45 @@ jint NativeBase::java_GetMirrorMode(JNIEnv *env, jobject instance)
     return player->GetMirrorMode();
 }
 
+/*
+ * 【色觉辅助滤镜 / 回退点 J1】jfloatArray(9) → float[9]。
+ * GetFloatArrayElements/ReleaseFloatArrayElements 成对；JNI_ABORT = 只读不改，不回写 Java 数组。
+ * 长度不足 9 或为 null 时直接返回（上层 Java 已把 null 归一成单位矩阵，这里只是兜底）。
+ */
+void NativeBase::java_SetColorMatrix(JNIEnv *env, jobject instance, jfloatArray matrix)
+{
+    AF_TRACE;
+
+    if (matrix == nullptr) {
+        return;
+    }
+
+    if (env->GetArrayLength(matrix) < 9) {
+        return;
+    }
+
+    MediaPlayer *player = getPlayer(env, instance);
+
+    if (player == nullptr) {
+        return;
+    }
+
+    jfloat *elements = env->GetFloatArrayElements(matrix, nullptr);
+
+    if (elements == nullptr) {
+        return;
+    }
+
+    float colorMatrix[9];
+    for (int i = 0; i < 9; i++) {
+        colorMatrix[i] = elements[i];
+    }
+
+    env->ReleaseFloatArrayElements(matrix, elements, JNI_ABORT);
+
+    player->SetColorMatrix(colorMatrix);
+}
+
 
 jfloat NativeBase::java_GetSpeed(JNIEnv *env, jobject instance)
 {
@@ -1112,6 +1151,8 @@ static JNINativeMethod nativePlayer_method_table[] = {
         {"nGetRotateMode", "()I", (void *) NativeBase::java_GetRotateMode},
         {"nSetMirrorMode", "(I)V", (void *) NativeBase::java_SetMirrorMode},
         {"nGetMirrorMode", "()I", (void *) NativeBase::java_GetMirrorMode},
+        /* 【色觉辅助滤镜 / 回退点 J1】签名必须与 NativePlayerBase.nSetColorMatrix(float[]) 一致 */
+        {"nSetColorMatrix", "([F)V", (void *) NativeBase::java_SetColorMatrix},
         {"nSetSpeed", "(F)V", (void *) NativeBase::java_SetSpeed},
         {"nGetSpeed", "()F", (void *) NativeBase::java_GetSpeed},
         {"nSetTraceID", "(Ljava/lang/String;)V", (void *) NativeBase::java_SetTraceID},

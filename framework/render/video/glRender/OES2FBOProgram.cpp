@@ -21,8 +21,10 @@ static const char DIS_FRAGMENT_SHADER[] = R"(
         precision mediump float;
         varying vec2 textureCoordinate;
         uniform sampler2D inputTexture;
+        uniform mat3 uColorMatrix;
         void main() {
-            gl_FragColor = texture2D(inputTexture, textureCoordinate);
+            vec3 rgb = texture2D(inputTexture, textureCoordinate).rgb;
+            gl_FragColor = vec4(clamp(uColorMatrix * rgb, 0.0, 1.0), 1.0);
         }
 )";
 
@@ -79,6 +81,8 @@ int OES2FBOProgram::initProgram()
     mDisPositionLocation = static_cast<GLuint>(glGetAttribLocation(mDisProgram, "aPosition"));
     mDisTexCoordLocation = static_cast<GLuint>(glGetAttribLocation(mDisProgram, "aTextureCoord"));
     mDisTextureLocation = glGetUniformLocation(mDisProgram, "inputTexture");
+    /* 【色觉辅助滤镜 / 回退点 S2】 */
+    mDisColorMatrixLocation = glGetUniformLocation(mDisProgram, "uColorMatrix");
     mInitRet = 0;
     return mInitRet;
 }
@@ -180,4 +184,19 @@ void OES2FBOProgram::useProgram()
 void OES2FBOProgram::uniform1i()
 {
     glUniform1i(mDisTextureLocation, 0);
+    /* 【色觉辅助滤镜 / 回退点 S2】每帧下发（program 只在创建时初始化一次）。
+     * location == -1 时 glUniformMatrix3fv 是 no-op。 */
+    glUniformMatrix3fv(mDisColorMatrixLocation, 1, GL_FALSE, mDisColorMatrix);
+}
+
+/* 【色觉辅助滤镜 / 回退点 S2】只存矩阵；真正下发在上面的 uniform1i() 里（每帧）。 */
+void OES2FBOProgram::updateColorMatrix(const float matrix[9])
+{
+    if (matrix == nullptr) {
+        return;
+    }
+
+    for (int i = 0; i < 9; i++) {
+        mDisColorMatrix[i] = matrix[i];
+    }
 }

@@ -94,7 +94,8 @@ namespace Cicada {
         void setForceInsecureDecoder(bool force);
 
         int
-        configureVideo(const std::string &mime, int width, int height, int angle, void *surface);
+        configureVideo(const std::string &mime, int width, int height, int angle, void *surface,
+                       bool usePlaceholderSurface);
 
         int configureAudio(const std::string &mime, int sampleRate, int channelCount, int isADTS);
 

@@ -177,6 +177,8 @@ namespace Cicada {
 
     int64_t filterAudioRender::getPosition()
     {
+        /* 【② 已整体回退】原来这里透传 INT64_MIN 哨兵；见 AudioTrackRender::device_get_position()
+         * 里那段回退说明。恢复成今天的行为：不做任何哨兵判断。 */
         return device_get_position() + static_cast<int64_t>(mSpeedDeltaDuration / (mOutputInfo.sample_rate / 1000000.0f));
     }
 

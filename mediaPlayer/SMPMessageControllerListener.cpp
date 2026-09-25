@@ -481,6 +481,24 @@ void SMPMessageControllerListener::ProcessSetVideoBackgroundColor()
     }
 }
 
+/*
+ * 【色觉辅助滤镜 / 回退点 C6】照 ProcessSetMirrorMode 的写法：对**当前**渲染器下发。
+ * 矩阵本体直接读 mSet->colorMatrix（与 mirrorMode 同一套写法），消息只作触发信号。
+ * 空默认实现：非 GL 渲染器（Dummy / Qt / Apple）什么都不做，且**不需要改一行**。
+ * 这里是"事件驱动"的那一行日志，方便真机确认通道打通（不是计时器）。
+ */
+void SMPMessageControllerListener::ProcessSetColorMatrix()
+{
+    const float *matrix = mPlayer.mSet->colorMatrix;
+    AF_LOGI("color matrix applied: %f %f %f %f %f %f %f %f %f\n",
+            matrix[0], matrix[1], matrix[2], matrix[3], matrix[4],
+            matrix[5], matrix[6], matrix[7], matrix[8]);
+
+    if (mPlayer.mAVDeviceManager->isVideoRenderValid()) {
+        mPlayer.mAVDeviceManager->getVideoRender()->setColorMatrix(matrix);
+    }
+}
+
 void SMPMessageControllerListener::ProcessSetViewMsg(void *view)
 {
     mPlayer.mSet->mView = view;
@@ -497,16 +515,47 @@ void SMPMessageControllerListener::ProcessSetViewMsg(void *view)
     // releaseCodec+maybeInitCodec 式的重建兜底（RestartVideoDecoder）
     if (mPlayer.mAVDeviceManager->getVideoRender() != nullptr
         && (mPlayer.mAVDeviceManager->getVideoRender()->getFlags() & IVideoRender::FLAG_DUMMY)) {
-        IDecoder *decoder = mPlayer.mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
-        if (decoder != nullptr) {
-            int ret = decoder->setOutputSurface(view);
-            if (ret < 0) {
-                AF_LOGI("video output surface swap failed ret=%d, fallback: restart video decoder\n", ret);
-                mPlayer.RestartVideoDecoder();
-            } else if (view != nullptr && mPlayer.mPlayStatus == PLAYER_PAUSED) {
-                // 暂停状态恢复 surface：ACodec 不会重绘最后一帧，用渲染门 +
-                // 原地 seek 精确恢复"暂停的那一帧"（只放行最后渲染帧 PTS）
-                mPlayer.RestorePausedVideoFrame();
+        /*
+         * 【2026-09-24 修：切档在途/提交中时，这里不许换 surface、更不许重建解码器】
+         *
+         * 真机 native 崩溃（Fatal signal 11 SIGSEGV, fault addr 0x4,
+         * tid=ApsaraPlayerService）的成因：A 方案下 SurfaceView 尺寸变化会再次
+         * setSurface ⇒ 本函数在主线程走 setOutputSurface，失败后
+         * RestartVideoDecoder()（invalidateDecoder + CreateVideoDecoder），而**播放线程
+         * 正在为切档创建 pending 解码器** —— 两边同时动解码器槽位/mAVDeviceManager，
+         * 且都落到 tunnel 下无意义的软解兜底，最终崩在 native。
+         *
+         * 判据全部是**既有状态**（不新增成员、不看时间、没有定时器）：切档目标已定、
+         * 解码器切换已闩、或提交待收尾 ⇒ 播放线程正在接管视频槽位，这里必须让路，
+         * 只记一条日志；切档自己用既有的 finishQualitySwitch / 错误路径收尾。
+         *
+         * 【为什么 Qt 不受影响】整条判据包在 FLAG_DUMMY 分支内，而 Qt 永远没有
+         * FLAG_DUMMY 渲染器（bEnableTunnelRender 每次播放前 reset 为 false、
+         * Qt 壳不下发该选项、CicadaVideoRender 明确返回 0 而不是 FLAG_DUMMY）
+         * ⇒ 恒不进入，Qt 走的还是原来那条 setOutputSurface/RestartVideoDecoder 分支。
+         */
+        const bool qualitySwitchInFlight = mPlayer.mPendingVideoStreamIndex >= 0 ||
+                                           mPlayer.mPendingVideoDecoderSwitch ||
+                                           mPlayer.mQualitySwitchCommitPending;
+        if (qualitySwitchInFlight) {
+            AF_LOGW("ProcessSetViewMsg: quality switch in flight (pendingStream=%d decoderSwitch=%d "
+                    "commitPending=%d) — skipping the dummy surface swap and the decoder rebuild; "
+                    "the switch owns the video slot\n",
+                    mPlayer.mPendingVideoStreamIndex,
+                    (int) mPlayer.mPendingVideoDecoderSwitch,
+                    (int) mPlayer.mQualitySwitchCommitPending);
+        } else {
+            IDecoder *decoder = mPlayer.mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+            if (decoder != nullptr) {
+                int ret = decoder->setOutputSurface(view);
+                if (ret < 0) {
+                    AF_LOGI("video output surface swap failed ret=%d, fallback: restart video decoder\n", ret);
+                    mPlayer.RestartVideoDecoder();
+                } else if (view != nullptr && mPlayer.mPlayStatus == PLAYER_PAUSED) {
+                    // 暂停状态恢复 surface：ACodec 不会重绘最后一帧，用渲染门 +
+                    // 原地 seek 精确恢复"暂停的那一帧"（只放行最后渲染帧 PTS）
+                    mPlayer.RestorePausedVideoFrame();
+                }
             }
         }
     }
@@ -604,6 +653,14 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mQualitySwitchCommittedStreamIndex = -1;
     mPlayer.mVideoPtsRevert = false;
     mPlayer.mAudioPtsRevert = false;
+    /*
+     * 【修法 2】锚点事件在这里置位（seek 真正开始时），而不是在 SeekTo() 里。
+     * SeekTo() 是 API 线程、只负责 putMsg；从 putMsg 到本函数执行之间，
+     * 主循环仍可能渲染出**旧时间轴**的帧，如果那时事件已就绪就会被它消费掉，
+     * 把主时钟锚到旧位置（安卓实测锚到了 1.75s 而目标是 52.085s）。
+     * 放在这里之后，只有 seek 开始之后渲染的帧才可能消费该事件。
+     */
+    mPlayer.mSeekAnchorPending = true;
     /* 必须在调用 DASH/HLS demuxer->Seek() 之前取消 pending representation。
      * 旧顺序先对所有 selected stream 做 Seek，再 CloseStream(pending)，网络
      * 慢时 Seek 会等待已经被用户取消的目标流，表现为 seek 直接卡死。普通本地
@@ -612,6 +669,43 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
         mPlayer.FlushVideoPath(true, true, __func__);
         mPlayer.mWillChangedVideoStreamIndex = -1;
         mPlayer.mVideoChangedFirstPts = INT64_MIN;
+    }
+
+    /*
+     * ============ 矩阵第 3 格：seek 在途时必须**干净中止**在途切档（2026-09-24）============
+     *
+     * 上面那个 if 只覆盖"还没提交"的 pending 路（mPendingVideoStreamIndex /
+     * mWillChangedVideoStreamIndex >= 0）。**已经提交**的切档（decoder 已经 promote，
+     * 两个索引都是 -1、只剩 mQualitySwitchCommitPending 为真）会从这里漏过去 ——
+     * 而它恰恰是最容易出事的形态：暂停态切档的 S5 渲染还欠着、S9 的提交后墙钟
+     * 死线还在倒计时，而 seek 刚刚把整个视频时间轴换掉了。两者叠加的结果就是
+     * 状态机停在"已提交但永远不会上屏"，最后由死线报一次 FAILED，期间用户看到
+     * 的是画面卡住。
+     *
+     * 处理：只要还有任何在途切换（含已提交、含暂停态那三个新状态），seek 就
+     * 权威地把它收掉 —— 复用现成的 finishQualitySwitch(false, …)，它会关
+     * retired 流、释放 retired 解码器、清 commitPending/offset/计数器，以及
+     * 三个暂停态新状态（见 finishQualitySwitch 末尾的 resetPausedSwitchState）。
+     *
+     * 为什么用 finishQualitySwitch 而不是 FlushVideoPath：提交之后 decoder 已经
+     * 是 **active** 路，这里如果再来一次 FlushVideoPath(flushRender=1) 会把渲染器
+     * 一起 flush 掉，正是历史上"seek 后 read-ahead gate 永久堵住"那条事故路径。
+     * 所以只做状态收尾（不发 CANCELED，避免和真实用户操作的通知语义混淆 ——
+     * 该发的终态由 finishQualitySwitch 统一发 FAILED 给 UI，高亮退回旧档）。
+     */
+    if (mPlayer.mQualitySwitchCommitPending ||
+        mPlayer.mSwitchStartedWhilePaused ||
+        mPlayer.mPausedSwitchRenderPending) {
+        AF_LOGW("seek is taking over while a quality switch was in flight (commitPending=%d "
+                "pausedSwitch=%d renderPending=%d) — finishing the switch cleanly before repositioning, "
+                "otherwise the two in-flight state machines would wait for each other\n",
+                (int) mPlayer.mQualitySwitchCommitPending,
+                (int) mPlayer.mSwitchStartedWhilePaused,
+                (int) mPlayer.mPausedSwitchRenderPending);
+
+        mPlayer.finishQualitySwitch(false, "superseded by a seek that took over the video timeline");
+        mPlayer.resetPausedSwitchState();
+        mPlayer.mQualitySwitchPrerollDeadlineMs = 0;
     }
     //flush packet queue
     mPlayer.mSeekInCache = mPlayer.SeekInCache(seekPos);
@@ -666,7 +760,20 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
                 // first frame is far away from seek position, don't suppport accurate seek
                 mPlayer.mSeekNeedCatch = false;
             } else {
-                mPlayer.mBufferController->ClearPacketBeforeTimePos(BUFFER_TYPE_AUDIO, mPlayer.mSeekPos);
+                /*
+                 * C 方案（本轮改）：这里原来会把"目标点之前的音频包"直接清掉
+                 * （ClearPacketBeforeTimePos(AUDIO, mSeekPos)），于是音频只能从**目标点**
+                 * 开始，而视频从**目标点之前的关键帧**开始 —— 两者相差 1~4 秒，
+                 * 视频相对主时钟永久迟到（4K 解码只有约 1×，还不清）→ 画面冻住。
+                 *
+                 * 现在**不动音频包**：保留缓存里"落点→目标点"这段音频。等本次 seek 的
+                 * 落点关键帧被读到（落点 PTS 已知）这个**事件**发生，再由
+                 * SuperMediaPlayer::DecodeVideoPacket 一次性把音频裁剪/对齐到落点
+                 * （见那里的 mSeekAudioAlignDone）。这样音频与视频从**同一个落点**起步：
+                 * 无债务、无静音、A/V 内容对齐。
+                 */
+                AF_LOGI("seek in cache: keeping the audio packets before the target so the audio can "
+                        "start at the video landing keyframe (aligned by the landing event)\n");
             }
         }
 

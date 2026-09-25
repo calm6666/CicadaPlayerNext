@@ -49,6 +49,17 @@ namespace Cicada {
         ScaleMode scaleMode = ScaleMode::SM_FIT;
         RotateMode rotateMode = RotateMode::ROTATE_MODE_0;
         MirrorMode mirrorMode = MirrorMode::MIRROR_MODE_NONE;
+        /*
+         * 【色觉辅助滤镜 / 回退点 C4】3x3 颜色矩阵（行主序）。默认**单位矩阵 = 关闭**：
+         * 这样"建渲染器时下发一次启动配置"（SuperMediaPlayer::CreateVideoRender）拿到的
+         * 就是"无效果"，不需要额外判断"是否设置过"。
+         *
+         * 注意：全 0 矩阵在语义上等于"画面变全黑"（clamp(0,0,1)），**不是**"关闭"；
+         * 要关闭请传单位矩阵（Java 层 setColorMatrix(null) 也走单位矩阵）。
+         */
+        float colorMatrix[9] = {1.0f, 0.0f, 0.0f,
+                                0.0f, 1.0f, 0.0f,
+                                0.0f, 0.0f, 1.0f};
         int64_t mAutoSwitchTime{INT64_MIN};
         atomic<float> mVolume{1.0};
         playerListener mPlayerListener{};

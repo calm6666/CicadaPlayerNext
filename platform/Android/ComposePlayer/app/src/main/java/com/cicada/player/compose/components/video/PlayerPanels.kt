@@ -91,6 +91,89 @@ fun PanelRow(text: String, selected: Boolean, onClick: () -> Unit) {
     )
 }
 
+/**
+ * 镜像画面（**内核 `setMirrorMode`**，不是 App 层翻转）。
+ *
+ * 三态：关 / 水平 / 垂直（用户明确：只做镜像翻转，不做旋转）。
+ *
+ * 【为什么改了名字 / 回退点 M2】内核 SDK 自带 `com.cicada.player.CicadaPlayer.MirrorMode`
+ * （`MIRROR_MODE_NONE / MIRROR_MODE_HORIZONTAL / MIRROR_MODE_VERTICAL`，见 CicadaPlayer.java:345-366）。
+ * 本枚举原来就叫 `MirrorMode`，与它同名容易在调用处看错类型（一个是 UI 三态、一个是内核参数），
+ * 所以这里**改名成 `MirrorUiMode`**：面板参数/状态继续用它，下发内核时在
+ * CicadaVideoPlayer 里显式映射一次（见 `LaunchedEffect(mirrorMode)`），两个类型各自只出现一次，
+ * 不用在 UI 层 import 内核枚举。回退：把本枚举与下面 MIRROR_ROWS、PlayerInfoPanel 两个参数
+ * 的名字改回 `MirrorMode`，并删掉 CicadaVideoPlayer 里的映射 + setMirrorMode 调用。
+ *
+ * 【为什么走内核（与上一轮相反的结论）】上一轮用 `Modifier.graphicsLayer { scaleX = -1f }`
+ * 挂在承载画面的 AndroidView 上，真机点击后画面毫无变化：视频画在 **SurfaceView** 上，由
+ * SurfaceFlinger 单独合成，Compose 图层的负缩放传不到它。内核这条路（JNI →
+ * `SMPMessageControllerListener` 对当前渲染器 `setFlip` → `GLRender` → OES/YUV 两个 program
+ * context）是已验证可用的。
+ *
+ * 【已知限制（不解决）】隧道 / direct 渲染（HDR、Widevine 被内核强制走 `FLAG_DUMMY`）下渲染器是
+ * `DummyVideoRender`，它的 `setFlip` 是**空实现** ⇒ 那类片源镜像仍无效；**不要**再用 App 层
+ * View 变换去兜。截图不带镜像（内核抓帧处对自身的 flip 做临时补偿）。
+ */
+enum class MirrorUiMode { None, Horizontal, Vertical }
+
+/** 「镜像画面」那三行的文案与顺序（与 [MirrorUiMode] 一一对应；三态文案保持不变） */
+private val MIRROR_ROWS: List<Pair<MirrorUiMode, String>> = listOf(
+    MirrorUiMode.None to "关闭",
+    MirrorUiMode.Horizontal to "水平镜像",
+    MirrorUiMode.Vertical to "垂直镜像",
+)
+
+/**
+ * 【色觉辅助滤镜 / 回退点 K2】色觉辅助（红绿色盲等）4 档：关闭 / 红·绿 / 绿·红 / 蓝·黄。
+ *
+ * 与镜像那三行的 `MirrorUiMode` **不是一回事**：镜像走内核渲染器的 flip（隧道渲染那条无效），
+ * 而色觉滤镜必须在**内核的 GL 着色器**里乘一个 3x3 矩阵（`CicadaPlayerController.setColorMatrix`
+ * → JNI → `SuperMediaPlayer` → `GLRender` → `OESProgramContext`/`YUVProgramContext`）。
+ *
+ * 矩阵数值：Machado, Oliveira & Fernandes (2009) 的色盲**模拟**矩阵，强度 1.0，**行主序 3×3**。
+ * 这三组是"正常三色觉 → 某型色盲所见"的正向矩阵；用在色盲用户屏幕上时，它把本来容易混淆的
+ * 颜色拉开成他们能分辨的方向（业界常用的 daltonization 近似做法之一）。
+ * 数值照用户给定的三组原样抄写，未做任何调整；实际观感必须在真机上核对。
+ *
+ * 【关闭】用**单位矩阵**表示（不用 null）：C++ 侧默认值也是单位矩阵，"乘上去等于没乘"
+ * 让"关滤镜"和"滤镜没设置过"走完全同一条路径，少一个分支。**注意别传全 0 矩阵**，
+ * 那在着色器里的语义是 clamp(0,0,1) = 画面全黑，不是关闭。
+ */
+enum class ColorVisionMode(val label: String, val matrix: FloatArray) {
+    None(
+        "关闭",
+        floatArrayOf(
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f,
+        ),
+    ),
+    Protan(
+        "红/绿（红色盲）",
+        floatArrayOf(
+            0.152286f, 1.052583f, -0.204868f,
+            0.114503f, 0.786281f, 0.099216f,
+            -0.003882f, -0.048116f, 1.051998f,
+        ),
+    ),
+    Deutan(
+        "绿/红（绿色盲）",
+        floatArrayOf(
+            0.367322f, 0.860646f, -0.227968f,
+            0.280085f, 0.672501f, 0.047413f,
+            -0.011820f, 0.042940f, 0.968881f,
+        ),
+    ),
+    Tritan(
+        "蓝/黄（蓝色盲）",
+        floatArrayOf(
+            1.255528f, -0.076749f, -0.178779f,
+            -0.078411f, 0.930809f, 0.147602f,
+            0.004733f, 0.691367f, 0.303900f,
+        ),
+    ),
+}
+
 /** 清晰度（数据来自内核 `MediaInfo` 的视频轨，见 PlayerStats.buildQualities） */
 @Composable
 fun PlayerQualityPanel(
@@ -100,8 +183,22 @@ fun PlayerQualityPanel(
 ) {
     PlayerPanelShell(modifier = modifier) {
         PanelTitle("清晰度")
+        /*
+         * 【回退点 A3】这里原来是 `PanelRow("自动（当前分辨率）", selected = true) { }`
+         * —— 一个既不可点、也不来自内核的**假条目**。已删除：列表为空时如实说明。
+         *
+         * 正常路径下这一支根本走不到：调用方只在列表非空时才允许打开本面板
+         * （CicadaVideoPlayer 的 onQualityClick，对齐 Qt RightControls.qml:1671-1680
+         * 的 `hasQuality = qualities.length > 0` / `if (qualityButton.hasQuality) open()`）。
+         * 留着这一支是为了 debug 入口（--es panel quality）和其它调用方不出现空壳面板。
+         */
         if (qualities.isEmpty()) {
-            PanelRow("自动（当前分辨率）", selected = true) { }
+            Text(
+                text = "当前片源没有清晰度信息",
+                color = PlayerTheme.panelSubText,
+                fontSize = 12.sp,
+                modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
+            )
         } else {
             qualities.forEach { q -> PanelRow(q.label, q.selected) { onPick(q) } }
         }
@@ -239,12 +336,32 @@ private fun VerticalVolumeSlider(volume: Float, onVolume: (Float) -> Unit) {
     }
 }
 
-/** 视频信息（真实读数）+ 后台播放开关 */
+/**
+ * 视频信息（真实读数）+ 后台播放开关 + **画面设置（镜像 / 截图）**。
+ *
+ * 【回退点】`mirror / onMirrorChange / captureInFlight / onCapture` 这四个参数与下面
+ * 「镜像画面」「截图」两段是**本轮新增**的：整段删掉 + 调用方（CicadaVideoPlayer 的
+ * PlayerPanel.Info 那一支）去掉这四个实参，即可回到只有信息+后台播放的旧状态。
+ *
+ * 为什么这两行放在**这个已有面板**里，而不是控制栏再加一颗按钮：
+ * 控制栏那一行在竖屏下已经排满（清晰度/倍速/字幕三颗文字按钮 + 竖屏胶囊 + 两颗图标，
+ * 见 PlayerControls.kt 里那段宽度说明），再塞一颗会把弹幕输入框挤到不可用。
+ * 位置对应 Qt 的设置面板（platform/QtPlayer/SettingsPanel.qml:389-394「镜像画面」）。
+ */
 @Composable
 fun PlayerInfoPanel(
     stats: PlayerStats,
     backgroundPlayEnabled: Boolean,
     onToggleBackgroundPlay: () -> Unit,
+    mirror: MirrorUiMode = MirrorUiMode.None,
+    onMirrorChange: (MirrorUiMode) -> Unit = {},
+    /* 【色觉辅助滤镜 / 回退点 K3】这两个参数与下面「色觉辅助」一段是本轮新增的：
+     * 整段删掉 + 调用方（CicadaVideoPlayer 的 PlayerPanel.Info 那一支）去掉这两个实参，
+     * 即可回到只有镜像/截图的状态。*/
+    colorVision: ColorVisionMode = ColorVisionMode.None,
+    onColorVisionChange: (ColorVisionMode) -> Unit = {},
+    captureInFlight: Boolean = false,
+    onCapture: () -> Unit = {},
     modifier: Modifier = Modifier,
 ) {
     PlayerPanelShell(modifier = modifier, width = 300.dp) {
@@ -297,5 +414,31 @@ fun PlayerInfoPanel(
                 onCheckedChange = { onToggleBackgroundPlay() },
             )
         }
+
+        /* ---------------- 镜像画面（本轮修复：改走内核 setMirrorMode） ----------------
+         * 三态互斥、当前档用主题色高亮 —— 与面板其它选中项同一套写法（PanelRow 的 selected）。
+         * 这里只改状态；**下发内核**在 CicadaVideoPlayer 的 LaunchedEffect(mirrorMode) 里做
+         * （与色觉滤镜同一种写法）。改完立刻生效：不重设 Surface、不碰解码/播放状态。 */
+        PanelTitle("镜像画面")
+        MIRROR_ROWS.forEach { (mode, label) ->
+            PanelRow(label, mirror == mode) { onMirrorChange(mode) }
+        }
+
+        /* ---------------- 色觉辅助（本轮新增；走**内核 GL 着色器**，与镜像不是一条路） ----------------
+         * 4 档互斥、当前档用主题色高亮（同一套 PanelRow(selected) 写法）。改完立刻生效。
+         * 在哪无效、截图为什么不带滤镜：见 ColorVisionMode 和 CicadaPlayerController.setColorMatrix。 */
+        PanelTitle("色觉辅助")
+        ColorVisionMode.entries.forEach { mode ->
+            PanelRow(mode.label, colorVision == mode) { onColorVisionChange(mode) }
+        }
+
+        /* ---------------- 截图 → 存相册（本轮新增） ----------------
+         * 点击 = 请求内核截当前帧，成功后由 CicadaVideoPlayer 写进相册（Pictures/CicadaPlayer）
+         * 并给一句 Toast。`captureInFlight` 只用于把文案换成"正在截图…"，防止连点。 */
+        PanelTitle("截图")
+        PanelRow(
+            text = if (captureInFlight) "正在截图…" else "保存当前画面到相册",
+            selected = false,
+        ) { onCapture() }
     }
 }

@@ -152,6 +152,24 @@ namespace Cicada {
 
         virtual MirrorMode GetMirrorMode() = 0;
 
+        /*
+         * 【色觉辅助滤镜】设置 3x3 颜色矩阵（行主序，9 个 float）。
+         *
+         * 这是照 SetMirrorMode 那条已验证通道**新增的独立一条通道**，不改任何已有 API。
+         * 语义：显示时 rgb = clamp(uColorMatrix * rgb, 0, 1)；单位矩阵 = 关闭（无效果）。
+         *
+         * 已知限制（不打算解决，写明即可）：
+         *  · 隧道/direct 渲染（IVideoRender::FLAG_DUMMY，HDR/Widevine 被内核强制走这条）没有
+         *    着色器 ⇒ 滤镜无效；
+         *  · GLRender::captureScreen 抓的是"加滤镜之前"的画面 ⇒ 截图不带滤镜
+         *    （Qt 的截图链路同源，同样不带）。
+         *
+         * 【回退点 C1】删掉本函数 + 各实现类里的 override 即可回到加此通道之前（见各文件注释）。
+         *
+         * @param matrix 9 个 float，行主序；传单位矩阵表示关闭
+         */
+        virtual void SetColorMatrix(const float matrix[9]) = 0;
+
         virtual int GetCurrentStreamIndex(StreamType type) = 0;
 
         virtual StreamInfo *GetCurrentStreamInfo(StreamType type) = 0;

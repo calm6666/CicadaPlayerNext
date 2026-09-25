@@ -258,6 +258,36 @@ namespace Cicada {
         virtual void setClientBufferLevel(client_buffer_level level)
         {}
 
+        /*
+         * 【按流 re-position】把**单个流**的后续投递位置重新定位到 us（绝对微秒，与 Seek 同一时间轴），
+         * 其它流的读取位置与已经排队的数据都不受影响。
+         *
+         * 注意：本虚函数**必须留在虚函数列表末尾**（与成员偏移契约同理）—— 插在中间会移动
+         * 其后所有虚函数的 vtable 槽位，而本工程增量构建不记录头文件依赖，未重编的旧 TU
+         * 会按错槽位调用（崩溃）。新增同类接口时也继续往这里追加。
+         *
+         * 默认实现返回 -1（不支持）—— 与本文件里 GetNbSubStreams / GetRemainSegmentCount
+         * 表达"不支持"的方式一致。**当前没有任何解复用器覆写它**，所以这个接口的加入对
+         * 现有行为（HLS/DASH/单文件容器）零影响；调用方必须按返回值回退到既有防线。
+         *
+         * 实现本接口必须先满足下面三条，任何一条做不到就**继续返回负值**：
+         *   1. 只改变 index 指定流的投递位置；
+         *   2. 不得移动共享容器位置、不得清空其它流的已排队包、不得暂停或重启读线程；
+         *   3. 可被消息线程调用（与其它控制接口同一线程模型）。
+         *
+         * 为什么默认不支持：单文件容器（avFormatDemuxer）的定位原语 avformat_seek_file
+         * 移动的是**整个容器上下文**，FFmpeg 没有"只动音频"的能力；用它满足第 2 条是不可能的
+         * （会把视频包从新位置重新投递，造成 PTS 倒退与重复）。真要支持，只能为音频流单独
+         * 持有一份解复用/读取上下文（另一份 AVFormatContext 与 IO），那是一次独立的大改动。
+         */
+        virtual int SeekStream(int64_t us, int flags, int index)
+        {
+            (void) us;
+            (void) flags;
+            (void) index;
+            return -1;
+        }
+
     public:
         int64_t estimateExclusiveEndPositionBytes(const string &url, int64_t timeMicSec, int64_t totalLength) override;
 

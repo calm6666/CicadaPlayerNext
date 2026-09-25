@@ -61,6 +61,14 @@ namespace Cicada {
     class MediaPlayer;
 }
 
+/*
+ * 对象方式入口用到的构造器类型（见 platform/QtPlayer/src/CicadaManifestBuilder.h）。
+ * 这里只前向声明：头文件不必把构造器实现拖进来，.cpp 里 include 即可。
+ */
+namespace CicadaManifest {
+    class Builder;
+}
+
 namespace cicadaqt {
 
     class CicadaVideoTexture;
@@ -575,6 +583,18 @@ namespace cicadaqt {
          * 注意：换成普通 URL（setSource）时会反过来把清单清掉，两种片源不会串。
          */
         Q_INVOKABLE bool setManifest(const QVariantMap &manifest);
+        /*
+         * **对象方式入口**：直接接 CicadaManifest::Builder 的产物（类型安全、IDE 补全、
+         * 字段写错在编译期就能发现）。实现与 setManifest(QVariantMap) **完全相同**：
+         *   builder.toJsonString() -> setManifestJson(json)
+         *     -> SetDataSource(std::string) -> 内核 cJSON 解析 -> ManifestDemuxer
+         * 也就是：对象方式和 JSON 文本方式最终是**同一份 JSON 文本**走同一条内核路径，
+         * 运行时行为与性能完全一致；应用层不做任何解析/转换。
+         *
+         * 仍然保留那条警告：往核心传清单**必须传 std::string**，传 const char* 会命中
+         * SetDataSource(const char *url) 那个重载，清单会被当成 URL 去打开。
+         */
+        bool setManifest(const CicadaManifest::Builder &builder);
         Q_INVOKABLE bool setManifestJson(const QString &json);
         /*
          * **按协议**喂清单对象：protocol 是 "dash" 或 "hls"（大小写不敏感）。
@@ -745,10 +765,6 @@ namespace cicadaqt {
         void onSceneGraphInvalidated();
         /* 主线程：场景图设备就绪之后再真正开始准备播放。 */
         void startPlaybackWhenReady();
-        /*
-         * seek 看门狗：框架迟迟不发 SeekEnd 时兜底（详见 .cpp）。
-         */
-        void onSeekWatchdog();
 
     private:
         /* 创建/销毁播放器（都在主线程）。 */
@@ -762,9 +778,9 @@ namespace cicadaqt {
          * （位置/缓冲位置一律走框架推送：PositionUpdate / BufferPositionUpdate。）
          */
         void refreshDuration();
-        /* 真正把一次 seek 交给框架（并起看门狗）。 */
+        /* 真正把一次 seek 交给框架（终态由 Seeking / SeekEnd 事件驱动，没有看门狗）。 */
         void issueSeek(qint64 positionMs);
-        /* seek 结束（或看门狗超时）之后的收尾：清状态 + 如果有挂起目标就接着发。 */
+        /* seek 结束之后的收尾：清状态 + 如果有挂起目标就接着发。 */
         void finishSeek();
         /*
          * 把当前片源重新打开一遍（销毁 + 重建 + Prepare），并把播放位置记下来，
@@ -795,13 +811,6 @@ namespace cicadaqt {
         void appendStatsSample(const QVariantMap &snapshot);
         void ensureStatsTimer();
         void parseManifestStatsInfo();
-        /*
-         * seek 期间的"位置不许往回跳"地板（微秒→毫秒）。
-         * seek 一开始就把目标点记在这里，之后所有比它小的位置更新都被忽略，
-         * 直到这次 seek 结束 —— 否则进度条会出现"点了 → 跳过去 → 又跳回原处 →
-         * 最后才跳到 seek 点"的来回弹（用户实测报的就是这个）。
-         */
-        qint64 m_seekUiFloorMs = -1;
         /*
          * QML 侧适配矩形：按视频宽高比在 item 里算一个**等比居中**的矩形
          * （Scale_AspectFit：整幅画面都在 item 里，短的那一边留黑边）。
@@ -891,11 +900,6 @@ namespace cicadaqt {
          */
         bool m_seekInFlight = false;
         qint64 m_seekPending = -1;
-        /*
-         * seek 看门狗：框架的 SeekEnd 一直不来（seek 卡在框架里了）时，至少要让我们
-         * 自己恢复，不能把"正在 seek"这个状态永远挂住。
-         */
-        QTimer m_seekWatchdog;
         bool m_playerStarted = false;
         /*
          * "首帧已经上屏"是否已经通知过。

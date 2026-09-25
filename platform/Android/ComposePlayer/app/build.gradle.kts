@@ -1,7 +1,48 @@
+import java.util.Properties
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.android)
     alias(libs.plugins.kotlin.compose)
+}
+
+/*
+ * ============ release 签名配置（从工程根的 keystore.properties 读）============
+ *
+ * 规则：**文件不存在（或没填 storeFile）就完全跳过** —— release 仍按今天的方式产出
+ * `-unsigned` 包，debug 流程一字不变。存在就挂上签名，`assembleRelease` 直接产出可安装包。
+ *
+ * keystore.properties 内容（放在 platform/Android/ComposePlayer/ 下，**不要入库**）：
+ *   storeFile=D:/hilihili/keys/cicada-release.jks
+ *   storePassword=你的库口令
+ *   keyAlias=cicada
+ *   keyPassword=你的库口令
+ *
+ * 生成密钥库（一次性；AS 自带 JDK 里就有 keytool）：
+ *   & "C:\Program Files\Android\Android Studio\jbr\bin\keytool.exe" -genkeypair -v `
+ *     -keystore "D:\hilihili\keys\cicada-release.jks" -alias cicada `
+ *     -keyalg RSA -keysize 2048 -sigalg SHA256withRSA -validity 10000 `
+ *     -storetype PKCS12 -dname "CN=Cicada Player, OU=Dev, O=Hilihili, L=Beijing, ST=Beijing, C=CN"
+ *
+ * 注意：PKCS12 下 storePassword 与 keyPassword 必须相同。
+ */
+/*
+ * 读 keystore.properties。注意用 Properties 的**简单名**：Kotlin DSL 里 `java` 会被
+ * AGP 生成的 `java` 扩展访问器遮蔽，直接写 `java.util.Properties` 会编不过
+ * （Unresolved reference: util / load），所以文件头已经 `import java.util.Properties`。
+ */
+val keystorePropertiesFile = rootProject.file("keystore.properties")
+val keystoreProperties = Properties()
+if (keystorePropertiesFile.exists()) {
+    keystorePropertiesFile.inputStream().use { keystoreProperties.load(it) }
+}
+val hasReleaseKeystore = !keystoreProperties.getProperty("storeFile").isNullOrBlank()
+if (hasReleaseKeystore) {
+    val missing = listOf("storePassword", "keyAlias", "keyPassword")
+        .filter { keystoreProperties.getProperty(it).isNullOrBlank() }
+    if (missing.isNotEmpty()) {
+        println("[signing] keystore.properties 缺少字段 ${missing.joinToString()} —— release 签名会失败")
+    }
 }
 
 android {
@@ -39,6 +80,24 @@ android {
         }
     }
 
+    /*
+     * 签名配置：只有 keystore.properties 真的填了 storeFile 才创建（否则不创建、
+     * release 保持"未签名"的旧行为）。
+     */
+    signingConfigs {
+        if (hasReleaseKeystore) {
+            create("release") {
+                storeFile = file(keystoreProperties.getProperty("storeFile"))
+                storePassword = keystoreProperties.getProperty("storePassword")
+                keyAlias = keystoreProperties.getProperty("keyAlias")
+                keyPassword = keystoreProperties.getProperty("keyPassword")
+                /* minSdk 24 ⇒ v2 足够；v1 一起开是为了兼容个别老设备/第三方校验工具 */
+                enableV1Signing = true
+                enableV2Signing = true
+            }
+        }
+    }
+
     buildTypes {
         release {
             isMinifyEnabled = false
@@ -46,6 +105,10 @@ android {
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
             )
+            /* 有签名就挂上；没有 ⇒ 与今天完全一致（产出 -unsigned，装不上但能编过） */
+            if (hasReleaseKeystore) {
+                signingConfig = signingConfigs.getByName("release")
+            }
         }
     }
     compileOptions {

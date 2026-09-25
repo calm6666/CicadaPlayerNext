@@ -120,6 +120,12 @@ public:
 
     static jint java_GetMirrorMode(JNIEnv *env, jobject instance);
 
+    /*
+     * 【色觉辅助滤镜 / 回退点 J1】照 java_SetMirrorMode 的写法，多一个数组参数。
+     * 声明 (1/3)：本头文件。
+     */
+    static void java_SetColorMatrix(JNIEnv *env, jobject instance, jfloatArray matrix);
+
     static void java_SetSpeed(JNIEnv *env, jobject instance, jfloat speed);
 
     static jfloat java_GetSpeed(JNIEnv *env, jobject instance);
@@ -218,6 +224,15 @@ public:
     static jbyteArray  jni_requestProvision(const std::string& url , void* data, int size, void *userData);
 
     static jbyteArray  jni_requestKey(const std::string& url , void* data, int size , int type, void *userData);
+
+    /*
+     * 清晰度切换状态（内核 playerListener.VideoQualitySwitch）。
+     * status 取 native_cicada_player_def.h 的 player_quality_switch_status：
+     * 0=STARTED / 1=READY / 2=FAILED / 3=CANCELED；streamIndex 是目标视频流下标；
+     * desc 是内核给的说明文字，允许为空。
+     */
+    static void
+    jni_onVideoQualitySwitch(int64_t status, int64_t streamIndex, const void *desc, void *userData);
 
 private:
     static int64_t mapStatus(int64_t status);

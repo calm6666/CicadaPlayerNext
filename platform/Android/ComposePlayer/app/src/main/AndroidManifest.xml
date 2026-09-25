@@ -22,6 +22,17 @@
         android:name="android.permission.READ_EXTERNAL_STORAGE"
         android:maxSdkVersion="32" />
 
+    <!--
+        截图保存到相册（Pictures/CicadaPlayer，见 components/video/CicadaVideoPlayer.kt 的
+        saveSnapshotToGallery 与 requestCapture）：
+          · Android 10（API 29）+ ：写自己插入的 MediaStore 条目**不需要**任何权限；
+          · Android 9（API 28）及以下：需要 WRITE_EXTERNAL_STORAGE，所以只在这个区间声明
+            （maxSdkVersion=28），运行时由 RequestPermission 申请；29+ 直接跳过申请。
+    -->
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
     <application
         android:allowBackup="true"
         android:dataExtractionRules="@xml/data_extraction_rules"

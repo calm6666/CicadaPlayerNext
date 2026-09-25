@@ -563,6 +563,12 @@ MirrorMode AppleAVPlayer::GetMirrorMode()
     }
 }
 
+/* 【色觉辅助滤镜 / 回退点 C9】空实现：本路径画面不经内核 GL 着色器（见头文件说明） */
+void AppleAVPlayer::SetColorMatrix(const float matrix[9])
+{
+    (void) matrix;
+}
+
 int AppleAVPlayer::GetCurrentStreamIndex(StreamType type)
 {
     return 0;

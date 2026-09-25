@@ -56,6 +56,17 @@ public:
 
     virtual void updateFlip(IVideoRender::Flip flip) = 0;
 
+    /**
+     * 【色觉辅助滤镜 / 回退点 R2】下发 3x3 颜色矩阵（行主序，单位矩阵 = 关闭）。
+     *
+     * **非纯虚 + 空默认实现**：只有 OESProgramContext / YUVProgramContext 覆写；
+     * CV420PProgramContext 等其它 context 不用改也不会编译失败。
+     */
+    virtual void updateColorMatrix(const float matrix[9])
+    {
+        (void) matrix;
+    }
+
     virtual void updateRotate(IVideoRender::Rotate rotate) = 0;
 
     virtual void updateBackgroundColor(uint32_t color) = 0;

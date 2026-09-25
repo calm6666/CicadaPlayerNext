@@ -25,6 +25,12 @@ namespace Cicada{
         MEDIA_PLAYER_ERROR_LOADING_TIMEOUT,
         MEDIA_PLAYER_ERROR_DATASOURCE_EMPTYURL,
         MEDIA_PLAYER_ERROR_DEMUXER_OPEN_CACHEFILE,
+        /*
+         * 对象模式（MediaManifest JSON）解析失败：JSON 文本不合法、缺必填字段
+         * （duration / video[]）或结构不符。**追加在本段末尾**，不改动既有任何错误码
+         * 的取值（后面的段都以显式常量开头，例如 MEDIA_PLAYER_ERROR_DECODE_BASE）。
+         */
+        MEDIA_PLAYER_ERROR_DEMUXER_MANIFEST_PARSE,
 
         MEDIA_PLAYER_ERROR_DECODE_BASE = 0x20040000,
         MEDIA_PLAYER_ERROR_DECODE_VIDEO,

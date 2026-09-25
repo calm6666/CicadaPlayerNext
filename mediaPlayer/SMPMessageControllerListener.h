@@ -37,6 +37,9 @@ namespace Cicada {
 
         void ProcessSetVideoBackgroundColor() final;
 
+        /* 【色觉辅助滤镜 / 回退点 C6】与 ProcessSetMirrorMode 同一形态 */
+        void ProcessSetColorMatrix() final;
+
         void ProcessSetDataSourceMsg(const std::string &url) final;
 
         void ProcessSetManifestDataSourceMsg(std::unique_ptr<Manifest::MediaManifest> manifest) final;

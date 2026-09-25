@@ -85,27 +85,110 @@ data class SubtitleOption(
  * 真实字段（已核 `nativeclass/TrackInfo.java`）：`index`、`mType`(`Type.TYPE_VIDEO`)、
  * `videoWidth`/`videoHeight`/`videoBitrate`；**`TrackInfo.AUTO_SELECT_INDEX = -1`** 表示自动切码率。
  * 只有一档视频轨时按用户要求**只显示"自动"**。
+ *
+ * [autoQuality] 是**用户意图**（内核 ABR 开着），[currentIndex] 是内核回报的**实际**档位。
+ * 两者必须分开判：自动档下内核会把 ABR 自己选中的真实档位报回来（0/3/7…），只按
+ * currentIndex 高亮的话，"自动"这一行会在 ABR 运行时失去高亮、而某一档具体清晰度被点亮
+ * —— 那正是"只有标签、实际手动"的界面来源。Qt 端同样是两个属性
+ * （CicadaPlayerItem.h:302 qualityIndex / :311 autoQuality）。
  */
-fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int): List<QualityOption> {
+fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int, autoQuality: Boolean): List<QualityOption> {
     /* 用显式 getter：TrackInfo 同时有公有字段与 getter，Kotlin 属性语法可能歧义 */
     val videos = mediaInfo?.trackInfos?.filter {
         it.getType() == TrackInfo.Type.TYPE_VIDEO
     }.orEmpty()
 
+    /* 只有一档视频轨：按用户要求只显示"自动"一行（不带实际清晰度的括号） */
+    if (videos.size <= 1) {
+        return listOf(
+            QualityOption(
+                index = TrackInfo.AUTO_SELECT_INDEX,
+                label = "自动",
+                selected = true,
+            )
+        )
+    }
+
+    /*
+     * ============ 照 Qt 的 onMediaInfoGetCb 逐条移植 ============
+     * 标杆：platform/QtPlayer/src/CicadaPlayerItem.cpp:492-537（合并 + 排序）、:446-466（文案）。
+     *
+     * ① 同分辨率合并：按**高度**分组（Qt 特意用高度而不是"宽x高"，见它 :499-508 的说明），
+     *    每组留**带宽最大**的那一条。
+     *    为什么必须要：DASH 下同一分辨率会同时存在 h264 与 h265 两条编码，内核 Java 侧
+     *    是原样把全部视频流都给出来的（cicadaplayer/.../jni/player/JavaTrackInfo.cpp:195-209），
+     *    不合并列表里就会出现"1080P / 1080P"这种重复项 —— 这正是现在列表不行的主因。
+     * ② 合并后按**带宽降序**排（Qt :534-537）。
+     * ③ "自动"追加到**末尾**（Qt 控制栏是各档在前、自动在最后：RightControls.qml:1784-1790），
+     *    而不是像以前那样放在第一行。
+     */
+    val merged = videos
+        .groupBy { qualityGroupKey(it) }
+        .map { (_, group) -> group.maxByOrNull { it.getVideoBitrate() } ?: group.first() }
+        .sortedByDescending { it.getVideoBitrate() }
+
+    /*
+     * 自动档在 ABR 已经选出实际档位之后带上括号显示它 —— 与 Qt 控制栏的
+     * "自动（实际清晰度）"同一个意思（RightControls.qml 的自动档那一行）。
+     * 这样用户不用去翻日志就能看出"自动"是不是真的在动（这正是 ① 的验收点）。
+     */
+    val actual = if (autoQuality) merged.firstOrNull { it.getIndex() == currentIndex } else null
     val auto = QualityOption(
         index = TrackInfo.AUTO_SELECT_INDEX,
-        label = "自动",
-        selected = currentIndex == TrackInfo.AUTO_SELECT_INDEX || videos.size <= 1,
+        label = if (actual != null) "自动（${qualityLabelOf(actual)}）" else "自动",
+        selected = autoQuality,
     )
-    if (videos.size <= 1) return listOf(auto)
 
-    return listOf(auto) + videos.map { t ->
-        val w = t.getVideoWidth()
-        val h = t.getVideoHeight()
-        val res = if (w > 0 && h > 0) "$w x $h" else "未知分辨率"
-        val br = if (t.getVideoBitrate() > 0) "  ${t.getVideoBitrate() / 1000} kbps" else ""
-        QualityOption(index = t.getIndex(), label = res + br, selected = t.getIndex() == currentIndex)
+    return merged.map { t ->
+        QualityOption(
+            index = t.getIndex(),
+            label = qualityLabelOf(t),
+            selected = !autoQuality && t.getIndex() == currentIndex,
+        )
+    } + auto
+}
+
+/** 合并分组的键：优先高度，其次宽度，都没有就按各自 index 单独成组（Qt 同兜底）。 */
+private fun qualityGroupKey(track: TrackInfo): Int {
+    val h = track.getVideoHeight()
+    if (h > 0) return h
+    val w = track.getVideoWidth()
+    if (w > 0) return w
+    return -1 - track.getIndex()
+}
+
+/**
+ * 一档视频轨的显示名 —— 与 Qt 完全一致的写法（`CicadaPlayerItem.cpp:446-466`）：
+ *   2160 及以上 → `4K`；1440 及以上 → `2K`；有高度 → `1080P`；
+ *   没高度 → `宽 x 高`；连宽高都没有 → `kbps`；都没有 → `未知`。
+ * 清晰度列表、切换提示、按钮文案共用这一套。
+ */
+fun qualityLabelOf(track: TrackInfo): String {
+    val w = track.getVideoWidth()
+    val h = track.getVideoHeight()
+    val kbps = track.getVideoBitrate() / 1000
+    return when {
+        h >= 2160 -> "4K"
+        h >= 1440 -> "2K"
+        h > 0 -> "${h}P"
+        w > 0 -> if (h > 0) "$w x $h" else "$w"
+        kbps > 0 -> "$kbps kbps"
+        else -> "未知"
     }
+}
+
+/**
+ * 按内核给的视频流下标找档位名（清晰度切换提示的文案用）。
+ *
+ * 下标来自内核 `PLAYER_QUALITY_SWITCH_STARTED` 事件的 `streamIndex`，与
+ * `TrackInfo.getIndex()` 同一套编号（Qt 端 `PlayerView.qml` 的
+ * `qualityLabelForStream()` 做的是同一件事）。找不到就返回 null，界面退回通用文案。
+ */
+fun qualityLabelFor(mediaInfo: MediaInfo?, index: Int): String? {
+    if (index < 0) return null
+    return mediaInfo?.trackInfos
+        ?.firstOrNull { it.getType() == TrackInfo.Type.TYPE_VIDEO && it.getIndex() == index }
+        ?.let { qualityLabelOf(it) }
 }
 
 /**

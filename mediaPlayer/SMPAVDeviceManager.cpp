@@ -161,6 +161,20 @@ int SMPAVDeviceManager::setUpPendingVideoDecoder(uint64_t decFlag, const Stream_
         return gen_framework_errno(error_class_codec, codec_error_video_device_error);
     }
     h.valid = true;
+    /*
+     * 【角色标签，2026-09-24】
+     *
+     * 排查"切档后花屏/卡住"时最缺的一条事实是：日志里那些 codec 级输出
+     * （AFActiveDecoder / mediaCodecDecoder 等）到底是 active、pending 还是
+     * retired 解码器打的 —— 三者共用同一个 LOG_TAG，光看日志分不出来，
+     * 于是"坏包到底是新路还是旧路产生的"只能猜。
+     *
+     * 这里在**创建时刻**打一行带角色+实现名的 INFO（每次 setUpPendingVideoDecoder
+     * 只会成功走到这里一次，天然限频，不需要额外控制），配合 active/retired
+     * 那两处已有的日志，就能按时间线把三个角色的存活区间对上。
+     */
+    AF_LOGI("pending video decoder is up: role=pending impl=%s flag=0x%llx (active decoder keeps running)\n",
+            h.decoder->getName().c_str(), (unsigned long long) decFlag);
     return 0;
 }
 

@@ -33,6 +33,7 @@ static const char YUV_FRAGMENT_SHADER[] = R"(
 
         uniform mat3      uColorSpace;
         uniform vec3      uColorRange;
+        uniform mat3      uColorMatrix;
 
         varying vec2 v_texCoord;
 
@@ -43,6 +44,7 @@ static const char YUV_FRAGMENT_SHADER[] = R"(
             yuv.y = (texture2D(u_tex, v_texCoord).r - 0.5) * 255.0 / uColorRange.z;
             yuv.z = (texture2D(v_tex, v_texCoord).r - 0.5) * 255.0 / uColorRange.z;
             rgb = uColorSpace * yuv;
+            rgb = clamp(uColorMatrix * rgb, 0.0, 1.0);
             gl_FragColor = vec4(rgb, 1.0);
         }
 )";
@@ -135,6 +137,20 @@ void YUVProgramContext::updateFlip(IVideoRender::Flip flip) {
     if (mFlip != flip) {
         mFlip = flip;
         mCoordsChanged = true;
+    }
+}
+
+/*
+ * 【色觉辅助滤镜 / 回退点 S3】软解（YUV420P/422P）这条路——"关硬解"时走的就是它。
+ * 只存矩阵；GL 下发在 updateFrame() 里每帧做（program 只在创建时初始化一次）。
+ */
+void YUVProgramContext::updateColorMatrix(const float matrix[9]) {
+    if (matrix == nullptr) {
+        return;
+    }
+
+    for (int i = 0; i < 9; i++) {
+        mUColorMatrix[i] = matrix[i];
     }
 }
 
@@ -251,6 +267,9 @@ int YUVProgramContext::updateFrame(std::unique_ptr<IAFFrame> &frame) {
 
     glUniformMatrix4fv(mProjectionLocation, 1, GL_FALSE, (GLfloat *) mUProjection);
     glUniformMatrix3fv(mColorSpaceLocation, 1, GL_FALSE, (GLfloat *) mUColorSpace);
+    /* 【色觉辅助滤镜 / 回退点 S3】每帧下发（program 只在创建时初始化一次）。
+     * location == -1 时 glUniformMatrix3fv 是 no-op。 */
+    glUniformMatrix3fv(mColorMatrixLocation, 1, GL_FALSE, (GLfloat *) mUColorMatrix);
     glUniform3f(mColorRangeLocation, mUColorRange[0], mUColorRange[1], mUColorRange[2]);
 
     glVertexAttribPointer(mPositionLocation, 2, GL_FLOAT, GL_FALSE, 0, mDrawRegion);
@@ -626,6 +645,8 @@ void YUVProgramContext::getShaderLocations() {
      mProjectionLocation = glGetUniformLocation(mProgram, "u_projection");
      mColorSpaceLocation = glGetUniformLocation(mProgram, "uColorSpace");
      mColorRangeLocation = glGetUniformLocation(mProgram, "uColorRange");
+     /* 【色觉辅助滤镜 / 回退点 S3】 */
+     mColorMatrixLocation = glGetUniformLocation(mProgram, "uColorMatrix");
      mPositionLocation = static_cast<GLuint>(glGetAttribLocation(mProgram, "a_position"));
      mTexCoordLocation = static_cast<GLuint>(glGetAttribLocation(mProgram, "a_texCoord"));
      mYTexLocation = glGetUniformLocation(mProgram, "y_tex");

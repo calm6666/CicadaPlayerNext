@@ -161,6 +161,13 @@ public:
 
     MirrorMode GetMirrorMode() override;
 
+    /*
+     * 【色觉辅助滤镜 / 回退点 C10】ICicadaPlayer::SetColorMatrix 是纯虚的 ⇒ 这个
+     * "ExternalPlayer"（把播放交给宿主 Java 播放器，不经内核 GL 渲染器）必须给实现才能编译。
+     * 空实现：这条路的画面不经过内核着色器，滤镜不适用（与隧道/direct 渲染同类限制）。
+     */
+    void SetColorMatrix(const float matrix[9]) override;
+
     int GetCurrentStreamIndex(StreamType type) override;
 
     StreamInfo *GetCurrentStreamInfo(StreamType type) override;

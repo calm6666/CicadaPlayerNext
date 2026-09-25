@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <list>
 #include <atomic>
+#include <memory>
+#include <mutex>
 #include <jni.h>
 #include <thread>
 #include <condition_variable>
@@ -113,6 +115,49 @@ namespace Cicada{
         std::string mMime{};
         std::list<std::unique_ptr<CodecSpecificData>> mCSDList{};
         MediaCodec_Decoder *mDecoder{nullptr};
+
+        /*
+         * ============ 【B5-4】帧释放回调的共享状态（不再捕获裸 this）============
+         *
+         * 两个真机问题都由"帧的释放回调"引起：
+         *   ① `MediaCodecDecoder E releaseOutputBuffer fail Error 0xfffffff3`
+         *      （2026-09-25 11:02:56.763，一次 seek 之后 7 ms）：`flush_decoder()` 里的
+         *      `mDecoder->flush()` 之后平台收回了 codec 自持的缓冲，而内核手里的
+         *      `AFMediaCodecFrame` 的 index 从此失效；这些帧要等渲染线程**下一次 VSync**
+         *      才被析构（GLRender / AFActiveVideoRender 的输入队列是异步清的），
+         *      于是必然拿着失效 index 去 release，白刷一条 E。
+         *   ② 更严重的是 use-after-free：回调原来是 `[this, framePts](...)`，而
+         *      `~mediaCodecDecoder` 会 `delete mDecoder`（已经提交切换的 retired
+         *      解码器是在播放线程**同步**销毁的）。旧代帧仍压在渲染器队列里等下一次
+         *      VSync ⇒ 回调在**已释放的对象**上读成员并调用 mDecoder。
+         *
+         * 处置（只动本文件、只动 Android 后端）：
+         *   · 把"解码器对象还在不在 / 这是第几代"放进下面这个 shared_ptr 共享状态；
+         *     帧的回调**按值持有这个 shared_ptr** —— 解码器先死也不会悬垂（状态本身
+         *     由 shared_ptr 保命）；
+         *   · 回调在同一把锁内先校验：`!alive || decoder == nullptr`（对象正在/已经销毁）
+         *     或 `gen != flushGen`（平台已 flush/close，index 已失效）⇒ 直接短路，
+         *     **不碰任何成员、也不进 Java**；
+         *   · 析构时**在锁内**置 alive=false 并销毁 mDecoder，与回调临界区互斥 ⇒
+         *     "销毁"与"释放"被串行化，UAF 窗口关闭。
+         *
+         * 影响面：本文件是 Android 专用后端；Qt / macOS / Windows / Linux / iOS 的
+         * 解码器实现一行都不动，接口与 ABI 无变化（新增的只是一个私有成员）。
+         * 回退点：把本结构与 member 删掉、恢复 lambda 捕获裸 this、去掉析构/两处
+         * invalidateFrameReleases() 调用即可。
+         */
+        struct FrameReleaseState {
+            std::mutex mutex;
+            MediaCodec_Decoder *decoder{nullptr};
+            bool alive{true};
+            /* flush / close 会让所有"已出队未释放"的帧失效：每失效一次就 +1，
+             * 帧在创建时快照这个代。用原子量是为了让"创建帧"这条热路径不必加锁。 */
+            std::atomic<uint64_t> flushGen{0};
+        };
+        std::shared_ptr<FrameReleaseState> mReleaseState;
+
+        /* 让所有"已出队但还没释放"的帧立刻失效（平台 flush / 关闭解码器时调用）。 */
+        void invalidateFrameReleases();
 
         std::recursive_mutex mFuncEntryMutex;
         bool mbInit{false};

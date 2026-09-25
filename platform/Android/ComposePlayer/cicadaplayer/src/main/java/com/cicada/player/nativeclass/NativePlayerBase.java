@@ -386,6 +386,27 @@ public class NativePlayerBase {
         }
     }
 
+    /**
+     * 【色觉辅助滤镜 / 回退点 J2】3x3 颜色矩阵（行主序，9 个 float），单位矩阵 = 关闭。
+     *
+     * 长度不是 9（含 null）时归一成单位矩阵 —— 这样调用方"传 null 表示关闭"也能工作，
+     * 且 native 侧永远不会拿到半个矩阵。矩阵为 null 也不会把画面变黑。
+     */
+    public void setColorMatrix(float[] matrix) {
+        float[] target = IDENTITY_COLOR_MATRIX;
+        if (matrix != null && matrix.length == 9) {
+            target = matrix;
+        }
+        nSetColorMatrix(target);
+    }
+
+    /** 单位矩阵 = 关闭滤镜（见 setColorMatrix 的说明） */
+    private static final float[] IDENTITY_COLOR_MATRIX = new float[]{
+            1f, 0f, 0f,
+            0f, 1f, 0f,
+            0f, 0f, 1f,
+    };
+
     public void setTraceId(String traceId) {
         Logger.v(TAG, "setTraceId = " + traceId);
         nSetTraceID(traceId);
@@ -552,6 +573,9 @@ public class NativePlayerBase {
 
     protected native int nGetMirrorMode();
 
+    /** 【色觉辅助滤镜 / 回退点 J2】3x3 颜色矩阵，行主序 9 个 float；实现见 NativeBase.cpp */
+    protected native void nSetColorMatrix(float[] matrix);
+
     protected native void nSetSpeed(float speed);
 
     protected native float nGetSpeed();
@@ -598,6 +622,7 @@ public class NativePlayerBase {
     private CicadaPlayer.OnErrorListener mOnErrorListener = null;
     private CicadaPlayer.OnRenderingStartListener mOnRenderingStartListener = null;
     private CicadaPlayer.OnTrackChangedListener mOnTrackChangedListener = null;
+    private CicadaPlayer.OnVideoQualitySwitchListener mOnVideoQualitySwitchListener = null;
     private CicadaPlayer.OnLoadingStatusListener mOnLoadingStatusListener = null;
     private CicadaPlayer.OnSeekCompleteListener mOnSeekCompleteListener = null;
     private CicadaPlayer.OnSubtitleDisplayListener mOnSubtitleDisplayListener = null;
@@ -661,6 +686,11 @@ public class NativePlayerBase {
     public void setOnTrackSelectRetListener(CicadaPlayer.OnTrackChangedListener l) {
         Logger.v(TAG, "setOnSwitchStreamResultListener = " + l);
         mOnTrackChangedListener = l;
+    }
+
+    public void setOnVideoQualitySwitchListener(CicadaPlayer.OnVideoQualitySwitchListener l) {
+        Logger.v(TAG, "setOnVideoQualitySwitchListener = " + l);
+        mOnVideoQualitySwitchListener = l;
     }
 
 
@@ -902,6 +932,27 @@ public class NativePlayerBase {
                     errorInfo.setCode(finalErrorCode);
                     errorInfo.setMsg(code + ":" + msg);
                     mOnTrackChangedListener.onChangedFail(targetInfo, errorInfo);
+                }
+            }
+        });
+    }
+
+    /**
+     * 清晰度切换状态（JNI 直接调用，见 jni/player/NativeBase.cpp 的
+     * jni_onVideoQualitySwitch）。和别的回调一样切回主线程 handler 再往上抛：
+     * 内核是在自己的事件线程上回调的，Compose 状态必须在主线程改。
+     *
+     * @param status      0=STARTED / 1=READY / 2=FAILED / 3=CANCELED
+     * @param streamIndex 目标视频流下标
+     * @param description 内核给的说明，可能为 null
+     */
+    protected void onVideoQualitySwitch(final int status, final int streamIndex, final String description) {
+        Logger.v(TAG, "onVideoQualitySwitch = " + status + " , stream = " + streamIndex + " , " + description);
+        mCurrentThreadHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (mOnVideoQualitySwitchListener != null) {
+                    mOnVideoQualitySwitchListener.onVideoQualitySwitch(status, streamIndex, description);
                 }
             }
         });

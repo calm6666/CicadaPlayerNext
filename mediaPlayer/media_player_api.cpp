@@ -491,6 +491,16 @@ void CicadaSetVideoBackgroundColor(playerHandle *pHandle, uint32_t color)
     }
 }
 
+/* 【色觉辅助滤镜 / 回退点 C3】照 CicadaSetMirrorMode 的写法，多一个空指针保护 */
+void CicadaSetColorMatrix(playerHandle *pHandle, const float *matrix)
+{
+    GET_PLAYER;
+
+    if (player && matrix != nullptr) {
+        player->SetColorMatrix(matrix);
+    }
+}
+
 MirrorMode CicadaGetMirrorMode(playerHandle *pHandle)
 {
     GET_PLAYER;

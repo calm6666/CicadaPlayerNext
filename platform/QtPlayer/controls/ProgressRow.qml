@@ -315,14 +315,11 @@ Item {
             }
         }
 
-        /* 兜底：框架一直没报到位（直播/切片）时也要放开 */
-        Timer {
-            running: progressRow.pendingSeekMs >= 0
-            interval: 1500
-            repeat: false
-            onTriggered: progressRow.pendingSeekMs = -1
-        }
-
+        /*
+         * 这里原来有一个 1500ms 的兜底 Timer（"框架一直没报到位就放开 pendingSeekMs"）。
+         * 本轮删除：pendingSeekMs 只由上面的位置事件收敛（与目标位差 < 1000ms 即放开），
+         * 不再用墙钟去猜 seek 有没有完成 —— 那是 "UI 替内核兜底" 的看门狗。
+         */
         /* ---- 缩略图请求（悬停预览）的节流 ----
          *
          * 每请求一次就是**截一帧**：硬解时要在渲染器里回读一帧 GPU 表面（4K 十几毫秒），

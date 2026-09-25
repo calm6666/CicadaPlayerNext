@@ -170,6 +170,8 @@ namespace Cicada {
         std::atomic_int mError{0};
         int mDataSourceError = 0;
         int64_t mSeekPendingUs = -1;
+        // seek 后第一个分片点不参与"媒体重置"判断（seek 造成的 pts 跳变不是 Period 切换）
+        bool mSeekSuppressResetOnce = false;
         std::atomic<bool> mIsOpened_internal{false};
         std::atomic_bool mInterrupted{false};
         std::atomic_bool mExited{false};

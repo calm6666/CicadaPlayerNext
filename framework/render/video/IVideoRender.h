@@ -137,6 +137,22 @@ public:
     virtual int setFlip(Flip flip) = 0;
 
     /**
+     * 【色觉辅助滤镜 / 回退点 R1】设置 3x3 颜色矩阵（行主序，单位矩阵 = 关闭）。
+     *
+     * **非纯虚 + 空默认实现**：这是刻意的 —— Qt / Apple / Dummy 等渲染器一行都不用改，
+     * 也不需要任何平台 #ifdef。只有 GLRender 覆写它。
+     *
+     * 已知限制（不解决，写明即可）：隧道/direct 渲染（getFlags() & FLAG_DUMMY）没有着色器，
+     * 滤镜无效；GLRender::captureScreen 抓的是加滤镜之前的画面。
+     *
+     * @param matrix 9 个 float，行主序
+     */
+    virtual void setColorMatrix(const float matrix[9])
+    {
+        (void) matrix;
+    }
+
+    /**
      * set render scale.
      * @param scale
      */

@@ -1160,20 +1160,8 @@ int64_t SuperMediaPlayer::getCurrentPosition()
      * seek 目标地板：管道还没走到 seek 目标之前，位置一律按目标点报。
      * 不加这一条，进度条会“跳到目标 → 被回到关键帧位置的旧回调拽回去 → 再往前走”，
      * 用户看到的就是来回跳（见 mSeekPositionFloorUs 的说明）。
-     *
-     * 【地板必须会自己作废 —— 循环播放/重开源的归零修复】上面那条只在“seek 在飞”期间成立。
-     * 一旦播放从**更前面**重新开始（循环播放重开缓存源、Stop+Prepare、大跨度回退 seek），
-     * 管道位置会明显低于地板，此时地板已经过期：旧代码只在落点分支里做“放弃”判断
-     * （:7317 那条），重开源的路径根本走不到那里 ⇒ getCurrentPosition() 被永久钉在旧目标点上，
-     * 表现就是“循环播放从头开始，进度条却停在上一次 seek 的点（末尾）不归零”。
-     * 这里补一条**纯状态判断**的自愈：管道位置比地板低出一个分片量级（SEEK_FLOOR_GIVEUP_US，
-     * 远大于任何落点回看距离）就作废地板，按真实位置报。没有计时器，不影响正常 seek 的防回退。
      */
     if (mSeekPositionFloorUs != INT64_MIN && mCurrentPos.load() < mSeekPositionFloorUs) {
-        if (mCurrentPos.load() + SEEK_FLOOR_GIVEUP_US < mSeekPositionFloorUs) {
-            mSeekPositionFloorUs = INT64_MIN;
-            return mCurrentPos;
-        }
         return mSeekPositionFloorUs;
     }
 
@@ -1236,28 +1224,6 @@ void SuperMediaPlayer::SetVideoBackgroundColor(uint32_t color)
 MirrorMode SuperMediaPlayer::GetMirrorMode()
 {
     return mSet->mirrorMode;
-}
-
-/*
- * 【色觉辅助滤镜 / 回退点 C7】照 SetMirrorMode 的写法：存配置 + putMsg 通知渲染器线程。
- * 与 SetMirrorMode 的唯一区别：矩阵逐元素比较（镜像是个枚举，可以直接 ==）。
- * 单位矩阵 = 关闭（见 player_types.h 里 colorMatrix 的默认值）。
- */
-void SuperMediaPlayer::SetColorMatrix(const float matrix[9])
-{
-    if (matrix == nullptr) {
-        return;
-    }
-
-    for (int i = 0; i < 9; i++) {
-        if (mSet->colorMatrix[i] != matrix[i]) {
-            for (int j = 0; j < 9; j++) {
-                mSet->colorMatrix[j] = matrix[j];
-            }
-            this->putMsg(MSG_SET_COLOR_MATRIX, dummyMsg);
-            return;
-        }
-    }
 }
 
 ScaleMode SuperMediaPlayer::GetScaleMode()
@@ -4691,85 +4657,6 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
     int64_t pos = getCurrentPosition();
 
     if (pVideoPacket != nullptr) {
-        /*
-         * ============ 【B9】"视频原始 pts → 节目轴"的偏移必须**跟着分段走** ============
-         *
-         * 真机证据（2026-09-25 13:47，DASH `output.mpd`，8 档）：同一个档每次 seek 落点报出来的
-         * 两轴差（`seek landing: … -N ms away …`）分别是
-         *     −1708 / −3416 / −4697 / −5979 / −7260 ms（落点 40/80/110/140/170 s）
-         * ⇒ **每 10 s 分片差 ~1.7 s**，也就是说这一档的"原始 pts 轴"与节目轴的**速率都不一样**
-         * （≈17%）。而 HLS/顺序片源那几行是 `0 ms away`（差恒为 0）⇒ 天生免疫。
-         *
-         * 危害：偏移只在两个时刻被建立（seek 落点=B3、切档提交），之后**冻结**。于是
-         * 跨过一个分片后，帧被平移到错误的节目位置，视频相对音频每秒偏 ~170 ms ——
-         * "seek 之后音画偏差越来越大、最后完全对不上"，DASH 必现、HLS 正常。
-         *
-         * 处置：**每个视频包**都按它自己的 `timePosition − pts` 刷新这个偏移（包级元数据本来就有）。
-         * 只看**当前 active 流**的包（切档在途时流进来的包属于另一档，delta 不同，不能用来改 active 的轴）；
-         * 只在变化超过 100 ms 时才刷新并打一行日志（分片边界一次，事件驱动、不刷屏）。
-         *
-         * 关于"跨边界那一批帧"：偏移是在 FillVideoFrame（帧出解码器时）应用的，所以刷新前
-         * 已出队的那几张帧仍带旧轴，最多几帧（<0.1~0.2 s）会偏一次 —— 相比"永远偏下去"
-         * 这是可接受的折中。要做到逐帧精确，需要把每个帧自己的 timePosition 从 Android
-         * 硬解后端带出来（mediaCodecDecoder 里那个 TODO），属于下一步。
-         */
-        if (mPendingVideoStreamIndex < 0 && mWillChangedVideoStreamIndex < 0 &&
-            pVideoPacket->getInfo().streamIndex == mCurrentVideoIndex) {
-            const int64_t packetPtsForAxis = pVideoPacket->getInfo().pts;
-            const int64_t packetPosForAxis = pVideoPacket->getInfo().timePosition;
-
-            if (packetPtsForAxis != INT64_MIN && packetPosForAxis >= 0) {
-                const int64_t freshOffset = packetPosForAxis - packetPtsForAxis;
-                const int64_t previousOffset = mActiveVideoPtsOffset;
-                const bool logThisRefresh = (previousOffset == INT64_MIN ||
-                                             llabs(freshOffset - previousOffset) > 500 * 1000);
-
-                /*
-                 * ============ 【B9-2：偏移**逐包跟随**，不再用 100 ms 阈值】============
-                 *
-                 * 真机日志（2026-09-25 14:00，DASH `output.mpd`）：
-                 *   `video pts axis refreshed … rawPts=83416667 timePosition=80000000
-                 *    offset=-3416667 (was -2989583, corrected by -427 ms)`
-                 * ⇒ 这一档每 10 s 分片的两轴差要修 **427 ms**（原始 pts 轴比节目轴快 4.27%），
-                 * 而 HLS/顺序片源同一行是 `offset=-2`（差恒为 0）—— 这就是"DASH 才有、
-                 * HLS 没有"的全部原因。
-                 *
-                 * 上一版用"变化超过 100 ms 才刷新"来省日志，代价是修正被攒成台阶：
-                 * 归一化后的帧 pts 相对节目轴呈锯齿，残余误差可达 ±100 ms —— 用户看到的
-                 * "DASH 还是有点不同步"就是这一截。
-                 *
-                 * 现在**每个包都赋值**（这是逐帧正确性的关键）：帧出解码器（FillVideoFrame）
-                 * 时用的是"离它最近的那个包的偏移"，误差 = 解码滞后 × 4.27% ≈ 几毫秒，
-                 * 于是 DASH 的紧密度与 HLS（差值恒 0）完全一致。
-                 * 只有**日志**保留 500 ms 阈值（大约每分片一行），不会刷屏。
-                 */
-                mActiveVideoPtsOffset = freshOffset;
-
-                /*
-                 * B10：把这一包的 (pts → timePosition) 也记进逐帧配对表（见 .h 里的说明）。
-                 * 帧与包同序、只为 active 流记录、上限 64 ⇒ 内存与查找成本都可以忽略。
-                 */
-                mVideoAxisPts.push_back(packetPtsForAxis);
-                mVideoAxisTimePos.push_back(packetPosForAxis);
-
-                while (mVideoAxisPts.size() > 64) {
-                    mVideoAxisPts.pop_front();
-                    mVideoAxisTimePos.pop_front();
-                }
-
-                if (logThisRefresh) {
-                    AF_LOGW("video pts axis refreshed from the packet: stream=%d rawPts=%lld timePosition=%lld "
-                            "offset=%lld (was %lld, corrected by %lld ms) — a DASH rendition whose raw pts axis "
-                            "does not advance at the program rate would otherwise drift out of sync after every "
-                            "segment boundary\n",
-                            pVideoPacket->getInfo().streamIndex, (long long) packetPtsForAxis,
-                            (long long) packetPosForAxis, (long long) freshOffset,
-                            (long long) (previousOffset == INT64_MIN ? 0 : previousOffset),
-                            (long long) ((previousOffset == INT64_MIN ? 0 : (freshOffset - previousOffset)) / 1000));
-                }
-            }
-        }
-
         // for cache video, or seeking accurate, check whether drop output frame
         /*
          * 落点帧即上屏（K1）之后，默认路径不再把"目标点之前的包"标成丢弃 —— 否则
@@ -5116,32 +5003,7 @@ int SuperMediaPlayer::FillVideoFrame()
         /* 切换提交后，目标 decoder 的每一帧都必须使用与首帧相同的时间轴偏移。
          * 只修正首帧会导致后续帧突然跳回原始 rendition PTS，RenderVideo() 便会
          * 把它们当成严重落后帧持续丢弃，日志表现为 0/1 FPS。 */
-        /*
-         * ============ 【B10】逐帧精确：优先用"帧自己那一个包"的 timePosition ============
-         *
-         * 帧与包同序 ⇒ 帧的 pts 应能在 mVideoAxisPts 的前端找到（顺便把更旧的条目淘汰掉）。
-         * 命中就直接把帧的 pts 设成**它自己**的节目位置：分片边界不再有任何台阶，
-         * 也不需要对全局偏移做任何刷新（B9-2 退化为"查不到时的兜底"）。
-         * 查不到（解码器改写 pts、或该路没有包级 timePosition）⇒ 与今天完全一致的全局平移。
-         */
-        bool framePtsTakenFromPacketAxis = false;
-
-        if (pFrame->getInfo().pts != INT64_MIN) {
-            while (!mVideoAxisPts.empty() && mVideoAxisPts.front() < pFrame->getInfo().pts) {
-                mVideoAxisPts.pop_front();
-                mVideoAxisTimePos.pop_front();
-            }
-
-            if (!mVideoAxisPts.empty() && mVideoAxisPts.front() == pFrame->getInfo().pts) {
-                pFrame->getInfo().pts = mVideoAxisTimePos.front();
-                mVideoAxisPts.pop_front();
-                mVideoAxisTimePos.pop_front();
-                framePtsTakenFromPacketAxis = true;
-            }
-        }
-
-        if (!framePtsTakenFromPacketAxis &&
-            mActiveVideoPtsOffset != INT64_MIN && pFrame->getInfo().pts != INT64_MIN) {
+        if (mActiveVideoPtsOffset != INT64_MIN && pFrame->getInfo().pts != INT64_MIN) {
             pFrame->getInfo().pts += mActiveVideoPtsOffset;
         }
 
@@ -5595,12 +5457,12 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
      * 一直为 true，RenderVideo() 会绕过全部节流（这就是帧率掉到 1 FPS 的直接原因）。
      */
     const bool switchTimedOut =
-        (switchElapsedMs > 0 &&
-         (switchElapsedMs > QUALITY_SWITCH_TOTAL_TIMEOUT_MS ||
-          (switchElapsedMs > 8000 &&
-           (frameTimePosition < 0 ||
-            (mPendingVideoSwitchTimePosition >= 0 &&
-             frameTimePosition + 2 * 1000 * 1000 < mPendingVideoSwitchTimePosition)))));
+        switchElapsedMs > 0 &&
+        (switchElapsedMs > QUALITY_SWITCH_TOTAL_TIMEOUT_MS ||
+         (switchElapsedMs > 8000 &&
+          (frameTimePosition < 0 ||
+           (mPendingVideoSwitchTimePosition >= 0 &&
+            frameTimePosition + 2 * 1000 * 1000 < mPendingVideoSwitchTimePosition))));
     if (switchTimedOut) {
         AF_LOGW("quality switch timed out before commit: stream=%d target=%lld frame=%lld "
                 "elapsed=%lld pendingPktQ=%d pendingFrameQ=%d master=%lld\n",
@@ -5609,9 +5471,9 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
                 (long long) frameTimePosition, (long long) switchElapsedMs,
                 (int) mPendingVideoPacketQue.size(), (int) mPendingVideoFrameQue.size(),
                 (long long) master);
-        mPNotifier->NotifyVideoQualitySwitch(
-            PLAYER_QUALITY_SWITCH_FAILED, mPendingVideoStreamIndex,
-            "target rendition did not reach playback timeline");
+        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED,
+                                             mPendingVideoStreamIndex,
+                                             "target rendition did not reach playback timeline");
         mAVDeviceManager->discardPendingVideoDecoder();
         while (!mPendingVideoPacketQue.empty()) {
             mPendingVideoPacketQue.front()->setDiscard(true);
@@ -5677,37 +5539,12 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
      */
     int64_t droppedStaleFrames = 0;
 
-    /*
-     * ============ 【B11】pending 帧的"有效节目位置" ============
-     *
-     * 提交门的三处判定原来都读 `frame->getInfo().timePosition`，而 Android 硬解的
-     * 输出帧恒为 `INT64_MIN`（`mediaCodecDecoder.cpp:692` 那个 TODO）⇒ 这三处**在安卓上
-     * 全部失效**：
-     *   · "落后主时钟就丢"的循环直接 break（前缀帧一张都不丢）；
-     *   · "落后就等/超前就等"两条判据都不生效 ⇒ **只要有帧就提交**。
-     * 于是 B7 让 pending 从参考点之前起解时，提交会发生在**落后主时钟约 1 s**的位置
-     * （真机 `committed … pts=41708 master=1459472`），随后靠渲染器**逐帧丢弃**去追
-     * —— 日志里那串 `drop frame` 就是它，用户看到的是"启动/切档时的小跳动"。
-     *
-     * 修法：用"有效位置"= 帧自带 timePosition；缺了就用它**已经被 B6 归一化过的 pts**
-     * （B6 之后安卓上这个 pts 就是节目位置）。纯状态判断，无计时器；对带 timePosition
-     * 的后端（Qt/macOS/iOS）取值与今天**逐字相同**。
-     */
-    auto pendingEffectivePos = [](const std::unique_ptr<IAFFrame> &f) -> int64_t {
-        if (f == nullptr) {
-            return INT64_MIN;
-        }
-
-        const int64_t tp = f->getInfo().timePosition;
-        return (tp >= 0) ? tp : f->getInfo().pts;
-    };
-
     if (master > 0) {
         while (!mPendingVideoFrameQue.empty()) {
-            const int64_t headPos = pendingEffectivePos(mPendingVideoFrameQue.front());
+            const int64_t headPos = mPendingVideoFrameQue.front()->getInfo().timePosition;
 
-            if (headPos == INT64_MIN || headPos + PENDING_ALIGN_TOLERANCE_US >= master) {
-                /* 这一张（或者连位置都推不出来的 init 帧）交给下面的正常判断。 */
+            if (headPos < 0 || headPos + PENDING_ALIGN_TOLERANCE_US >= master) {
+                /* 这一张（或者没有 media time 的 init 帧）交给下面的正常判断。 */
                 break;
             }
 
@@ -5738,11 +5575,9 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
     }
 
     const int64_t frameTimePositionNow = mPendingVideoFrameQue.front()->getInfo().timePosition;
-    /* B11：判定用"有效位置"（见上面 pendingEffectivePos 的说明） */
-    const int64_t frameEffectiveNow = pendingEffectivePos(mPendingVideoFrameQue.front());
 
-    if (master > 0 && frameEffectiveNow != INT64_MIN &&
-        frameEffectiveNow + PENDING_ALIGN_TOLERANCE_US < master) {
+    if (master > 0 && frameTimePositionNow >= 0 &&
+        frameTimePositionNow + PENDING_ALIGN_TOLERANCE_US < master) {
         if (floodLogAllowed(FLOOD_PENDING_HOLD, 2, "hold pending video before playback position")) {
             /* 同 FLOOD_PENDING_DROP：带数值输出，否则卡住时只有一句计数。 */
             AF_LOGI("hold pending video before playback position: framePts=%lld timePosition=%lld "
@@ -5768,8 +5603,8 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
      * 就是用户说的"dash 切换之后音画不太同步"。等待是不花代价的：旧路在等的时候
      * 照常播放，主时钟走到那一点再提交，误差就只有抖动级别。
      */
-    if (master > 0 && frameEffectiveNow != INT64_MIN &&
-        frameEffectiveNow > master + PENDING_FUTURE_TOLERANCE_US) {
+    if (master > 0 && frameTimePositionNow >= 0 &&
+        frameTimePositionNow > master + PENDING_FUTURE_TOLERANCE_US) {
         return false;
     }
 
@@ -6939,15 +6774,6 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
                 mAudioTime.deltaTime = -kMaxClockCorrectionUs;
             }
 
-            /*
-             * 诊断打印的**行数上界是常数级**：`deltaTime` 已经被上面限幅在 ±300 ms，
-             * 而水位每 100 ms 才动一次 ⇒ 单方向最多 3~6 行；换向时把水位清零重新起算，
-             * 这样两个方向都能看到，但仍然不会刷屏（不需要额外的限流器、也没有计时器）。
-             */
-            if ((mAudioTime.deltaTime >= 0) != (mAudioClockDriftLoggedUs >= 0)) {
-                mAudioClockDriftLoggedUs = 0;
-            }
-
             if (llabs(mAudioTime.deltaTime) >= llabs(mAudioClockDriftLoggedUs) + 100 * 1000) {
                 mAudioClockDriftLoggedUs = mAudioTime.deltaTime;
                 AF_LOGW("audio clock drift: correction deltaTime=%lld us (capped at +-%lld), startTime=%lld, "
@@ -7434,7 +7260,7 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
             const bool renderedRecently = mLastVideoFrameRenderedMs > 0 &&
                                           (af_getsteady_ms() - mLastVideoFrameRenderedMs) < JOINING_FORCE_RENDER_MS;
 
-            if (!masterClockUnset && videoLateUs > JOINING_STALE_FRAME_US && renderedRecently) {
+            if (!masterClockUnset && videoLateUs > 10 * 1000 && renderedRecently) {
                 render = false;
             } else {
                 dropLateVideoFrames = false;
@@ -8480,9 +8306,6 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
 
     mPendingVideoPtsOffset = INT64_MIN;
     mActiveVideoPtsOffset = INT64_MIN;
-    /* B10：时间轴重建（seek/stop/换源）时逐帧配对表必须一起丢掉，否则旧代的 pts 可能撞上新帧 */
-    mVideoAxisPts.clear();
-    mVideoAxisTimePos.clear();
     mQualitySwitchCommitPending = false;
     mQualitySwitchCommittedStreamIndex = -1;
     mQualitySwitchOldFramesPending = 0;
@@ -8913,13 +8736,6 @@ int64_t SuperMediaPlayer::getAudioPlayTimeStamp()
 
     int64_t aoutPos;
     aoutPos = mAVDeviceManager->getAudioRenderPosition();
-
-    /* 【② 已整体回退】这里曾加过 `af_clock_value_is_unset(aoutPos) ⇒ return INT64_MIN`
-     * 的哨兵护栏（回退点 B2）：真机出现"第一次 seek 画面不动、半天才动"——设备在 seek
-     * 窗口内本来就会瞬时经过 PAUSED→STOPPED→PLAYING，框架 baseStop 的 STOPPED 还会持续一段；
-     * 期间时钟改按墙上时间自走，音频回来时 SystemReferClock::GetTime()（:44-45）又**双向**
-     * reSync 把它拉回音频位置（可能向后跳）⇒ 视频被判"未来"继续干等。失败模式比它要治的
-     * "参考值冻结"更糟，故整体回退；详见 AudioTrackRender::device_get_position() 的说明。 */
     return mAudioTime.startTime + mAudioTime.deltaTime + aoutPos;
 }
 
@@ -9291,10 +9107,6 @@ bool SuperMediaPlayer::CreateVideoRender(uint64_t flags)
     mAVDeviceManager->getVideoRender()->setRotate(convertRotateMode(mSet->rotateMode));
     mAVDeviceManager->getVideoRender()->setBackgroundColor(mSet->mVideoBackgroundColor);
     mAVDeviceManager->getVideoRender()->setFlip(convertMirrorMode(mSet->mirrorMode));
-    /* 【色觉辅助滤镜 / 回退点 C8】照上一行 setFlip 的写法：建渲染器时把**启动配置**里的矩阵
-     * 也下发一次。否则"先 setColorMatrix 再 prepare/播放"时首帧不带滤镜
-     * （渲染器是后建的，错过那条消息）。空默认实现下非 GL 渲染器无副作用。 */
-    mAVDeviceManager->getVideoRender()->setColorMatrix(mSet->colorMatrix);
     mAVDeviceManager->getVideoRender()->setDisPlay(mSet->mView);
     mAVDeviceManager->setVideoRenderListener(mVideoRenderListener.get());
     mAVDeviceManager->getVideoRender()->setVideoProcessTextureCb(mVideoProcessCb.get());
@@ -9611,9 +9423,6 @@ void SuperMediaPlayer::Reset()
     mPendingVideoStreamIndex = -1;
     mPendingVideoPtsOffset = INT64_MIN;
     mActiveVideoPtsOffset = INT64_MIN;
-    /* B10：时间轴重建（seek/stop/换源）时逐帧配对表必须一起丢掉，否则旧代的 pts 可能撞上新帧 */
-    mVideoAxisPts.clear();
-    mVideoAxisTimePos.clear();
     mQualitySwitchCommitPending = false;
     mQualitySwitchCommittedStreamIndex = -1;
     mQualitySwitchOldFramesPending = 0;

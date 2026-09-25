@@ -158,6 +158,9 @@ namespace Cicada {
 
         void SetMirrorMode(MirrorMode mode) override;
 
+        /* 【色觉辅助滤镜 / 回退点 C7】与 SetMirrorMode 同一形态 */
+        void SetColorMatrix(const float matrix[9]) override;
+
         void SetVideoBackgroundColor(uint32_t color) override;
 
         MirrorMode GetMirrorMode() override;
@@ -360,6 +363,12 @@ namespace Cicada {
         void FlushAudioPath();
 
         /*
+         * 静音窗口起止日志（只在状态变化时各一条；不改动任何播放行为，
+         * 编码见 AUDIO_SILENCE_* 与成员 mAudioSilenceReason）。
+         */
+        void logAudioSilence(int reason, const char *detail, int64_t audioPts, int64_t clockUs);
+
+        /*
          * flushRender=false 只清解码器、不动渲染器。
          *
          * 默认的 true 会走 flushDevice()，而那里面最后会 flushVideoRender()，
@@ -414,6 +423,125 @@ namespace Cicada {
          * 帧队列堵了几个、状态机卡在哪个标志上。
          */
         void logQualitySwitchState();
+
+        /*
+         * 把**目标（pending）Representation 的 codec 参数集**（SPS/PPS/VPS，
+         * 即 demuxer meta 里的 extradata）贴到即将送入 pending 解码器的包上。
+         *
+         * 为什么需要它（马赛克根因，2026-09-24）：
+         *   预滚跳过（见 ProcessVideoPacket 里那段）会把目标流开头的一批包整批
+         *   丢掉，而"携带 extradata 的那一条"往往就在里面 —— 框架是在目标流
+         *   第一个包上 setExtraData 的。丢过之后，新解码器拿到的第一个关键帧
+         *   没有参数集，解不出来（`Error while decoding frame -1094995529 :
+         *   Invalid data found when processing input`），P 帧参考不上参考帧，
+         *   画面就是"人物糊成马赛克块"。
+         *
+         * 原来只有"等到参考点之后的关键帧"那一条分支贴了参数集，**兜底回退分支
+         * （等太久、退而接受更早的关键帧）没贴** —— 而日志里两处马赛克簇
+         * （22:51:00.790 / 22:52:09.646）正好紧跟在那条回退日志之后。所以这里
+         * 抽成公共函数，两条分支共用，语义上不可能再漏。
+         *
+         * 返回 true 表示本次确实贴上了参数集（供调用处判断要不要 log）。
+         */
+        bool attachPendingVideoCodecParams();
+
+        /*
+         * seek 卡死排查用的**状态翻转日志**（只在翻转时各打一行，不刷屏）。
+         *
+         * 起因（2026-09-23 安卓 pause.log，22:58:03.880 那次 seek）：
+         * seek 之后整份日志只剩三条 INFO —— PFR: seek / FlushVideoPath /
+         * clearCache，然后 545ms 后 PlayerBase 的 HSM 就 baseTimeout() + stop()。
+         * 而"seek 为什么没完成"这件事在日志里**一个判据都没有**：
+         *   * mSeekFlag   只由 doRender() 里"有帧真的上屏"那一处清掉，它是不是还挂着；
+         *   * mBufferingFlag 只在 DoCheckBufferPass() 里置位/清除，它是不是把
+         *     doRender() 挡在 return false（:2103）之外；
+         *   * 帧队列是不是空的、解码器是不是被标记成 EOS；
+         * 这三件事全都无日志，于是"没帧上屏"到底是缓冲没起来、解码器死了、
+         * 还是 seek 状态没清，只能靠猜 —— 这次就是猜不出来。
+         * 这里把它们的翻转补上：一行说清"谁在什么时候变成了什么"。
+         * 每次翻转一行，稳态下一行都不打。
+         */
+        void logSeekPipelineState(const char *why);
+
+        /*
+         * ================= 暂停态无感切档（2026-09-24，跨平台）=================
+         *
+         * 用户要求"暂停中 / 播放中都要能无感换清晰度"，而且"切档在途时暂停、
+         * 暂停时切档、seek 与切档叠加"等组合都要收敛。播放中那条路本来就能走
+         * （旧路继续出画、新路预热完 promote）；**卡死的是暂停态**，因为它有
+         * 四道门全部以"主时钟在走"为前提：
+         *
+         *   门1 渲染 doRender() 只在 PLAYER_PLAYING 调 render()；
+         *   门2 提交 TryCommitPendingVideoSwitch() 要求"帧时间 <= master + 150ms"；
+         *   门3 预滚只接受"参考点之后的关键帧"，且参考点取自主时钟；
+         *   门4 终态 checkQualitySwitchDeadline() 非 PLAYING 时无限延期。
+         * 主时钟在暂停时是冻结的，于是 1/2/3 一起把状态机钉在 decoderSwitch：
+         * 实测 [switch] 关键量 28.6 秒逐字节不变、18s 超时被拖到 33.3s，
+         * 最后是外层预编译 PlayerBase 的 baseTimeout() 把播放器 stop() 掉。
+         *
+         * 解法：切档发起时**快照**一个冻结的参考时刻（mPausedSwitchPivotUs），
+         * 所有"和 master 比"的判据在暂停态改用它；预滚起点改成"暂停点之前
+         * 最近的关键帧"（不必读空队列去够后面的关键帧）；提交后由 doRender()
+         * 在暂停态渲染**恰好一帧**到达终态。全程不动主时钟、不发位置回调。
+         */
+
+        /*
+         * 本次切档是否发起于暂停态。true 时上面那四条改走"冻结参考点"路径。
+         * 只在发起时写一次，切档终态（成功/失败/被 seek 中止）时清零。
+         * 【成员变量本身定义在类成员列表的末尾，见文件下方同名声明处的说明 ——
+         *   本工程增量构建不做头文件依赖，新成员必须追加在成员列表最后，
+         *   不能夹在方法声明中间。】
+         */
+
+        /*
+         * 暂停态切档的**冻结参考时刻**（微秒，媒体时间轴）。
+         * 取发起切档那一刻的 getCurrentPosition()，之后不再推进 —— 这正是
+         * "暂停"的语义：时间不走了，所以判据要拿一个不动的值去比。
+         */
+
+        /*
+         * 提交之后、暂停态还欠"恰好一帧上屏"。doRender() 看到它为真就反复调
+         * RenderVideo(true)，直到有一帧真的送出（或撞上墙钟死线）。
+         * 不是周期渲染：一旦有一帧上屏（或切换终态）立刻清假。
+         */
+
+        /*
+         * 提交前墙钟死线（steady ms）：**只要有任何在途切换**就必须有到点的出口。
+         *
+         * 为什么必须有：Android 侧预编译的 PlayerBase 会在 ~545ms 内就
+         * baseTimeout()+stop()，而切换在途的判据一旦依赖主时钟（暂停时不动），
+         * 就等于没有出口 —— 用户看到的是"点了清晰度之后整个播放器卡死"。
+         */
+
+        /*
+         * 是否有在途的清晰度切换（提交前或提交后）。给墙钟死线、复位点、
+         * 以及"seek 要不要中止切档"共用同一个判据，避免三处各写一份而漏形态。
+         */
+        bool isQualitySwitchInFlight() const
+        {
+            return mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 ||
+                   mQualitySwitchCommitPending;
+        }
+
+        /*
+         * 提交前的墙钟死线。由 ProcessVideoLoop 每轮调用（紧挨着原有的
+         * checkQualitySwitchDeadline），覆盖每一种"在途"状态：暂停切档在途、
+         * 播放中切档在途、seek 在途、以及它们的叠加。到点即
+         * finishQualitySwitch(false, ...) —— 必有终态。
+         */
+        void checkQualitySwitchPrerollDeadline();
+
+        /*
+         * 切档发起时的统一快照（暂停/播放都用它，保证两条路状态初始化一致）。
+         * 只记录，不动主时钟、不动位置回调。
+         */
+        void beginQualitySwitchTracking();
+
+        /*
+         * 清掉上面三个新状态。所有"切档终态"的出口都必须调它：
+         * finishQualitySwitch()、切档超时失败、FlushVideoPath()、Reset()。
+         */
+        void resetPausedSwitchState();
 
         /*
          * 洪水日志限频（W0.4）。
@@ -809,6 +937,22 @@ namespace Cicada {
          * 监听类会按偏移直接访问成员，偏移一变就可能拿错指针（见下面“必须留在
          * 最末尾”那段；本次另外删除的两个成员确实移动了偏移，那段里写清了）。
          */
+        /*
+         * 【第七项：死代码清理 —— 这四个成员**故意保留**，不要删】
+         *
+         * 它们原来是"多久没上屏就判死并重建解码器"那套墙钟巡检的状态，机制已按红线
+         * 整体删除（见 .cpp 的 doRender() 历史说明），现在**已无任何读取点**
+         * （mLastVideoFrameRenderedMs 还被"上屏成功"那一刻写入，属于无害的残留写入）。
+         *
+         * 为什么保留而不是删掉：本文件顶部的**增量构建偏移契约** —— 本工程不记录头文件
+         * 依赖，friend 监听类按成员偏移直接访问；删成员会移动其后所有成员的偏移，
+         * 让未重编的旧 TU 目标文件按错偏移访问（这是真实存在过的坑，见头文件里那段说明）。
+         * 因此"零行为变化的清理"在这里的正确做法是：**留成员、删宏、写清楚**。
+         * 真要删，必须连同其后所有 TU 一起全量重编，不能只改这一处。
+         *
+         * 下面 mLastVideoFrameRenderedMs / mVideoRecoverCooldownMs / mRecoverSampleMs /
+         * mRecoverSamplePackets 都属于这一类。
+         */
         int64_t mLastVideoFrameRenderedMs{0};
         int64_t mVideoRecoverCooldownMs{0};
         int64_t mRecoverSampleMs{0};
@@ -982,6 +1126,329 @@ namespace Cicada {
          * .obj 按错偏移访问（见前面“以下这些成员必须留在成员列表的最末尾”那段）。
          */
         int mVideoDecodeRebuildCount{0};
+
+        /*
+         * logSeekPipelineState() 的"上一次值"。纯粹为了"只在翻转时打一行"，
+         * 不参与任何判定。同样**追加在成员列表末尾**（增量构建不做头文件依赖，
+         * 插在中间会移动其后成员的偏移，见上面那段说明）。
+         */
+        bool mSeekDiagLastSeekFlag{false};
+        bool mSeekDiagLastBufferingFlag{false};
+        bool mSeekDiagLastFirstBufferFlag{true};
+        bool mSeekDiagLastVideoDecoderEOS{false};
+        int mSeekDiagLastVideoFrameQueSize{-1};
+
+        /*
+         * ============ seek 的墙钟出口（2026-09-24）============
+         *
+         * 为什么必须有：播放中 seek 之后，"精确 seek"这个标志会把**音频**也一起
+         * 掐死 —— render() 里 `if ((mCurrentAudioIndex >= 0) && !mSeekNeedCatch)`
+         * 一帧音频都不推，而 mSeekNeedCatch 只在 FillVideoFrame() 真的从解码器
+         * 取到一帧时才清。于是"视频解码器没吐出目标帧"这件事会连带把音频饿死，
+         * AudioTrack 约 500ms 后 BUFFER TIMEOUT → 预编译 PlayerBase 的 HSM
+         * baseTimeout()+stop()（2026-09-23 pause.log: 03.880 seek → 04.425
+         * baseTimeout，中间一次音频都没推）。这条链跟"视频能不能出帧"绑在一起
+         * 是设计缺陷：seek 的进度回调可以等，音频缓冲不能等。
+         *
+         * 这里只记两个时间戳，不引入任何周期性动作：
+         *   mSeekCatchStartMs    —— mSeekNeedCatch 变成 true 的墙钟时刻；
+         *   mSeekNoFrameSinceMs  —— "seek 在途且帧队列为空"这段已经持续多久。
+         * 用 af_getsteady_ms()（单调钟），不用主时钟 —— 主时钟在 seek 期间是被
+         * 钉住/暂停的，拿它计时会永远等不到超时。
+         *
+         * 同样**追加在成员列表末尾**（见上面那段"增量构建不做头文件依赖"）。
+         */
+        int64_t mSeekCatchStartMs{0};
+        /*
+         * 【第七项：死代码清理】mSeekNoFrameSinceMs 原是"seek 在途且帧队列为空持续多久"
+         * 的墙钟计时；产生它的墙钟块已按红线删除，现在只剩 Reset() 里的一次写、无人读。
+         * **故意保留**：删它会移动其后成员的偏移，违反本文件的增量构建偏移契约。
+         */
+        int64_t mSeekNoFrameSinceMs{0};
+
+        /*
+         * pending 解码器这一轮是否已经贴过目标流的参数集（SPS/PPS）。
+         * 由 attachPendingVideoCodecParams() 维护：只在"还没贴过"时贴一次，
+         * 避免每个包都重复 setExtraData（Java 侧每帧一次 JNI 拷贝，不划算）。
+         * 每次 CreatePendingVideoDecoder / FlushVideoPath 时复位。
+         * 同样**追加在成员列表末尾**（见上面那段增量构建的说明）。
+         */
+        bool mPendingVideoCodecParamsAttached{false};
+
+        /*
+         * 暂停态切档的状态（声明与完整说明见上面那一段）。**追加在成员列表末尾**
+         * （见本文件里"增量构建不做头文件依赖、新成员一律追加在最后"那段约定）：
+         * 插在中间会移动其后成员的偏移，让旧的 friend TU 目标文件按错偏移访问。
+         */
+        bool mSwitchStartedWhilePaused{false};
+        int64_t mPausedSwitchPivotUs{INT64_MIN};
+        bool mPausedSwitchRenderPending{false};
+        int64_t mQualitySwitchPrerollDeadlineMs{0};
+
+        /*
+         * seek 墙钟死线触发那一刻，"输出缓冲被谁占住"的诊断只打一次用的闩。
+         * 纯诊断，不参与任何判定；同样追加在末尾。
+         *
+         * 【第七项：死代码清理】产生它的墙钟机制已删除，本闩现在既不被读也不被写
+         * （连同 mSeekNoFrameSinceMs 一起成为历史成员）。**故意保留**：删它会移动其后
+         * 成员的偏移，违反本文件的增量构建偏移契约（见上面那段说明）。
+         */
+        bool mSeekStallDiagLogged{false};
+
+        /*
+         * ============ seek 落点与"只锚一次"（见 docs/PLAN-SEEK-FAST-LANDING-CROSSPLATFORM.md K1/K2）============
+         *
+         * 三者分工必须分清，这是本轮修 seek 的核心：
+         *   mSeekPositionFloorUs    只管"对外上报的位置"（进度条不回退），语义不变；
+         *   mSeekRenderGateUs       只管"渲染闸门"：本次 seek 的落点帧还没上屏时用它挡帧，
+         *                           落点帧一被接受立刻撤掉（之后一帧都不再挡）；
+         *   mSeekLandingFrameAccepted  本次 seek 是否已接受落点帧（纯闩锁，SeekTo 复位）。
+         *
+         * mSeekClockAnchored 是"一次 seek 只允许锚定一次"的闩：音频首帧与视频落点帧谁先到谁锚，
+         * 后到的那条不再改写主时钟（否则后到的帧会被新时钟判成迟到帧丢掉）。
+         *
+         * mSeekExactLanding 保留旧语义（必须精确到目标帧、目标点之前的帧一律不上屏）的开关，
+         * 默认 0 = 落点即上屏；需要旧行为时由各端 setOption("seekExactLanding", "1") 打开。
+         *
+         * 全部追加在成员列表末尾（本文件顶部有约定：中间插入会移动偏移、破坏增量构建）。
+         */
+        int64_t mSeekRenderGateUs{INT64_MIN};
+        bool mSeekLandingFrameAccepted{false};
+        bool mSeekClockAnchored{false};
+        bool mSeekExactLanding{false};
+        /*
+         * 本次 seek 是否"从关键帧起步解码"（由 DecodeVideoPacket 在关键帧包上置真）。
+         * 花屏（马赛克）就是"非关键帧起步解出来的帧被显示出去"：解码器缺参考帧，
+         * 输出是脏的。渲染侧必须等这个闩为真才允许接受落点帧。
+         */
+        bool mSeekDecodeStartIsKey{false};
+        /*
+         * S2：视频路"手里什么都没有"连续成立的轮数（**状态计数，不是时间**）。
+         * 达到 VIDEO_STARVE_ITERS 时按"缓冲空"处理：暂停主时钟 + 暂停音频渲染 +
+         * 通知界面，避免"画面冻住、声音继续"。数据一回来立刻清零。
+         */
+        int mVideoStarveIters{0};
+        /*
+         * A 方案（seek 落点语义）：本次 seek 的视频落点帧是否已经**采纳并锚定主时钟**。
+         * 为假时：音频不许把时钟接走（见 render 里"音频等时钟"的门与音频锚定分支），
+         * 这样时钟保持在落点关键帧的 PTS 上按 1× 前进，视频不背"目标点 − 落点"那笔债。
+         */
+        bool mSeekVideoAnchorDone{false};
+        /*
+         * C 方案：本次 seek 是否已经把音频**起点对齐到视频落点**（一次性闩）。
+         * 事件：读到本次 seek 的第一个关键帧视频包（= 落点 PTS 已知）。
+         * 动作：把音频包队列裁到落点并 flush 音频路，让音频解码从落点重新开始 ——
+         * 这样 A 的"音频等时钟"不再需要（无 ≤1 个 GOP 静音），A/V 内容也对齐。
+         * 失败/不支持（音频队列里没有落点及之后的数据）就什么都不做，回落到 A。
+         */
+        bool mSeekAudioAlignDone{false};
+        /*
+         * 解码器"有输入却零输出"的一次性救援（纯状态驱动，与时间无关）。
+         * 判据**不再限定在 seek 窗口内**：安卓实测卡死发生在 seek **结束之后**
+         * （seekFlag 只活 16~23ms，而 codec 的"输出缓冲被占住"信号 0.5~1s 后才出现，
+         * 于是"只在 seek 窗口内判定"永远等不到），所以这三个状态由"应当有帧在流的
+         * 播放态"驱动：
+         *   mVideoDecodeRetrySeen   —— 观察到"解码器不收输入"这个**状态签名**
+         *                              （sendPacket 返回 STATUS_RETRY_IN：解码器自己的输入队列满，
+         *                              即 codec 拿着缓冲不放手）；
+         *   mDecodeStallIters       —— 该签名成立、且**一帧都没产出**（帧队列为空）时，
+         *                              管线自身工作循环走过的轮数（不是时间，也不是周期动作）；
+         *   mDecodeStallRebuildDone —— 本次卡死是否已重建过一次；**出帧即自愈**
+         *                              （FillVideoFrame 收到帧时清掉，与重建预算一起复位），
+         *                              所以它既是"每次卡死只重建一次"的闩，也是不用计时器的冷却。
+         * 三者同时成立即走**错误驱动**那条现成路径 rebuildVideoDecoder(false)。
+         */
+        bool mVideoDecodeRetrySeen{false};
+        int mDecodeStallIters{0};
+        bool mDecodeStallRebuildDone{false};
+        /*
+         * C 方案：音频"落点地板"。落点 PTS 已知后，PTS 早于它的音频帧不再推给设备，
+         * 使音频与视频从同一落点开始（不留债务、不出静音）。首帧音频渲染后清零。
+         */
+        int64_t mSeekAudioFloorUs{INT64_MIN};
+        /*
+         * 【第 4 条】落点对齐期间的"音频连续性高水位"（微秒，INT64_MIN = 未启用）。
+         *
+         * 只靠"低于落点就丢"挡不住旧时间轴残留：seek 之后音频解码器**内部**还压着旧
+         * 时间轴的数据（ActiveDecoder 输入队列 ≤16 包 + 输出队列 ≤10 帧，约 0.5s 内容），
+         * 它们的 PTS 位于 seek 之前的位置（实测高出落点 8.8~11.9s：落点 20.833s 却报出
+         * 29.674s → reSync + 约 230 帧丢帧）。而新时间轴的音频从落点开始**连续**到达
+         * （实测包队首 = 落点 + ≤21ms）。所以对齐期间再加一条连续性判据：
+         *   PTS 高出本高水位超过 SEEK_AUDIO_CONTINUITY_TOLERANCE_US 的帧 = 旧时间轴残留，丢；
+         *   其余帧接受，并把高水位推进到该帧。
+         *
+         * 与 mSeekAudioFloorUs 同生共死：C 对齐事件置位、首帧音频上屏即撤除 ——
+         * 对齐窗口一结束就不再干预正常音频（不会误伤真正的时间戳跳跃或缺包）。
+         */
+        int64_t mSeekAudioContinuityUs{INT64_MIN};
+        /*
+         * 【第 4 条的安全上界】对齐期间因为"高出高水位"被丢掉的帧数。
+         * 旧时间轴残留是可数的（解码器输入 ≤16 包 + 输出 ≤10 帧），所以最多丢
+         * SEEK_AUDIO_STALE_DROP_MAX 帧就必须放行 —— 万一新时间轴本身在这段窗口里
+         * 有一个 >200ms 的正常空隙（编辑列表/丢包），也绝不会把音频饿死到"窗口永不关闭"。
+         * 纯计数，不是时间判据。
+         */
+        int mSeekAudioStaleDrops{0};
+        /*
+         * 音频静音窗口的**状态**（0 有声 / 1 seek 窗口内等主时钟 / 2 设备写失败 /
+         * 3 设备被 flush 重建）。只用于"起止各一条"的日志，不参与任何管线决策：
+         * 判据全是状态变化，没有时间阈值，也没有周期性动作。
+         */
+        int mAudioSilenceReason{0};
+        /*
+         * 【第 2 项：有界精确落点】本次 seek 是否"值得精确到目标帧"。
+         * 事件：读到本次 seek 的第一个关键帧视频包时，若它离目标点不超过
+         *       SEEK_EXACT_LANDING_BUDGET_US，就置真（否则保持假 = 照旧立刻上屏落点帧）。
+         * 作用：RenderVideo 的落点采纳分支在该闩为真时，会把"仍比目标早超过预算"的帧
+         *       挡在门外（render=false），直到解码器走到目标附近才采纳/锚定 ——
+         *       帧 PTS 单调前进，所以必然终止，不需要任何计时器。
+         * 与用户选项 mSeekExactLanding 相互独立：那是全局策略（同一套旧语义，只在采纳
+         * 之后挡帧），这里只是"这一次 seek 的目标点离落点够近"的预算判断。
+         * 每次 SeekTo 与 Reset 都清零，绝不让上一次 seek 的判断影响下一次。
+         */
+        bool mSeekExactLandingByBudget{false};
+        /*
+         * 【锚点事件闩，修"seek 没反应"】"本次 seek 之后第一帧真的上屏"这个事件还没被消费。
+         * SeekTo 置真；doRender 里一旦 rendered 就消费它，把主时钟锚到 mPlayedVideoPts
+         * （刚上屏那一帧自己的 PTS），只锚一次。
+         * 独立成事件的理由：落点采纳依赖 frameTimePosition >= 0，部分容器/流该字段缺失时
+         * 它永远不发生 —— 锚点与 seek 结束都不能绑在它身上（上一轮绑上去，导致安卓 seek
+         * 永久结束不了、一直转圈）。
+         */
+        bool mSeekAnchorPending{false};
+        /*
+         * 【本轮修"seek 之后一直转圈 + 日志刷满"】PTS_REVERTING 分支的日志闩：
+         *   0 = 既不在等待也不在强制渲染；1 = 正在"强制渲染旧视频帧"；2 = 正在"等音频倒回来"。
+         * 只在进入/离开该状态时各打一条日志（原来每轮 2~3 行，每秒数百~上千行）。
+         * 纯日志用途，不参与任何决策。
+         */
+        int mPtsRevertWaitLogged{0};
+        /* 同上限频用：上一次已经打过日志的音频位置（值没变就不再打）。 */
+        int64_t mPtsRevertLastLoggedAudio{INT64_MIN};
+        /*
+         * 【A 方案：音频流重新定位到落点】事件闩与数值。
+         * 置闩处：renderAudioFrame() 里"音频时间轴在一个 seek 之后前跳 > 1s"那一条 ——
+         *   这是"容器把音频放到了别处（不是视频落点）"唯一可观测的信号（安卓实测：
+         *   视频落点 110.110s，而音频的下一帧是 112.512s，前跳 2026 ms）。
+         * 消费处：主循环 ProcessVideoLoop() → DoCheckBufferPass() 之前（消息线程）。
+         * 消费结论：解复用层目前**没有**按流重定位的通路 ⇒ 记一条限频日志，并保持既有
+         *   防线（1b 清已解码帧队列 + 重基时间轴、双侧地板 + 32 帧上限）。证据见消费处注释。
+         * 读包/渲染路径只置闩，**绝不**调解复用器（禁止重入与跨线程占用）。
+         */
+        bool mSeekAudioRepositionPending{false};
+        int64_t mSeekAudioRepositionUs{INT64_MIN};
+        int64_t mSeekAudioRepositionJumpUs{INT64_MIN};
+        /*
+         * [seekdiag] 的**语义**变化检测（本轮修刷屏）：
+         * 原来把 frameQueSize 也算进"变化"，而 frameQ 在 0/1 之间每轮都跳，
+         * 于是每轮主循环都打一条 —— 2 秒 190+ 行，自己吃掉 CPU 与日志带宽。
+         * 现在只看语义字段：seekFlag / seekNeedCatch / buffering / videoEOS /
+         * playStatus / vDecValid（队列长度只作为输出，不参与判定）。
+         */
+        bool mSeekDiagLastSeekNeedCatch{false};
+        int mSeekDiagLastPlayStatus{-1};
+        bool mSeekDiagLastVideoDecoderValid{false};
+
+        /*
+         * B2：当前 pending（切档目标）解码器是不是用"1x1 占位 Surface"配置的
+         * （= tunnel 渲染器带 FLAG_DUMMY 且 view 非空时，由 CreatePendingVideoDecoder
+         * 连同 DECFLAG_PLACEHOLDER_SURFACE 一起置真）。提交
+         * （TryCommitPendingVideoSwitch）据此走 placeholder 交接：先让旧解码器交出
+         * 真 Surface，确认新解码器接上之后才 promote 并释放旧解码器；接不上就原地回滚。
+         *
+         * SeekTo / Reset / FlushVideoPath 三处必须随 pending 状态一起复位 ——
+         * 漏一处就会跨 seek / 跨片源残留，让下一次提交误判"pending 是 surface 模式"。
+         *
+         * 追加在成员列表末尾：本文件有"增量构建不做头文件依赖、新成员一律追加在最后"
+         * 的约定，插在中间会移动其后成员的偏移，让旧的 friend TU 目标文件按错偏移访问。
+         */
+        bool mPendingDecoderUsesPlaceholderSurface{false};
+
+        /*
+         * 【纯诊断，两个值都不参与任何判定；同样追加在成员列表末尾】
+         *
+         * mPendingVideoPrerollKeyPts：预滚实际开始解码的那个关键帧的 raw pts
+         *   （在两个接受分支里记录：正常"参考点之后的第一个关键帧"与"等太久回退"）。
+         * mQualitySwitchCarriedFramePts：提交（promote）时从 pending 帧队列带进
+         *   active 队列的那一帧的 pts（每次提交先置 INT64_MIN，避免跨次残留）。
+         *
+         * 用途只有一个：RenderVideo 里交接后第一帧真的进真面时打
+         *   `post-handover first frame: pts=… prerollKeyPts=… carriedPendingPts=…`
+         * 一眼判定"交接后上屏的是 preroll 那一代（交接前就解好的帧，~百 ms 出画）
+         * 还是交接后新解出来的帧"，以及从提交到上屏的真实毫秒数。
+         * 坐标轴：mQualitySwitchCarriedFramePts 与上屏帧的 pts 同轴（都是流水线
+         * 归一化后的），可以直接比较；mPendingVideoPrerollKeyPts 是**包的原始 pts**，
+         * 与它们相差一个 mActiveVideoPtsOffset，只作"离预滚关键帧多远"的参考。
+         * 之所以要这一行：上一版在这里加了 flush，逼出 6.4s 等关键帧 + 4.2s 等时钟
+         * （实测 10.6s 静止）。有了这三个 pts，同一份日志就能当场判定走了哪条路。
+         */
+        int64_t mPendingVideoPrerollKeyPts{INT64_MIN};
+        int64_t mQualitySwitchCarriedFramePts{INT64_MIN};
+
+        /*
+         * ============ B4（两条渲染路）：active 视频解码器**实际绑定的输出面** ============
+         *
+         * 就是 `CreateVideoDecoder()` 里算出来的那个 view：
+         *   · 隧道（FLAG_DUMMY，解码器直出）：= App 的 Surface（`mSet->mView`）；
+         *   · GL（GLRender）：= 渲染器 SurfaceTexture 的那块 Surface（`GLRender::getSurface()`）。
+         *
+         * 唯一用途：切清晰度的"占位 Surface 交接"（B2）必须把**真面**从旧解码器交给
+         * pending 解码器。GL 路的"真面"不是 App 的 view —— 拿 `mSet->mView` 去
+         * setOutputSurface 一定失败（那块面属于 EGL，不是 codec 的输出面），
+         * 这正是"两条路要各自记住自己的真面"的原因。
+         *
+         * 生命周期：`CreateVideoDecoder()` 一开始置 null（失败即保持 null ⇒ 交接退回
+         * 纯 promote），成功后写入；解码器被销毁的路径（Reset / closeVideo）也置 null。
+         * 不额外持有 JNI 引用（与 mSet->mView 同样的用法：调用方保证它活得比播放器长）。
+         */
+        void *mActiveVideoSurface{nullptr};
+
+        /*
+         * ============ 【B6】后端能力探测：输出帧带不带节目时间轴（timePosition）============
+         *
+         * `FillVideoFrame()` 里只要见到一张 `timePosition >= 0` 的帧就置真（单调、粘性）。
+         * Android 的 MediaCodec 后端**不带**（`mediaCodecDecoder.cpp:692` 仍是
+         * `INT64_MIN`，那句 TODO 还在），Qt / macOS / iOS 的解码器带。
+         *
+         * 切档预滚用它决定对齐策略 —— 注意这是**能力探测**，不是平台分支：
+         *   · 带 ⇒ 沿用既有逻辑（帧自带 timePosition，逐字不变）；
+         *   · 不带 ⇒ 目标档的帧没法自报位置，只能"按构造对齐"：预滚从参考点**之前**
+         *     最近的关键帧起步（解掉前缀、由切换窗丢帧丢掉它），提交时手上就有贴着
+         *     主时钟的帧。否则就会走主时钟相对偏移把帧**重命名**到时钟轴上，把
+         *     "预滚起点领先参考点的量（lead，本片源 4.5~9 s）"变成恒定的音画错位
+         *     ——真机日志里 `committed … offset=-9473284` 就是它。
+         */
+        bool mActiveDecoderFramesCarryTimePosition{false};
+
+        /*
+         * 【B8】音频时钟纠偏的诊断水位（纯诊断，不参与任何判定）。
+         * 纠偏把"每帧 pts 与预测位置的差"累加进 mAudioTime.deltaTime（见 RenderAudio 里
+         * kGradualStepUs 那段）。如果这个累加**单向持续**，主时钟就会相对真实时间被拉偏，
+         * 表现为"越播音画偏差越大、最后完全对不上"。这里记住上次打印时的水位，
+         * 每累计变化 100 ms 打一行（事件驱动，无计时器），一眼看出是不是 deltaTime 在爬。
+         */
+        int64_t mAudioClockDriftLoggedUs{0};
+
+        /*
+         * ============ 【B10】"视频包 pts → 节目时间轴(timePosition)"的逐帧配对表 ============
+         *
+         * DASH 的每一档都会在**每个分片边界**重算 `time2ptsDelta`（`DashStream.cpp:880`、
+         * `HLSStream.cpp:1295/1315` 同理），于是"原始 pts 轴 → 节目轴"的映射**不是常数**：
+         * 真机（2026-09-25 14:00，`output.mpd`）实测每 10 s 分片要修 427 ms（4.27%）。
+         *
+         * 用一个全局偏移去平移帧（哪怕每个包都跟着刷新）在分片边界上总有一步台阶。
+         * 这里改成**逐帧精确配对**：`DecodeVideoPacket()` 把 active 流每个包的
+         * `(pts → timePosition)` 记进这两个并行的双端队列，`FillVideoFrame()` 用帧自己的
+         * pts 精确查表，直接把帧的 pts 设成它自己那一个包的 timePosition ——
+         * 每一帧都落在自己的真实节目位置，于是**没有漂移、没有台阶、没有跳变**。
+         *
+         * 只在 active 流、且没有切档在途时记录（切档时流进来的是另一档的包，delta 不同）；
+         * 容量上限 64，按顺序消费/淘汰（帧与包同序），查不到就退回 mActiveVideoPtsOffset
+         * 那条全局偏移（B9-2）—— 所以这是**纯增量**：任何异常路径行为与今天一致。
+         * 全部在内核里，没有平台分支 ⇒ Qt 与安卓同一份。
+         */
+        std::deque<int64_t> mVideoAxisPts;
+        std::deque<int64_t> mVideoAxisTimePos;
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

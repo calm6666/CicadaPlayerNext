@@ -33,6 +33,9 @@ private:
 
     void updateFlip(IVideoRender::Flip flip) override ;
 
+    /* 【色觉辅助滤镜 / 回退点 S1】覆写 IProgramContext 的空默认实现 */
+    void updateColorMatrix(const float matrix[9]) override;
+
     void updateBackgroundColor(uint32_t color) override;
 
     int updateFrame(std::unique_ptr<IAFFrame> &frame) override;
@@ -74,6 +77,8 @@ private:
     GLint mMVPMatrixLocation = 0;
     GLint mSTMatrixLocation = 0;
     GLint mTextureLocation = 0;
+    /* 【色觉辅助滤镜 / 回退点 S1】uColorMatrix 的 uniform 位置 */
+    GLint mColorMatrixLocation = -1;
 
 
     GLfloat mOESMVMatrix[16] = {1.0f, 0, 0, 0,
@@ -89,6 +94,15 @@ private:
 
     bool mCoordsChanged = false;
     GLfloat mOESFlipCoords[8] = {0.0f};
+
+    /*
+     * 【色觉辅助滤镜 / 回退点 S1】当前颜色矩阵，默认单位矩阵 = 关闭。
+     * 与 mFlip 同为"渲染线程内使用"的配置量（GLRender 在渲染线程调用本 context 的
+     * updateColorMatrix），不需要原子/锁。
+     */
+    GLfloat mColorMatrix[9] = {1.0f, 0.0f, 0.0f,
+                               0.0f, 1.0f, 0.0f,
+                               0.0f, 0.0f, 1.0f};
 
     bool mRegionChanged = false;
     GLfloat mDrawRegion[12]={0.0f};

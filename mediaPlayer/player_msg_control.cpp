@@ -27,6 +27,9 @@ namespace Cicada {
             case MSG_SET_ROTATE_MODE:
             case MSG_SET_MIRROR_MODE:
             case MSG_SET_VIDEO_BACKGROUND_COLOR:
+            /* 【色觉辅助滤镜 / 回退点 C5】与镜像/旋转/背景色同为"立即替换全部"的配置类消息。
+             * 不加这一句会掉进 default 的 assert(0)（debug 直接挂）。 */
+            case MSG_SET_COLOR_MATRIX:
                 return REPLACE_ALL;
 
             case MSG_START:
@@ -259,6 +262,11 @@ namespace Cicada {
 
             case MSG_SET_VIDEO_BACKGROUND_COLOR:
                 mProcessor.ProcessSetVideoBackgroundColor();
+                break;
+
+            /* 【色觉辅助滤镜 / 回退点 C5】 */
+            case MSG_SET_COLOR_MATRIX:
+                mProcessor.ProcessSetColorMatrix();
                 break;
 
             case MSG_SEEKTO:
