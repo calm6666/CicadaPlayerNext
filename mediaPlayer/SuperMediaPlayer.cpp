@@ -339,6 +339,17 @@
  */
 #define QUALITY_SWITCH_TOTAL_TIMEOUT_MS (18000)
 
+/*
+ * 【切档进度判据】连续多少次"待提交帧的有效位置没有前进"才允许判切换失败。
+ *
+ * 纯计数、无墙钟（分层规则 R5）：调试点 TryCommitPendingVideoSwitch() 由解码循环驱动，
+ * 真机约 75 次/秒，5000 次 ≈ 一分钟完全不动 —— 真正的死法（pendingFrameQ 恒定、
+ * 队首位置一个字节不变）必被抓住；而"慢但在收敛"的切换绝不会被误杀。
+ * 依据：真机 21:42:17~21:42:37 那次切换 lag 从 5248ms 一路收敛到 96ms（只差一瞬间
+ * 就能提交），却被墙钟上限判成"切换失败"，用户看到的就是那条失败提示。
+ */
+#define PENDING_VIDEO_STALL_CHECKS_MAX (5000)
+
 
 /*
  * 追赶窗口内「多久没上屏就强制渲染一帧」（毫秒）。
@@ -6058,20 +6069,45 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
         (frameTimePosition >= 0)
         ? frameTimePosition
         : (mPendingVideoFrameQue.empty() ? INT64_MIN : mPendingVideoFrameQue.front()->getInfo().pts);
+    /*
+     * ============ 【修：目标路只要在前进，就不许判"切换失败"】============
+     *
+     * 真机日志（21:42:17 → 21:42:37，切 stream=0）把这条判据的问题写得很清楚：
+     *   drop pending frame already behind the playback position: … lag=5248 ms → 381 ms
+     *   （20 秒内 lag 从 5.2 秒收敛到 0.1 秒，目标路一直在往前解）
+     *   quality switch timed out before commit: target=197410732 framePos=235001433 master=235097791
+     *   elapsed=37687 pendingFrameQ=1
+     * —— 帧已经只落后主时钟 **96 毫秒**，再有一瞬间就能提交，却被"绝对时间上限"判死，
+     * 界面弹出"切换失败"。这不是"路不通"，只是"路慢"：本机 4K 目标档约 1.25× 实时，
+     * 起步落后 5 秒就要 20 秒才追平。
+     *
+     * 处置：把"是否失败"改成**进度判据**（纯状态、无墙钟）：
+     *   · 待提交帧的有效位置比上次**前进了** ⇒ 目标路在推进 ⇒ 计数清零，继续等；
+     *   · 一直不前进（真正的死法：pendingFrameQ 恒定、队首位置一个字节不动）⇒ 计数累加，
+     *     达到 PENDING_VIDEO_STALL_CHECKS_MAX 才判失败；
+     *   · 连一帧都读不出来（有效位置 INT64_MIN）⇒ 仍按 8 秒那条收摊（无从判断进度）。
+     * 这样"慢但能成"的切换一定能成，"卡死不动"的切换照样有明确出口。
+     */
+    if (frameEffectiveForTimeout != INT64_MIN && frameEffectiveForTimeout > mPendingVideoProgressUs) {
+        mPendingVideoProgressUs = frameEffectiveForTimeout;
+        mPendingVideoStallChecks = 0;
+    } else if (mPendingVideoStallChecks < PENDING_VIDEO_STALL_CHECKS_MAX + 1) {
+        ++mPendingVideoStallChecks;
+    }
+
+    const bool switchStalled = (mPendingVideoStallChecks >= PENDING_VIDEO_STALL_CHECKS_MAX);
     const bool switchTimedOut =
         (switchElapsedMs > 0 &&
-         (switchElapsedMs > QUALITY_SWITCH_TOTAL_TIMEOUT_MS ||
-          (switchElapsedMs > 8000 &&
-           (frameEffectiveForTimeout == INT64_MIN ||
-            (mPendingVideoSwitchTimePosition >= 0 &&
-             frameEffectiveForTimeout + 2 * 1000 * 1000 < mPendingVideoSwitchTimePosition)))));
+         (switchStalled ||
+          (frameEffectiveForTimeout == INT64_MIN && switchElapsedMs > 8000)));
     if (switchTimedOut) {
-        AF_LOGW("quality switch timed out before commit: stream=%d target=%lld framePos=%lld "
-                "rawTimePosition=%lld elapsed=%lld pendingPktQ=%d pendingFrameQ=%d master=%lld\n",
+        AF_LOGW("quality switch %s before commit: stream=%d target=%lld framePos=%lld rawTimePosition=%lld "
+                "elapsed=%lld stallChecks=%d pendingPktQ=%d pendingFrameQ=%d master=%lld\n",
+                switchStalled ? "STALLED (the target path stopped advancing)" : "has no readable timeline",
                 mPendingVideoStreamIndex,
                 (long long) mPendingVideoSwitchTimePosition,
                 (long long) frameEffectiveForTimeout, (long long) frameTimePosition,
-                (long long) switchElapsedMs,
+                (long long) switchElapsedMs, mPendingVideoStallChecks,
                 (int) mPendingVideoPacketQue.size(), (int) mPendingVideoFrameQue.size(),
                 (long long) master);
         mPNotifier->NotifyVideoQualitySwitch(
@@ -9070,6 +9106,9 @@ int SuperMediaPlayer::ReadPacket()
             /* 新的一次切换：预滚（丢弃窗口之前的数据）重新开始。 */
             mPendingVideoPrerollDone = false;
                         mPendingVideoPrerollRefUs = INT64_MIN;
+            /* 【切档进度判据】新的一次切换 ⇒ 进度采样与"没前进"计数一起重新起算。 */
+            mPendingVideoProgressUs = INT64_MIN;
+            mPendingVideoStallChecks = 0;
             // 清晰度切换建立新的 pending 时间轴；旧 pending 帧不能带入本次
             // 切换，否则连续点击多个档位时会把上一目标的首帧误提交。
             while (!mPendingVideoFrameQue.empty()) {
@@ -10876,6 +10915,9 @@ void SuperMediaPlayer::Reset()
     mDeferredUserSeekPending = false;
     mDeferredUserSeekUs = INT64_MIN;
     mDeferredUserSeekAccurate = false;
+    /* 【切档进度判据】换片源/停止/Reset ⇒ 进度采样与计数一起作废（不跨片源累计）。 */
+    mPendingVideoProgressUs = INT64_MIN;
+    mPendingVideoStallChecks = 0;
     // 复位时必须把"落点闸门/闩"一起清掉：否则 Reset 之后残留的闸门会让
     // 下一个与 seek 无关的帧被当成落点帧（并带着一个无效的目标点去算日志）。
     mSeekRenderGateUs = INT64_MIN;

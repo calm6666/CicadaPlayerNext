@@ -1678,6 +1678,17 @@ namespace Cicada {
          */
         void setVideoDecodeBoost(bool boost);
         void setPendingVideoDecodeBoost(bool boost);
+
+        /*
+         * 【切档进度判据】待提交帧的"有效位置"上次采样值，以及"连续多少次没有前进"的计数。
+         *
+         * 用途：切换是否判失败不再看墙钟，而看**目标路有没有在前进** ——
+         * 真机日志里那次切换 lag 从 5248ms 收敛到 96ms（差一瞬间就能提交）却被时间上限
+         * 判成失败（界面"切换失败"）。纯状态、无计时器。
+         * 追加在类末尾，保证增量 ABI 安全。
+         */
+        int64_t mPendingVideoProgressUs{INT64_MIN};
+        int mPendingVideoStallChecks{0};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H
