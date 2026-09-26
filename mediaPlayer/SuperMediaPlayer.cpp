@@ -8324,14 +8324,29 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
          * 时钟钉在目标上、解码从落点朝目标推进）就回到 1，正常追赶完全不受打扰。
          * 纯事件计数：没有计时器、没有墙钟阈值。
          */
+        /*
+         * 【修：连续拒帧计数不再被"偏移抖动"清零 ⇒ 防冻阀门真的能用】
+         *
+         * 原判据是"|master - videoPts| 没有变小才计入"，而它把**任何**一次减小
+         * （哪怕 1us）都当成"在收敛"并把计数清回 1。主时钟与视频帧是两条各自
+         * 16.7ms 步进的轴，差值本身就在 ±1 帧内抖动 —— 于是计数永远攒不到
+         * VIDEO_STUCK_DISCARD_STREAK_MAX(8)，阀门形同不存在。真机日志（安卓
+         * 2026-09-26 20:55:54）就是这个形态：`drop frame,master played time is
+         * 163268733,video pts is 153570083` 连续刷了 10 秒以上，而
+         * `forcing this frame to the screen` 在整份日志里出现 **0 次** ⇒ 画面真的
+         * 冻死（用户看到的"有时候完全卡死""有声音没画面"）。
+         *
+         * 现在改成纯粹的"连续被拒帧数"：只有真的上屏（下面 render == true 那一段）
+         * 才清零，与差值的抖动无关。偏移采样仍然保留，只用于日志/诊断。
+         * 精度不受影响：这条只在"渲染判定已经连续 8 帧给出不上屏"之后放行**这一帧**，
+         * 位于落点判据之后，不碰落点、不碰主时钟、不碰位置上报。
+         */
         if (videoGapAbsUs != INT64_MIN) {
-            if (mVideoDiscardGapAbsUs != INT64_MIN && videoGapAbsUs < mVideoDiscardGapAbsUs) {
-                mVideoDiscardStreak = 1;
-            } else if (mVideoDiscardStreak < VIDEO_STUCK_DISCARD_STREAK_MAX + 1) {
+            mVideoDiscardGapAbsUs = videoGapAbsUs;
+
+            if (mVideoDiscardStreak < VIDEO_STUCK_DISCARD_STREAK_MAX + 1) {
                 ++mVideoDiscardStreak;
             }
-
-            mVideoDiscardGapAbsUs = videoGapAbsUs;
         }
         /*
          * 【B16-b】追赶期的连续被拒计数：只看**帧数**（"偏移是否变小"不作为条件，
