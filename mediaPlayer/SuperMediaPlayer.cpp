@@ -7270,9 +7270,35 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
      * 只锚一次（锚定另有 mSeekVideoAnchorDone 闩）。
      */
     if (mSeekRenderGateUs != INT64_MIN && (render || mSeekFlag)) {
-        const int64_t frameTimePos = videoFrame->getInfo().timePosition;
+        /*
+         * 【timePosition 缺失的容器/流也必须能精确落点】
+         *
+         * 有些容器/流不填 timePosition（全局时间轴位置）。原来整块落点判定被
+         * `if (frameTimePos >= 0)` 挡在门外：那条来源的 seek **永远不采纳、不锚定** ——
+         * 于是既没有"落点帧"概念，也没有精度可言（这正是"某些片源 seek 不跳转"的形状）。
+         * 这里在缺失（< 0）时退回帧自己的 pts：两者在同一时间轴、单位相同，
+         * 判据与采纳/锚定逻辑一字不改。
+         */
+        int64_t frameTimePos = videoFrame->getInfo().timePosition;
+
+        if (frameTimePos < 0) {
+            frameTimePos = videoFrame->getInfo().pts;
+        }
 
         if (frameTimePos >= 0) {
+            /*
+             * 【100% 帧级精准 seek 的判据基础】
+             *
+             * 这一帧在时间轴上覆盖 [frameTimePos, frameTimePos + 帧长)。
+             * "包含目标时刻的那一帧"就是 frameTimePos <= target < frameTimePos + 帧长 ——
+             * 也就是目标要求的"目标落在两帧之间时取不晚于目标的那一帧"。
+             * 帧长优先用帧自己的 duration（AFFrameInfo.duration，见
+             * framework/base/media/IAFPacket.h:208）；缺失时按 25fps 兜底，
+             * 兜底只影响"目标离帧首不到一帧"的边界判定，绝不会把早很多的帧放上屏。
+             */
+            const int64_t seekFrameDurUs = (videoFrame->getInfo().duration > 0)
+                                           ? videoFrame->getInfo().duration : 40000;
+
             if (!mSeekLandingFrameAccepted) {
                 if (!mSeekDecodeStartIsKey) {
                     /*
@@ -7282,16 +7308,27 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                      * 最多等一个 GOP；绝不把脏帧显示出去。
                      */
                     render = false;
-                } else if (mSeekExactLandingByBudget && mSeekPositionFloorUs != INT64_MIN &&
-                           frameTimePos != INT64_MIN &&
-                           frameTimePos + SEEK_EXACT_LANDING_BUDGET_US < mSeekPositionFloorUs) {
+                } else if (frameTimePos != INT64_MIN && mSeekPositionFloorUs != INT64_MIN &&
+                           frameTimePos + seekFrameDurUs <= mSeekPositionFloorUs) {
                     /*
-                     * 【第 2 项：有界精确落点】这一帧还比目标早超过预算 —— 不采纳、不上屏，
-                     * 继续解码（解码无论如何都要走到目标，这里不增加任何解码量，只推迟
-                     * "第一帧上屏"）。帧 PTS 单调前进，所以最迟在"距目标 <= 预算"的那一帧
-                     * 就会被下面的分支采纳；预算由 C 对齐块按"落点距目标是否够近"逐次授予
-                     * （见 DecodeVideoPacket），所以永远不会出现"为了精确让用户等一个稀疏 IDR"
-                     * 的情况。既没有计时器，也不会无限等待。
+                     * ============ 【★ 还没到目标：不采纳、不上屏，一直解到"包含目标"那一帧 ★】====
+                     *
+                     * 原来这里是一条**预算**判据（SEEK_EXACT_LANDING_BUDGET_US / 只在
+                     * mSeekExactLandingByBudget 被授予时才生效）：比目标早不超过预算就放上屏。
+                     * 那等于"精度换等待"—— 精度取决于预算给不给，而不是取决于目标本身；实测表现
+                     * 就是落点帧可能比目标早一整个 GOP，暂停态 seek 尤其明显。
+                     *
+                     * 现在改成与**目标本身**比较的确定性判据（无预算、无计时器）：
+                     *   · 本帧 + 帧长 <= 目标 ⇒ 这一帧完全在目标之前，不包含目标 ⇒ 不上屏，继续解；
+                     *   · 否则（本帧 <= 目标 < 本帧 + 帧长）⇒ 它**就是**包含目标的那一帧 ⇒ 走下面的
+                     *     采纳分支上屏；
+                     *   · 帧 PTS 单调前进 ⇒ 必然在有限帧内到达包含目标的那一帧，不需要任何超时兜底；
+                     *   · 目标落在 seek 落点之前（稀疏 IDR，第一帧就晚于目标）⇒ 此时
+                     *     frameTimePos > 目标 ⇒ 条件不成立 ⇒ 直接采纳它（没有更早的帧可选）。
+                     *
+                     * 这一处是**来源无关**的：本地文件、DASH、HLS 的帧都经由同一个
+                     * mVideoFrameQue 走到这里，所以三条来源同时获得同样的精度。
+                     * ==========================================================================
                      */
                     render = false;
                 } else {
