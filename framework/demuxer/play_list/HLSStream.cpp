@@ -375,6 +375,13 @@ namespace Cicada {
                 mPTracker->setCurSegNum(num);
             }
 
+            /*
+             * 【seek 落点延迟线：装弹（延后型 seek）】tracker 还没 init 时，seek() 只把目标存进
+             * mSeekPendingUs（那一刻读线程可能正跑在 open_internal 里，不能去动延迟线的 stage）。
+             * 这里才是"真正定位到分片"的那一刻，而且本函数跑在读线程上：装弹之后紧接着才会产出
+             * 第一个包，不存在与读线程并发写延迟线的问题。
+             */
+            seekLandingArm(mSeekPendingUs);
             mSeekPendingUs = -1;
         }
 
@@ -717,6 +724,14 @@ namespace Cicada {
         while (0 < mQueue.size()) {
             mQueue.pop_front();
         }
+
+        /*
+         * 【seek 落点延迟线】延迟线里攒着的包同样是"已经收下、还没交出去"的队列：位置一旦作废
+         * （seek / 换分片 reopen / stop），它必须跟着一起丢掉并复位，否则新的位置会带着旧的
+         * 落点状态继续跑。这个函数的三个调用点都在读线程 pause() 或 join 之后，
+         * 所以这里清 stage 不存在与读线程并发写的问题。
+         */
+        seekLandingReset();
     }
 
 
@@ -945,7 +960,21 @@ namespace Cicada {
         } else if (packet_size < 0) {
             if (packet_size == -EAGAIN) {
                 //     AF_LOGD("read timed out");
-                af_msleep(10);
+                /*
+                 * 【seek 落点延迟线】攒前缀时不能每个包都停 10ms。
+                 *
+                 * "不晚于目标的最后一个关键帧"可能要几十个包之后才出现（本片源一个 GOP ≈ 60 个包），
+                 * 每包停 10ms 就是 0.6 秒，正好把这次优化的收益吃光。
+                 * 判据是**进度**、不是时间：只有上一轮确实从 demuxer 取到了一个包
+                 * （seekLandingFilter 把它收进延迟线时置的 mSeekLandingProgress），才跳过这一次停顿；
+                 * demuxer 没数据（等网络）时进度为假，照旧 af_msleep(10) —— 不会空转、不是计时器。
+                 * 延迟线一放行或一复位，这个标志就被清掉，节奏立刻回到原样。
+                 */
+                if (mSeekLandingProgress) {
+                    mSeekLandingProgress = false;
+                } else {
+                    af_msleep(10);
+                }
                 return 0;
             }
 
@@ -1146,6 +1175,9 @@ namespace Cicada {
                 AF_LOGD("stop on segment end（切清晰度：本片读完就停在片界，等管理器换流）\n");
             }
 
+            /* 【seek 落点延迟线】本片到此为止，先把延迟线里攒着的（本片末尾那一段）整体交出，再报停。 */
+            seekLandingFlush();
+
             mIsEOS = true;
             return -EAGAIN;
         }
@@ -1158,6 +1190,13 @@ namespace Cicada {
             if (mReopen) {
                 AF_LOGD("reopen");
             }
+
+            /*
+             * 【seek 落点延迟线】本分片读完（把 demuxer 读到 EOS）时，延迟线里攒着的正是本片最后
+             * 那一段：这属于"目标落在本片最后一个 GOP"的情形，等不到"timePosition > 目标"的包，
+             * 判据只能在这里收口。整体按序交出，绝不能跟着分片一起丢掉。
+             */
+            seekLandingFlush();
 
             ret = updateSegment();
 
@@ -1222,6 +1261,13 @@ namespace Cicada {
         if (packet != nullptr) {
             //  AF_LOGD("read a frame \n");
 
+            /*
+             * 【这块只服务"对齐切档"】mDiscardPts 的唯一设置点是 HLSManager 的对齐切档
+             * （目标流接过旧流的最后 pts），语义是"这次切档要从哪儿开始"。
+             * ⚠ 铁律：**绝不允许把 seek 目标塞进 mDiscardPts**。下面第二条判据会整片跳过
+             * （mReopen），拿 seek 目标当它就会把落点推到目标之后，直接破坏"首帧必须包含目标、
+             * 不晚于目标"。HLSStream::seek 开头已经把地板清成 INT64_MIN 做硬化。
+             */
             if (mDiscardPts != INT64_MIN) {
                 if (packet->getInfo().pts < mDiscardPts) {
                     if (mDiscardPts - packet->getInfo().pts > mPTracker->getTargetDuration() / 2) {
@@ -1324,6 +1370,19 @@ namespace Cicada {
 
             if (packet->getInfo().pts != INT64_MIN) {
                 mStreamStartTimeMap[streamIndex].lastFramePts = packet->getInfo().pts;
+            }
+
+            /*
+             * 【seek 落点延迟线】包的时间轴（timePosition）、关键帧标记都已经算完了，落点判定就放在
+             * 这里 —— 在进入 mQueue 之前、也在上面那些既有处理之后，所以被延迟线收下的包不会打乱
+             * time2ptsDelta / lastFramePts / seamlessPoint 的既有状态机。
+             * 返回 false = 这一包被延迟线收下（本轮不产出，读线程立刻再来一轮，见 read_thread 的
+             * EAGAIN 分支）；返回 true = 这一包照原样交出去。
+             * 判据与边界见 seekLandingFilter 上面的长注释（与 DashStream 那一份同形）。
+             */
+            if (!seekLandingFilter(packet)) {
+                packet = nullptr;
+                return -EAGAIN;
             }
 
 //          AF_LOGE("pFrame->pts is %lld index is %d\n", (*pFrame)->pts, (*pFrame)->streamIndex);
@@ -1497,6 +1556,22 @@ namespace Cicada {
         AF_LOGD("%s:%d stream (%d) seek us is %lld\n", __func__, __LINE__,
                 mPTracker->getStreamType(), us);
 
+        /*
+         * ============ mDiscardPts 的硬边界：它只属于"对齐切档"，绝不允许装 seek 目标 ============
+         *
+         * mDiscardPts 是"这次清晰度对齐要从哪儿开始"的地板，唯一的设置点是 HLSManager 的对齐切档
+         * （目标流接过旧流的最后 pts）。read_internal 对它的用法有两条：
+         *   · 低于地板：丢包（setDiscard）；
+         *   · 低得超过半片：**整片跳过**（mReopen）。
+         * 所以一旦有人把**seek 目标**塞进 mDiscardPts，"低于地板"的判据会变成"晚于目标的帧才算数"，
+         * 整片跳过那条更是会把落点推到目标**之后** —— 直接破坏"首帧必须是包含目标、且不晚于目标的
+         * 那一帧"这条铁律（精准 seek 的全部意义就在这一条）。
+         * 因此这里做硬化：seek 一开始就把地板清掉，让 seek 落点只由"包含目标的那一片 + 延迟线"决定；
+         * 正在途中的对齐切档也已经由 HLSManager::seek 的第 1 步收尾了，不需要这个地板。
+         */
+        mDiscardPts = INT64_MIN;
+        discardCount = 0;
+
         if (!mPTracker->isInited()) {
             mSeekPendingUs = us;
             AF_LOGI("pending seek\n");
@@ -1592,6 +1667,16 @@ namespace Cicada {
                     mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
                     (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought);
         }
+
+        /*
+         * 【seek 落点延迟线：装弹】位置很关键：
+         *   · 必须在上面 clearDataFrames() 之后 —— 那一刻读线程已经 pause()，不会再写延迟线的 stage；
+         *   · 必须在下面 mThreadPtr->start() 之前 —— 线程一启动就可能立刻产出第一个包。
+         * 目标必须用入参 us，**不能用 usSought**：SegmentList::getSegmentNumberByTime 会把 usSought
+         * 改写成"该分片起点"（这是它给 HLS 提供的落点语义），拿它当目标的话，落点会退回到
+         * "最后一个 ≤ 分片起点"的关键帧，等于白做。
+         */
+        seekLandingArm(us);
 
         mIsEOS = false;
         mIsDataEOS = false;
@@ -1932,6 +2017,179 @@ namespace Cicada {
         mSize = 0;
         mMapPTS = INT64_MIN;
         bFinished = false;
+    }
+
+    /*
+     * ============================================================================
+     * seek 落点延迟线（HLSStream 这一份，与 DashStream 的那一份**同形**）
+     * ============================================================================
+     *
+     * 【要解决的问题】
+     * 实测（10 秒分片、片内每 2.5 秒一个 IDR）：seek 的落点关键帧比目标早 3~9 秒，落点就落在
+     * "整 10 秒的分片片首"上；播放器必须从落点一路解到目标（"落点距离 = 必须解码前推的帧数"），
+     * 这就是 seek 后 1~2.4 秒卡顿的全部来源（日志里那条 "the landing keyframe is N ms before
+     * the target"）。分片内部的 IDR 无法用更小的字节范围落上去（分片里只有一个 moof、没有可以
+     * 从内部进入的 box 边界，内层 demuxer 也不可 seek），清单里也只有分片级信息。
+     *
+     * 【做法】包是顺序出的，关键帧标记（AF_PKT_FLAG_KEY）就在包上：把解码起点从"分片片首"
+     * 挪到"不晚于目标的最后一个关键帧"，它之前的包整体丢掉，从它到目标、以及目标之后的包一个
+     * 不丢、按原顺序交出。落点误差于是从"分片长度(≤10s)"变成"关键帧间隔(本片源 2.5s)"，
+     * 而**精度语义一个字节不改**：仍然从 ≤ 目标的关键帧起解，播放器侧"包含目标、不晚于目标"
+     * 的采纳判据照旧一行不动。
+     *
+     * 【为什么不会把目标帧丢出去】（静态可自证）
+     *   1. 只有 timePosition ≤ 目标 的包才会进延迟线；
+     *   2. 包按 timePosition 单调递增，所以每当又看到一个"仍然 ≤ 目标"的关键帧，此前攒下的那一批
+     *      全都早于它，都是"落点之前"的帧：丢掉它们不可能丢掉目标帧（目标帧在该关键帧之后，
+     *      此刻还没被读出来）；
+     *   3. 一旦读到 timePosition > 目标的包，"最后一个 ≤ 目标的关键帧"就唯一确定了，于是延迟线
+     *      整批按序交出，当前这一包也照原样交出，目标帧必在其中；
+     *   4. 目标落在本片最后一个 GOP 时等不到第 3 条的包，由"本片读完 / 停在本片界"这两个分片
+     *      切换点收口（整体交出），同样不丢。
+     *
+     * 【失败安全】首包不是关键帧、或者拿不到 timePosition，都直接放弃延迟线（把已收下的包照原样
+     * 交出去），退化成今天的行为 —— 只慢、不错。只对点播视频路生效：音频没有 GOP 语义，混合流里
+     * 丢前缀会连声音一起丢，都不介入。
+     *
+     * 【没有计时器】所有状态迁移都由"包里带的时间戳 + 关键帧标记"这两个事件驱动；唯一与时间有关
+     * 的地方是"攒前缀时不要每包白等 10ms"，它的判据是"上一轮有没有真的取到包"（进度），不是毫秒数。
+     */
+    void HLSStream::seekLandingArm(int64_t targetUs)
+    {
+        seekLandingReset();
+
+        if (targetUs < 0) {
+            return;
+        }
+
+        if (mPTracker == nullptr || mPTracker->getStreamType() != STREAM_TYPE_VIDEO) {
+            return;
+        }
+
+        /*
+         * 只对点播生效：直播的目标轴是"当前可用窗"，落点距离本来就由分片位置决定，
+         * 而且直播另有它自己的过期丢弃逻辑；这一轮不动它（只慢不错）。
+         */
+        if (mPTracker->isLive()) {
+            return;
+        }
+
+        mSeekLandingTargetUs = targetUs;
+    }
+
+    void HLSStream::seekLandingReset()
+    {
+        mSeekLandingTargetUs = INT64_MIN;
+        mSeekLandingStarted = false;
+        mSeekLandingHaveKey = false;
+        mSeekLandingProgress = false;
+        mSeekLandingExtraData.clear();
+        mSeekLandingStage.clear();
+    }
+
+    void HLSStream::seekLandingFlush()
+    {
+        if (!mSeekLandingStage.empty()) {
+            {
+                std::unique_lock<std::mutex> waitLock(mDataMutex);
+
+                while (!mSeekLandingStage.empty()) {
+                    mQueue.push_back(move(mSeekLandingStage.front()));
+                    mSeekLandingStage.pop_front();
+                }
+            }
+            /* 消费端 read() 在队列空时会等这个条件（和 read_thread 推包后的动作一致）。 */
+            mWaitCond.notify_one();
+        }
+
+        seekLandingReset();
+    }
+
+    bool HLSStream::seekLandingFilter(std::unique_ptr<IAFPacket> &packet)
+    {
+        if (mSeekLandingTargetUs == INT64_MIN || packet == nullptr) {
+            return true;
+        }
+
+        if (mPTracker->getStreamType() != STREAM_TYPE_VIDEO) {
+            seekLandingReset();
+            return true;
+        }
+
+        /*
+         * 和 read_thread 的判据保持一致：这种包本来就不该进队列（read_thread 会把它丢掉），
+         * 不能让它占住延迟线的队首。
+         */
+        if (packet->getData() == nullptr || packet->getSize() <= 0) {
+            return true;
+        }
+
+        const int64_t pos = packet->getInfo().timePosition;
+
+        if (pos == INT64_MIN) {
+            /* 拿不到 timePosition 就判不了"不晚于目标"：放弃延迟线（只慢不错）。 */
+            seekLandingFlush();
+            return true;
+        }
+
+        const bool isKey = (packet->getInfo().flags & AF_PKT_FLAG_KEY) != 0;
+
+        if (!mSeekLandingStarted) {
+            mSeekLandingStarted = true;
+
+            /*
+             * 分片首必须是"关键帧 + 不晚于目标"，否则这一片里没有可用的内部落点：
+             * 放弃延迟线，退化成今天的行为（照旧从分片片首起解）。
+             */
+            if (!isKey || pos > mSeekLandingTargetUs) {
+                mSeekLandingTargetUs = INT64_MIN;
+                return true;
+            }
+        }
+
+        if (pos <= mSeekLandingTargetUs) {
+            if (isKey) {
+                /*
+                 * 又看到一个仍然 ≤ 目标的关键帧，它比当前候选更贴近目标，是更好的落点：
+                 * 把之前攒的那一批整个丢掉（它们全在这个关键帧之前）。丢之前先把其中带的
+                 * codec 参数集抄下来 —— 参数集常常就挂在分片第一个包上，被丢掉的正是它。
+                 */
+                for (auto &staged : mSeekLandingStage) {
+                    if (staged != nullptr && staged->getInfo().extra_data != nullptr &&
+                        staged->getInfo().extra_data_size > 0) {
+                        mSeekLandingExtraData.assign(staged->getInfo().extra_data,
+                                                     staged->getInfo().extra_data + staged->getInfo().extra_data_size);
+                    }
+                }
+
+                mSeekLandingStage.clear();
+                mSeekLandingHaveKey = true;
+            } else if (!mSeekLandingHaveKey) {
+                /* 还没见过关键帧就先来了非关键帧：从它起解会缺参考帧，放弃（此刻 stage 为空，没丢东西）。 */
+                mSeekLandingTargetUs = INT64_MIN;
+                return true;
+            }
+
+            /*
+             * 【extradata / SPS-PPS 必须贴到新的第一个包上】原样保留新首包自己的参数集，
+             * 它没有才补 —— 与 ActiveDecoder 里"从 holding 队列补参数集"的做法同形。
+             */
+            if (!mSeekLandingExtraData.empty() && packet->getInfo().extra_data_size <= 0) {
+                packet->setExtraData(mSeekLandingExtraData.data(),
+                                     static_cast<int>(mSeekLandingExtraData.size()));
+            }
+
+            mSeekLandingStage.push_back(move(packet));
+            mSeekLandingProgress = true;
+            return false;
+        }
+
+        /*
+         * pos > 目标：落点到此确定，延迟线整批按序交出；当前这一包走正常路径返回，
+         * read_thread 会把它追加到 mQueue 末尾，顺序仍然是"落点 → ... → 目标帧 → 后续"。
+         */
+        seekLandingFlush();
+        return true;
     }
 
 }// namespace Cicada

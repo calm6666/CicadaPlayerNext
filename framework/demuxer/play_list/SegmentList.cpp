@@ -96,15 +96,25 @@ namespace Cicada {
     bool SegmentList::getSegmentNumberByTime(uint64_t &time, uint64_t &num)
     {
         AF_LOGI("time is %llu", time);
-        uint64_t duration = 0;
         std::lock_guard<std::mutex> uMutex(segmetsMuxtex);
 
+        /*
+         * 【落点判据用分片自己的 startTime，不要从链表头累加】
+         *
+         * 原来是从链表头开始累加 duration（duration += i->duration; duration > time），
+         * 这在"清单从 0 开始、且没被剪过"的点播清单上等价于 startTime；但：
+         *   · 逐个累加只反映**链表内**的相对时间，链头一旦被剪掉（live 的 merge：只保留
+         *     最近的若干片），累加和就从 0 重新起算，于是同一个目标时间会算到**更早**的分片
+         *     —— 落点偏早，播放器就要多解一段前缀（seek 后更卡）；
+         *   · HLS 给包打的 timePosition 用的正是 mCurSeg->startTime（见 HLSStream 里
+         *     "mark startTime" 那段），两者用同一个量，落点才和包的时间轴严格一致。
+         * startTime 由解析器按清单累计写死（HlsParser）、或由 addSegment 续写（mNextStartTime），
+         * 所以点播清单上的结果与旧实现逐字节相同，只修正被剪过/带偏移的清单。
+         */
         for (auto &i : segments) {
-            duration += i->duration;
-
-            if (duration > time) {
+            if (static_cast<int64_t>(i->startTime) + i->duration > static_cast<int64_t>(time)) {
                 num = i->sequence;
-                time = duration - i->duration;
+                time = i->startTime;
                 return true;
             }
         }

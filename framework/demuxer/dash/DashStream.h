@@ -206,6 +206,34 @@ namespace Cicada {
         bool mIsPreload{false};
         bool mPreloadSucc{false};
         std::atomic<bool> mPreferAudio{false};
+
+        /*
+         * ============ seek 落点延迟线（只对点播视频路生效）============
+         *
+         * 完整说明见 DashStream::seekLandingFilter 上面的长注释。一句话：DASH 只能把 seek
+         * 定位到"包含目标的那一个分片"（10 秒一个独立文件），落点因此是分片片首，实测比目标
+         * 早 3~9 秒；分片内部的 IDR 又无法用字节范围落上去（分片里只有一个 moof，没有可以从
+         * 内部进入的 box 边界，内层 demuxer 也不可 seek）。所以改成在**包**这一层把落点挪到
+         * "不晚于目标的最后一个关键帧"：它之前的包整体丢掉，之后的包按序交出。解码起点于是从
+         * "分片片首"变成"≤ 一个关键帧间隔"，而精度语义（包含目标、不晚于目标）一个字节不改。
+         *
+         * 全部状态迁移由包自带的事件驱动（timePosition 单调 + AF_PKT_FLAG_KEY），没有计时器、
+         * 没有预算。本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
+         */
+        int64_t mSeekLandingTargetUs{INT64_MIN};
+        bool mSeekLandingStarted{false};
+        bool mSeekLandingHaveKey{false};
+        bool mSeekLandingProgress{false};
+        std::deque<unique_ptr<IAFPacket>> mSeekLandingStage{};
+        std::vector<uint8_t> mSeekLandingExtraData{};
+
+        void seekLandingArm(int64_t targetUs);
+
+        bool seekLandingFilter(std::unique_ptr<IAFPacket> &packet);
+
+        void seekLandingFlush();
+
+        void seekLandingReset();
     };
 }
 

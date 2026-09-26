@@ -273,6 +273,13 @@ int DashStream::open_internal()
             mPTracker->setCurSegNum(num);
         }
 
+        /*
+         * 【seek 落点延迟线：装弹（延后型 seek）】tracker 还没 init 时，seek() 只把目标存进
+         * mSeekPendingUs（那一刻读线程可能正跑在 open_internal 里，不能去动延迟线的 stage）。
+         * 这里才是"真正定位到分片"的那一刻，而且本函数跑在读线程上：装弹之后紧接着才会产出
+         * 第一个包，不存在与读线程并发写延迟线的问题。
+         */
+        seekLandingArm(mSeekPendingUs);
         mSeekPendingUs = -1;
     }
 
@@ -523,6 +530,14 @@ void DashStream::clearDataFrames()
     while (0 < mQueue.size()) {
         mQueue.pop_front();
     }
+
+    /*
+     * 【seek 落点延迟线】延迟线里攒着的包同样是"已经收下、还没交出去"的队列：位置一旦作废
+     * （seek / 换分片 reopen / stop），它必须跟着一起丢掉并复位，否则新的位置会带着旧的
+     * 落点状态继续跑。这个函数的三个调用点都在读线程 pause() 或 join 之后，
+     * 所以这里清 stage 不存在与读线程并发写的问题。
+     */
+    seekLandingReset();
 }
 
 void DashStream::close()
@@ -597,7 +612,21 @@ int DashStream::read_thread()
     } else if (packet_size < 0) {
         if (packet_size == -EAGAIN) {
             //     AF_LOGD("read timed out");
-            af_msleep(10);
+            /*
+             * 【seek 落点延迟线】攒前缀时不能每个包都停 10ms。
+             *
+             * "不晚于目标的最后一个关键帧"可能要几十个包之后才出现（本片源一个 GOP ≈ 60 个包），
+             * 每包停 10ms 就是 0.6 秒，正好把这次优化的收益吃光。
+             * 判据是**进度**、不是时间：只有上一轮确实从 demuxer 取到了一个包
+             * （seekLandingFilter 把它收进延迟线时置的 mSeekLandingProgress），才跳过这一次停顿；
+             * demuxer 没数据（等网络）时进度为假，照旧 af_msleep(10) —— 不会空转、不是计时器。
+             * 延迟线一放行或一复位，这个标志就被清掉，节奏立刻回到原样。
+             */
+            if (mSeekLandingProgress) {
+                mSeekLandingProgress = false;
+            } else {
+                af_msleep(10);
+            }
             return 0;
         }
 
@@ -766,6 +795,8 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
     }
 
     if (ret == 0 && mStopOnSegEnd) {
+        /* 【seek 落点延迟线】本片到此为止，先把延迟线里攒着的（本片末尾那一段）整体交出，再报停。 */
+        seekLandingFlush();
         mIsEOS = true;
         AF_LOGE("mStopOnSegEnd");
         return 0;
@@ -780,6 +811,13 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
             AF_LOGD("reopen");
             mReopen = false;
         }
+
+        /*
+         * 【seek 落点延迟线】本分片读完（把 demuxer 读到 EOS）时，延迟线里攒着的正是本片最后
+         * 那一段：这属于"目标落在本片最后一个 GOP"的情形，等不到"timePosition > 目标"的包，
+         * 判据只能在这里收口。整体按序交出，绝不能跟着分片一起丢掉。
+         */
+        seekLandingFlush();
 
         ret = updateSegment();
 
@@ -961,6 +999,19 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
                     packet->setDiscard(true);
                 }
             }
+        }
+
+        /*
+         * 【seek 落点延迟线】包的时间轴（timePosition）、关键帧标记都已经算完了，落点判定就放在
+         * 这里 —— 在进入 mQueue 之前、也在上面那些既有处理之后，所以被延迟线收下的包不会打乱
+         * time2ptsDelta / lastFramePts / seamlessPoint 的既有状态机。
+         * 返回 false = 这一包被延迟线收下（本轮不产出，读线程立刻再来一轮，见 read_thread 的
+         * EAGAIN 分支）；返回 true = 这一包照原样交出去。
+         * 判据与边界见 seekLandingFilter 上面的长注释。
+         */
+        if (!seekLandingFilter(packet)) {
+            packet = nullptr;
+            return -EAGAIN;
         }
 
     }
@@ -1242,6 +1293,15 @@ int64_t DashStream::seek(int64_t us, int flags)
                 (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought);
     }
 
+    /*
+     * 【seek 落点延迟线：装弹】位置很关键：
+     *   · 必须在上面 clearDataFrames() 之后 —— 那一刻读线程已经 pause()，不会再写延迟线的 stage；
+     *   · 必须在下面 mThreadPtr->start() 之前 —— 线程一启动就可能立刻产出第一个包。
+     * 目标用请求值 us（不是 landingUs）：延迟线要找的是"玩家要的那一帧"所在的 GOP，
+     * 分片起点只是解码起点，不能拿它当目标（否则落点会退回到"最后一个 ≤ 分片起点"的关键帧）。
+     */
+    seekLandingArm(us);
+
     mIsEOS = false;
     mIsDataEOS = false;
     mError = 0;
@@ -1444,4 +1504,184 @@ void DashStream::setPreferAudio(bool preferAudio)
 {
     mPreferAudio = preferAudio;
     AF_LOGI("DashStream %d, setPreferAudio, %ld", mId, (int32_t)preferAudio);
+}
+
+/*
+ * ============================================================================
+ * seek 落点延迟线（DashStream 与 HLSStream 各一份、**同形**）
+ * ============================================================================
+ *
+ * 【要解决的问题】
+ * 实测（DASH，10 秒分片、片内每 2.5 秒一个 IDR）：seek 三次的落点关键帧分别比目标早
+ * 9125 / 3071 / 3744 ms，落点都落在 40.0 / 70.0 / 110.0 这种"整 10 秒的分片片首"上；
+ * 播放器必须从落点一路解到目标（"落点距离 = 必须解码前推的帧数"），这就是 seek 后
+ * 1~2.4 秒卡顿的全部来源（日志里那条 "the landing keyframe is N ms before the target"）。
+ *
+ * 【为什么不能直接落到分片内部】
+ * 分片内部的 IDR 无法用一个更小的字节范围落上去：当前工具链（dashenc 默认 frag_type=none）
+ * 每个分片只有一个 moof，文件里没有"从内部 IDR 开始"的 box 边界；内层 demuxer 也不可 seek
+ * （建 demuxer 时没有传 seek 回调）。清单里同样只有分片级信息。
+ *
+ * 【所以改成在包这一层挪落点】
+ * 包是顺序出的，关键帧标记（AF_PKT_FLAG_KEY）就在包上，于是把解码起点从"分片片首"挪到
+ * "不晚于目标的最后一个关键帧"：
+ *   · 比这个关键帧更早的包 —— 整体丢掉，不交给播放器（这正是"少解 3~9 秒的帧"的来源）；
+ *   · 从这个关键帧到目标、以及目标之后的包 —— 一个不丢、按原顺序交出。
+ * 落点误差于是从"分片长度(≤10s)"变成"关键帧间隔(本片源 2.5s)"，而**精度语义一个字节不改**：
+ * 仍然从 ≤ 目标的关键帧起解，播放器侧"包含目标、不晚于目标"的采纳判据照旧一行不动。
+ *
+ * 【为什么不会把目标帧丢出去】（静态可自证）
+ *   1. 只有 timePosition ≤ 目标 的包才会进延迟线；
+ *   2. 包按 timePosition 单调递增，所以每当又看到一个"仍然 ≤ 目标"的关键帧，此前攒下的那一批
+ *      全都早于它，都是"落点之前"的帧：丢掉它们不可能丢掉目标帧（目标帧在该关键帧之后，
+ *      此刻还没被读出来）；
+ *   3. 一旦读到 timePosition > 目标的包，"最后一个 ≤ 目标的关键帧"就唯一确定了
+ *      （后面不可能再出现 ≤ 目标的关键帧），于是延迟线整批按序交出，当前这一包也照原样交出，
+ *      目标帧必在其中；
+ *   4. 目标落在本片最后一个 GOP 时等不到第 3 条的包，由"本片读完 / 停在本片界"这两个分片
+ *      切换点收口（整体交出），同样不丢。
+ *
+ * 【失败安全】首包不是关键帧、或者拿不到 timePosition，都直接放弃延迟线（把已收下的包照原样
+ * 交出去），退化成今天的行为 —— 只慢、不错。只对点播视频路生效：音频没有 GOP 语义，混合流里
+ * 丢前缀会连声音一起丢，都不介入。
+ *
+ * 【没有计时器】所有状态迁移都由"包里带的时间戳 + 关键帧标记"这两个事件驱动；唯一与时间有关的
+ * 地方是"攒前缀时不要每包白等 10ms"，它的判据是"上一轮有没有真的取到包"（进度），不是毫秒数。
+ */
+void DashStream::seekLandingArm(int64_t targetUs)
+{
+    seekLandingReset();
+
+    if (targetUs < 0) {
+        return;
+    }
+
+    if (mPTracker == nullptr || mPTracker->getStreamType() != STREAM_TYPE_VIDEO) {
+        return;
+    }
+
+    /*
+     * 只对点播生效：直播的目标轴是"当前可用窗"，落点距离本来就由分片位置决定，
+     * 而且直播另有它自己的过期丢弃逻辑；这一轮不动它（只慢不错）。
+     */
+    if (mPTracker->isLive()) {
+        return;
+    }
+
+    mSeekLandingTargetUs = targetUs;
+}
+
+void DashStream::seekLandingReset()
+{
+    mSeekLandingTargetUs = INT64_MIN;
+    mSeekLandingStarted = false;
+    mSeekLandingHaveKey = false;
+    mSeekLandingProgress = false;
+    mSeekLandingExtraData.clear();
+    mSeekLandingStage.clear();
+}
+
+void DashStream::seekLandingFlush()
+{
+    if (!mSeekLandingStage.empty()) {
+        {
+            std::unique_lock<std::mutex> waitLock(mDataMutex);
+
+            while (!mSeekLandingStage.empty()) {
+                mQueue.push_back(move(mSeekLandingStage.front()));
+                mSeekLandingStage.pop_front();
+            }
+        }
+        /* 消费端 read() 在队列空时会等这个条件（和 read_thread 推包后的动作一致）。 */
+        mWaitCond.notify_one();
+    }
+
+    seekLandingReset();
+}
+
+bool DashStream::seekLandingFilter(std::unique_ptr<IAFPacket> &packet)
+{
+    if (mSeekLandingTargetUs == INT64_MIN || packet == nullptr) {
+        return true;
+    }
+
+    if (mPTracker->getStreamType() != STREAM_TYPE_VIDEO) {
+        seekLandingReset();
+        return true;
+    }
+
+    /*
+     * 和 read_thread 的判据保持一致：这种包本来就不该进队列（read_thread 会把它丢掉），
+     * 不能让它占住延迟线的队首。
+     */
+    if (packet->getData() == nullptr || packet->getSize() <= 0) {
+        return true;
+    }
+
+    const int64_t pos = packet->getInfo().timePosition;
+
+    if (pos == INT64_MIN) {
+        /* 拿不到 timePosition 就判不了"不晚于目标"：放弃延迟线（只慢不错）。 */
+        seekLandingFlush();
+        return true;
+    }
+
+    const bool isKey = (packet->getInfo().flags & AF_PKT_FLAG_KEY) != 0;
+
+    if (!mSeekLandingStarted) {
+        mSeekLandingStarted = true;
+
+        /*
+         * 分片首必须是"关键帧 + 不晚于目标"，否则这一片里没有可用的内部落点：
+         * 放弃延迟线，退化成今天的行为（照旧从分片片首起解）。
+         */
+        if (!isKey || pos > mSeekLandingTargetUs) {
+            mSeekLandingTargetUs = INT64_MIN;
+            return true;
+        }
+    }
+
+    if (pos <= mSeekLandingTargetUs) {
+        if (isKey) {
+            /*
+             * 又看到一个仍然 ≤ 目标的关键帧，它比当前候选更贴近目标，是更好的落点：
+             * 把之前攒的那一批整个丢掉（它们全在这个关键帧之前）。丢之前先把其中带的
+             * codec 参数集抄下来 —— 参数集常常就挂在分片第一个包上，被丢掉的正是它。
+             */
+            for (auto &staged : mSeekLandingStage) {
+                if (staged != nullptr && staged->getInfo().extra_data != nullptr &&
+                    staged->getInfo().extra_data_size > 0) {
+                    mSeekLandingExtraData.assign(staged->getInfo().extra_data,
+                                                 staged->getInfo().extra_data + staged->getInfo().extra_data_size);
+                }
+            }
+
+            mSeekLandingStage.clear();
+            mSeekLandingHaveKey = true;
+        } else if (!mSeekLandingHaveKey) {
+            /* 还没见过关键帧就先来了非关键帧：从它起解会缺参考帧，放弃（此刻 stage 为空，没丢东西）。 */
+            mSeekLandingTargetUs = INT64_MIN;
+            return true;
+        }
+
+        /*
+         * 【extradata / SPS-PPS 必须贴到新的第一个包上】第二个条件（新首包自己没带参数集）与
+         * ActiveDecoder 里"从 holding 队列补参数集"的做法同形：新首包自己带了就尊重它。
+         */
+        if (!mSeekLandingExtraData.empty() && packet->getInfo().extra_data_size <= 0) {
+            packet->setExtraData(mSeekLandingExtraData.data(),
+                                 static_cast<int>(mSeekLandingExtraData.size()));
+        }
+
+        mSeekLandingStage.push_back(move(packet));
+        mSeekLandingProgress = true;
+        return false;
+    }
+
+    /*
+     * pos > 目标：落点到此确定，延迟线整批按序交出；当前这一包走正常路径返回，
+     * read_thread 会把它追加到 mQueue 末尾，顺序仍然是"落点 → ... → 目标帧 → 后续"。
+     */
+    seekLandingFlush();
+    return true;
 }

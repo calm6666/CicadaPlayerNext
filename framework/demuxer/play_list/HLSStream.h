@@ -272,6 +272,33 @@ namespace Cicada {
         {
             mDiscardPts = pts;
         }
+
+    private:
+        /*
+         * ============ seek 落点延迟线（只对点播视频路生效）============
+         *
+         * 与 DashStream 里那一套**同形**：完整说明见 HLSStream::seekLandingFilter 上面的长注释。
+         * 一句话：HLS 也只能把 seek 定位到"包含目标的那一片"（10 秒一个独立文件），落点因此是
+         * 分片片首；所以在**包**这一层把落点挪到"不晚于目标的最后一个关键帧"——它之前的包整体
+         * 丢掉，之后的包按序交出。精度语义（包含目标、不晚于目标）一个字节不改。
+         *
+         * 全部状态迁移由包自带的事件驱动（timePosition 单调 + AF_PKT_FLAG_KEY），没有计时器、
+         * 没有预算。本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
+         */
+        int64_t mSeekLandingTargetUs{INT64_MIN};
+        bool mSeekLandingStarted{false};
+        bool mSeekLandingHaveKey{false};
+        bool mSeekLandingProgress{false};
+        std::deque<unique_ptr<IAFPacket>> mSeekLandingStage{};
+        std::vector<uint8_t> mSeekLandingExtraData{};
+
+        void seekLandingArm(int64_t targetUs);
+
+        bool seekLandingFilter(std::unique_ptr<IAFPacket> &packet);
+
+        void seekLandingFlush();
+
+        void seekLandingReset();
     };
 }
 
