@@ -1733,7 +1733,21 @@ int SuperMediaPlayer::mainService()
          */
         const bool inSeekWindow = (mSeekFlag || mSeekRenderGateUs != INT64_MIN);
 
-        if (inSeekWindow || (mVideoCatchingUp && getPlayerBufferDuration(false, false) > 0)) {
+        /*
+         * ============ 【★ seek 之后"刚开始一直卡着"的来源之一：追赶期被"缓冲>0"挡住 ★】============
+         *
+         * 原判据 `(mVideoCatchingUp || mSeekFlag) && getPlayerBufferDuration(...) > 0`：
+         * **seek 一完成、缓冲还空着**的时候（缓冲=0）快跑不成立，主循环退回 loopGap（约 26ms 一拍），
+         * 而这个阶段恰恰是"解码器刚被 flush、帧队列空、要把重新解码出来的帧尽快送上去"的时候 ——
+         * 一拍一帧地挪 ⇒ 用户看到的就是"seek 之后刚开始一直卡着，过一会儿才动"。
+         *
+         * 而 getPlayerBufferDuration() 在**帧队列空**时会返回 0，正是它把最需要快跑的阶段排除掉了。
+         * 所以这里对"追赶中"（mVideoCatchingUp：每丢一帧置真、一旦真有帧上屏立刻清零）**不再要求缓冲 > 0**。
+         * 这不是自旋：needWait 仍有 2ms 下限（下面那段），而且 mVideoCatchingUp 一旦有帧上屏就归假，
+         * 快跑窗口是**状态**定义的、有界的，不引入任何计时器。
+         * ==================================================================================
+         */
+        if (inSeekWindow || mVideoCatchingUp) {
             /*
              * 追赶/seek 期间要尽快再跑一轮，但必须留一点时间片：原来这里
              * 直接 return 0，一次 wait 都不做，主循环变成 0 延时自旋。
