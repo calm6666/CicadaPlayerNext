@@ -173,6 +173,25 @@ namespace Cicada {
         std::string value{};
         mAbrManager->GetOption("switchInfo", value);
 
+        /*
+         * 【修：切档在途时 ABR 让过这一 tick】
+         *
+         * 用户症状：点一次手动清晰度，界面先弹"已取消切换"再弹结果 —— 因为 ABR 这一 tick
+         * 的请求会被内核按"新请求取代旧请求"判成 CANCELED（就是那次在途的手动切档）。
+         * ABR 是**周期性**决策（每秒一次），让过这一 tick 不丢任何意图：下一次 tick 会按
+         * 新的缓冲/带宽重新算一遍；而手动请求的优先级本来就高于自动档。
+         *
+         * 判据复用内核唯一的"切档在途"并集（ICicadaPlayer::IsStreamSwitchInFlight），
+         * 不引入任何新状态、不引入计时器。
+         */
+        GET_PLAYER_HANDLE
+
+        if (handle != nullptr && CicadaIsStreamSwitchInFlight(handle)) {
+            AF_LOGI("abr: a quality switch is still in flight, skipping this ABR tick so the in-flight "
+                    "switch is not reported as canceled (the next tick will re-evaluate)\n");
+            return;
+        }
+
         int64_t toTime = af_gettime_relative();
         int64_t fromTime = toTime - 10 * 1000000;
         CicadaJSONItem params{};
@@ -184,7 +203,7 @@ namespace Cicada {
             mCollector->ReportAutoSwitchBitrateStart(value, playerBuffer);
         }
 
-        GET_PLAYER_HANDLE
+        /* handle 已在上面为"切档在途"判据取过（同一作用域，不能重复声明）。 */
         CicadaSwitchStreamIndex(handle, stream);
     }
 

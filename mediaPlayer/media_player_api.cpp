@@ -53,6 +53,17 @@ StreamType CicadaSwitchStreamIndex(playerHandle *pHandle, int index)
     return ST_TYPE_UNKNOWN;
 }
 
+bool CicadaIsStreamSwitchInFlight(playerHandle *pHandle)
+{
+    GET_PLAYER;
+
+    if (player) {
+        return player->IsStreamSwitchInFlight();
+    }
+
+    return false;
+}
+
 int CicadaSetListener(playerHandle *pHandle, const playerListener &Listener)
 {
     GET_PLAYER;

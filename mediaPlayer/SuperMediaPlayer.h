@@ -1689,6 +1689,12 @@ namespace Cicada {
          */
         int64_t mPendingVideoProgressUs{INT64_MIN};
         int mPendingVideoStallChecks{0};
+
+        /*
+         * 【ABR 让路】"当前有切档在途"的唯一对外查询（复用 qualitySwitchInFlight() 的并集判据）。
+         * 追加在类末尾，保证增量 ABI 安全；语义见 ICicadaPlayer::IsStreamSwitchInFlight。
+         */
+        bool IsStreamSwitchInFlight() const override;
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

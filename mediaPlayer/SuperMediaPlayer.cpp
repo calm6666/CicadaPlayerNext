@@ -10780,6 +10780,15 @@ void SuperMediaPlayer::replayDeferredUserSeek()
  * 全程无副作用：解码器不存在 / 是软解 / 平台不支持时，IDecoder::setDecodeBoost
  * 默认实现就是空操作 —— 所以核心层一行平台宏都不需要（分层规则 R8）。
  */
+/*
+ * 【ABR 让路】对外只报"有没有切档在途"，判据一律复用 qualitySwitchInFlight() 那一个并集，
+ * 保证 ABR 看到的状态与内核内部（PFR 让路 / seek 推迟 / 切档终态）完全一致。
+ */
+bool SuperMediaPlayer::IsStreamSwitchInFlight() const
+{
+    return qualitySwitchInFlight();
+}
+
 void SuperMediaPlayer::setVideoDecodeBoost(bool boost)
 {
     if (mAVDeviceManager == nullptr) {

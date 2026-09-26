@@ -94,6 +94,12 @@ void CicadaSetDataSourceWithManifest(playerHandle *player, const char *jsonManif
  */
 StreamType CicadaSwitchStreamIndex(playerHandle *player, int index);
 
+/*
+ * 【ABR 让路】当前是否有清晰度切换在途（见 ICicadaPlayer::IsStreamSwitchInFlight）。
+ * ABR 每秒一次决策，切档在途时让过这一 tick，避免把用户手动切档判成 CANCELED。
+ */
+bool CicadaIsStreamSwitchInFlight(playerHandle *player);
+
 void CicadaAddCustomHttpHeader(playerHandle *pHandle, const char *header);
 
 void CicadaRemoveAllCustomHttpHeader(playerHandle *pHandle);

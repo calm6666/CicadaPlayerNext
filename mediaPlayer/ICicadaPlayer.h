@@ -312,6 +312,22 @@ namespace Cicada {
 
         virtual float getCurrentDownloadSpeed() = 0;
 
+        /*
+         * 【ABR 让路 / 切档去重】当前是否有清晰度切换在途。
+         *
+         * 用途只有一个：**ABR 线程不要在"用户手动切档还没结束"时再发一次切档请求**。
+         * 真机症状（用户反馈）：点一次清晰度，界面先弹"已取消切换"再弹结果 —— 因为
+         * ABR 那一 tick 的请求把在途的手动切档判成了 CANCELED（内核的"新请求取代旧请求"
+         * 语义）。ABR 让这一 tick 过去，下一秒会自己重新评估，**不会丢任何意图**。
+         *
+         * 纯状态查询、无副作用；默认实现返回 false（不改变任何既有实现的行为）。
+         * 追加在 vtable 末尾，保证增量 ABI 安全。
+         */
+        virtual bool IsStreamSwitchInFlight() const
+        {
+            return false;
+        }
+
 
     protected:
         playerMediaFrameCb mMediaFrameCb = nullptr;

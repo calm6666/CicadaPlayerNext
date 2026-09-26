@@ -1348,6 +1348,25 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
         return;
     }
 
+    /*
+     * 【修：同一个目标档位的重复请求不再"取消再重启"】
+     *
+     * 现场：手动档与 ABR 很容易在几百毫秒内对**同一档**各发一次请求（ABR 一秒一决策，
+     * 用户手动点档时它可能刚好也在选同一档，或 UI 连点两次）。而内核原来对任何新请求都
+     * 走"新请求取代旧请求"：先把在途那次判 CANCELED、关掉目标流、丢掉 pending 解码器，
+     * 再从零重建 —— 用户看到的就是界面先弹"已取消切换"、切档时间白白翻倍。
+     *
+     * 判据是纯状态：请求的目标 == 在途切档的目标（mWillChangedVideoStreamIndex 是"已选定
+     * 但 pending 路还没建立"，mPendingVideoStreamIndex 是"pending 路已经在跑"），
+     * 那就什么都不用做 —— 在途那次本来就在朝同一个目标走。
+     */
+    if (mPlayer.mWillChangedVideoStreamIndex == index || mPlayer.mPendingVideoStreamIndex == index) {
+        AF_LOGI("quality switch ignored: stream %d is already the target of the in-flight switch "
+                "(no cancel-and-restart churn; willChanged=%d pending=%d)\n",
+                index, mPlayer.mWillChangedVideoStreamIndex, mPlayer.mPendingVideoStreamIndex);
+        return;
+    }
+
     AF_LOGD("video change video bitrate before is %d,after is %d",
             currentInfo != nullptr ? currentInfo->videoBandwidth : 0, willChangeInfo->videoBandwidth);
     //TODO: different strategy
