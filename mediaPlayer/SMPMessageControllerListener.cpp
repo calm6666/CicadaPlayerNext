@@ -842,6 +842,26 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     if (mPlayer.mDemuxerService->isPlayList()) {
         mPlayer.mSeekInCache = false;
     }
+
+    /*
+     * ============ 【A：seek 一律"flush + 重读"，取消"命中缓存"捷径】============
+     *
+     * 这是主流播放器的做法（ExoPlayer 每次 seek 都 flush 掉 loader/decoder 缓冲，从目标
+     * 分片重读），也是"分片边界切换"能成立的前提。
+     *
+     * 为什么必须取消这条捷径（真机 21:42 那份日志）：
+     *   `sought in cache` 分支**一个视频包都不清**（只处理音频对齐），于是主时钟被本次
+     *   seek 钉在目标点（本函数末尾 setTime(seekPos)），而解码器仍从**队首**重新起步：
+     *     [switch] … master=214890741 activeFrontPts=95545450 activeQ=6978
+     *     drop frame,master played time is 234128251, video pts is 118668550
+     *   视频活动路落后音频 **115 秒**、队列积压 ≈233 秒 4K 内容，解码器只能一包一包啃
+     *   （~1.2× 实时）⇒ 画面靠防冻阀门每 8 帧放 1 帧，切档也永远追不上时间线。
+     *
+     * 强制走"清包 + demuxer seek"这支之后：目标流从目标分片重新读，配合下面 seek 收尾处
+     * 的"裁掉目标点之前的陈旧视频包"，两条轴在每次 seek 后都从同一个落点重新对齐。
+     * 代价只有一个 —— seek 后必然重新缓冲（分片流本来就如此），这正是主流的取舍。
+     */
+    mPlayer.mSeekInCache = false;
     AF_LOGI("PFR: seek posUs=%" PRId64 " inCache=%d status=%d\n",
             seekPos, (int) mPlayer.mSeekInCache, (int) mPlayer.mPlayStatus.load());
 

@@ -2328,7 +2328,22 @@ void SuperMediaPlayer::doReadPacket()
             }
         }
 
-        if (mBufferIsFull && !warmingPending) {
+        /*
+         * 【A：缓冲上限对**任何**状态都生效 —— 包括切档预热】
+         *
+         * 原来这两条都带 `!warmingPending`：只要切档在途（且 pending 队列 <120、
+         * 本轮的预读额度还没用完），读循环就**完全不受 maxBufferDuration 约束**。
+         * 而 pendingReadAllowance 是**每次 doReadPacket() 都重置**的，于是切档期间
+         * 读循环实际上一直在跑：真机日志里切档卡 37 秒，队列被读到 **6978 个包
+         * （≈233 秒 4K 内容）**，切档结束后解码器只能从队首（落后主时钟上百秒）
+         * 往上啃 —— 这就是"整个卡死"的来源。
+         *
+         * 现在上限永远生效：切档期间读循环最多也只是把缓冲填到 maxBufferDuration
+         * （默认 40 秒，且不再"几十秒变几百秒"），目标路的预读仍由它自己的
+         * PENDING_VIDEO_QUEUE_CAP/额度控制、当前路与音频该读还是照读（见 :2196 那处
+         * "只有当前路吃得住才停读"的保护，那条不受本改动影响）。
+         */
+        if (mBufferIsFull) {
             static const int BufferGap = 1000 * 1000;
 
             if ((mSet->maxBufferDuration > 2 * BufferGap) && (cur_buffer_duration > mSet->maxBufferDuration - BufferGap) &&
@@ -2337,7 +2352,7 @@ void SuperMediaPlayer::doReadPacket()
             }
         }
 
-        if (cur_buffer_duration > mSet->maxBufferDuration && !warmingPending &&
+        if (cur_buffer_duration > mSet->maxBufferDuration &&
             getPlayerBufferDuration(false, true) > mSet->startBufferDuration
             // we need readout the buffer in demuxer when no buffer in player, player keep at least start buffer duration
         ) {
@@ -4546,24 +4561,31 @@ void SuperMediaPlayer::doDeCode()
                          *   · 不做轴修正 ⇒ 走"重命名到主时钟"的备用偏移 ⇒ 恒定音画错位。
                          * 两条路都不对，根因是"从参考点之后的 IDR 起解"这个选择本身。
                          *
-                         * 正确做法：从参考点**之前**最近的关键帧起解（暂停态早就是这么做的，
-                         * 见上面 S3 那段）。解掉 [关键帧, 参考点] 这段前缀，前缀帧由切换窗 /
-                         * 渲染器追赶窗丢掉，提交时手上就有贴着主时钟的帧 ⇒ 既不错位也不等时钟。
-                         * 代价被一个 IDR 间隔封顶（本例只有 1 s），而且与下载重叠。
-                         *
-                         * 触发条件只是"这是个参考点之前的关键帧"（纯状态判断，无计时器）；
-                         * 一旦被接受，mPendingVideoPrerollDone 置真，本块不会再跑。
+                         * （B7 当年据此选择"从参考点之前起解"，那条已被下面的 B 方案取代：
+                         *  它换来的"手上就贴着主时钟的帧"在 4K 上是**追移动靶**的代价。）
                          */
-                        if (isKeyFrame && packetTimePos < mPendingVideoPrerollRefUs) {
-                            AF_LOGI("pending preroll: starting at the key frame BEFORE the reference "
-                                    "(keyTimePosition=%lld ref=%lld prefix=%lld ms) instead of waiting for the "
-                                    "next one — waiting would push every pending frame past the clock and either "
-                                    "delay the commit past its deadline or force the clock-relative rename that "
-                                    "caused the A/V offset\n",
-                                    (long long) packetTimePos, (long long) mPendingVideoPrerollRefUs,
-                                    (long long) ((mPendingVideoPrerollRefUs - packetTimePos) / 1000));
-                            mPendingVideoPrerollRefUs = packetTimePos;
-                        }
+                        /*
+                         * ============ 【B：预滚从参考点**之后**的第一个关键帧起解】============
+                         *
+                         * 这里是本轮按"主流做法（分片边界切换）"改的关键点：原来会把参考点
+                         * **往回挪**到上一个关键帧、当场开解（B7 的选择），于是目标路要解掉
+                         * [关键帧, 参考点] 这段前缀才能追上播放位置 —— 而播放位置在解的过程中
+                         * 还在往前走，形成**追移动靶**：
+                         *   真机 21:42:17~21:42:37：lag 5248ms 只以 ~0.25× 收敛，追了 37 秒
+                         *   仍差 96ms，最后被时间判据杀掉（界面"切换失败"）；4K 硬解只有
+                         *   ~1.2× 实时，这就是"追不上"的物理原因。
+                         *
+                         * 主流播放器不在播放位置上换档：它在**分片边界**换（ExoPlayer 的
+                         * ChunkSampleStream 选定新码流后丢弃已缓冲数据、从边界读起），新码流
+                         * 天然落在当前播放位置**之后**，提交只是"等时钟走到那里"，没有追赶。
+                         *
+                         * 所以：参考点之前的包一律照下面的分支跳过，pending 从参考点之后
+                         * 第一个关键帧起解；它的帧会落在时钟**之前**（未来帧），由提交门的
+                         * "未来帧就等时钟"那条判据等时钟走到边界时提交 —— 换档发生在分片
+                         * 边界上，全程旧流照常播放，不追赶、不失败。
+                         * 远处没有关键帧时的兜底仍在（下面的 waitedTooLong 分支，接受更早的
+                         * 关键帧，代价是多解一个 GOP），所以任何片源都不会卡住。
+                         */
 
                         if (packetTimePos < mPendingVideoPrerollRefUs) {
                             if (!isKeyFrame || !waitedTooLong) {
