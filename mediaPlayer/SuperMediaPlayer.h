@@ -1630,6 +1630,16 @@ namespace Cicada {
          */
         bool mPauseFrameRestorePending{false};
         void runDeferredPauseFrameRestore();
+        /*
+         * 【B19-b】"切档在途"的唯一判据（PFR 让路 / 用户 seek 推迟都以它为准）。
+         * 取切档状态机自己的未完成标志的**并集**：两个 pending/willChange 索引、
+         * mPendingVideoDecoderSwitch（`state=decoderSwitch`）、mQualitySwitchCommitPending
+         * 与 mQualitySwitchCommittedStreamIndex（`state=committed`）、
+         * mQualitySwitchOldFramesPending、mRetiredVideoStreamIndex、
+         * mSwitchStartedWhilePaused / mPausedSwitchRenderPending、以及 B17 的 mSwitchReArmPending。
+         * 定义与逐项理由见 SuperMediaPlayer.cpp 里那个函数的注释。
+         */
+        bool qualitySwitchInFlight() const;
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

@@ -7900,10 +7900,30 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                             (long long) mSeekPositionFloorUs, (long long) mSeekLandingFloorOwnerUs,
                             (long long) frameTimePos);
 
-                    render = false;
-                    mSeekRenderGateUs = INT64_MIN;
-                    mSeekPositionFloorUs = INT64_MIN;
-                    mSeekLandingFloorOwnerUs = INT64_MIN;
+                    /*
+                     * 【② B18-b：拒绝之后必须**立刻出画**，不能把窗口关掉让画面留在旧帧上】
+                     *
+                     * 现场：`seek landing refused … 34722 ms LATER than the seek target …` 之后
+                     * 窗口被关掉，B15（先出画）与 B16（追赶阀门）都跟着失效 —— 下一帧既没有
+                     * "落点采纳"可以强制上屏、也不在追赶窗口里，用户看到的就是"seek 后卡死半天不动"。
+                     *
+                     * 处置：不关窗，而是把落点窗口**重开在当前实际读位置**上，并让这一帧立刻上屏：
+                     *   · 能走到这里说明 mSeekDecodeStartIsKey 已经为真 ⇒ 这一帧是"从关键帧起步
+                     *     解出的干净帧"，不是脏帧（脏帧在更上面那一支就被挡住了）；
+                     *   · 地板与归属一起写成这一帧的位置 ⇒ 下一帧位置必然 >= 新地板 ⇒ 走正常
+                     *     采纳分支（采纳 + 强制上屏），位置上报从此钉在**真实读位置**上，
+                     *     不再出现"进度条停在旧目标、画面在另一个位置"；
+                     *   · 出口照旧齐全（不会悬挂）：采纳时关闸门、ResetSeekStatus() 兜底关窗、
+                     *     getCurrentPosition() 的地板过期自愈三条都还在，且这里只剩一次拒绝
+                     *     （重开后的地板与真实读位置同轴，不会再触发"晚出容差"那条）；
+                     *   · 精度判据未改：正常 seek（帧落在目标附近）仍然由原来的采纳分支处理，
+                     *     只有"目标已经不可达"的这种异常状态才改判落点。
+                     */
+                    mSeekPositionFloorUs = frameTimePos;
+                    mSeekLandingFloorOwnerUs = frameTimePos;
+                    mSeekFirstDecodableFrameShown = true;
+                    force_render = true;
+                    render = true;
                 } else if (mSet->maxASeekDelta > 0 && frameTimePos != INT64_MIN &&
                            mSeekPositionFloorUs != INT64_MIN &&
                            frameTimePos - mSeekPositionFloorUs > mSet->maxASeekDelta) {
@@ -7933,9 +7953,18 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                             (long long) mSeekPositionFloorUs,
                             (long long) (mSet->maxASeekDelta / 1000));
 
-                    mSeekRenderGateUs = INT64_MIN;
-                    mSeekPositionFloorUs = INT64_MIN;
-                    mSeekLandingFloorOwnerUs = INT64_MIN;
+                    /*
+                     * 【② B18-b：同一处置 —— 拒绝但**不关窗**，把窗口重开在当前实际读位置，
+                     * 并让这一帧立刻上屏】理由与上面"归属不一致"那一支逐字相同：
+                     * 走到这里的帧是"从关键帧起步的干净帧"；重开后下一帧必然被正常采纳；
+                     * 出口（采纳关闸门 / ResetSeekStatus 兜底 / 地板过期自愈）一条不少，
+                     * 而且地板与真实读位置同轴之后不会再复发"晚出容差"这条拒绝。
+                     */
+                    mSeekPositionFloorUs = frameTimePos;
+                    mSeekLandingFloorOwnerUs = frameTimePos;
+                    mSeekFirstDecodableFrameShown = true;
+                    force_render = true;
+                    render = true;
                 } else {
                 mSeekLandingFrameAccepted = true;
                 mSeekRenderGateUs = INT64_MIN;
@@ -10388,6 +10417,42 @@ int SuperMediaPlayer::RestartVideoDecoder()
     return rebuildVideoDecoder(true);
 }
 
+/*
+ * 【B19-b】"切档在途"的唯一判据（PFR 是否可以让路、用户 seek 是否该推迟，都以它为准）。
+ *
+ * 为什么不能只看 pending/willChange 两个索引（B19 第一版就是这么写的，结果**从未生效**）：
+ * 日志里 `[switch] state=decoderSwitch willChange=-1 target=0 current=7 retired=7 …
+ * decoderSwitch=1 commitPending=0 oldFramesPending=0` 这个阶段，两个索引**都不是 >= 0**
+ * （pending 路已经被 promote 成 active、willChange 已清），可是切档明明还没完 ——
+ * 于是 PFR 照旧插 seek，把切档打成 CANCELED（7/7 次点击仍然全是 status=0 → 3）。
+ *
+ * 现状取"切档状态机自己的未完成标志"**并集**（每一项都是一个未完成的终态义务）：
+ *   · mPendingVideoStreamIndex >= 0        —— 预滚/待提交的 pending 路还在
+ *   · mWillChangedVideoStreamIndex >= 0    —— 已经受理、还没落到 pending 索引上
+ *   · mPendingVideoDecoderSwitch           —— `state=decoderSwitch` / `decoderSwitch=1`
+ *   · mQualitySwitchCommitPending          —— `state=committed`，还没上屏/收尾
+ *   · mQualitySwitchCommittedStreamIndex >= 0 —— 已提交、终态还没发
+ *   · mQualitySwitchOldFramesPending != 0  —— 提交前 active 队列的旧帧还没送完（READY 前置条件）
+ *   · mRetiredVideoStreamIndex >= 0        —— 退役流还没关、retired 解码器还没释放
+ *   · mSwitchStartedWhilePaused / mPausedSwitchRenderPending —— 暂停态切档的 S5/S9 欠账
+ *   · mSwitchReArmPending                  —— B17：马上要在 seek 结束重发一次切档
+ * 取值域：以上任一为"未完成"即算在途；全部落回 0/-1/false 才算终态。
+ *
+ * 覆盖 `state=decoderSwitch`：靠 mPendingVideoDecoderSwitch（=1）与 mRetiredVideoStreamIndex（=7 >= 0）
+ * 两项 —— 日志里那个阶段这两项都成立，所以新判据一定为真。
+ * 本函数是 logQualitySwitchState() 里那个局部 inSwitch 的**超集**：诊断行只在 warming /
+ * decoderSwitch 有意义（那边不动），而"能不能插 seek"必须一直覆盖到 retired 释放与
+ * oldFramesPending 收尾，所以这里更严。
+ */
+bool SuperMediaPlayer::qualitySwitchInFlight() const
+{
+    return mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 ||
+           mPendingVideoDecoderSwitch || mQualitySwitchCommitPending ||
+           mQualitySwitchCommittedStreamIndex >= 0 || mQualitySwitchOldFramesPending != 0 ||
+           mRetiredVideoStreamIndex >= 0 || mSwitchStartedWhilePaused ||
+           mPausedSwitchRenderPending || mSwitchReArmPending;
+}
+
 int SuperMediaPlayer::RestorePausedVideoFrame()
 {
     // 由 ProcessSetViewMsg 在持有 mCreateMutex 时调用（仅暂停状态）。
@@ -10413,12 +10478,17 @@ int SuperMediaPlayer::RestorePausedVideoFrame()
      * 重新装弹"闩为真（后者意味着马上会再发起一次切档，此时插 seek 会把重装也打断）。
      * 无计时器、无阈值。
      */
-    if (mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 || mSwitchReArmPending) {
+    if (qualitySwitchInFlight()) {
         if (!mPauseFrameRestorePending) {
-            AF_LOGI("PFR: deferred — a quality switch is in flight (pendingStream=%d willChangeStream=%d "
-                    "reArmPending=%d), so no seek is issued now; the restore will run ONCE at the "
-                    "switch's terminal state (READY / CANCELED / FAILED)\n",
-                    mPendingVideoStreamIndex, mWillChangedVideoStreamIndex, (int) mSwitchReArmPending);
+            AF_LOGI("PFR: deferred — a quality switch is still in flight (pendingStream=%d willChangeStream=%d "
+                    "decoderSwitch=%d commitPending=%d committedStream=%d oldFramesPending=%d retired=%d "
+                    "pausedSwitch=%d pausedRenderPending=%d reArmPending=%d), so no seek is issued now; the "
+                    "restore will run ONCE at the switch's terminal state (READY / CANCELED / FAILED)\n",
+                    mPendingVideoStreamIndex, mWillChangedVideoStreamIndex,
+                    (int) mPendingVideoDecoderSwitch, (int) mQualitySwitchCommitPending,
+                    mQualitySwitchCommittedStreamIndex, (int) mQualitySwitchOldFramesPending,
+                    mRetiredVideoStreamIndex, (int) mSwitchStartedWhilePaused,
+                    (int) mPausedSwitchRenderPending, (int) mSwitchReArmPending);
         }
 
         mPauseFrameRestorePending = true;
@@ -10501,7 +10571,7 @@ void SuperMediaPlayer::runDeferredPauseFrameRestore()
         return;
     }
 
-    if (mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 || mSwitchReArmPending) {
+    if (qualitySwitchInFlight()) {
         /* 终态出口处又有新的切档在途：推迟到它自己的终态，绝不在这里立即重试。 */
         mPauseFrameRestorePending = true;
         return;
