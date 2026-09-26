@@ -7296,8 +7296,20 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
              * framework/base/media/IAFPacket.h:208）；缺失时按 25fps 兜底，
              * 兜底只影响"目标离帧首不到一帧"的边界判定，绝不会把早很多的帧放上屏。
              */
-            const int64_t seekFrameDurUs = (videoFrame->getInfo().duration > 0)
-                                           ? videoFrame->getInfo().duration : 40000;
+            /*
+             * 帧长优先取帧自己的 duration（AFFrameInfo.duration，IAFPacket.h:208）；
+             * 缺失时**按本流实际帧率推算**，不再写死 25fps —— 写死会让 60fps 片源
+             * "早一帧"就被判成"包含目标"而采纳（一帧 16.7ms 却被当成 40ms）。
+             * avg_fps 的取法与本文件 :1669 的既有惯用法完全一致。
+             */
+            int64_t seekFrameDurUs = videoFrame->getInfo().duration;
+
+            if (seekFrameDurUs <= 0) {
+                const int seekFps = (mCurrentVideoMeta != nullptr)
+                                    ? std::max(1, (int) (mCurrentVideoMeta->operator Stream_meta *()->avg_fps))
+                                    : 25;
+                seekFrameDurUs = 1000000 / seekFps;
+            }
 
             if (!mSeekLandingFrameAccepted) {
                 if (!mSeekDecodeStartIsKey) {
