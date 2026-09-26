@@ -6,6 +6,7 @@ import android.media.MediaCrypto;
 import android.media.MediaFormat;
 import android.graphics.SurfaceTexture;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.HandlerThread;
 import android.os.SystemClock;
@@ -189,6 +190,44 @@ public class MediaCodecDecoder {
     public void setForceInsecureDecoder(boolean force) {
         Logger.d(TAG, "--> setForceInsecureDecoder  " + force);
         forceInsecureDecoder = force;
+    }
+
+    /*
+     * 追帧窗口的性能点：240 帧/秒量级 = "尽快解"（seek 落点前缀 / 切档预滚期间用）。
+     * 退出时回 -1，语义等同 MediaCodecInfo.CodecCapabilities.OPERATING_RATE_UNSPECIFIED
+     * —— ExoPlayer 的 getCodecOperatingRateV23 用的就是 -1（"不指定"）。
+     */
+    private static final int OPERATING_RATE_BOOST = 240;
+    private static final int OPERATING_RATE_UNSPECIFIED = -1;
+
+    /*
+     * 【追帧加速】seek / 切档预滚窗口里把 codec 提到更高的性能点。
+     *
+     * 只下发一个"性能点"提示：key 就是 MediaFormat.KEY_OPERATING_RATE 的字符串
+     * （这里写字面量而不是引用那个常量，是为了不引入 API 23 的 InlinedApi 提示）。
+     *
+     * 关键性质：
+     *   · **不丢帧、不改时间轴** —— seek 之后"从关键帧解到目标"的那段前缀帧照常
+     *     全部解出来，精度不会因为这里少一帧或多一帧（丢帧与否由内核的落点判据决定）；
+     *   · 它只是让 codec 跑在更高的性能点，把本就要解的那段内容更快吐出来；
+     *   · 个别厂商 codec 不认这个 key 会抛异常 —— 全部吞掉只记一条日志，绝不影响解码。
+     */
+    @NativeUsed
+    public void setDecodeBoost(boolean boost) {
+        MediaCodec codec = mMediaCodec;
+
+        if (codec == null) {
+            return;
+        }
+
+        try {
+            Bundle params = new Bundle();
+            params.putInt("operating-rate", boost ? OPERATING_RATE_BOOST : OPERATING_RATE_UNSPECIFIED);
+            codec.setParameters(params);
+            Logger.d(TAG, "--> setDecodeBoost " + boost);
+        } catch (Throwable t) {
+            Logger.w(TAG, "setDecodeBoost(" + boost + ") is not supported by this codec: " + t);
+        }
     }
 
     @NativeUsed

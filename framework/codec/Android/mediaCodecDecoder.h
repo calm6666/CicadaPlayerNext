@@ -55,6 +55,12 @@ namespace Cicada{
 
         int64_t getLastRenderedVideoPts() override;
 
+        /*
+         * 【追帧加速】seek / 切档预滚窗口里让 codec 跑更高的性能点（不丢帧、不改时间轴）。
+         * 追加在类末尾，保证增量 ABI 安全；语义见 IDecoder::setDecodeBoost。
+         */
+        int setDecodeBoost(bool boost) override;
+
         int64_t getLastRenderedVideoFrameDur() override;
 
         void setRenderGate(int64_t gatePts) override;

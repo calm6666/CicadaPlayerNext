@@ -722,6 +722,15 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     //checkPosInPackQueue cache in seek
     //TODO: seek sync
     mPlayer.mSeekFlag = true;
+    /*
+     * 【追帧加速】seek 真正开始（mSeekFlag 置真的同一处）⇒ 让视频解码器跑更高的性能点。
+     *
+     * seek 落点必须从**目标之前的关键帧**起解，这段前缀帧现在会全部上屏（快进到目标），
+     * 所以这段解码时间直接等于用户看到的"追上去要多久"。这里只是把本就要解的内容更快
+     * 吐出来：不丢帧、不改时间轴、不动落点判据。
+     * 收回点成对且都是状态判据：落点帧被采纳时、以及 ResetSeekStatus()（seek 结束）。
+     */
+    mPlayer.setVideoDecodeBoost(true);
     mPlayer.mPlayedVideoPts = INT64_MIN;
     mPlayer.mPlayedAudioPts = INT64_MIN;
     mPlayer.mSoughtVideoPos = INT64_MIN;

@@ -223,6 +223,23 @@ namespace Cicada {
             return true;
         }
 
+        /*
+         * 【追帧加速开关（seek / 切档预滚窗口）】
+         *
+         * 语义：只是给"把 codec 跑在哪个性能点"提个要求 —— **不丢帧、不改时间轴、不动精度**。
+         * seek 之后必须从目标之前的关键帧起解，这段前缀本来就要全部解出来，本开关只是让
+         * codec 更快地把它们吐出来（安卓侧对应 MediaCodec.setParameters("operating-rate")，
+         * 与 ExoPlayer 用 MediaFormat.KEY_OPERATING_RATE 的做法同源）。
+         *
+         * 默认实现是空操作：只有能真正下发给平台的解码器（安卓 MediaCodec）才覆盖它，
+         * 软解/其它平台调用它完全无副作用。**追加在 vtable 末尾**，保证增量 ABI 安全。
+         */
+        virtual int setDecodeBoost(bool boost)
+        {
+            (void) boost;
+            return 0;
+        }
+
         void setRequireDrmHandlerCallback(std::function<std::shared_ptr<DrmHandler>(const DrmInfo &drmInfo)> callback)
         {
             mRequireDrmHandlerCallback  = callback;

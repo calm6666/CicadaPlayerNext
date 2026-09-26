@@ -1660,6 +1660,24 @@ namespace Cicada {
         bool mDeferredUserSeekAccurate{false};
         bool mDeferredUserSeekPending{false};
         void replayDeferredUserSeek();
+
+        /*
+         * 【追帧加速（seek 落点前缀 / 切档预滚）】
+         *
+         * 语义：只是把"跑在更高性能点"的要求下发给解码器 —— **不丢帧、不改时间轴、
+         * 不动任何精度判据**。seek 之后必须从目标之前的关键帧起解，那段前缀本来就要
+         * 全部解出来（现在也全部上屏，见 RenderVideo 的落点前缀分支），本开关只是让
+         * platform codec 更快地把它们吐出来（安卓 = MediaCodec operating-rate）。
+         *
+         * setVideoDecodeBoost      → 当前活动视频解码器（seek 窗口）
+         * setPendingVideoDecodeBoost → 切档的 pending 解码器（预滚窗口）
+         *
+         * 两个都是状态判据驱动：seek 真正开始置位、seek 结束/落点上屏/切档终态收回；
+         * 没有任何计时器。平台不支持时是空操作，所以核心层不需要任何平台宏。
+         * 追加在类末尾，保证增量 ABI 安全。
+         */
+        void setVideoDecodeBoost(bool boost);
+        void setPendingVideoDecodeBoost(bool boost);
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

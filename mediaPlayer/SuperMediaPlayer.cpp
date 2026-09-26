@@ -3143,6 +3143,14 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
         return;
     }
 
+    /*
+     * 【追帧加速收尾】切档走到终态 ⇒ 把性能点收回默认。
+     * 提交过就说明 pending 解码器已经 promote 成**活动**解码器了，所以这里收活动路；
+     * 同时也收一次 pending 槽（失败终态里它可能还在），两处都是幂等空操作。
+     */
+    setVideoDecodeBoost(false);
+    setPendingVideoDecodeBoost(false);
+
     const int committedStream = mQualitySwitchCommittedStreamIndex;
     const int retiredStream = mRetiredVideoStreamIndex;
     const int64_t committedPts = mPlayedVideoPts;
@@ -5957,6 +5965,18 @@ int SuperMediaPlayer::CreatePendingVideoDecoder(const Stream_meta &meta)
             mPendingVideoPacketQue.front()->setDiscard(true);
             mPendingVideoPacketQue.pop_front();
         }
+    } else {
+        /*
+         * 【追帧加速】pending 解码器建好了 ⇒ 预滚窗口内让它跑更高的性能点。
+         *
+         * 为什么这一档特别需要：目标档必须把"切换参考点 → 当前播放位置"这段内容解出来，
+         * 才可能满足提交门；这段解码就是切档耗时的主体。真机日志（21:27:21.959 → 21:27:30.510）
+         * 里切到 stream=1 时正是它没追上时间线，8.5 秒后被判
+         * `target rendition did not reach playback timeline`（界面显示"切换失败"）。
+         * 这里只是让 codec 把这段本就要解的内容更快吐出来 —— 不丢帧、不改时间轴。
+         * 收回点：finishQualitySwitch()（提交/失败终态）与 pending 被丢弃（对象销毁）两处。
+         */
+        setPendingVideoDecodeBoost(true);
     }
     return ret;
 }
@@ -8013,6 +8033,12 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                 mSeekLandingFrameAccepted = true;
                 mSeekRenderGateUs = INT64_MIN;
                 mSeekExactLandingByBudget = false;
+
+                /*
+                 * 【追帧加速收尾】包含目标的那一帧已经到手 ⇒ 落点前缀追完，
+                 * 立刻把性能点收回默认（不必等 seek 整体结束，缩短 codec 跑在高性能点的时间）。
+                 */
+                setVideoDecodeBoost(false);
 
                 /*
                  * 【事件出口】落点帧被采纳 = 本次 seek 的时间轴已经重新锚定。
@@ -10670,6 +10696,40 @@ void SuperMediaPlayer::replayDeferredUserSeek()
 }
 
 /*
+ * 【追帧加速】取"当前正在解视频的那块解码器"下发性能点要求。
+ *
+ * 写在唯一一处，调用点只管"什么时候要快、什么时候收回"，不去各自取解码器。
+ * 全程无副作用：解码器不存在 / 是软解 / 平台不支持时，IDecoder::setDecodeBoost
+ * 默认实现就是空操作 —— 所以核心层一行平台宏都不需要（分层规则 R8）。
+ */
+void SuperMediaPlayer::setVideoDecodeBoost(bool boost)
+{
+    if (mAVDeviceManager == nullptr) {
+        return;
+    }
+
+    IDecoder *decoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+
+    if (decoder != nullptr) {
+        decoder->setDecodeBoost(boost);
+    }
+}
+
+/* 同上，但作用于切档的 pending 解码器（预滚窗口）。promote 之后它就是活动解码器。 */
+void SuperMediaPlayer::setPendingVideoDecodeBoost(bool boost)
+{
+    if (mAVDeviceManager == nullptr) {
+        return;
+    }
+
+    IDecoder *decoder = mAVDeviceManager->getPendingVideoDecoder();
+
+    if (decoder != nullptr) {
+        decoder->setDecodeBoost(boost);
+    }
+}
+
+/*
  * 【B19】切档终态出口的唯一补做入口（READY/FAILED/CANCELED 三处都会调到）。
  *
  * 语义：把"切档在途时被推迟的那一次 PFR"补做一次，然后清闩。
@@ -10986,6 +11046,12 @@ void SuperMediaPlayer::ResetSeekStatus()
     mSeekPositionFloorUs = INT64_MIN;
     mSeekLandingFloorOwnerUs = INT64_MIN;
     mSeekFirstDecodableFrameShown = false;
+
+    /*
+     * 【追帧加速收尾】seek 结束 ⇒ 落点前缀已经追完，把性能点收回默认。
+     * 与置位点（ProcessSeekToMsg 里 seek 真正开始那一刻）成对，全程状态判据、无计时器。
+     */
+    setVideoDecodeBoost(false);
 
     /*
      * 【修：seek 结束 ⇒ 未消费的锚点事件一并作废（"进度条往回弹"的根因）】

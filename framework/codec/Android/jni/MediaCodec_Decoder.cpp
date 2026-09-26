@@ -21,6 +21,7 @@ static jmethodID jMediaCodec_init = nullptr;
 static jmethodID jMediaCodec_setCodecSpecificData = nullptr;
 static jmethodID jMediaCodec_setDrmInfo = nullptr;
 static jmethodID jMediaCodec_setForceInsecureDecoder = nullptr;
+static jmethodID jMediaCodec_setDecodeBoost = nullptr;
 static jmethodID jMediaCodec_configureVideo = nullptr;
 static jmethodID jMediaCodec_configureAudio = nullptr;
 static jmethodID jMediaCodec_setOutputSurface = nullptr;
@@ -51,6 +52,17 @@ void MediaCodec_Decoder::init(JNIEnv *env) {
                                                   "(Ljava/lang/String;[B)Z");
         jMediaCodec_setForceInsecureDecoder = env->GetMethodID(jMediaCodecClass, "setForceInsecureDecoder",
                                                   "(Z)V");
+        jMediaCodec_setDecodeBoost = env->GetMethodID(jMediaCodecClass, "setDecodeBoost", "(Z)V");
+
+        /*
+         * 新旧 Java/native 混装（例如 APK 里是旧 AAR、.so 是新的）时，这个成员可能不存在。
+         * GetMethodID 失败会挂起一个 pending 异常，不清掉会污染后面**所有** JNI 调用。
+         * 所以这里主动清掉并把句柄置空 —— 追帧加速退化成空操作，其余功能一字不受影响。
+         */
+        if (env->ExceptionCheck()) {
+            env->ExceptionClear();
+            jMediaCodec_setDecodeBoost = nullptr;
+        }
         jMediaCodec_configureVideo = env->GetMethodID(jMediaCodecClass, "configureVideo",
                                                       "(Ljava/lang/String;IIILandroid/view/Surface;Z)I");
         jMediaCodec_configureAudio = env->GetMethodID(jMediaCodecClass, "configureAudio",
@@ -170,6 +182,29 @@ void MediaCodec_Decoder::setForceInsecureDecoder(bool force)
 
     env->CallVoidMethod(mMediaCodec, jMediaCodec_setForceInsecureDecoder,  (jboolean)force);
 
+}
+
+int MediaCodec_Decoder::setDecodeBoost(bool boost)
+{
+    JniEnv jniEnv{};
+
+    JNIEnv *env = jniEnv.getEnv();
+    if (env == nullptr || mMediaCodec == nullptr || jMediaCodec_setDecodeBoost == nullptr) {
+        return MC_ERROR;
+    }
+
+    env->CallVoidMethod(mMediaCodec, jMediaCodec_setDecodeBoost, (jboolean) boost);
+
+    /*
+     * Java 侧已经用 try/catch 把"个别 codec 不认这个 key"兜住了；这里再清一次
+     * 异常，保证即使真的抛出来也不会污染后续 JNI 调用（返回值只用于日志）。
+     */
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return MC_ERROR;
+    }
+
+    return 0;
 }
 
 int MediaCodec_Decoder::configureVideo(const std::string &mime, int width, int height, int angle,

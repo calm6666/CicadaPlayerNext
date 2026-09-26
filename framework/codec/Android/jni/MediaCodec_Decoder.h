@@ -93,6 +93,12 @@ namespace Cicada {
 
         void setForceInsecureDecoder(bool force);
 
+        /*
+         * 【追帧加速】把"更高性能点"的要求下发到 MediaCodec（Java 侧
+         * MediaCodec.setParameters("operating-rate")）。只对视频有效，失败静默。
+         */
+        int setDecodeBoost(bool boost);
+
         int
         configureVideo(const std::string &mime, int width, int height, int angle, void *surface,
                        bool usePlaceholderSurface);

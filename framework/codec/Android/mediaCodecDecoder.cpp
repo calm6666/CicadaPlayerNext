@@ -407,6 +407,20 @@ namespace Cicada {
         return mLastRenderedVideoPts.load();
     }
 
+    /*
+     * 【追帧加速】只对视频、且解码器已初始化时下发；失败一路返回 0 —— 这是"性能点提示"，
+     * 任何平台拒绝都不允许影响解码/精度。详见 IDecoder::setDecodeBoost 的说明。
+     */
+    int mediaCodecDecoder::setDecodeBoost(bool boost) {
+        if (codecType != CODEC_VIDEO || !mbInit || mDecoder == nullptr) {
+            return 0;
+        }
+
+        int ret = mDecoder->setDecodeBoost(boost);
+        AF_LOGI("mediaCodecDecoder setDecodeBoost boost=%d ret=%d\n", (int) boost, ret);
+        return ret;
+    }
+
     int64_t mediaCodecDecoder::getLastRenderedVideoFrameDur() {
         int64_t last = mLastRenderedVideoPts.load();
         int64_t prev = mPrevRenderedVideoPts.load();
