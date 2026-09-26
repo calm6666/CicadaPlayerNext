@@ -4843,19 +4843,24 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                 mSeekAudioAlignDone = true;
 
                 /*
-                 * 【第 2 项】有界精确落点：落点关键帧离目标点不超过预算时，本次 seek 要求
-                 * 精确到目标附近（见 RenderVideo 的落点采纳分支）。超出预算就一直保持假：
-                 * 照旧立刻上屏落点帧，绝不为了精确让用户黑屏等一个稀疏 IDR 的距离
-                 * （实测该文件落点比目标早 1.0~11.2 秒）。纯状态判断，无计时器。
+                 * 【预算判据已删除（精准 seek 第 2 项）】
+                 *
+                 * 这里原来按"落点距目标是否在 SEEK_EXACT_LANDING_BUDGET_US 内"来**授予**
+                 * 精确落点（mSeekExactLandingByBudget = true）。那是"精度换等待"：精度取决于
+                 * 预算给不给，而不是取决于目标本身 —— 落点比目标早超过预算时就直接把落点帧
+                 * 放上屏（实测该文件早 1.0~11.2 秒），这正是 DASH/HLS/稀疏 IDR 上"seek 不精准"。
+                 *
+                 * 现在落点判据是**包含目标**（RenderVideo 的落点采纳块：帧区间
+                 * [timePosition, timePosition + 帧长) 不含目标就继续解到下一帧），与目标本身
+                 * 比较、与落点距离无关，所以不再需要"授予"这一步：
+                 * mSeekExactLandingByBudget 从此恒为假 —— 预算这条路径被彻底关掉。
+                 * 这里只留一条"落点离目标多远"的日志，便于现场核对，与精度无关。
                  */
                 if (mSeekPositionFloorUs != INT64_MIN && landingUs > 0 &&
-                    mSeekPositionFloorUs > landingUs &&
-                    mSeekPositionFloorUs - landingUs <= SEEK_EXACT_LANDING_BUDGET_US) {
-                    mSeekExactLandingByBudget = true;
-                    AF_LOGI("seek: the landing keyframe is %lld ms before the target (within the %lld ms "
-                            "budget) — this seek will land exactly on the target region\n",
-                            (long long) ((mSeekPositionFloorUs - landingUs) / 1000),
-                            (long long) (SEEK_EXACT_LANDING_BUDGET_US / 1000));
+                    mSeekPositionFloorUs > landingUs) {
+                    AF_LOGI("seek: the landing keyframe is %lld ms before the target — decoding forward "
+                            "to the frame that contains the target (exact landing, no budget)\n",
+                            (long long) ((mSeekPositionFloorUs - landingUs) / 1000));
                 }
 
                 /*
