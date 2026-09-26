@@ -5034,6 +5034,31 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                 mSeekAudioAlignDone = true;
 
                 /*
+                 * ============ 【B13：音频的对齐锚点必须与时钟锚点是同一个点（目标）】============
+                 *
+                 * 实测（用户日志，暂停态 seek）：时钟被钉在**目标**（mSeekPositionFloorUs），
+                 * 而音频的裁剪/地板/时间轴重基都按**视频落点**（landingUs）来做 —— 两者相差
+                 * "落点到目标"这一段，于是出现：
+                 *   · 音频队列里保留着 [落点, 目标) 这一段的帧；
+                 *   · render() 里"pcm 队首比时钟超前就按住"那道门把它们按住；
+                 *   · 暂停态时钟是 pause 的（ProcessPauseMsg → startRendering(false) →
+                 *     mMasterClock.pause()），它**不可能"追上来"**，门就永远不开 —— 音频不流动
+                 *     ⇒ 以音频为参考的时钟也不动 ⇒ 视频落点帧的渲染门永远不满足 ⇒
+                 *     画面与进度条都不动（fps=0，实测 frameQ=1 而 master 已越过落点）。
+                 *
+                 * 这里把音频的对齐锚点统一到**时钟锚点**上：目标已知且不早于落点时，按目标
+                 * 裁剪/重基（丢掉落在目标之前的音频，包括 [落点, 目标) 那一段）。第一帧音频于是
+                 * 落在目标附近（一个音频帧的量级），上面那道门自然不成立，不需要"等时钟追上"。
+                 *
+                 * 通用性：这里只比较两个**位置值本身**，与 GOP、关键帧间距、分片长度都无关。
+                 * 精度不变：视频首帧仍由"包含目标、不晚于目标"的采纳块决定，本处只动音频。
+                 * 目标未知（INT64_MIN）或目标早于落点时，锚点退回落点 —— 与今天逐字一致。
+                 */
+                const int64_t audioAnchorUs =
+                        (mSeekPositionFloorUs != INT64_MIN && mSeekPositionFloorUs > landingUs)
+                        ? mSeekPositionFloorUs : landingUs;
+
+                /*
                  * 【预算判据已删除（精准 seek 第 2 项）】
                  *
                  * 这里原来按"落点距目标是否在 SEEK_EXACT_LANDING_BUDGET_US 内"来**授予**
@@ -5062,16 +5087,16 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                  * 内部残留就没有任何东西挡得住，等于第 4 条在最需要它的路径上失效。
                  * 现在只有"裁包"这一步需要 audioFront（日志/丢包统计），其余照做。
                  */
-                if (landingUs > 0) {
+                if (audioAnchorUs > 0) {
                     int64_t dropped = 0;
 
                     if (audioFront != INT64_MIN) {
-                        dropped = mBufferController->ClearPacketBeforeTimePos(BUFFER_TYPE_AUDIO, landingUs);
+                        dropped = mBufferController->ClearPacketBeforeTimePos(BUFFER_TYPE_AUDIO, audioAnchorUs);
                     }
 
-                    mSeekAudioFloorUs = landingUs;
-                    /* 第 4 条：连续性高水位从落点起算（详见 SEEK_AUDIO_CONTINUITY_TOLERANCE_US）。 */
-                    mSeekAudioContinuityUs = landingUs;
+                    mSeekAudioFloorUs = audioAnchorUs;
+                    /* 第 4 条：连续性高水位从**同一个锚点**起算（详见 SEEK_AUDIO_CONTINUITY_TOLERANCE_US）。 */
+                    mSeekAudioContinuityUs = audioAnchorUs;
                     mSeekAudioStaleDrops = 0;
 
                     /*
@@ -5127,9 +5152,9 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                     }
 
                     /*
-                     * 1b：整条音频时间轴对齐到落点。清的是**本进程内**已解码帧队列，
-                     * 不动设备、不动音频解码器：下一帧音频会按落点重新建立时间轴
-                     * （mPlayedAudioPts == INT64_MIN 那条既有交接路径），
+                     * 1b：整条音频时间轴对齐到**上面的锚点**（目标优先，见 B13）。清的是
+                     * **本进程内**已解码帧队列，不动设备、不动音频解码器：下一帧音频会按锚点
+                     * 重新建立时间轴（mPlayedAudioPts == INT64_MIN 那条既有交接路径），
                      * 因此"设备位置按旧时间轴报数"再也不可能把主时钟拽走。
                      */
                     while (!mAudioFrameQue.empty()) {
@@ -5137,18 +5162,19 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                     }
 
                     mPlayedAudioPts = INT64_MIN;
-                    mAudioTime.startTime = landingUs;
+                    mAudioTime.startTime = audioAnchorUs;
                     mAudioTime.deltaTime = 0;
                     mAudioTime.deltaTimeTmp = 0;
                     mLastAudioFrameDuration = -1;
                     /* 音频包指针也必须丢：它属于 seek 前的旧时间轴。 */
                     mAudioPacket = nullptr;
 
-                    AF_LOGI("seek audio aligned to the video landing point: landing=%lld dropped=%lld "
-                            "audioFront=%lld (no device flush; the decoded frames from the old "
-                            "timeline are discarded and the audio clock is rebased to the landing "
-                            "point)\n",
-                            (long long) landingUs, (long long) dropped,
+                    AF_LOGI("seek audio aligned to the CLOCK anchor: landing=%lld anchor=%lld target=%lld "
+                            "dropped=%lld audioFront=%lld (audio before the anchor is dropped so the first "
+                            "audio frame sits at the target; no device flush, the decoded frames from the "
+                            "old timeline are discarded and the audio clock is rebased to the anchor)\n",
+                            (long long) landingUs, (long long) audioAnchorUs,
+                            (long long) mSeekPositionFloorUs, (long long) dropped,
                             (long long) mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO));
                 } else {
                     AF_LOGI("seek audio align skipped (landing=%lld audioFront=%lld) — falling back to "
@@ -6786,7 +6812,22 @@ bool SuperMediaPlayer::render()
         int64_t audioSilencePts = INT64_MIN;
         int64_t audioSilenceClock = INT64_MIN;
 
-        if (inSeekAudioWindow && !mAudioFrameQue.empty() && mAudioFrameQue.front() != nullptr) {
+        /*
+         * ============ 【B13：暂停态绝不按"等时钟追上"按住 PCM】============
+         *
+         * 下面这道门的前提是"时钟会自己往前走，走到队首 PTS 就开"。暂停态这个前提不成立：
+         * ProcessPauseMsg → startRendering(false) → mMasterClock.pause()，时钟冻住，
+         * "追上队首"永远不会发生 —— 于是 PCM 一直不推、以音频为参考的时钟也不动、
+         * 视频落点帧的渲染门永远不满足（实测：暂停态 seek 之后 fps=0，画面与进度条都不动，
+         * frameQ=1 而 master 已经越过落点）。
+         *
+         * 所以暂停态**不参与**这道门：音频照常走下面的 RenderAudio（它会按锚点丢掉旧时间轴的帧），
+         * 恢复播放时从锚点（目标）起算。要等也只等"音频数据到达"，**不等时钟**。
+         * 判据是纯状态（mPlayStatus），没有计时器；只影响暂停态，播放/缓冲路径逐字不变。
+         */
+        const bool seekHoldDisabled = (mPlayStatus == PLAYER_PAUSED);
+
+        if (!seekHoldDisabled && inSeekAudioWindow && !mAudioFrameQue.empty() && mAudioFrameQue.front() != nullptr) {
             audioSilencePts = mAudioFrameQue.front()->getInfo().pts;
             audioSilenceClock = mMasterClock.GetTime();
 
@@ -6812,6 +6853,16 @@ bool SuperMediaPlayer::render()
         if (!inSeekAudioWindow) {
             if (mAudioSilenceReason == AUDIO_SILENCE_SEEK_CLOCK) {
                 logAudioSilence(AUDIO_SILENCE_NONE, "left the seek window, pcm flows again",
+                                audioSilencePts, audioSilenceClock);
+            }
+        } else if (seekHoldDisabled) {
+            /*
+             * 暂停态：上面那道门被禁用，PCM 照推。若之前已经报过"被按住"，这里把它收尾
+             * （logAudioSilence 只在**状态变化**时输出，所以不是逐帧日志）。
+             */
+            if (mAudioSilenceReason == AUDIO_SILENCE_SEEK_CLOCK) {
+                logAudioSilence(AUDIO_SILENCE_NONE,
+                                "paused: the frozen clock cannot catch up, so pcm is not held any more",
                                 audioSilencePts, audioSilenceClock);
             }
         } else if (holdAudioForSeek && mAudioSilenceReason == AUDIO_SILENCE_NONE) {
@@ -7123,7 +7174,28 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
          */
         bool handOverToAudio = true;
 
-        if (mAudioClockReanchorPending) {
+        /*
+         * ============ 【B13：暂停态不按音频帧改写时钟、也不把时钟交给音频】============
+         *
+         * 机制（都可静态核对）：
+         *   · af_clock::set() 在**暂停**态改的是"暂停值"（framework/utils/af_clock.cpp:55-57
+         *     `mPauseUs = us`）⇒ 暂停态调 mMasterClock.setTime(pts) 等于把**冻结的时钟**
+         *     挪到音频帧的位置上；
+         *   · SystemReferClock::GetTime() 在时钟运行起来之后会按音频参考重同步
+         *     （mediaPlayer/system_refer_clock.cpp:16-45）⇒ 一旦交接给音频，恢复播放时
+         *     时钟从**音频帧的位置**起算，而不是 seek 的目标点。
+         * 两者叠加就是用户看到的"暂停期间 master 从 0.083s 变成 3.09s、恢复后从错误时间点起播"。
+         *
+         * 处理：暂停态**时钟保持不动**（seek 时已被钉在目标上），并且**不交接**给音频；
+         * mAudioClockReanchorPending 留着不清，等恢复播放后的第一帧音频再走同一条既有交接
+         * 路径（那时时钟在跑，交接才是正确动作）。判据是纯状态（mPlayStatus），没有计时器；
+         * 这里不打日志（本函数每帧都走，暂停态又不再被上面的门挡住，逐帧打会刷屏）。
+         */
+        if (mPlayStatus == PLAYER_PAUSED && mAudioClockReanchorPending) {
+            handOverToAudio = false;
+        }
+
+        if (handOverToAudio && mAudioClockReanchorPending) {
             if (!mSeekVideoAnchorDone) {
                 handOverToAudio = false;
                 AF_LOGI("seek: holding the clock at the video landing point until the frame lands "
