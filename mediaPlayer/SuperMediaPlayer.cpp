@@ -3833,14 +3833,51 @@ void SuperMediaPlayer::doRender()
             const int64_t seekAnchorUs = fetchSeekClockAnchorUs(mPlayedVideoPts, "first frame rendered after the seek");
 
             if (seekAnchorUs != INT64_MIN) {
-                mMasterClock.setTime(seekAnchorUs);
+                /*
+                 * ============ 【修：锚点绝不允许把主时钟往回拉】============
+                 *
+                 * 真机日志（安卓 2026-09-26 20:55:38，用户 seek 到 116.273s）逐行可对：
+                 *   38.825  seek anchor refused: frame=99933167 earlier than target=116273000
+                 *   38.851  seek anchor: pts=99966533, target=-9223372036854775808,
+                 *           landingFloor=116273000, anchor=99966533
+                 *   39.033  seek anchored by the video landing frame, audio pts=116288000
+                 * 第二行里 `target=-9223372036854775808`（= INT64_MIN）说明：锚定发生时
+                 * `mSeekPositionFloorUs` 与 `mSeekPos` **都已经被清掉**（seek 结束走的
+                 * ResetSeekStatus()，见本文件 10912 / 10929），于是 fetchSeekClockAnchorUs()
+                 * 走"目标未知"兜底分支返回了这一帧自己的 pts —— 主时钟从 116.273s 被
+                 * **倒退**到 99.966s（-16.3 秒），36ms 之后又被落点帧拉回 116.288s。
+                 * 用户看到的就是"进度条先往回弹一下、然后又弹回去"；而时钟倒退的那段时间里
+                 * 所有正常帧都成了"迟到帧"被丢掉 —— 也就是"seek 后卡死半天不动"。
+                 *
+                 * 判据（纯状态、无阈值、无计时器）：**只有向前才改写主时钟**。
+                 * 目标已知时这不会改变任何行为 —— fetchSeekClockAnchorUs() 的返回值是
+                 * max(落点帧, 目标)，本来就不可能小于 seek 目标；唯一会小于当前时钟的情形，
+                 * 正是上面那种"目标已被清掉、这一帧是旧位置"的坏状态，也就是要拦的这一种。
+                 */
+                const int64_t masterBeforeUs = mMasterClock.GetTime();
+
+                if (seekAnchorUs >= masterBeforeUs) {
+                    mMasterClock.setTime(seekAnchorUs);
+                    AF_LOGW("seek anchor: master clock anchored to the first frame rendered after the seek "
+                            "(pts=%lld, target=%lld, landingFloor=%lld, anchor=%lld)\n",
+                            (long long) mPlayedVideoPts, (long long) mSeekPositionFloorUs,
+                            (long long) mSeekAudioFloorUs, (long long) seekAnchorUs);
+                } else {
+                    AF_LOGW("seek anchor SKIPPED: anchoring on pts=%lld would move the master clock BACKWARD "
+                            "from %lld (by %lld ms) — the frame is older than the position the clock is "
+                            "already on (this is the 'progress bar bounces back' state: the seek target has "
+                            "already been cleared, so this frame carries no usable anchor)\n",
+                            (long long) seekAnchorUs, (long long) masterBeforeUs,
+                            (long long) ((masterBeforeUs - seekAnchorUs) / 1000));
+                }
+
+                /*
+                 * 事件在两种出口都消费掉：目标已经被清掉的这一帧之后，再等下一帧只会得到
+                 * 一个更晚的旧位置，锚定已经没有正确值可用 或 时钟本身就在正确位置上。
+                 */
                 mSeekClockAnchored = true;
                 mSeekVideoAnchorDone = true;
                 mSeekAnchorPending = false;
-                AF_LOGW("seek anchor: master clock anchored to the first frame rendered after the seek "
-                        "(pts=%lld, target=%lld, landingFloor=%lld, anchor=%lld)\n",
-                        (long long) mPlayedVideoPts, (long long) mSeekPositionFloorUs,
-                        (long long) mSeekAudioFloorUs, (long long) seekAnchorUs);
             }
         }
 
@@ -10929,6 +10966,31 @@ void SuperMediaPlayer::ResetSeekStatus()
     mSeekPositionFloorUs = INT64_MIN;
     mSeekLandingFloorOwnerUs = INT64_MIN;
     mSeekFirstDecodableFrameShown = false;
+
+    /*
+     * 【修：seek 结束 ⇒ 未消费的锚点事件一并作废（"进度条往回弹"的根因）】
+     *
+     * 本函数刚刚把 mSeekPos 与 mSeekPositionFloorUs（锚点的**两个目标载体**）清零，
+     * 却把 mSeekAnchorPending 留着。于是 seek 宣告结束之后第一帧视频上屏时，锚点事件
+     * 拿着"目标未知"去锚定：fetchSeekClockAnchorUs() 走兜底分支返回那一帧自己的 pts，
+     * 主时钟被**倒退**到落点帧的位置。真机日志（安卓 2026-09-26 20:55:38，用户 seek
+     * 到 116.273s）三行可对：
+     *   38.825  seek anchor refused: frame=99933167 earlier than target=116273000
+     *   38.851  seek anchor: pts=99966533, target=-9223372036854775808,
+     *           landingFloor=116273000, anchor=99966533        ← 时钟 116.273s → 99.966s
+     *   39.033  seek anchored by the video landing frame, audio pts=116288000  ← 又拉回 116.288s
+     * 用户看到的就是"进度条先往回弹一下、然后又弹回去"；而时钟倒退的那 16.3 秒里，
+     * 所有正常帧都被判成"迟到帧"丢掉 —— 也就是"seek 后卡死画面半天不动"。
+     *
+     * 语义上这次锚定本来就没有可用的正确值：目标已经被清掉，"锚到目标"无从谈起，
+     * 而 seek 已经结束、时钟本来就停在正确位置上（ProcessSeekToMsg 一开始就把它钉在
+     * 目标上），再去锚一个旧帧只会破坏它。所以在**唯一的目标载体被清掉的这一处**
+     * 把事件消费掉：不再等"下一帧旧位置"，也不会悬挂（上面两条注释担心的
+     * "纯音频渲染把事件白白消费掉"发生在 seek 期间，与这里不是同一个时点）。
+     * 应用侧的护栏见 RenderVideo 的锚点出口：即使还有别的时序绕过这里，
+     * "锚点不许把主时钟往回拉"那条判据也不会让时钟倒退。
+     */
+    mSeekAnchorPending = false;
 
     /*
      * 【① B17】seek 结束事件：如果这次 seek 曾把"用户点过的切档"拆掉，在这里
