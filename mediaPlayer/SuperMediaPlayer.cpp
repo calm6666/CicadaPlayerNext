@@ -8843,6 +8843,13 @@ void SuperMediaPlayer::FlushAudioPath()
     mFirstSeekStartTime = 0;
     mRemovedFirstAudioPts = INT64_MIN;
     mAudioClockReanchorPending = reanchorAfterFlush;
+    /*
+     * 【B14】音频设备刚被 flush（seek / 内部重建）：重新开始观察"设备位置有没有真的前进"。
+     * 与 mAudioClockReanchorPending 同生共死，语义绑定在一起（见 getAudioPlayTimeStamp）。
+     */
+    mAudioClockProgressBaseUs = INT64_MIN;
+    mAudioClockProgressSeen = false;
+    mAudioClockProgressLogCount = 0;
 }
 
 void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch, const char *from)
@@ -9369,6 +9376,59 @@ int64_t SuperMediaPlayer::getAudioPlayTimeStamp()
      * 期间时钟改按墙上时间自走，音频回来时 SystemReferClock::GetTime()（:44-45）又**双向**
      * reSync 把它拉回音频位置（可能向后跳）⇒ 视频被判"未来"继续干等。失败模式比它要治的
      * "参考值冻结"更糟，故整体回退；详见 AudioTrackRender::device_get_position() 的说明。 */
+
+    /*
+     * ============ 【B14】"设备位置真的前进过"才交出音频时钟 ============
+     *
+     * B2 那次回退是因为"整段时间都不交时钟"这条路本身更糟（回头又会被向后 reSync 拉一次）。
+     * 这里换一个**更窄、只针对坏值**的判据，语义与上面两条 return 完全一致（音频时钟暂不可用）：
+     *   1. seek 后第一帧音频重锚之后，第一次拿到的设备位置只记**基准**，先不交；
+     *   2. 只有观察到设备位置**严格超过**基准（设备真的在产数据/前进）才放行；
+     *   3. 放行之后，仍然拒绝"低于基准"的值（向后跳）—— 这正是会被 GetTime() 双向 reSync
+     *      拿去做"向后拉"的那一类值（AudioTrack 在 seek 窗口内非 PLAYING/PAUSED 时
+     *      getDevicePlayedSimples() 返回 0，位置会塌回 0）。
+     * 期间主时钟按**本地墙钟**自走（与既有 mSeekFlag 窗口内的行为一致），所以不会"卡死"；
+     * 一旦设备真的前进就立刻把音频参考交出去，A/V 仍以音频为主时钟。
+     * 全是事件判据：没有计时器、没有时间阈值；复位点与 mAudioClockReanchorPending 同步
+     * （FlushAudioPath / Reset），因此每次 seek 重新观察一遍。
+     */
+    if (mAudioClockProgressBaseUs == INT64_MIN) {
+        mAudioClockProgressBaseUs = aoutPos;
+
+        if (mAudioClockProgressLogCount < 8) {
+            ++mAudioClockProgressLogCount;
+            AF_LOGI("audio clock: recorded the post-seek device-position base %lld us — the audio reference "
+                    "stays unavailable until the device position is seen to advance\n",
+                    (long long) aoutPos);
+        }
+
+        return INT64_MIN;
+    }
+
+    if (aoutPos <= mAudioClockProgressBaseUs) {
+        if (mAudioClockProgressLogCount < 8) {
+            ++mAudioClockProgressLogCount;
+            AF_LOGW("audio clock: rejected a stale/backward device position %lld us (base=%lld, delta=%lld us) — "
+                    "a backward reSync here is what froze the picture right after a seek\n",
+                    (long long) aoutPos, (long long) mAudioClockProgressBaseUs,
+                    (long long) (aoutPos - mAudioClockProgressBaseUs));
+        }
+
+        return INT64_MIN;
+    }
+
+    if (!mAudioClockProgressSeen) {
+        mAudioClockProgressSeen = true;
+
+        if (mAudioClockProgressLogCount < 8) {
+            ++mAudioClockProgressLogCount;
+            AF_LOGI("audio clock: the device position advanced to %lld us (base=%lld, +%lld us) — the audio "
+                    "reference is released from here on\n",
+                    (long long) aoutPos, (long long) mAudioClockProgressBaseUs,
+                    (long long) (aoutPos - mAudioClockProgressBaseUs));
+        }
+    }
+
     return mAudioTime.startTime + mAudioTime.deltaTime + aoutPos;
 }
 
@@ -10038,6 +10098,10 @@ void SuperMediaPlayer::Reset()
     mPlayedVideoPts = INT64_MIN;
     mPlayedAudioPts = INT64_MIN;
     mAudioClockReanchorPending = false;
+    /* 【B14】Reset 与 FlushAudioPath 一样清掉"设备位置前进观察"的状态。 */
+    mAudioClockProgressBaseUs = INT64_MIN;
+    mAudioClockProgressSeen = false;
+    mAudioClockProgressLogCount = 0;
     mSeekFlag = false;
     /* 墙钟计时跟 seek 状态一起复位，否则上一次播放留下的时间戳会让新一次
      * seek 的"音频解锁"立刻命中（见 render() 里 SEEK_CATCH_AUDIO_UNBLOCK_MS）。 */

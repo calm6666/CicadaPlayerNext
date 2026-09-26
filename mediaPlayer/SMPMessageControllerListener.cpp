@@ -814,10 +814,26 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
         }
     }
 
-    /* demuxer 已经完成定位后再 flush active decoder/渲染队列。这样不会让
+    /*
+     * demuxer 已经完成定位后再 flush active decoder、清解码帧队列。这样不会让
      * DASH/HLS 的 Seek() 等待已经取消的 pending 流，同时保证旧位置的解码帧
-     * 不会混入新 seek 时间轴；本地文件和其它平台仍沿用原有 flush 语义。 */
-    mPlayer.FlushVideoPath(true, false, __func__);
+     * 不会混入新 seek 时间轴。
+     *
+     * 【B14-A：flushRender 由 true 改成 false —— seek 是"原地重启视频"，不必碰渲染器】
+     *
+     * 依据是本仓库自己的结论（SuperMediaPlayer.cpp 的 FlushVideoPath 里那段说明）：
+     *   "只清解码器。flushDevice() 最后会 flushVideoRender()，那会 pause/start VSync
+     *    线程；seek 这种一次性'原地重启视频'没必要每次都去碰 afThread 的
+     *    pause/start 状态机 —— 渲染器里缓存的旧帧下一帧本来就会被覆盖。"
+     * 安卓上 flushVideoRender() 的 pause/start 是真实开销（VSync 线程握手），
+     * 而 seek 每次都要走这里 ⇒ 每次 seek 省一次渲染器 flush。
+     *
+     * 精度不受影响：落点帧仍由 mSeekRenderGateUs 那道门挡着（只有"包含目标、不晚于
+     * 目标"的帧会被采纳，见 RenderVideo 的采纳块），本处只是不再主动清渲染器里
+     * 已提交的那 1~2 帧 —— 而 seek 期间画面本来就停在上一帧，观感一致。
+     * 解码帧队列（mVideoFrameQue）在 FlushVideoPath 内部无条件清空，与 flushRender 无关。
+     */
+    mPlayer.FlushVideoPath(false, false, __func__);
 
     mPlayer.FlushAudioPath();
     mPlayer.FlushSubtitleInfo();

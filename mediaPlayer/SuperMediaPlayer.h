@@ -1492,6 +1492,36 @@ namespace Cicada {
          */
         int mPendingVideoDecodeRateMilli{1900};
         bool mPendingVideoPrerollPathChosen{false};
+
+        /*
+         * ============ 【B14】音频时钟"设备位置真的前进过"才交出（事件驱动，无计时器）============
+         *
+         * 背景（安卓真机，本仓库两处注释都记过这个形态）：
+         *   · AudioTrack 在 seek 窗口内会经历 PAUSED → FLUSHED/STOPPED → PLAYING，
+         *     而 `AudioTrackRender::device_get_position()` 在**非 PLAYING/PAUSED** 时
+         *     `getDevicePlayedSimples()` 返回 0（framework/render/audio/Android/AudioTrackRender.cpp
+         *     的 `if (state == PLAYSTATE_PLAYING || state == PLAYSTATE_PAUSED)` 那一支），
+         *     于是上报的位置会**塌回 0 / 向后跳**；
+         *   · 这个值一旦被 SystemReferClock::GetTime() 拿去做**双向** reSync
+         *     （mediaPlayer/system_refer_clock.cpp 的 `mClock.set(referTime)`），主时钟会被
+         *     向后拉，视频随即被判"未来"继续干等 —— 就是 SuperMediaPlayer.cpp 里
+         *     "第一次 seek 画面不动、半天才动"那条注释描述的机制。
+         *
+         * 处置（全是事件判据，没有计时器、没有时间阈值）：
+         *   · seek 后第一帧音频完成重锚之后，第一次拿到的设备位置记为**基准**
+         *     （mAudioClockProgressBaseUs），并**先不交出**音频时钟；
+         *   · 直到观察到设备位置**严格超过**基准（= 设备真的在产数据/前进），才把音频参考
+         *     放行（mAudioClockProgressSeen）；
+         *   · 放行之后仍然拒绝"低于基准"的值（向后跳），一律按"音频时钟暂不可用"返回
+         *     INT64_MIN —— 语义与既有的 mSeekFlag / mAudioClockReanchorPending 两条 return 完全一致。
+         * 复位点与 mAudioClockReanchorPending 一起（FlushAudioPath / Reset），所以每次 seek 重新观察。
+         * mAudioClockProgressLogCount 只用来给这条观测限频（不新增 FloodLogId：那会移动
+         * mFloodLog[] 及其后成员的偏移）。
+         * 三个成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
+         */
+        int64_t mAudioClockProgressBaseUs{INT64_MIN};
+        bool mAudioClockProgressSeen{false};
+        int mAudioClockProgressLogCount{0};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H
