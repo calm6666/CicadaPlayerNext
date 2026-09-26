@@ -128,3 +128,23 @@ set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=2 -fstac
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Werror=return-type")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Werror=return-type")
+
+# ===========================================================================
+# 【体积】非 Debug 构建在**链接期**直接 strip
+#
+# 实测（release APK，2026-09-26）：
+#   lib/arm64-v8a/libCicadaPlayer.so = 28.71 MB（RelWithDebInfo，带 -g）
+#   而同一份构建树里 strip 过的副本只有 2.7 MB
+#   ⇒ 28.7MB 里约 26MB 是 DWARF 调试信息 + 符号表，不是代码。
+#   （AGP 的 stripReleaseDebugSymbols 在 app 变体上没有把它瘦下来：stripped_native_libs
+#     目录里那份还是 28.7MB。）
+#
+# 用 lld 的 `-s`（--strip-all）在链接这一步去掉，不依赖 Gradle 侧的 strip 任务：
+#   · 只对**非 Debug** 生效 —— Debug 包保持带符号，原生崩溃/调试照旧；
+#   · 需要符号化 release 崩溃栈时，用 build/intermediates 里的未 strip 副本（那里还有）；
+#   · 行为零变化：只影响符号与调试段，不影响任何代码/优化级别。
+# 预期：arm64 的 .so 从 28.7MB 降到 ~2.7MB，release APK 从 49MB 降到 ~24MB。
+# ===========================================================================
+if(NOT CMAKE_BUILD_TYPE STREQUAL "Debug")
+    target_link_options(CicadaPlayer PRIVATE -s)
+endif()
