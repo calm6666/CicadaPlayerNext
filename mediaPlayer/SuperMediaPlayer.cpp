@@ -4519,6 +4519,36 @@ void SuperMediaPlayer::doDeCode()
                      * 才真的 break。
                      */
                     if (pendingPacketBeforeDecode) {
+                        /*
+                         * 【观测（纯日志，零行为改动）：pending 路的背压】
+                         *
+                         * pending 解码器回 RETRY_IN 就是"目标路吃不下"的唯一信号
+                         * （ActiveDecoder 在输入队列 >= 16 或输出队列 >= 10 时才回它）。
+                         * 这一行与每秒一行的 `[switch]` 行、以及
+                         * `drop pending frame already behind the playback position`
+                         * 那行配合，一次实测就能分清三种"每轮只前进一个包"：
+                         *   · 这里频繁出现 + pendingFrameQ 停在 4 ⇒ 背压（本文件已按
+                         *     "落后播放位置的帧在抽取处就丢"修掉了一半，剩下的就是
+                         *     "帧没落后、但主时钟还没走到"这份正常等待）；
+                         *   · 这里不出现 + pendingPktQ 为 0 ⇒ 包没到（读闸门/网络）；
+                         *   · 这里不出现 + 队列都不空 ⇒ 解码/渲染本身是瓶颈。
+                         *
+                         * 用 FLOOD_PENDING_HOLD 这个既有 id（"pending 路在等"是同一
+                         * 族语义）：这样 FloodLogId 枚举与 mFloodLog[] 的大小都不变，
+                         * 不会挪动类里任何成员的位置（增量构建 ABI 安全）。
+                         */
+                        if (floodLogAllowed(FLOOD_PENDING_HOLD, 2, "pending decoder back-pressure (RETRY_IN)")) {
+                            AF_LOGI("pending decoder back-pressure (RETRY_IN): pts=%lld timePosition=%lld "
+                                    "pendingPktQ=%d pendingFrameQ=%d frameQ=%d pendingBurst=%d prerollDone=%d "
+                                    "elapsed=%lld ms\n",
+                                    (long long) (mVideoPacket != nullptr ? mVideoPacket->getInfo().pts : INT64_MIN),
+                                    (long long) (mVideoPacket != nullptr ? mVideoPacket->getInfo().timePosition : INT64_MIN),
+                                    (int) mPendingVideoPacketQue.size(), (int) mPendingVideoFrameQue.size(),
+                                    (int) mVideoFrameQue.size(), pendingBurst, (int) mPendingVideoPrerollDone,
+                                    (long long) (mPendingVideoSwitchStartMs > 0
+                                                     ? af_getsteady_ms() - mPendingVideoSwitchStartMs : -1));
+                        }
+
                         if (mVideoPacket != nullptr) {
                             mPendingVideoPacketQue.push_front(std::move(mVideoPacket));
                         }
@@ -5326,12 +5356,78 @@ int SuperMediaPlayer::FillPendingVideoFrame()
             continue;
         }
 
+        /*
+         * ============ 【预热背压修复：已经落后播放位置的帧在**抽取处**就丢掉】============
+         *
+         * 症状（实测）：DASH 切换 7.35 秒，而 pending 路正好以 1× 实时前进
+         * （7.26 秒内容 / 218 帧 / 约 38 包每秒），硬解本应几百帧每秒。
+         *
+         * 机制：DrainPendingVideoFrames() 只要 app 侧队列到了
+         * VIDEO_PICTURE_MAX_CACHE_SIZE * 2（= 4）帧就**不再抽**解码器输出；而预热期
+         * 抽到的"已经落在播放位置之前"的帧，在这里既不会被丢（本判据以前只在
+         * TryCommitPendingVideoSwitch 的提交门里做），又永远满足不了提交门
+         * （提交门要求帧贴着主时钟）。于是那 4 个格位被一批**注定要丢**的帧钉住，
+         * 解码器输出队列随之一直是满的（ActiveDecoder 的 maxOutQueueSize），
+         * send_pending_packet 于是每次都返回 STATUS_RETRY_IN ⇒ pending 路每轮只能
+         * 前进一个包，速度被压到主时钟的节拍上 —— 这就是"1× 实时"的全部来源。
+         *
+         * 处置：在抽取处（还在 mPendingVideoFrameQue.push 之前）就把这类帧
+         * setDiscard 掉，不占那 4 个格位，然后 continue 继续抽。丢帧本身只是
+         * setDiscard + 析构，不花时间；真正的成本在解码，所以这一步只增不减速度。
+         *
+         * 【为什么用"播放位置"而不是"预滚参考点"】
+         * mPendingVideoPrerollRefUs 会被 B7 那段**下调到真正的解码起点关键帧**
+         * （见上面 `pending preroll: starting at the key frame BEFORE the reference`
+         * 那一分支），于是"早于参考点"在"从分片起点起解"这种最常见的慢场景里是
+         * **空集**，起不到拆背压的作用；而"早于播放位置（减对齐容差）"正是提交门
+         * 原本会丢掉的那一批。
+         *
+         * 【静态自证：不可能丢掉会被提交的帧】
+         * 判据与 TryCommitPendingVideoSwitch 里"丢弃落后帧"的循环、以及它后面那条
+         * 单帧丢弃逐字相同（frameEffectivePos + PENDING_ALIGN_TOLERANCE_US < master）；
+         * 那里的 master 是在**更晚**的时刻读的（本函数这里是更早、更小的值，播放态
+         * 下主时钟单调不减），所以这里丢掉的一定是提交点也会丢掉的那一批，
+         * 提交锚点的选择逐字不变。暂停态两边用的都是冻结的 mPausedSwitchPivotUs，
+         * 完全同参。外层 for 的上限是 PENDING_PREROLL_DRAIN_MAX，不会无界循环。
+         */
+        if (frameTimePosition >= 0) {
+            const int64_t videoAlignMasterUs = (mSwitchStartedWhilePaused && mPausedSwitchPivotUs > 0)
+                                                   ? mPausedSwitchPivotUs : masterPts;
+
+            if (videoAlignMasterUs > 0 &&
+                frameTimePosition + PENDING_ALIGN_TOLERANCE_US < videoAlignMasterUs) {
+                if (floodLogAllowed(FLOOD_PENDING_DROP, 2, "drop pending frame already behind the playback position")) {
+                    AF_LOGI("drop pending frame already behind the playback position: pts=%lld timePosition=%lld "
+                            "master=%lld lag=%lld ms stream=%d — dropping it here instead of at the commit gate "
+                            "keeps the 4-slot pending queue free, so the target decoder is no longer throttled to "
+                            "the clock rate by back-pressure\n",
+                            (long long) framePts, (long long) frameTimePosition,
+                            (long long) videoAlignMasterUs,
+                            (long long) ((videoAlignMasterUs - frameTimePosition) / 1000),
+                            mPendingVideoStreamIndex);
+                }
+
+                frame->setDiscard(true);
+                continue;
+            }
+        }
+
         /* 不能用不断前进的 masterPts 过滤 pending 帧。目标 representation
          * 通常从切换点之前最近的关键帧开始，网络/解码速度又可能暂时落后主
          * 时钟数秒；若这里按 masterPts 每帧丢弃，目标路永远追不上，日志会
          * 反复出现“drop pending init/old frame”并最终 FPS=0。真正需要丢弃的
          * 只有固定切换目标之前的旧 segment，上面的 switch-window 判断已经
-         * 完成；主时钟仅在 TryCommitPendingVideoSwitch() 中作为提交门限。 */
+         * 完成；主时钟仅在 TryCommitPendingVideoSwitch() 中作为提交门限。
+         *
+         * 【2026-09-25 补充：紧挨上面的新判据不是这里说的那种"过滤"】
+         * 那段只是把"已经落后播放位置超过 PENDING_ALIGN_TOLERANCE_US"的帧提前
+         * 丢掉 —— 判据与提交门里的落后帧循环、以及它后面那条单帧丢弃逐字相同，
+         * 也就是提交点**本来就会丢掉的那一批**，提交锚点的选择一字未改；
+         * 区别只是不再让这些注定要丢的帧占住 app 侧那 4 个格位（占住的后果
+         * 见上面"预热背压修复"整段：解码器输出队列恒满 ⇒ RETRY_IN ⇒ 1× 实时）。
+         * 这里记录的历史坑（pending 解码比实时还慢时"永远追不上"）依旧成立：
+         * 那种情况下同一批帧在提交点也一样会被丢，切换仍由既有超时收尾，
+         * 新判据既不会让它变好，也不会让它变坏。 */
 
         /* 某些硬解路径不会把 packet metadata 复制到输出帧。此时只能用 PTS
          * 识别 init 帧：主时钟已经运行后，0~5ms 的输出不能作为切换锚点。 */
@@ -6347,6 +6443,21 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
                 (int) oldVideoFramesPending);
     }
 
+    /*
+     * 【B10 配对表换代：提交时必须清 mVideoAxisPts / mVideoAxisTimePos】
+     *
+     * 这张表（见 .h 里 B10 那段说明）只给**当前 active 流**记录条目 —— 记录条件
+     * 要求 mPendingVideoStreamIndex < 0（见 doDeCode 里的记录处）。所以在提交
+     * 这一刻，表里剩下的**全是退役档**的 (raw pts → timePosition) 配对；而
+     * FillVideoFrame 的配对命中（`mVideoAxisPts.front() == pFrame->getInfo().pts`）
+     * 是按 raw pts **精确相等**匹配的：新路的首帧之后只要有一帧的 raw pts 恰好
+     * 等于某个残留条目，它的 pts 就会被换成**旧档**的 timePosition ⇒ 单帧时间戳
+     * 错位（错帧）。清空既不影响任何已归一化的帧（pts 在抽取时就已经写死），
+     * 也不影响旧档（它的解码器已退役、不会再被 getFrame）；提交后的第一个
+     * active 包会重新开始记录本档的配对。
+     */
+    mVideoAxisPts.clear();
+    mVideoAxisTimePos.clear();
     mActiveVideoPtsOffset = mPendingVideoPtsOffset;
     updateVideoMeta();
     /* 注意：这里仅完成 decoder 槽位交换，不能马上通知 READY。
