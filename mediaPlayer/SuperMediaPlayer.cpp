@@ -8,6 +8,7 @@
 #include "utils/UrlUtils.h"
 #include <cassert>
 #include <cinttypes>
+#include <cstdlib>
 #include <codec/avcodecDecoder.h>
 #include <codec/decoderFactory.h>
 #include <data_source/dataSourcePrototype.h>
@@ -299,6 +300,22 @@
 #define PENDING_VIDEO_QUEUE_HARD_CAP 320
 #define PENDING_CAP_ACTIVE_MIN_US (3 * 1000 * 1000)
 #define PENDING_CAP_AUDIO_MIN_US (2 * 1000 * 1000)
+
+/*
+ * 切换在途时，doReadPacket() **一次调用**最多为目标路读多少个包。
+ *
+ * 原来是写死的 16：额度一用完 warmingPending 立刻翻假，读循环马上重新受
+ * "当前路缓冲已满"那两条判断的约束而停读 —— 而稳态播放时当前路的缓冲本来就是满的，
+ * 于是目标档的数据只能跟着**播放节奏**一点点进来：实测预热正好 1× 实时
+ * （切换 1.09 s，其间 pending 只前进了约 1.0 s 的内容）。
+ *
+ * 现在放开到"一次调用足够填满目标队列"（= 它的硬上限）。内存仍然有界：
+ * 路由处按 PENDING_VIDEO_QUEUE_HARD_CAP 丢弃、循环顶部按 PENDING_VIDEO_QUEUE_CAP
+ * 在当前路吃得住时停读（见 doReadPacket 里那两处），所以这里放开的是
+ * **每次调用的读取工作量**，不是队列长度。当前路快见底时那两处会让路，
+ * 不会把旧画面饿死；读满一屏目标包后本函数就返回，主循环照样去解码/渲染。
+ */
+#define PENDING_READ_BURST_PER_CALL PENDING_VIDEO_QUEUE_HARD_CAP
 
 /*
  * 每轮 doDeCode 里最多连续解码多少个目标（pending）包。
@@ -2044,10 +2061,18 @@ void SuperMediaPlayer::doReadPacket()
      * 清晰度切换期间，旧 representation 的公共缓冲可能已经达到上限。
      * 如果仍然完全遵守公共缓冲上限，ReadPacket() 会在目标路拿到 init/GOP
      * 之前直接退出，pending decoder 只能消费一小段旧数据，最终永远追不上
-     * 主时钟。这里给目标路一个有限的“预热读取额度”，只允许多读少量包，
-     * 不会无限扩大内存，也不会让本地文件播放路径产生额外行为。
+     * 主时钟。这里给目标路一个“预热读取额度”：额度内不受"当前路缓冲已满"
+     * 的限制，只按目标队列自己的上限（见循环顶部那处）收敛。
+     *
+     * 【2026-09-25 修：16 → PENDING_READ_BURST_PER_CALL】
+     *
+     * 16 太小：一轮读循环只肯为目标路多读 16 个包，其余时间读循环被当前路的
+     * 缓冲上限挡住，目标档的数据于是按播放节奏到达（实测 pending 预热 1× 实时，
+     * 切换 1.09 s）。现在一次调用就足以把目标队列填到它的上限，让预滚按解码器
+     * 速度跑；队列长度仍由 PENDING_VIDEO_QUEUE_CAP / 硬上限兜住。
+     * 无切换在途时这个变量不参与任何判断（warmingPending 恒假），行为不变。
      */
-    int pendingReadAllowance = 16;
+    int pendingReadAllowance = PENDING_READ_BURST_PER_CALL;
 
     while (true) {
         /*
@@ -3691,14 +3716,35 @@ void SuperMediaPlayer::doRender()
          * FlushVideoPath() 无条件把它置 INT64_MIN（SuperMediaPlayer.cpp:7087 一带）。
          */
         if (mSeekAnchorPending && !mSeekVideoAnchorDone && mPlayedVideoPts != INT64_MIN) {
-            mMasterClock.setTime(mPlayedVideoPts);
-            mSeekClockAnchored = true;
-            mSeekVideoAnchorDone = true;
-            mSeekAnchorPending = false;
-            AF_LOGW("seek anchor: master clock anchored to the first frame rendered after the seek "
-                    "(pts=%lld, target=%lld, landingFloor=%lld)\n",
-                    (long long) mPlayedVideoPts, (long long) mSeekPositionFloorUs,
-                    (long long) mSeekAudioFloorUs);
+            /*
+             * ============ 【锚点规则收口】只允许"目标"或"不早于目标的落点帧" ============
+             *
+             * 原来这里**无条件**把主时钟设成 mPlayedVideoPts（seek 之后第一张上屏的帧）。
+             * 实测那条锚点日志：
+             *   seek anchor: master clock anchored to the first frame rendered after the seek
+             *                (pts=83438, target=2844000, landingFloor=-9223372036854775808)
+             * 帧 0.083s、目标 2.844s、地板未设 —— 时钟被钉在旧时间轴的 0.083s 上按 1x
+             * 往前走，之后整段时间轴错位（位置上报、追赶窗口、落点判据全按错轴判）。
+             *
+             * 现在判据由 fetchSeekClockAnchorUs() 统一给出（它是两处锚点共用的唯一实现）：
+             *   · 这一帧早于目标超过一个容差 ⇒ **不锚**，事件留在闩上（不清 mSeekAnchorPending、
+             *     不置 mSeekVideoAnchorDone），等 >= 目标的那一帧（含目标的那一帧）上屏再来锚；
+             *   · 这一帧在目标附近或之后 ⇒ 锚到它（落点在目标之前则锚到目标本身）。
+             * 位置上报的地板与落点判据读的都是目标，所以时间轴不会再被拉回到 seek 之前。
+             * ==========================================================================
+             */
+            const int64_t seekAnchorUs = fetchSeekClockAnchorUs(mPlayedVideoPts, "first frame rendered after the seek");
+
+            if (seekAnchorUs != INT64_MIN) {
+                mMasterClock.setTime(seekAnchorUs);
+                mSeekClockAnchored = true;
+                mSeekVideoAnchorDone = true;
+                mSeekAnchorPending = false;
+                AF_LOGW("seek anchor: master clock anchored to the first frame rendered after the seek "
+                        "(pts=%lld, target=%lld, landingFloor=%lld, anchor=%lld)\n",
+                        (long long) mPlayedVideoPts, (long long) mSeekPositionFloorUs,
+                        (long long) mSeekAudioFloorUs, (long long) seekAnchorUs);
+            }
         }
 
         //may audio already played over
@@ -6868,12 +6914,25 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
      */
     if (!mSeekClockAnchored && mSeekAudioFloorUs != INT64_MIN && pts != INT64_MIN &&
         llabs(pts - mSeekAudioFloorUs) <= SEEK_AUDIO_CONTINUITY_TOLERANCE_US) {
-        mMasterClock.setTime(pts);
-        mSeekClockAnchored = true;
-        mSeekVideoAnchorDone = true;
-        mSeekAnchorPending = false;
-        AF_LOGW("seek anchor (audio landing first frame): pts=%lld floor=%lld target=%lld\n",
-                (long long) pts, (long long) mSeekAudioFloorUs, (long long) mSeekPositionFloorUs);
+        /*
+         * 这里同样收口到 fetchSeekClockAnchorUs()（与视频锚点共用唯一实现）：
+         * 音频首帧只有在**不早于目标**（容差内）时才允许锚主时钟。早于目标的那一帧
+         * 同样只上设备、不锚时钟 —— 否则时钟会被拉回落点，位置上报与追赶窗口一起错位
+         * （实测 0.083s vs 目标 2.844s 就是这条路径的形状）。
+         * 不满足规则时**不清** mSeekAnchorPending / mSeekVideoAnchorDone：锚点事件留给
+         * 后面真正 >= 目标的帧（音频下一帧、或视频落点帧上屏事件）。
+         */
+        const int64_t seekAudioAnchorUs = fetchSeekClockAnchorUs(pts, "audio landing first frame");
+
+        if (seekAudioAnchorUs != INT64_MIN) {
+            mMasterClock.setTime(seekAudioAnchorUs);
+            mSeekClockAnchored = true;
+            mSeekVideoAnchorDone = true;
+            mSeekAnchorPending = false;
+            AF_LOGW("seek anchor (audio landing first frame): pts=%lld floor=%lld target=%lld anchor=%lld\n",
+                    (long long) pts, (long long) mSeekAudioFloorUs, (long long) mSeekPositionFloorUs,
+                    (long long) seekAudioAnchorUs);
+        }
     }
 
     auto *avafFrame = dynamic_cast<AVAFFrame *>(mAudioFrameQue.front().get());
@@ -10036,6 +10095,75 @@ void SuperMediaPlayer::ResetSeekStatus()
     mLastVideoFrameRenderedMs = af_getsteady_ms();
     mRecoverSampleMs = 0;
     mRecoverSamplePackets = -1;
+}
+
+/*
+ * ============ seek 期间主时钟锚点规则的唯一实现（声明与理由见 SuperMediaPlayer.h）============
+ *
+ * 只在"一次 seek 只锚一次"（mSeekClockAnchored 为假）时才会被调用处调用；这里再
+ * 复核一遍，因为它同时是"这一帧能不能当锚点"的唯一判据。
+ *
+ * 目标点取 **mSeekPositionFloorUs 优先、mSeekPos 兜底**：前者是 seek 入口写下的
+ * 位置地板（本次 seek 的目标），兜底那条覆盖"尚未设地板的旧路径 / 管道已经走完
+ * 目标点把地板撤掉"这两种状态 —— 两种情况下 mSeekPos 都还是本次 seek 的目标。
+ *
+ * 为什么"早于目标的帧直接返回 INT64_MIN"而不是照样采纳：早于目标的帧只可能来自
+ * 旧时间轴（或本次 seek 的落点关键帧，那是设计上允许**上屏**、但绝不允许**锚时钟**
+ * 的那一类）。返回 INT64_MIN 让锚点事件留在闩上，等真正 >= 目标的那一帧再来锚，
+ * 时间轴因此不会在 seek 期间被拉回旧位置。
+ *
+ * 日志里的 why 由调用处给出（视频落点帧 / 音频落点首帧），不新增限频状态：
+ * 一次 seek 最多锚成功一次，所以本函数最多打一行。
+ */
+int64_t SuperMediaPlayer::fetchSeekClockAnchorUs(int64_t frameUs, const char *why)
+{
+    if (mSeekClockAnchored) {
+        /* 本次 seek 已经锚过：主时钟不再被任何后来的帧改写。 */
+        return INT64_MIN;
+    }
+
+    if (frameUs == INT64_MIN) {
+        return INT64_MIN;
+    }
+
+    /*
+     * 目标点：位置地板优先，其次本次 seek 的 mSeekPos。
+     * 两者都是"位置必须等于目标"这条要求的载体，且都在微秒轴上（与帧的 pts 同轴）。
+     */
+    const int64_t effectiveTargetUs = (mSeekPositionFloorUs != INT64_MIN)
+                                      ? mSeekPositionFloorUs
+                                      : mSeekPos.load();
+
+    if (effectiveTargetUs != INT64_MIN &&
+        frameUs < effectiveTargetUs - SEEK_AUDIO_CONTINUITY_TOLERANCE_US) {
+        AF_LOGW("seek anchor refused (%s): frame=%lld is earlier than the target=%lld — keeping the "
+                "clock on the target instead of pulling the timeline back to a frame before the seek "
+                "(the position floor stays in charge until the landing frame reaches the target)\n",
+                why != nullptr ? why : "?", (long long) frameUs, (long long) effectiveTargetUs);
+        return INT64_MIN;
+    }
+
+    if (effectiveTargetUs == INT64_MIN) {
+        /* 极端兜底：目标点未知时，这一帧的时间位置就是唯一可用锚点。 */
+        return frameUs;
+    }
+
+    /*
+     * 【锚到目标】落点帧早于目标（稀疏 IDR / GOP 前缀的正常情况）时，时钟钉在目标上按
+     * 1x 前进、位置上报钉在目标上，用户看到的位置从松手那一刻就是目标；落点帧与它
+     * 之后的那一帧仍会被照常采纳上屏（RenderVideo 的落点判据与追赶窗口都不读时钟锚点），
+     * 所以精确性不受影响 —— 被去掉的只是"把时间轴拉回落点"这个错误动作。
+     */
+    const int64_t anchorUs = (frameUs > effectiveTargetUs) ? frameUs : effectiveTargetUs;
+
+    if (anchorUs != frameUs) {
+        AF_LOGI("seek anchor (%s): the first frame/audio packet of this seek is %lld us earlier than "
+                "the target %lld — anchoring the master clock on the TARGET (position reports and the "
+                "landing judge both use the target; the frame itself still goes to the screen)\n",
+                why != nullptr ? why : "?", (long long) frameUs, (long long) effectiveTargetUs);
+    }
+
+    return anchorUs;
 }
 
 void SuperMediaPlayer::notifySeekEndCallback()
