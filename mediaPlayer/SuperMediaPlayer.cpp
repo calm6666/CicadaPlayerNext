@@ -7886,34 +7886,39 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                      * 旧画面**上：从落点解到目标要多久，用户就看到画面冻多久 —— 这就是
                      * "seek 之后画面不动 / 卡住"的直接观感来源（与解码快慢无关的那部分）。
                      *
-                     * 现在改成"**只把第一张干净的帧先放上屏**，其余前缀帧照旧丢"：
-                     *   · 放上屏 ⇒ 旧画面立刻被替换成时间轴上离目标最近的已知帧，
-                     *     和主流播放器一致（先到附近、再精确落位）；
-                     *   · 只放一张 ⇒ mSeekFirstDecodableFrameShown 是事件闩（SeekTo / Reset
-                     *     复位），后面的前缀帧仍然走原来的 render = false，一帧都不多显示；
-                     *   · **不碰任何精度状态**：不置 mSeekLandingFrameAccepted、不动
-                     *     mSeekRenderGateUs、不动 mSeekPositionFloorUs —— 所以下面那个
-                     *     "包含目标 ⇒ 采纳 + 强制上屏"的分支一个字都没改，精确帧到达时
-                     *     **替换**这一帧，最终落点仍然是 100% 帧级精确；
-                     *   · 也**不会动时间轴**：主时钟锚点由 fetchSeekClockAnchorUs 把关，
-                     *     它明确**拒绝**早于目标的帧（"seek anchor refused"），本次 seek 的
-                     *     锚点事件（mSeekAnchorPending / mSeekVideoAnchorDone）保持未消费，
-                     *     等真正包含目标的那一帧再来锚。
+                     * 【修 2026-09-26：前缀帧按解码顺序**全部出画**（快进到目标），
+                     *  不再"只放第一张、其余一律丢"】
+                     *
+                     * 真机日志（21:25:45.020 起，用户 seek 到 82.529s）：
+                     *   seek first decodable frame shown: pts=80080000 is 2449 ms before the seek target=82529000
+                     *   随后 5 秒内 `drop frame,master played time is 82558949,video pts is 80147000`…
+                     *   连刷不断：主时钟钉在目标点，前缀帧（本帧 + 帧长 <= 目标）**全部**被判"迟到"丢掉。
+                     * 于是画面只能在"每丢 8 帧由防冻阀门强制放 1 帧"的节拍上爬 —— 看起来就是
+                     * 卡死/幻灯片；本次日志里前缀长度实测 0.9~16.9 秒，那就是用户看到的"卡了半天"。
+                     *
+                     * 改成：seek 落点窗口内，凡是从关键帧起步解出来的**干净前缀帧都按顺序上屏**
+                     * （解码多快就多快地快进到目标），不再让它们躺在队列里被丢掉。
+                     *   · **精度一点没变**：本分支只处理"本帧 + 帧长 <= 目标"（即**不包含目标**）的帧；
+                     *     包含目标的那一帧仍然走下面的采纳分支，最终停在屏幕上的仍然是它，
+                     *     位置上报/地板/主时钟锚点全都不在这里改动；
+                     *   · 画面**立刻就在动**（从落点关键帧朝目标快进），而不是冻着旧画面等解码；
+                     *   · force_render 会跳过下面的节拍/迟到判定，前缀帧不会在别处被二次丢掉；
+                     *   · 脏帧仍然被上面 !mSeekDecodeStartIsKey 那一支挡住（不进这里）。
                      */
+                    force_render = true;
+                    render = true;
+
                     if (!mSeekFirstDecodableFrameShown) {
                         mSeekFirstDecodableFrameShown = true;
-                        force_render = true;
-                        render = true;
 
                         AF_LOGI("seek first decodable frame shown: pts=%lld is %lld ms before the seek "
-                                "target=%lld — replacing the previous picture now (the frame that CONTAINS "
-                                "the target will replace this one as soon as it is decoded; the landing "
-                                "judge and the clock anchor are untouched)\n",
+                                "target=%lld — replacing the previous picture now and fast-forwarding the "
+                                "remaining clean prefix frames to the target (the frame that CONTAINS the "
+                                "target will replace them at the end; the landing judge and the clock anchor "
+                                "are untouched)\n",
                                 (long long) frameTimePos,
                                 (long long) ((mSeekPositionFloorUs - frameTimePos) / 1000),
                                 (long long) mSeekPositionFloorUs);
-                    } else {
-                        render = false;
                     }
                 } else if (mSeekPositionFloorUs != INT64_MIN &&
                            mSeekLandingFloorOwnerUs != INT64_MIN &&
