@@ -151,6 +151,8 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
      */
     mPlayer.mSwitchReArmPending = false;
     mPlayer.mSwitchReArmStreamIndex = -1;
+    /* 【B19 硬要求】换片源/重新 Prepare 同样不允许跨片源补做 PFR：闩一起清掉。 */
+    mPlayer.mPauseFrameRestorePending = false;
 
     //prepare之前seek
     if (mPlayer.mSeekPos > 0) {

@@ -1603,6 +1603,33 @@ namespace Cicada {
         int64_t mSeekLandingFloorOwnerUs{INT64_MIN};
         int mSwitchReArmStreamIndex{-1};
         bool mSwitchReArmPending{false};
+
+        /*
+         * ============ 【B19】切档在途时不发 PFR seek，改为"推迟到切档终态" ============
+         *
+         * PFR（暂停帧恢复）的发起点在**内核内部**：SuperMediaPlayer::RestorePausedVideoFrame()
+         * 在暂停态读到"解码器最后渲染帧 pts"后直接 SeekTo(...)（日志里的
+         * `PFR: seek posUs=…` 就是它）。上层（Compose/QML）反复 setView 时这个函数会被
+         * 反复调到，于是切档在途期间一次次插进 seek —— `FlushVideoPath(cancelPendingSwitch=1)`
+         * 把在途切档打成 `status=3 canceled`，这就是"手动切档 100% 失败"的直接推手。
+         *
+         * mPauseFrameRestorePending：一次"有待补做的 PFR"的事件闩。
+         *   · 切档在途（mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0
+         *     || mSwitchReArmPending）时不发 seek，只置闩并返回；
+         *   · 在切档终态出口补做一次（READY/FAILED 走 finishQualitySwitch 那处，
+         *     CANCELED 走 FlushVideoPath 那处），且**只补做一次**：先清闩再补发；
+         *   · 补做时仍在暂停态才真的发（PFR 只在暂停态有意义），否则丢弃闩；
+         *   · 补做时若又检测到新的切档在途，只重新置闩（推迟到它自己的终态），
+         *     **不递归、不立即重试** ⇒ 不会 ping-pong；
+         *   · 换片源/停止/Reset()/Prepare 一律清闩，不跨片源补做。
+         *
+         * 不记目标位置：补做时重新调用 RestorePausedVideoFrame()，它自己会从**当前**
+         * 解码器读"最后渲染帧 pts" ⇒ 天然取到切档之后的新时间轴，不会用取消前的旧时间点。
+         *
+         * runDeferredPauseFrameRestore()：三个终态出口共用的唯一补做入口（无计时器）。
+         */
+        bool mPauseFrameRestorePending{false};
+        void runDeferredPauseFrameRestore();
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

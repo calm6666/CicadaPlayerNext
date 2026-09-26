@@ -3194,6 +3194,14 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
     mQualitySwitchCommittedStreamIndex = -1;
     mQualitySwitchOldFramesPending = 0;
     mRetiredVideoStreamIndex = -1;
+
+    /*
+     * 【B19 终态出口 1/2：READY（status=1）与 FAILED】本函数同时是这两个终态的唯一出口
+     * （上面 :3156 那条 NotifyVideoQualitySwitch(ready ? READY : FAILED)）。
+     * 切档已经走完，把在途期间被推迟的那一次 PFR 补做一次（内部先清闩、且只在暂停态补做；
+     * 若此时又有新切档在途，它只会重新置闩，等那一次的终态 —— 不递归、不立即重试）。
+     */
+    runDeferredPauseFrameRestore();
     /*
      * ============ 【2026-09-24 修：这里**不能**清 mActiveVideoPtsOffset】============
      *
@@ -9138,6 +9146,13 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
             (int) mSeekFlag, (int) mSeekNeedCatch);
 
     /*
+     * 【B19】入口先记下"这一次 flush 会不会发出 CANCELED 终态"：真正要补做的 PFR 必须等
+     * 函数末尾（pending 索引清成 -1 之后）才能做，否则补做入口会把还没清掉的
+     * mPendingVideoStreamIndex 读成"切档仍在途"而再次推迟。纯状态快照，不做任何动作。
+     */
+    const bool switchCancelNotifiedOnEntry = (cancelPendingSwitch && mPendingVideoStreamIndex >= 0);
+
+    /*
      * seek/stop 之前必须把 pending representation 从 demuxer manager 中撤掉。
      * 仅丢弃 pending decoder 不够：HLS/DASH manager 仍会把该流标记为 selected，
      * 下一次 Seek() 会同时给旧流和已取消的新流发包，随后 ReadPacket() 把它们
@@ -9153,6 +9168,13 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
         mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_CANCELED,
                                              mPendingVideoStreamIndex,
                                              "quality switch canceled");
+        /*
+         * 【B19 终态出口 3/3：CANCELED（status=3）】未提交就被取消的切档不走
+         * finishQualitySwitch（那里 hadCommit 为假会直接 return），所以"补做被推迟的 PFR"
+         * 必须在**本函数末尾**（pending 状态全部拆干净之后）做一次 —— 见函数结尾处
+         * `switchCancelNotifiedOnEntry` 那一段。放在这里会把 mPendingVideoStreamIndex
+         * 仍 >= 0 的状态读成"切档还在途"，于是又推迟，永远补不上。
+         */
     }
     if (flushRender) {
         mAVDeviceManager->flushDevice(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
@@ -9281,6 +9303,23 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
     dropLateVideoFrames = false;
     mVideoCatchingUp = false;
     mVideoEOS = false;
+
+    /*
+     * 【B19 终态出口 3/3：CANCELED（status=3），放在**函数末尾**】
+     *
+     * 到这里 pending 路的一切状态（mPendingVideoStreamIndex / mWillChangedVideoStreamIndex /
+     * preroll 闩 / retired 索引）都已经拆干净，所以"切档在途"判据一定为假，补做入口这次
+     * 真的会把被推迟的 PFR 发出去（且只在暂停态发、先清闩、不递归）。
+     * 条件用入口快照：只有"这次 flush 确实取消了在途切档"才补做 ——
+     *   · Stop/换源/后台 flush 的 FlushVideoPath 也带 cancelPendingSwitch=1，但那时
+     *     mPlayStatus 不是 PLAYER_PAUSED，补做入口会丢弃这一次；Reset()/Prepare 还会
+     *     直接清闩；
+     *   · 普通 seek（cancelPendingSwitch=0）不在这里补做 —— 它的 PFR 由"seek 结束 →
+     *     重新装弹的切档 → 那个切档的终态"这条链补，避免 seek 期间插 seek。
+     */
+    if (switchCancelNotifiedOnEntry) {
+        runDeferredPauseFrameRestore();
+    }
 }
 
 void SuperMediaPlayer::FlushSubtitleInfo()
@@ -10360,6 +10399,31 @@ int SuperMediaPlayer::RestorePausedVideoFrame()
         AF_LOGI("PFR: skip, status=%d\n", (int) mPlayStatus.load());
         return 0;
     }
+
+    /*
+     * 【B19】切档在途时**不发起** PFR seek —— 只记下"有一次 PFR 待做"，等切档终态补做。
+     *
+     * 为什么要在这里拦：本函数是 PFR 的唯一发起点（下面那句 SeekTo），而它会被上层反复
+     * setView 反复调到；只要切档在途，它插进来的 seek 就会走
+     * `FlushVideoPath(cancelPendingSwitch=1)` 把在途切档打成 status=3 canceled
+     * （安卓日志 7/7 次手动切档都是这么没的）。推迟而不是丢弃：暂停帧恢复本身是必要的，
+     * 只是必须等切档走完。
+     *
+     * 判据（纯状态）：pending 路存在、或已有"将要切到某档"的请求、或 B17 的"等 seek 结束
+     * 重新装弹"闩为真（后者意味着马上会再发起一次切档，此时插 seek 会把重装也打断）。
+     * 无计时器、无阈值。
+     */
+    if (mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 || mSwitchReArmPending) {
+        if (!mPauseFrameRestorePending) {
+            AF_LOGI("PFR: deferred — a quality switch is in flight (pendingStream=%d willChangeStream=%d "
+                    "reArmPending=%d), so no seek is issued now; the restore will run ONCE at the "
+                    "switch's terminal state (READY / CANCELED / FAILED)\n",
+                    mPendingVideoStreamIndex, mWillChangedVideoStreamIndex, (int) mSwitchReArmPending);
+        }
+
+        mPauseFrameRestorePending = true;
+        return 0;
+    }
     IDecoder *decoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
     if (decoder == nullptr) {
         AF_LOGI("PFR: skip, no video decoder\n");
@@ -10409,6 +10473,44 @@ int SuperMediaPlayer::RestorePausedVideoFrame()
             (int64_t) (mActiveVideoPtsOffset == INT64_MIN ? 0 : mActiveVideoPtsOffset),
             (int64_t) (lastPtsOnClockAxis / 1000));
     return 0;
+}
+
+/*
+ * 【B19】切档终态出口的唯一补做入口（READY/FAILED/CANCELED 三处都会调到）。
+ *
+ * 语义：把"切档在途时被推迟的那一次 PFR"补做一次，然后清闩。
+ *   · 先清闩再调用 RestorePausedVideoFrame() —— 补发出去的 seek 即使又被打断（又来一次
+ *     切档），也只会让 RestorePausedVideoFrame() 重新置闩，由**那一次**切档的终态再补；
+ *     本函数不会在这里立即重试、也不会递归调用自己 ⇒ 没有 ping-pong（硬要求 3）。
+ *   · 播放器已不在暂停态 ⇒ 丢弃这一次待做（PFR 只对暂停画面有意义），清闩即可。
+ *   · 又检测到切档在途（例如刚被"更新的请求"取代、重装闩还在）⇒ 重新置闩，等它的终态。
+ *   · 不记目标位置：RestorePausedVideoFrame() 自己从当前解码器读最后渲染帧 pts，
+ *     所以补做用的是切档之后的当前时间轴（不是取消前的旧点）。
+ */
+void SuperMediaPlayer::runDeferredPauseFrameRestore()
+{
+    if (!mPauseFrameRestorePending) {
+        return;
+    }
+
+    mPauseFrameRestorePending = false;
+
+    if (mPlayStatus != PLAYER_PAUSED) {
+        AF_LOGI("PFR: deferred restore dropped — the player is no longer paused (status=%d)\n",
+                (int) mPlayStatus.load());
+        return;
+    }
+
+    if (mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 || mSwitchReArmPending) {
+        /* 终态出口处又有新的切档在途：推迟到它自己的终态，绝不在这里立即重试。 */
+        mPauseFrameRestorePending = true;
+        return;
+    }
+
+    AF_LOGI("PFR: running the deferred pause-frame restore now that the quality switch reached its "
+            "terminal state (no seek was issued while the switch was in flight)\n");
+
+    RestorePausedVideoFrame();
 }
 
 
@@ -10475,6 +10577,8 @@ void SuperMediaPlayer::Reset()
      */
     mSwitchReArmPending = false;
     mSwitchReArmStreamIndex = -1;
+    /* 【B19 硬要求】换片源/停止/Reset ⇒ 不跨片源补做 PFR：闩一起清掉。 */
+    mPauseFrameRestorePending = false;
     // 复位时必须把"落点闸门/闩"一起清掉：否则 Reset 之后残留的闸门会让
     // 下一个与 seek 无关的帧被当成落点帧（并带着一个无效的目标点去算日志）。
     mSeekRenderGateUs = INT64_MIN;
