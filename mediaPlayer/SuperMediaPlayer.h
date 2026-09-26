@@ -1473,6 +1473,25 @@ namespace Cicada {
          */
         std::deque<int64_t> mVideoAxisPts;
         std::deque<int64_t> mVideoAxisTimePos;
+
+        /*
+         * ============ 【B12】切换预滚"两路代价取小"的状态（2026-09-26）============
+         *
+         * 预滚起点有两条路（见 SuperMediaPlayer.cpp 里那段决策）：
+         *   · 等参考点**之后**第一个关键帧：不解码，等待 = nextKey - ref（≤ 一个关键帧间隔）；
+         *   · 从参考点**之前**最近的关键帧起解、丢前缀追上时钟：代价 = (ref - lastKey) / (rate - 1)。
+         * 在预滚入口比较两者、选小的那条。
+         *
+         * mPendingVideoDecodeRateMilli 是"目标路解码速度 / 实时"的千分比，每次提交后用它这一次
+         * 真正解掉的媒体长度 ÷ 墙钟实测更新；墙钟从**切换请求**起算（含 open/seek），因此只会
+         * 低估速率 ⇒ 偏向"等关键帧"（今天的行为），不会因为高估而选错路。
+         *
+         * mPendingVideoPrerollPathChosen 保证选路**只在预滚入口做一次**（每次切换请求处复位）：
+         * 否则包队列一前进就改主意，会和"已经丢掉的前缀"打架。
+         * 两个成员一律追加在类末尾（本文件顶部有硬约束：中间插入会让别的 TU 的偏移对不上）。
+         */
+        int mPendingVideoDecodeRateMilli{1900};
+        bool mPendingVideoPrerollPathChosen{false};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

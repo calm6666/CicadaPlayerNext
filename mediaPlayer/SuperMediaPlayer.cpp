@@ -4271,10 +4271,69 @@ void SuperMediaPlayer::doDeCode()
                          * 走的还是原来那条"等参考点之后的关键帧"的路。
                          */
                         const bool needAlignmentByConstruction = !mActiveDecoderFramesCarryTimePosition;
-                        const int64_t prerollLowerPivotUs =
+                        int64_t prerollLowerPivotUs =
                                 (mSwitchStartedWhilePaused && mPausedSwitchPivotUs > 0)
                                 ? mPausedSwitchPivotUs
                                 : (needAlignmentByConstruction ? mPendingVideoPrerollRefUs : INT64_MIN);
+
+                        /*
+                         * ============ 【B12：两路代价取小（只在预滚入口选一次）】============
+                         *
+                         * 预滚起点有两条路，各有代价：
+                         *   · 等参考点**之后**第一个关键帧：不解码，代价 = 墙钟 nextKey - ref
+                         *     （≤ 一个关键帧间隔）；
+                         *   · 从参考点**之前**最近的关键帧起解、丢前缀追上时钟：代价 = 解码
+                         *     (ref - lastKey) 这么长的一段，按 (rate - 1) 倍实时追赶。
+                         * 换档点刚过关键帧时（gap 很小）追帧远快于等下一个关键帧；反之等关键帧更省。
+                         *
+                         * 只在**播放态且帧带 timePosition**（prerollLowerPivotUs == INT64_MIN，
+                         * 即今天固定走"等关键帧"的那条路）时判一次：
+                         *   · 暂停态与"帧不带 timePosition"的后端本来就固定走追帧（S3 / B6），
+                         *     没有可选项；
+                         *   · mPendingVideoPrerollPathChosen 保证只判一次（每次切换请求处复位），
+                         *     否则包队列一前进就改主意，会和"已经丢掉的前缀"打架。
+                         *
+                         * nextKey / lastKey 都从**当前视频包队列**查：DASH 的 segmentAlignment 与
+                         * HLS 的 dashenc 让各档 IDR 落在同一网格上，所以这个估计对目标档成立；
+                         * 万一不成立也只是"选得不最优"—— 提交门"早于目标就丢、晚于目标就等"仍然
+                         * 兜住正确性，**不会降低精度**。
+                         */
+                        if (prerollLowerPivotUs == INT64_MIN && !mPendingVideoPrerollPathChosen &&
+                            !mPendingVideoPrerollDone && mPendingVideoPrerollRefUs != INT64_MIN) {
+                            const int64_t refForChoiceUs = mPendingVideoPrerollRefUs;
+                            const int64_t nextKeyUs =
+                                    mBufferController->GetFirstKeyPTSAfter(BUFFER_TYPE_VIDEO, refForChoiceUs);
+                            const int64_t lastKeyUs =
+                                    mBufferController->GetKeyTimePositionBefore(BUFFER_TYPE_VIDEO, refForChoiceUs);
+
+                            if (nextKeyUs != INT64_MIN && nextKeyUs > refForChoiceUs &&
+                                lastKeyUs != INT64_MIN && lastKeyUs < refForChoiceUs) {
+                                const int64_t waitNextKeyUs = nextKeyUs - refForChoiceUs;
+                                const int64_t gapFromLastKeyUs = refForChoiceUs - lastKeyUs;
+                                /* rate 是千分比；净追赶速度 = (rate - 1) 倍实时，至少按一点点算。 */
+                                const int64_t excessRateMilli = std::max(1, mPendingVideoDecodeRateMilli - 1000);
+                                const int64_t catchUpUs = gapFromLastKeyUs * 1000 / excessRateMilli;
+                                const bool chooseCatchUp = catchUpUs < waitNextKeyUs;
+
+                                if (chooseCatchUp) {
+                                    prerollLowerPivotUs = lastKeyUs;
+                                }
+
+                                mPendingVideoPrerollPathChosen = true;
+
+                                AF_LOGI("quality switch preroll: two candidate paths — wait for the next key frame "
+                                        "%lld ms (nextKey=%lld ref=%lld) vs catch up from the previous key frame "
+                                        "%lld ms (lastKey=%lld gap=%lld ms decodeRate=%d/1000) → choosing %s\n",
+                                        (long long) (waitNextKeyUs / 1000),
+                                        (long long) nextKeyUs, (long long) refForChoiceUs,
+                                        (long long) (catchUpUs / 1000),
+                                        (long long) lastKeyUs, (long long) (gapFromLastKeyUs / 1000),
+                                        mPendingVideoDecodeRateMilli,
+                                        chooseCatchUp
+                                        ? "catch-up (decode the previous key frame's GOP, drop the prefix)"
+                                        : "wait for the next key frame (no prefix decode)");
+                            }
+                        }
 
                         if (prerollLowerPivotUs != INT64_MIN && !mPendingVideoPrerollDone) {
                             const int64_t lastKeyBeforePivot =
@@ -4291,7 +4350,10 @@ void SuperMediaPlayer::doDeCode()
                                         (long long) lastKeyBeforePivot,
                                         mSwitchStartedWhilePaused
                                         ? "paused switch: the frozen pivot can never get a later key frame"
-                                        : "this backend's output frames carry no timePosition");
+                                        : (needAlignmentByConstruction
+                                           ? "this backend's output frames carry no timePosition"
+                                           : "adaptive: catching up from the previous key frame is cheaper than "
+                                             "waiting for the next one"));
                                 mPendingVideoPrerollRefUs = lastKeyBeforePivot;
                             }
                         }
@@ -6565,6 +6627,39 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
      * 它们的 streamIndex 就是新的 mCurrentVideoIndex，在 doDeCode 里会自然走
      * active 分支（旧流的残留包另有 streamIndex 检查挡掉）。
      */
+    /*
+     * ============ 【B12：实测目标路的解码速率（千分比），供下一次切换选路用】============
+     *
+     * 解掉的媒体长度 = 提交帧的位置 − 预滚起解关键帧的位置。两者都要在**节目轴**上：
+     * mPendingVideoPrerollKeyPts 是包的原始 pts，加 mActiveVideoPtsOffset 换算 —— 与提交门
+     * 自己用的换算（:5987 那一带）同源，所以两条路的算术一致。
+     *
+     * 墙钟从**切换请求**起算（mPendingVideoSwitchStartMs），因此含着 open/seek/flush 的时间
+     * ⇒ 只会**低估**速率 ⇒ 偏向"等关键帧"（今天的行为）；不会因为高估而选错路。
+     * 纯测量，不参与任何判定；没有计时器（只读一次墙钟，和本函数其它统计日志同源）。
+     */
+    if (mPendingVideoPrerollKeyPts != INT64_MIN && mActiveVideoPtsOffset != INT64_MIN &&
+        mPendingVideoSwitchStartMs > 0 && pts != INT64_MIN) {
+        const int64_t decodedUs = pts - (mPendingVideoPrerollKeyPts + mActiveVideoPtsOffset);
+        const int64_t wallUs = (af_getsteady_ms() - mPendingVideoSwitchStartMs) * 1000;
+
+        if (decodedUs > 0 && wallUs > 0) {
+            int64_t rateMilli = decodedUs * 1000 / wallUs;
+
+            /* 夹到 [1.0x, 10x]：低于实时不可能（追不上就不会提交），高于 10x 视为时间戳抖动。 */
+            if (rateMilli < 1000) {
+                rateMilli = 1000;
+            } else if (rateMilli > 10000) {
+                rateMilli = 10000;
+            }
+
+            mPendingVideoDecodeRateMilli = static_cast<int>(rateMilli);
+            AF_LOGI("quality switch: measured target decode rate %d/1000 real-time (decoded %lld ms of media "
+                    "in %lld ms wall since the switch request) — the next switch's path choice will use it\n",
+                    mPendingVideoDecodeRateMilli, (long long) (decodedUs / 1000), (long long) (wallUs / 1000));
+        }
+    }
+
     mPendingVideoPtsOffset = INT64_MIN;
     mPendingVideoSwitchTimePosition = INT64_MIN;
     mPendingVideoSwitchStartMs = 0;
@@ -8462,6 +8557,11 @@ int SuperMediaPlayer::ReadPacket()
                 mPendingVideoSwitchTimePosition = mCurrentPos;
             }
             mPendingVideoSwitchStartMs = af_getsteady_ms();
+            /*
+             * 【B12】新的一次切换：允许"两路代价取小"在预滚入口重新判一次。
+             * 不在这里复位的话，第二次切换会沿用上一次的选择（旧参考点已经作废）。
+             */
+            mPendingVideoPrerollPathChosen = false;
             mPendingVideoInitPacketSent = false;
             mPendingVideoPtsOffset = INT64_MIN;
             /* 新的一次切换：预滚（丢弃窗口之前的数据）重新开始。 */

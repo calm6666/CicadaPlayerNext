@@ -291,6 +291,10 @@ namespace Cicada {
         bool mSeekLandingProgress{false};
         std::deque<unique_ptr<IAFPacket>> mSeekLandingStage{};
         std::vector<uint8_t> mSeekLandingExtraData{};
+        /* 已经丢掉的"落点之前"的包数（只用于日志，证明延迟线真的接管了这次 seek） */
+        int mSeekLandingDropped{0};
+        /* "换更近的落点"这类日志每轮装弹的硬上限（防极端 GOP 刷屏；其余状态各只打一条） */
+        int mSeekLandingLogCount{0};
 
         void seekLandingArm(int64_t targetUs);
 
@@ -299,6 +303,9 @@ namespace Cicada {
         void seekLandingFlush();
 
         void seekLandingReset();
+
+        /* 只丢"已收下还没交出"的包，保留 seek 目标（stop/start 会重开同一个分片，目标仍有效） */
+        void seekLandingDropStage();
     };
 }
 
