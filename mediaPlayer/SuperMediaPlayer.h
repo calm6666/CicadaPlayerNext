@@ -1541,6 +1541,26 @@ namespace Cicada {
          * 新成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
          */
         bool mSeekFirstDecodableFrameShown{false};
+
+        /*
+         * ============ 【B16】"追赶不收敛 ⇒ 一帧都不送"的连续事件计数 ============
+         *
+         * mVideoDiscardStreak：播放态下渲染判定**连续**给出"不上屏"的帧数，任何一次
+         *   真的上屏都把它清零（见 RenderVideo 的两个分支）。
+         * mVideoDiscardGapAbsUs：上一次被拒帧与主时钟的距离绝对值（|master - videoPts|）。
+         *   新的一帧如果这个距离**变小了**，说明追赶在收敛（例如 seek 里时钟钉在目标上、
+         *   解码从落点往目标走），计数立刻回到 1，**不会**去强制放行；
+         *   只有"距离一直不变小"（两条轴恒速同向、偏移恒定 = 追赶不收敛）才累计到阈值，
+         *   由 RenderVideo 强制放行一帧，避免画面永久冻住（安卓日志形态：3.09s / 246 条
+         *   drop、偏移恒定 ~3s、期间 0 次上屏、0 条落点采纳 ⇒ 画面冻死）。
+         *
+         * 两个成员都只是**观测/出口**用途：不改主时钟、不改落点判据、不改位置上报；
+         * 复位口径与 mSeekFirstDecodableFrameShown 一致（SeekTo / Reset）。
+         * 无计时器（纯事件计数）。新成员一律追加在类末尾（本文件顶部硬约束：
+         * 中间插入会让别的 TU 的偏移对不上）。
+         */
+        int mVideoDiscardStreak{0};
+        int64_t mVideoDiscardGapAbsUs{INT64_MIN};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

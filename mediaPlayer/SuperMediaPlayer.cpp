@@ -346,6 +346,26 @@
  * `elapsedSinceLastRenderUs > 100_000`：为了追赶时钟丢掉迟到帧可以，但不能长时间不出画。
  */
 #define JOINING_FORCE_RENDER_MS (100)
+/*
+ * 【B16】"追赶不收敛 ⇒ 一帧都不送"的事件计数出口（无计时器）。
+ *
+ * 判据（全是状态）：播放态下，渲染判定**连续**给出"不上屏"，而且这些被拒帧与主时钟的
+ * 距离 |master - videoPts| **一直没有变小**（说明两条轴在恒速同向前进、偏移恒定 ——
+ * 也就是"追赶不收敛"：解码在前进，差距不收敛，于是按原规则每一帧都会被拒）。
+ * 一旦连续达到这个帧数，就**强制把当前帧放上屏一次**，让画面随解码前进，而不是
+ * 永远停在 seek 之前那张旧画面上（安卓日志里的形态：3.09s/246 条 drop、偏移恒定 ~3s、
+ * 期间 0 次上屏、0 条落点采纳 ⇒ 画面冻死）。
+ *
+ * 为什么用"帧数"而不是时间：帧数是**事件计数**（连续被拒了几帧），不引入计时器、不看墙钟；
+ * 它与 ExoPlayer 里 shouldForceRenderOutputBuffer 的 100ms 护栏同义（那边用时间，
+ * 这里用连续事件数），量级也刻意对齐本文件既有的 JOINING_FORCE_RENDER_MS = 100ms。
+ *
+ * 为什么不会破坏精度：这条只在"判定已经说不上屏"之后把 render 翻成 true，
+ *   · 不影响 seek 落点判据（落点采纳在同一帧里已经先跑完；采纳了就轮不到这里）；
+ *   · 不动主时钟、不动位置上报、不动任何锚点闩；
+ *   · 一帧上屏后计数清零 ⇒ 不会是"每帧都放行"，节拍/追赶逻辑照旧。
+ */
+#define VIDEO_STUCK_DISCARD_STREAK_MAX 8
 
 /*
  * 提交时允许新路首帧比主时钟（= 当前播放位置）旧多少（微秒）。
@@ -673,6 +693,9 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
     mSeekDecodeStartIsKey = false;
     /* B15：本次 seek 的"先出画"闩，与 mSeekDecodeStartIsKey 同点复位（每次 seek 只先出一帧）。 */
     mSeekFirstDecodableFrameShown = false;
+    /* B16：本帧连续拒帧计数与偏移采样随 seek 一起重新起算。 */
+    mVideoDiscardStreak = 0;
+    mVideoDiscardGapAbsUs = INT64_MIN;
     mSeekVideoAnchorDone = false;
     mSeekAudioAlignDone = false;
     /*
@@ -7971,10 +7994,48 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
         }
     }
 
+    /*
+     * 【B16：追赶不收敛 ⇒ 一帧都不送 —— 出口】
+     *
+     * 判据（纯状态、无计时器）：播放态下渲染判定已经连续给出"不上屏"共
+     * mVideoDiscardStreak 帧，而且这些帧与主时钟的距离 |master - videoPts| **始终没有变小**
+     * （见下面丢弃分支里的累计规则）。这正是安卓日志里的形态：
+     *   3.09s 内 246 条 `drop frame`（≈79 帧/秒，100% 的帧被拒）、
+     *   主时钟与视频帧两条轴**同速同向前进**、偏移恒定（~3s）、期间 0 次上屏、
+     *   0 条 `seek landing frame accepted` ⇒ 解码在前进、差距不收敛 ⇒ 画面永久冻住。
+     *
+     * 处置：把**这一帧**强制放上屏（只此一帧，计数在上屏分支立刻清零）。这样
+     *   · 画面至少随解码前进，不再"永不收敛 ⇒ 永远冻住"；
+     *   · 节拍/追赶语义不变：上屏后计数归零，下一次仍从 0 开始累计，
+     *     所以不会退化成"每帧都放行"；
+     *   · **精度零影响**：本行位于落点判据（上面的 mSeekRenderGateUs 块）之后，
+     *     落点帧若已被采纳，render 早就是 true，根本走不到这里；本行也不改主时钟、
+     *     不改位置上报、不动任何锚点闩 —— 被放行的帧是解码器正常输出的干净帧，
+     *     不是"缺参考帧的脏帧"（脏帧在落点块里就被 mSeekDecodeStartIsKey 挡住了）。
+     * 暂停态一律不适用（mPlayStatus != PLAYER_PLAYING）：暂停语义要求时间绝对不动。
+     */
+    const int64_t videoGapAbsUs = masterClockUnset ? INT64_MIN : llabs(videoLateUs);
+
+    if (!render && mPlayStatus == PLAYER_PLAYING && !masterClockUnset &&
+        mVideoDiscardStreak >= VIDEO_STUCK_DISCARD_STREAK_MAX) {
+        render = true;
+
+        AF_LOGW("video frames were rejected while the gap to the master clock never shrank "
+                "(consecutive=%d frames, gap=%lld ms, master=%lld, video pts=%lld, playStatus=%d, "
+                "seekFlag=%d) — forcing this frame to the screen so the picture keeps moving instead "
+                "of freezing; the pacing/landing rules are untouched and the count resets here\n",
+                mVideoDiscardStreak, (long long) (videoGapAbsUs / 1000),
+                (long long) masterPlayedTime, (long long) videoPts,
+                (int) mPlayStatus, (int) mSeekFlag);
+    }
+
     if (render) {
         /* 画面又在动了：清掉“追赶中”，主循环恢复正常的等待间隔
          * （读取点在 mainService()，见 mVideoCatchingUp 的说明）。 */
         mVideoCatchingUp = false;
+        /* B16：有帧真的上屏 ⇒ 连续拒帧计数与偏移采样一起归零（下一次从 0 开始累计）。 */
+        mVideoDiscardStreak = 0;
+        mVideoDiscardGapAbsUs = INT64_MIN;
         /*
          * 帧真的上屏了 —— 这是“视频路还活着”的**唯一**权威证据（丢帧不算，
          * 丢帧风暴里画面其实冻着）。管线真死时的一次性恢复就看这个时间戳：
@@ -8077,6 +8138,21 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
         mUtil->videoRendered(false);
         mMPAUtil->videoRendered(false);
         mVideoCatchingUp = true;
+        /*
+         * 【B16】连续拒帧的累计规则：只有"与主时钟的距离**没有变小**"才计入
+         * （= 两条轴恒速同向、偏移恒定 ⇒ 追赶不收敛）；距离在收敛（例如 seek 期间
+         * 时钟钉在目标上、解码从落点朝目标推进）就回到 1，正常追赶完全不受打扰。
+         * 纯事件计数：没有计时器、没有墙钟阈值。
+         */
+        if (videoGapAbsUs != INT64_MIN) {
+            if (mVideoDiscardGapAbsUs != INT64_MIN && videoGapAbsUs < mVideoDiscardGapAbsUs) {
+                mVideoDiscardStreak = 1;
+            } else if (mVideoDiscardStreak < VIDEO_STUCK_DISCARD_STREAK_MAX + 1) {
+                ++mVideoDiscardStreak;
+            }
+
+            mVideoDiscardGapAbsUs = videoGapAbsUs;
+        }
         /* 又丢了一帧：置“追赶中”，让主循环以最多 2ms 的间隔尽快再跑一轮
          * （mainService() 里读它；这就是这个标志现在唯一的用途）。 */
 
@@ -10255,6 +10331,9 @@ void SuperMediaPlayer::Reset()
     mSeekDecodeStartIsKey = false;
     /* B15：与 SeekTo 同一个复位口径，保证 Reset 之后不会残留"已经先出过画"的闩。 */
     mSeekFirstDecodableFrameShown = false;
+    /* B16：与 SeekTo 同一个复位口径。 */
+    mVideoDiscardStreak = 0;
+    mVideoDiscardGapAbsUs = INT64_MIN;
     mSeekCatchStartMs = 0;
     mVideoStarveIters = 0;
     mSeekVideoAnchorDone = false;
