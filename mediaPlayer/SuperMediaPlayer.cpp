@@ -1715,7 +1715,25 @@ int SuperMediaPlayer::mainService()
                 return 0;
             }
         }
-        if ((mVideoCatchingUp || mSeekFlag) && getPlayerBufferDuration(false, false) > 0) {
+        /*
+         * ============ 【★ seek 窗口内必须全速前推 —— "seek 后立马继续播放"的来源 ★】============
+         *
+         * 原判据是 `(mVideoCatchingUp || mSeekFlag) && getPlayerBufferDuration(...) > 0`。
+         * 而 seek 刚发起时缓冲**正是被清空的**（就是 0），于是这条"快跑"在最需要它的时刻
+         * 不成立：主循环退回 loopGap（25fps 时约 26ms 一拍），而"解码前推到目标"是**一帧一拍**
+         * 地往前挪的 —— 落点比目标早 11 秒（≈300 帧）时，光前推就要 6~7 秒，
+         * 用户看到的就是"seek 之后卡一下才动"。精确落点判据（包含目标）是对的，卡在前推速度上。
+         *
+         * seek 窗口期间（`mSeekFlag` 在途，或落点帧尚未采纳即 mSeekRenderGateUs 仍置位）
+         * 不再看缓冲：持续 2ms 一拍把包喂给解码器，直到"包含目标的那一帧"进入帧队列并被采纳。
+         * 这是**状态判据**（seek 还在不在进行），不引入计时器；窗口一结束
+         * （采纳时 mSeekRenderGateUs 归 INT64_MIN）自动回到正常节拍，不会长期快跑。
+         * 追赶（mVideoCatchingUp）那条保留原样，仍要求"缓冲 > 0"。
+         * ==================================================================================
+         */
+        const bool inSeekWindow = (mSeekFlag || mSeekRenderGateUs != INT64_MIN);
+
+        if (inSeekWindow || (mVideoCatchingUp && getPlayerBufferDuration(false, false) > 0)) {
             /*
              * 追赶/seek 期间要尽快再跑一轮，但必须留一点时间片：原来这里
              * 直接 return 0，一次 wait 都不做，主循环变成 0 延时自旋。
