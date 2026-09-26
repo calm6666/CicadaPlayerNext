@@ -1054,9 +1054,43 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
         return switchSubTitle(index);
     } else if (type == STREAM_TYPE_AUDIO && mPlayer.mCurrentAudioIndex >= 0 && mPlayer.mCurrentAudioIndex != index) {
         return switchAudio(index);
-    } else if (type == STREAM_TYPE_VIDEO && mPlayer.mCurrentVideoIndex >= 0 && mPlayer.mCurrentVideoIndex != index) {
+    } else if (type == STREAM_TYPE_VIDEO) {
+        /*
+         * 【修：当前视频下标未知时不再丢弃用户的切档请求】
+         *
+         * 原来这一支是 `type == STREAM_TYPE_VIDEO && mPlayer.mCurrentVideoIndex >= 0 &&
+         * mPlayer.mCurrentVideoIndex != index`。只要 mCurrentVideoIndex 是 -1
+         * （换源 / 切档 / seek 交叉时会被置过），用户点清晰度就在这一行**无声返回**：
+         * 没有日志、没有 STARTED 事件、画面不动，界面上就是"点了没反应"。
+         *
+         * "当前档位"这个判据真正有用的只有一件事 —— 点的是正在播的那一档就没必要
+         * 白切一次；而"未知"（<0）绝不等于"不能切"：下面 switchVideoStream() 用的
+         * 是**目标档位的元数据** + **主时钟** 作为预滚起点（见那里的 startTime 取法），
+         * 整条路都不依赖当前档位下标。
+         */
+        if (mPlayer.mCurrentVideoIndex == index) {
+            AF_LOGI("quality switch ignored: stream %d is already the playing video stream\n", index);
+            return;
+        }
+
+        if (mPlayer.mCurrentVideoIndex < 0) {
+            AF_LOGW("quality switch: current video index is unknown (%d) — accepting the request for stream %d "
+                    "instead of dropping it (the preroll start comes from the master clock, not from the current "
+                    "index)\n", mPlayer.mCurrentVideoIndex, index);
+        }
+
         return switchVideoStream(index, type);
     }
+
+    /*
+     * 【修：留一条"请求没被服务"的明确日志】
+     * 走到这里说明 index 指向的不是可切的对象（例如点了正在播的音频/字幕档，
+     * 或流表里没有这一路）。原来这里是函数末尾静默落地，日志上完全看不出来
+     * 有过一次切档请求 —— 排查时无法区分"没收到请求"和"收到了但被丢掉"。
+     */
+    AF_LOGW("switch stream request NOT served: index=%d type=%d duration=%lld video=%d audio=%d sub=%d\n",
+            index, (int) type, (long long) mPlayer.mDuration,
+            mPlayer.mCurrentVideoIndex, mPlayer.mCurrentAudioIndex, mPlayer.mCurrentSubtitleIndex);
 }
 
 void SMPMessageControllerListener::ProcessRenderedMsg(StreamType type, IAFFrame::AFFrameInfo &info, int64_t timeMs, bool rendered,
@@ -1245,11 +1279,29 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
         }
     }
 
-    if (!willChangeInfo || !currentInfo) {
+    /*
+     * 【修：手动切清晰度被"只用于日志的判据"悄悄吃掉】
+     *
+     * 原来这里是 `if (!willChangeInfo || !currentInfo) { return; }`。其中 currentInfo
+     * （= mCurrentVideoIndex 对应的那一档）在下面的全部代码里**只被一条 AF_LOGD 用到**
+     * （就是紧跟着这行的 before/after 码率），却成了整个切档的前置条件。于是只要
+     * "当前档位下标"和 mMediaInfo 的流表对不上（换源/seek/切档交叉时 mCurrentVideoIndex
+     * 会被置成 -1，或下标空间被换过），用户点清晰度就**一声不响地什么都不做**：
+     * 没有 PLAYER_QUALITY_SWITCH_STARTED、没有日志、画面不动 —— 表现就是
+     * "手动切换清晰度完全不可用，100% 失败"。
+     *
+     * 修法：目标档位（willChangeInfo）仍然是必须的 —— 找不到它就没有可切的对象，
+     * 这种情况要留下明确的 WARN；而"当前档位"只影响那一条日志，取不到就按未知打印，
+     * 绝不因此丢弃用户的请求。
+     */
+    if (willChangeInfo == nullptr) {
+        AF_LOGW("quality switch DROPPED: stream %d is not in the stream-info queue (queue=%d currentId=%d) "
+                "— nothing can be switched to\n", index, count, currentId);
         return;
     }
 
-    AF_LOGD("video change video bitrate before is %d,after is %d", currentInfo->videoBandwidth, willChangeInfo->videoBandwidth);
+    AF_LOGD("video change video bitrate before is %d,after is %d",
+            currentInfo != nullptr ? currentInfo->videoBandwidth : 0, willChangeInfo->videoBandwidth);
     //TODO: different strategy
     mPlayer.mWillChangedVideoStreamIndex = index;
     mPlayer.mVideoChangedFirstPts = INT64_MAX;
