@@ -764,6 +764,8 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
      * 这段时间里位置回调会把进度条往回拽。地板保证它只往前走。
      */
     mSeekPositionFloorUs = mSeekPos;
+    /* 【② B18】归属标记与地板**同点、同值**写入（见 SuperMediaPlayer.h 的说明）。 */
+    mSeekLandingFloorOwnerUs = mSeekPositionFloorUs;
 }
 
 void SuperMediaPlayer::Mute(bool bMute)
@@ -804,6 +806,14 @@ void SuperMediaPlayer::EnterBackGround(bool back)
 
 StreamType SuperMediaPlayer::SwitchStream(int streamIndex)
 {
+    /*
+     * 【① B17 硬要求 B】用户又发起了新的切档请求 ⇒ 之前那个"等 seek 结束再重新装弹"的
+     * 意图立即作废：新的请求本身就是用户的最新意图，直接走正常流程即可（不会重装旧档）。
+     * 本函数的两个调用者（公开 API / 重装路径）都走这里，所以这里清一次就够。
+     */
+    mSwitchReArmPending = false;
+    mSwitchReArmStreamIndex = -1;
+
     MsgParam param;
     MsgChangeStreamParam streamParam;
     streamParam.index = streamIndex;
@@ -7858,6 +7868,66 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                     } else {
                         render = false;
                     }
+                } else if (mSeekPositionFloorUs != INT64_MIN &&
+                           mSeekLandingFloorOwnerUs != INT64_MIN &&
+                           mSeekPositionFloorUs != mSeekLandingFloorOwnerUs) {
+                    /*
+                     * 【② B18：落点窗口的"归属"判据】
+                     *
+                     * 地板 mSeekPositionFloorUs 是"本次 seek 的目标"的载体；归属标记
+                     * mSeekLandingFloorOwnerUs 与它**同点写入**。两者不一致 = 这次 seek 之后
+                     * 地板被别的路径改写过了，它已经不代表本次落点的目标 ⇒ 这一帧不能算落点。
+                     *
+                     * 处置：不采纳、不上屏这一帧，并立刻把整个落点窗口关掉（闸门/地板/归属）。
+                     * 关窗口有两个作用：
+                     *   · 不会每帧重复判断（避免刷日志、避免长期占着闸门）；
+                     *   · 满足"落点窗口必须有明确出口"：即使这一帧没被采纳，seek 结束时
+                     *     ResetSeekStatus() 还会再关一次（幂等）。
+                     * 之后的位置上报由真实位置承担（getCurrentPosition() 地板已撤），
+                     * 后续帧交给正常节拍逻辑 ⇒ 不会冻住。
+                     */
+                    AF_LOGW("seek landing refused: the position floor %lld does not belong to this "
+                            "seek any more (owner=%lld, frame pts=%lld) — not accepting it as the "
+                            "landing frame and closing the landing window\n",
+                            (long long) mSeekPositionFloorUs, (long long) mSeekLandingFloorOwnerUs,
+                            (long long) frameTimePos);
+
+                    render = false;
+                    mSeekRenderGateUs = INT64_MIN;
+                    mSeekPositionFloorUs = INT64_MIN;
+                    mSeekLandingFloorOwnerUs = INT64_MIN;
+                } else if (mSet->maxASeekDelta > 0 && frameTimePos != INT64_MIN &&
+                           mSeekPositionFloorUs != INT64_MIN &&
+                           frameTimePos - mSeekPositionFloorUs > mSet->maxASeekDelta) {
+                    /*
+                     * 【② B18：比目标晚出"精确 seek 容差"以上的帧不算落点】
+                     *
+                     * 安卓日志里的荒谬读数就是这一支漏掉的：
+                     *   `seek landing frame accepted: pts=99933167, -97006 ms before the seek target`
+                     * —— 地板是用户 seek 目标 2.927s，而帧在 99.93s（晚了 97s），却被当成
+                     * "目标落在落点之前、没有更早的帧可选"而采纳，同时把闸门一起消费掉。
+                     *
+                     * 判据用**既有的精确 seek 容差** mSet->maxASeekDelta（默认 21s，语义就是
+                     * "第一次读到的帧离目标多远还算精确 seek"），不引入任何新阈值/计时器：
+                     * 超过它就不认这是本次 seek 的落点。
+                     *
+                     * 处置：不采纳、不强制上屏，并关掉落点窗口（同上一支）。这一帧之后交给
+                     * 正常节拍逻辑 ⇒ 画面继续走（不冻），位置上报回到真实位置；用户再 seek
+                     * 会重新写入地板与归属 ⇒ 正常落点照样采纳（这条只影响"目标已经不可达"的
+                     * 异常状态）。
+                     */
+                    AF_LOGW("seek landing refused: the frame pts=%lld is %lld ms LATER than the seek "
+                            "target %lld (beyond the accurate-seek tolerance %lld ms) — not accepting "
+                            "it as the landing frame (the read position was moved by another path) and "
+                            "closing the landing window\n",
+                            (long long) frameTimePos,
+                            (long long) ((frameTimePos - mSeekPositionFloorUs) / 1000),
+                            (long long) mSeekPositionFloorUs,
+                            (long long) (mSet->maxASeekDelta / 1000));
+
+                    mSeekRenderGateUs = INT64_MIN;
+                    mSeekPositionFloorUs = INT64_MIN;
+                    mSeekLandingFloorOwnerUs = INT64_MIN;
                 } else {
                 mSeekLandingFrameAccepted = true;
                 mSeekRenderGateUs = INT64_MIN;
@@ -10397,6 +10467,14 @@ void SuperMediaPlayer::Reset()
     mInited = false;
     mSeekNeedCatch = false;
     mSeekPositionFloorUs = INT64_MIN;
+    /* 【② B18】地板作废时归属一起作废，避免"地板 = INT64_MIN、归属还是旧目标"的组合。 */
+    mSeekLandingFloorOwnerUs = INT64_MIN;
+    /*
+     * 【① B17 硬要求 B】Reset = 换片源/停止/Prepare 的终态 ⇒ 之前记下的"等 seek 结束
+     * 重新装弹"的意图必须作废（不重装）。
+     */
+    mSwitchReArmPending = false;
+    mSwitchReArmStreamIndex = -1;
     // 复位时必须把"落点闸门/闩"一起清掉：否则 Reset 之后残留的闸门会让
     // 下一个与 seek 无关的帧被当成落点帧（并带着一个无效的目标点去算日志）。
     mSeekRenderGateUs = INT64_MIN;
@@ -10595,6 +10673,43 @@ void SuperMediaPlayer::ResetSeekStatus()
     mLastVideoFrameRenderedMs = af_getsteady_ms();
     mRecoverSampleMs = 0;
     mRecoverSamplePackets = -1;
+
+    /*
+     * 【② B18 硬要求 C】seek 结束 = 落点窗口的**明确出口**：把闸门、地板、归属、
+     * "先出画"闩一起关掉。正常路径下采纳那一刻已经关过闸门，这里是幂等兜底 ——
+     * 保证 mSeekRenderGateUs / mSeekLandingFrameAccepted 不会留下"无法撤销"的悬挂态
+     * （例如落点被归属判据拒绝、或落点帧始终没来）。
+     */
+    mSeekRenderGateUs = INT64_MIN;
+    mSeekPositionFloorUs = INT64_MIN;
+    mSeekLandingFloorOwnerUs = INT64_MIN;
+    mSeekFirstDecodableFrameShown = false;
+
+    /*
+     * 【① B17】seek 结束事件：如果这次 seek 曾把"用户点过的切档"拆掉，在这里
+     * **只重新发起一次**（先清闩再发起，所以不会重复触发）。
+     *
+     * 目标位置：这里只发档位索引，位置由切档消息处理按**当前**播放位置重新计算
+     * （日志里的 `quality switch: target stream N seeked to <当前播放位置>` 就是它），
+     * 因此不会用"取消前那个已经过期的时间点"去预热。
+     *
+     * 为什么不会 ping-pong（硬要求 A）：本函数只在 seek 结束时被调用，而置闩只发生在
+     * SMPMessageControllerListener 的 MSG_SEEKTO 处理里；切档自己的定位是 demuxer 级
+     * （不产生 MSG_SEEKTO，见那里的注释与全仓唯一的 putMsg(MSG_SEEKTO)），
+     * 所以"重装 → 切档内部 seek → 再取消 → 再重装"这条环不存在。
+     */
+    if (mSwitchReArmPending) {
+        const int reArmIndex = mSwitchReArmStreamIndex;
+        mSwitchReArmPending = false;
+        mSwitchReArmStreamIndex = -1;
+
+        if (reArmIndex >= 0) {
+            AF_LOGI("quality switch: re-issuing the user's switch request (stream=%d) now that the "
+                    "seek that superseded it has finished — the preroll position will be recomputed "
+                    "from the CURRENT playback position, not the pre-seek one\n", reArmIndex);
+            SwitchStream(reArmIndex);
+        }
+    }
 }
 
 /*

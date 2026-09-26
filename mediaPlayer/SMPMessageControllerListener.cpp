@@ -144,6 +144,14 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     }
 
 
+    /*
+     * 【① B17 硬要求 B】换片源 / 重新 Prepare ⇒ 清掉"等 seek 结束重新装弹"的意图：
+     * 下面那个 else 分支会调用 ResetSeekStatus()（seek 结束路径），若不清，上一部片源
+     * 留下的意图会被 Prepare 当成"seek 结束"而重新发起一次切档。
+     */
+    mPlayer.mSwitchReArmPending = false;
+    mPlayer.mSwitchReArmStreamIndex = -1;
+
     //prepare之前seek
     if (mPlayer.mSeekPos > 0) {
         mPlayer.mPNotifier->NotifySeeking(false);
@@ -698,6 +706,41 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 文件没有 pending 路时保持原有 SeekInCache 行为，不额外 flush。 */
     if (mPlayer.mPendingVideoStreamIndex >= 0 || mPlayer.mWillChangedVideoStreamIndex >= 0) {
         mPlayer.FlushVideoPath(true, true, __func__);
+
+        /*
+         * 【① B17：用户点过的档位意图不能就这么丢掉 —— 记下来，等 seek 结束重新装弹】
+         *
+         * 现场（安卓日志，7/7 次手动切档）：`status=0 started` → 本函数这条
+         * `FlushVideoPath(…, cancelPendingSwitch=1)` → `status=3 canceled`，
+         * 一次 READY 都没有。用户并没有改主意（他改的是**位置**，不是档位），
+         * 所以把档位意图记在很多地方都会用到的两个成员上，由 seek 结束事件
+         * （SuperMediaPlayer::ResetSeekStatus）**只重新发起一次**。
+         *
+         * 为什么不会 ping-pong（硬要求 A：必须区分"用户 seek"与"切档自己的 seek"）：
+         *   · 本函数只由 MSG_SEEKTO 驱动，而全仓 `putMsg(MSG_SEEKTO)` **只有一处**
+         *     （SuperMediaPlayer::SeekTo()，见那里的 putMsg）+ playCompleted 的循环重开
+         *     路径也走同一个入口；
+         *   · 切档自己的定位走的是 demuxer 级路径（日志里的
+         *     `quality switch: target stream N seeked to …`，由切档消息处理直接调 demuxer），
+         *     从不产生 MSG_SEEKTO ⇒ 切档内部 seek 永远进不到这里，也就永远不会置闩。
+         *   因此"重装 → 内部 seek → 取消 → 再重装"这条环在状态上不存在。
+         *
+         * 显式取消优先（硬要求 B）：Reset()（换片源/停止/Prepare）与 SwitchStream()
+         * （用户又选了别的档）入口都会清这两个成员；错误终态走 Reset/Stop 时同样清。
+         */
+        const int reArmIndex = (mPlayer.mWillChangedVideoStreamIndex >= 0)
+                               ? mPlayer.mWillChangedVideoStreamIndex
+                               : mPlayer.mPendingVideoStreamIndex;
+
+        if (reArmIndex >= 0) {
+            mPlayer.mSwitchReArmStreamIndex = reArmIndex;
+            mPlayer.mSwitchReArmPending = true;
+
+            AF_LOGI("quality switch: the user's switch request (stream=%d) is superseded by this seek — "
+                    "remembering it and re-issuing it ONCE when the seek finishes (the preroll position "
+                    "will be recomputed from the post-seek playback position)\n", reArmIndex);
+        }
+
         mPlayer.mWillChangedVideoStreamIndex = -1;
         mPlayer.mVideoChangedFirstPts = INT64_MIN;
     }

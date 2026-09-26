@@ -1571,6 +1571,38 @@ namespace Cicada {
          * 纯事件计数，无计时器。新成员追加在类末尾（本文件顶部硬约束）。
          */
         int mCatchUpDiscardStreak{0};
+
+        /*
+         * ============ 【①②B17】切档被 seek 取消后"重新装弹" / 落点窗口"归属" ============
+         *
+         * 背景（安卓日志，2026-09-26 20:24~20:25）：
+         *   · 7/7 次手动切档都是 `status=0 started` → 紧跟一条
+         *     `FlushVideoPath from ProcessSeekToMsg (… cancelPendingSwitch=1 … pendingStream=0)`
+         *     → `status=3 canceled`，没有一次 status=1 —— 用户点过的档位意图被一次
+         *     插进来的用户 seek 整条作废；
+         *   · 同时出现 `seek landing frame accepted: pts=99933167, -97006 ms before the seek target`
+         *     这种荒谬读数（floor=2.927s 是用户 seek 目标，被采纳的帧在 99.93s），
+         *     说明"落点窗口"在被切档路径挪动过时间轴之后仍然被当成有效窗口消费。
+         *
+         * mSwitchReArmStreamIndex / mSwitchReArmPending：
+         *   seek 拆掉在途切档时（SMPMessageControllerListener 的 seek 处理里）记下用户要的档位，
+         *   并置闩；seek 结束事件（ResetSeekStatus）里**只重新发起一次** SwitchStream(该档)，
+         *   发起即清闩。区分判据见 arm 处注释：只有 MSG_SEEKTO（= 用户 SeekTo）会走到那里，
+         *   切档自己的 demuxer 级 seek 从不经过 MSG_SEEKTO ⇒ 不会 ping-pong。
+         *   显式取消（换片源/停止/Reset、用户又选别的档、错误终态）一律清闩不重装：
+         *   Reset() 与 SwitchStream() 入口都会清。
+         *
+         * mSeekLandingFloorOwnerUs：与 mSeekPositionFloorUs **同点**写入的"归属"标记
+         *   （SeekTo 写地板处，两处都是同一个值）。落点采纳前要求两者一致（或归属为
+         *   INT64_MIN = 未知），避免"地板被别的路径改写后，落点块还拿它当本次 seek 的目标"；
+         *   另外拒绝"比目标晚出整个精确 seek 容差（mSet->maxASeekDelta）"的帧被当成落点。
+         *   seek 结束时由 ResetSeekStatus() 把闸门/地板/归属一起关闭 ⇒ 不会留悬挂态。
+         *
+         * 三个成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
+         */
+        int64_t mSeekLandingFloorOwnerUs{INT64_MIN};
+        int mSwitchReArmStreamIndex{-1};
+        bool mSwitchReArmPending{false};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H
