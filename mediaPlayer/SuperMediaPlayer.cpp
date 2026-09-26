@@ -6036,19 +6036,42 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
      * retired 解码器不还、上层永远收不到终态；更糟的是 mPendingVideoDecoderSwitch
      * 一直为 true，RenderVideo() 会绕过全部节流（这就是帧率掉到 1 FPS 的直接原因）。
      */
+    /*
+     * 【修：超时判据必须用 B11 的"有效位置"，不能读原始 timePosition】
+     *
+     * 安卓硬解的输出帧 timePosition 恒为 INT64_MIN（见下面 B11 那段），于是这里原来的
+     * `frameTimePosition < 0` 在安卓上**恒真**：只要预滚超过 8 秒就判失败，哪怕目标路
+     * 其实正一条条往前解（`pendingFrontPts` 一直在涨）。
+     *
+     * 真机日志（21:27:22.480 → 21:27:30.504，暂停态切 stream=1）逐行：
+     *   pending preroll starts at key frame: keyTimePosition=99933167 ref=99933167
+     *   [switch] state=decoderSwitch target=1 pendingFrameQ=4 pendingFrontPts=101801700
+     *   pending decoder back-pressure (RETRY_IN): pts=102402300 pendingFrameQ=4 elapsed=3161→7259 ms
+     *   quality switch timed out before commit: stream=1 target=103799539 frame=-9223372036854775808
+     * —— 界面那条"切换失败"就是这一次。
+     *
+     * 口径与提交门（B11 的 pendingEffectivePos）**完全一致**：timePosition 有效就用它，
+     * 否则用它已经被 B6 归一化过的 pts。仍然是纯状态判据：只有"有效位置也读不出来"
+     * 或者"有效位置落后目标 2 秒以上"才允许判失败。
+     */
+    const int64_t frameEffectiveForTimeout =
+        (frameTimePosition >= 0)
+        ? frameTimePosition
+        : (mPendingVideoFrameQue.empty() ? INT64_MIN : mPendingVideoFrameQue.front()->getInfo().pts);
     const bool switchTimedOut =
         (switchElapsedMs > 0 &&
          (switchElapsedMs > QUALITY_SWITCH_TOTAL_TIMEOUT_MS ||
           (switchElapsedMs > 8000 &&
-           (frameTimePosition < 0 ||
+           (frameEffectiveForTimeout == INT64_MIN ||
             (mPendingVideoSwitchTimePosition >= 0 &&
-             frameTimePosition + 2 * 1000 * 1000 < mPendingVideoSwitchTimePosition)))));
+             frameEffectiveForTimeout + 2 * 1000 * 1000 < mPendingVideoSwitchTimePosition)))));
     if (switchTimedOut) {
-        AF_LOGW("quality switch timed out before commit: stream=%d target=%lld frame=%lld "
-                "elapsed=%lld pendingPktQ=%d pendingFrameQ=%d master=%lld\n",
+        AF_LOGW("quality switch timed out before commit: stream=%d target=%lld framePos=%lld "
+                "rawTimePosition=%lld elapsed=%lld pendingPktQ=%d pendingFrameQ=%d master=%lld\n",
                 mPendingVideoStreamIndex,
                 (long long) mPendingVideoSwitchTimePosition,
-                (long long) frameTimePosition, (long long) switchElapsedMs,
+                (long long) frameEffectiveForTimeout, (long long) frameTimePosition,
+                (long long) switchElapsedMs,
                 (int) mPendingVideoPacketQue.size(), (int) mPendingVideoFrameQue.size(),
                 (long long) master);
         mPNotifier->NotifyVideoQualitySwitch(
@@ -6209,8 +6232,23 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
      * `committed … pts=200200000 master=199718939`），画面当场往前跳半秒 ——
      * 就是用户说的"dash 切换之后音画不太同步"。等待是不花代价的：旧路在等的时候
      * 照常播放，主时钟走到那一点再提交，误差就只有抖动级别。
+     *
+     * 【修：暂停态**不能**等主时钟 —— 它是冻结的，等就是死等】
+     *
+     * 暂停态的比较参考量已经在上面换成冻结的 pivot（mPausedSwitchPivotUs），而目标路
+     * 的帧天然会落在 pivot **之后**：切档的 demuxer 定位是按"发起切档那一刻的播放位置"
+     * 做的，用户随后暂停、pivot 取的是冻结的视频 pts，两者可以差出一两秒。
+     * 原来的"未来帧就 return false 等时钟"于是变成**永远等不到**：队列 4 帧满、解码器
+     * 输出满、输入 120 包发不进去（真机 `pending decoder back-pressure (RETRY_IN):
+     * pts=102402300 pendingFrameQ=4 elapsed 3161→7259 ms` 一个字节都不动），
+     * 8 秒后被上面那条超时判成 `target rendition did not reach playback timeline`
+     * —— 用户点一次手动切档就是一次"切换失败"。
+     *
+     * 处置：**暂停态跳过这两条"等时钟"**，直接按下面既有的序列提交（与 S2/S3/S8 的
+     * 设计意图逐字一致：暂停态"提交锚点取 pivot 之后的第一帧"，见 :4779 那条日志）。
+     * 播放态一个字都不改（pausedSwitch 为假时条件恒与原式相同）。
      */
-    if (master > 0 && frameEffectiveNow != INT64_MIN &&
+    if (!pausedSwitch && master > 0 && frameEffectiveNow != INT64_MIN &&
         frameEffectiveNow > master + PENDING_FUTURE_TOLERANCE_US) {
         return false;
     }
@@ -6242,7 +6280,8 @@ bool SuperMediaPlayer::TryCommitPendingVideoSwitch()
         mPendingVideoFrameQue.pop();
         return false;
     }
-    if (master > 0 && pts > master + PENDING_FUTURE_TOLERANCE_US) return false;
+    /* 同上：暂停态不等时钟（主时钟冻结，等就是把这条切换钉死）。 */
+    if (!pausedSwitch && master > 0 && pts > master + PENDING_FUTURE_TOLERANCE_US) return false;
 
     /*
      * 这里不能清空 active 视频帧队列。队列中的帧是旧 decoder 已经完成解码、
