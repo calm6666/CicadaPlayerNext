@@ -9554,6 +9554,34 @@ int64_t SuperMediaPlayer::getAudioPlayTimeStamp()
     int64_t aoutPos;
     aoutPos = mAVDeviceManager->getAudioRenderPosition();
 
+    /*
+     * ============ 【★ 坏值不许当基准 —— "没声音 / 卡死"的直接来源（Android 实测）★】============
+     *
+     * 真机日志（20:24:49 / 20:25:00 等多次出现）：
+     *   `audio clock: recorded the post-seek device-position base 9223372036854775807 us`
+     *   `audio clock: the device position advanced to 9223372036854775807 us (base=…, delta=0)`
+     * 也就是 **INT64_MAX 这个哨兵值被记成了"基准"**。此后任何真实位置都不大于它 ⇒
+     * 每一帧都走下面那条 `rejected a stale/backward` ⇒ **音频时钟永远交不出去** ⇒
+     * 主时钟失去参考、音频保持静音、画面被判"未来"而不上屏 —— 用户看到的就是
+     * "有时候没声音 / 画面不动但有声音 / 直接卡死"。
+     *
+     * 处置（比 B2 那次"整段不交时钟"窄得多，只针对**坏值**）：
+     *   哨兵值（`af_clock_value_is_unset` 判定的那类）与负值 **既不记基准、也不当进度**，
+     *   直接按"音频时钟暂不可用"返回；真实设备位置一到，走原有逻辑照常放行。
+     * 纯值判据、无计时器。
+     * ======================================================================================
+     */
+    if (aoutPos < 0 || af_clock_value_is_unset(aoutPos)) {
+        if (mAudioClockProgressLogCount < 8) {
+            ++mAudioClockProgressLogCount;
+            AF_LOGW("audio clock: ignored an invalid device position %lld us (sentinel/negative) — it must not "
+                    "become the progress base, otherwise every real position would be rejected as stale\n",
+                    (long long) aoutPos);
+        }
+
+        return INT64_MIN;
+    }
+
     /* 【② 已整体回退】这里曾加过 `af_clock_value_is_unset(aoutPos) ⇒ return INT64_MIN`
      * 的哨兵护栏（回退点 B2）：真机出现"第一次 seek 画面不动、半天才动"——设备在 seek
      * 窗口内本来就会瞬时经过 PAUSED→STOPPED→PLAYING，框架 baseStop 的 STOPPED 还会持续一段；
