@@ -954,6 +954,45 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      */
     mPlayer.FlushVideoPath(false, false, __func__);
 
+    /*
+     * ============ 【修：seek 后必须裁掉"目标点之前的陈旧视频包"】============
+     *
+     * 症状（真机 21:42:17 → 21:42:37）：
+     *   [switch] … master=214890741 activeFrontPts=95545450 activeQ=6978
+     *   drop frame,master played time is 234128251,video pts is 118668550
+     * 视频活动路落后主时钟（音频）**115 秒**，队列里压着约 7000 个包（≈233 秒 4K 内容），
+     * 解码器只能从**队首**一包一包往前啃（实测只有 ~1.2× 实时），画面于是只剩"每丢 8 帧
+     * 由防冻阀门放 1 帧"——用户看到的就是"整个卡死"。清晰度切换也一起受害：它要追的
+     * 参考点跟这堆陈旧积压完全错位，pending 路追了 37 秒（lag 5248ms→96ms）仍被判
+     * `target rendition did not reach playback timeline`（界面"切换失败"）。
+     *
+     * 成因：seek 的 `ClearPacket(BUFFER_TYPE_ALL)` 只在 `!mSeekInCache` 那一支执行
+     * （见上面 :876），而"命中缓存"的捷径（sought in cache）**一个视频包都不清**。
+     * 于是：主时钟被本次 seek 钉在目标点上（本函数末尾的 setTime(seekPos)），
+     * 解码器却从落后的队首重新起步 —— 两条轴从此永久错开，而解码器要追上目标点
+     * 需要按"落后多少秒"把这段内容全解一遍（上百秒 = 十几分钟）。
+     *
+     * 处置：seek 收尾处（解码器已 flush、解码帧队列已清）按"**不晚于目标点的最近关键帧**"
+     * 裁剪视频包队列。语义与落点判据完全一致：落点必须从关键帧起解，更早的包永远不可能
+     * 上屏；目标点及其之后的包一个不动，音频/字幕包一个不动（音频对齐仍走上面 C 方案）。
+     * 纯状态判断，无计时器、不改任何精度判据；非缓存支路此时队列本来就是空的 ⇒ 幂等空操作。
+     */
+    {
+        const int64_t videoKeyBeforeSeek =
+            mPlayer.mBufferController->GetKeyTimePositionBefore(BUFFER_TYPE_VIDEO, seekPos);
+        const int64_t videoTrimUs = (videoKeyBeforeSeek != INT64_MIN) ? videoKeyBeforeSeek : seekPos;
+        const int64_t videoTrimmed =
+            mPlayer.mBufferController->ClearPacketBeforeTimePos(BUFFER_TYPE_VIDEO, videoTrimUs);
+
+        if (videoTrimmed > 0) {
+            AF_LOGW("seek: trimmed %lld stale video packets before the landing key frame (keyPos=%lld "
+                    "target=%lld) — the video decoder now starts at the target instead of grinding through "
+                    "the stale backlog, which is exactly what kept the picture frozen while the audio "
+                    "kept playing and made the quality switch unable to reach the timeline\n",
+                    (long long) videoTrimmed, (long long) videoKeyBeforeSeek, (long long) seekPos);
+        }
+    }
+
     mPlayer.FlushAudioPath();
     mPlayer.FlushSubtitleInfo();
 
