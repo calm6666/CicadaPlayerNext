@@ -1561,6 +1561,16 @@ namespace Cicada {
          */
         int mVideoDiscardStreak{0};
         int64_t mVideoDiscardGapAbsUs{INT64_MIN};
+
+        /*
+         * 【B16-b】追赶期（dropLateVideoFrames）内的**连续被拒帧数**（不做"偏移是否变小"
+         * 的过滤）。追赶期偏移可能只是在缓慢收敛（实测 ~2~3ms/帧），上面那条判据不会触发，
+         * 于是还要这条：连续被拒达到 VIDEO_CATCHUP_DISCARD_STREAK_MAX 就强制放行一帧。
+         * 只在"非 seek 落点窗口"（mSeekRenderGateUs == INT64_MIN）累计，避免与 B15
+         * 的"seek 前缀只先出一张"打架；上屏即清零（见 RenderVideo）。
+         * 纯事件计数，无计时器。新成员追加在类末尾（本文件顶部硬约束）。
+         */
+        int mCatchUpDiscardStreak{0};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H
