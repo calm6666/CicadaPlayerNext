@@ -3616,11 +3616,32 @@ void SuperMediaPlayer::doRender()
      * 对播放中路径零影响：前置条件是 PLAYER_PAUSED 且 mPausedSwitchRenderPending，
      * 而后者只在"暂停态切档提交"那一刻置真；PLAYING 时恒为假，整块不进入。
      */
-    if (mPausedSwitchRenderPending && mPlayStatus == PLAYER_PAUSED &&
+    /*
+     * ============ 【★ 暂停态 seek：目标帧到了却没人交给渲染器 ⇒ 画面/进度条都不动 ★】============
+     *
+     * 实测（用户日志）：
+     *   14:05:50.132  renderer joining started (seek finished) … master=83445
+     *   14:05:53.145  [seekdiag] loop: seekFlag=0 playStatus=6(PAUSED) frameQ=1 master=3092596 us
+     *   之后 fps=0.0、画面停在原地、进度条也不动（直到十几秒后有别的事件发生）。
+     *
+     * 机制：`render()` 那道门在 `mPlayStatus == PLAYER_PLAYING` 上；暂停态唯一会交帧的入口
+     * 原来是"切档待渲染"。于是**暂停态 seek** 一旦 `mSeekFlag` 清掉（SeekEnd），
+     * 之后才解出来的目标帧 / 落点帧就**没有任何分支把它送进渲染器** —— 帧队列里明明有帧
+     * （frameQ=1），画面却永远停在上一次上屏的那张，位置回调也不再更新。
+     *
+     * 处理：把"暂停 + seek 相关"并进同一个分支（纯状态判据，无计时器）：
+     *   `mSeekFlag`（seek 在途）、`mSeekRenderGateUs != INT64_MIN`（落点帧尚未采纳）都算在内；
+     *   每次只交一帧，靠帧自己的 pts 去重；语义与切档那条一致 —— **不动主时钟、不发位置通知**，
+     *   用户看到的位置仍是暂停时那个位置，只有画面换成落点帧。
+     *   切档那条的老行为一字未变（清 mPausedSwitchRenderPending 与那条日志仍只属于它）。
+     * ==========================================================================================
+     */
+    if ((mPausedSwitchRenderPending || mSeekFlag || mSeekRenderGateUs != INT64_MIN) &&
+        mPlayStatus == PLAYER_PAUSED &&
         mAppStatus != APP_BACKGROUND && HAVE_VIDEO) {
         const bool pausedSwitchFrameRendered = RenderVideo(true);
 
-        if (pausedSwitchFrameRendered) {
+        if (pausedSwitchFrameRendered && mPausedSwitchRenderPending) {
             /*
              * 恰好一帧送达渲染器：清掉欠账，后面的终态判定由 RenderVideo() 里
              * "提交后首帧上屏"那条既有逻辑负责（它会走 finishQualitySwitch(true)）。
