@@ -1522,6 +1522,25 @@ namespace Cicada {
         int64_t mAudioClockProgressBaseUs{INT64_MIN};
         bool mAudioClockProgressSeen{false};
         int mAudioClockProgressLogCount{0};
+
+        /*
+         * ============ 【B15】seek 之后"先出画、再精确"的事件闩 ============
+         *
+         * 语义：一次 seek 里，**第一张可解码的帧**（= 解码从关键帧起步之后解出的第一帧，
+         * 判据就是既有的 mSeekDecodeStartIsKey）在 RenderVideo 的落点块里被直接放上屏，
+         * 用来**替换掉 seek 之前那张旧画面**；此后直到"包含目标的那一帧"到达之前，
+         * 仍然按原来的规则不显示（精度判据一个字都没改）。
+         *
+         * 为什么必须有这个闩：没有它，落点块里那条"早于目标 ⇒ render=false"会**每一帧**生效，
+         * 于是整段前缀解码期间屏幕停在 seek 前的旧画面上（用户看到的"seek 后画面不动"）。
+         * 有了它，最多只提前显示**一张**来自关键帧的干净帧，之后的前缀帧照旧丢掉。
+         *
+         * 复位点与 mSeekDecodeStartIsKey 完全一致（SeekTo / Reset），保证"每次 seek 只先出一次"。
+         * 只做状态判断：不引入计时器、不与时钟锚定交互（锚定仍由 fetchSeekClockAnchorUs
+         * 拒绝早于目标的帧，见那里的说明）。
+         * 新成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
+         */
+        bool mSeekFirstDecodableFrameShown{false};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

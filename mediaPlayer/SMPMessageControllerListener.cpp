@@ -753,6 +753,26 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
 
     mPlayer.mPNotifier->NotifySeeking(mPlayer.mSeekInCache);
 
+    /*
+     * 【本轮 B15：进度条与缓冲条在"seek 受理"这一刻就到位】
+     *
+     * 位置：seek 目标点**就是**用户要求的播放位置，报它即"到位"，不必等管道走过去。
+     * 之后每一次位置上报都被 getCurrentPosition() 的 mSeekPositionFloorUs 地板钉在目标点，
+     * 所以这一跳只可能向前，不会被落点帧（目标之前的那个关键帧）的旧位置再拽回去。
+     * 这是纯状态语义：目标点来自本次 seek 的入参，不依赖任何计时器/预测。
+     *
+     * 缓冲条：这里报的是**下限**语义 —— "到目标点为止的数据正在按本次 seek 重建"。
+     * 它不会再像以前那样"先窜到目标、随后框架报出几乎为 0 的真实值又塌回来"：
+     * 真正的下限由 SuperMediaPlayer 侧保证（GetBufferPosition() 与 PostBufferPositionMsg()
+     * 都加了"缓冲条末端不可能早于播放头"的下限，而 seek 窗口内播放头正是目标点），
+     * 也就是说框架在这之后报出的任何值都 >= 这里报出去的值，界面只会看到它继续往后长。
+     *
+     * 这条与下面 !mSeekInCache 分支里那段"以前把已缓冲位置直接报成 seek 目标点"的历史说明
+     * 并不矛盾：那次的问题是**没有下限**（报完还会被更小的真实值拽回去），现在是先立下限再报。
+     */
+    mPlayer.mPNotifier->NotifyPosition(seekPos / 1000);
+    mPlayer.mPNotifier->NotifyBufferPosition(seekPos / 1000);
+
     // TODO: why add this?
     /*
     if (mPlayer.mSeekNeedCatch && !HAVE_VIDEO) {
@@ -775,6 +795,11 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
          * 缓冲位置（几乎为 0）又塌回来，用户描述成"每次 seek 缓冲条都在重新加载"。
          * 现在不再伪造：让界面按框架真实的 BufferPositionUpdate 走，
          * 缓冲条只会随真实数据增长（seek 后本来就是从 0 重新缓冲，这是分片流的固有行为）。
+         *
+         * 【B15 补充】上面这段说的是"**没有下限**地伪造会塌回来"。本轮改成"先立下限再报"：
+         * 受理时把目标点报出去（见本函数上方那处 NotifyPosition / NotifyBufferPosition），
+         * 而框架侧之后报出的值**不可能低于播放头**（seek 窗口内播放头就是目标点），
+         * 因此不会被更小的真实值拽回去 —— 先立下限、再报目标，两者配合才是"不回缩、不弹回"。
          */
         mPlayer.mEof = false;
 

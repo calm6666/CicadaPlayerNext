@@ -671,6 +671,8 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
     mSeekLandingFrameAccepted = false;
     mSeekClockAnchored = false;
     mSeekDecodeStartIsKey = false;
+    /* B15：本次 seek 的"先出画"闩，与 mSeekDecodeStartIsKey 同点复位（每次 seek 只先出一帧）。 */
+    mSeekFirstDecodableFrameShown = false;
     mSeekVideoAnchorDone = false;
     mSeekAudioAlignDone = false;
     /*
@@ -1284,7 +1286,40 @@ ScaleMode SuperMediaPlayer::GetScaleMode()
 
 int64_t SuperMediaPlayer::GetBufferPosition()
 {
-    return mBufferPosition / 1000;
+    /*
+     * 【2026-09-26 修：seek 之后缓冲条"先往回缩、再弹回来"】
+     *
+     * mBufferPosition 只是一份**上报缓存**，它只在 PostBufferPositionMsg() 里被写。
+     * 而那个函数在 seek 在途时（isSeeking()）是**直接 return 不发布**的（见那里的说明），
+     * 于是整个 seek 期间这里返回的都是**上一个播放周期**写下的旧值：
+     *   · 向前 seek：旧值（例如 30s）远小于 seek 目标（例如 90s），
+     *     而播放头这时已经被 mSeekPositionFloorUs 钉在 90s ——
+     *     界面拿到的是"缓冲条末端落在播放头后面"，
+     *   · 分片流 seek 会把整段缓存清掉再从目标重下（见 SMPMessageControllerListener
+     *     里 seek 分支的说明），旧值本来也不再代表任何真实缓冲。
+     * 用户描述成"seek 后 buffer 往后缩再弹回来"，说的就是这段窗口：
+     * 先拿到旧的小值（缩），等 seek 结束、真实缓冲时长能测出来以后再跳出去（弹）。
+     *
+     * 这里给上报值加一条**纯状态**下限：缓冲条末端不可能早于播放头。
+     * seek 期间 getCurrentPosition() 返回的就是 seek 目标（地板钉住的），
+     * 所以这条下限正好等价于"seek 窗口内缓冲位置以目标为下限"。
+     * getCurrentPosition() 自己带地板过期自愈（循环播放/重开源的场景），
+     * 所以这里不会用一个已经过期的目标点把缓冲条顶到旧位置上去。
+     * 无计时器、不新增成员、不在 seek 之外改变任何取值（非 seek 时
+     * mBufferPosition 恒不小于当前位置，这一条是空操作）。
+     */
+    int64_t bufferPosition = mBufferPosition;
+    const int64_t currentPosition = getCurrentPosition();
+
+    if (bufferPosition < currentPosition) {
+        bufferPosition = currentPosition;
+    }
+
+    if (mDuration > 0 && bufferPosition > mDuration) {
+        bufferPosition = mDuration;
+    }
+
+    return bufferPosition / 1000;
 }
 
 int64_t SuperMediaPlayer::GetDuration() const
@@ -7737,7 +7772,50 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                      * mVideoFrameQue 走到这里，所以三条来源同时获得同样的精度。
                      * ==========================================================================
                      */
-                    render = false;
+                    /*
+                     * 【B15：先出画、再精确 —— 前缀解码期间不再冻着旧画面】
+                     *
+                     * 走到这里说明三件事同时成立：
+                     *   · 本次 seek 的落点帧还没被采纳（mSeekLandingFrameAccepted 为假）；
+                     *   · 解码**是从关键帧起步**的（上面 !mSeekDecodeStartIsKey 那一支已经把
+                     *     "落点在 GOP 中间、缺参考帧的脏帧"挡在门外）—— 手里这一帧是干净的、
+                     *     可以显示的；
+                     *   · 它完全落在目标之前（本帧 + 帧长 <= 目标），**不包含目标**。
+                     *
+                     * 原来这里无条件 render = false。那个精度判据本身是对的（不包含目标的帧
+                     * 不能当落点），但副作用是**整段前缀解码期间屏幕一直停在 seek 之前那张
+                     * 旧画面**上：从落点解到目标要多久，用户就看到画面冻多久 —— 这就是
+                     * "seek 之后画面不动 / 卡住"的直接观感来源（与解码快慢无关的那部分）。
+                     *
+                     * 现在改成"**只把第一张干净的帧先放上屏**，其余前缀帧照旧丢"：
+                     *   · 放上屏 ⇒ 旧画面立刻被替换成时间轴上离目标最近的已知帧，
+                     *     和主流播放器一致（先到附近、再精确落位）；
+                     *   · 只放一张 ⇒ mSeekFirstDecodableFrameShown 是事件闩（SeekTo / Reset
+                     *     复位），后面的前缀帧仍然走原来的 render = false，一帧都不多显示；
+                     *   · **不碰任何精度状态**：不置 mSeekLandingFrameAccepted、不动
+                     *     mSeekRenderGateUs、不动 mSeekPositionFloorUs —— 所以下面那个
+                     *     "包含目标 ⇒ 采纳 + 强制上屏"的分支一个字都没改，精确帧到达时
+                     *     **替换**这一帧，最终落点仍然是 100% 帧级精确；
+                     *   · 也**不会动时间轴**：主时钟锚点由 fetchSeekClockAnchorUs 把关，
+                     *     它明确**拒绝**早于目标的帧（"seek anchor refused"），本次 seek 的
+                     *     锚点事件（mSeekAnchorPending / mSeekVideoAnchorDone）保持未消费，
+                     *     等真正包含目标的那一帧再来锚。
+                     */
+                    if (!mSeekFirstDecodableFrameShown) {
+                        mSeekFirstDecodableFrameShown = true;
+                        force_render = true;
+                        render = true;
+
+                        AF_LOGI("seek first decodable frame shown: pts=%lld is %lld ms before the seek "
+                                "target=%lld — replacing the previous picture now (the frame that CONTAINS "
+                                "the target will replace this one as soon as it is decoded; the landing "
+                                "judge and the clock anchor are untouched)\n",
+                                (long long) frameTimePos,
+                                (long long) ((mSeekPositionFloorUs - frameTimePos) / 1000),
+                                (long long) mSeekPositionFloorUs);
+                    } else {
+                        render = false;
+                    }
                 } else {
                 mSeekLandingFrameAccepted = true;
                 mSeekRenderGateUs = INT64_MIN;
@@ -9050,16 +9128,46 @@ void SuperMediaPlayer::PostBufferPositionMsg()
         }
 
         int64_t duration = getPlayerBufferDuration(false, false);
+        /*
+         * 当前位置：seek 在途时它等于 mSeekPos；seek 已宣告结束、管道还在从落点往目标
+         * 追赶时它被 mSeekPositionFloorUs 钉在**目标点**上（见 getCurrentPosition()）。
+         */
+        const int64_t position = getCurrentPosition();
 
         if (duration >= 0) {
-            mBufferPosition = getCurrentPosition() + duration;
-
-            if (mEof) {
-                mBufferPosition = mDuration;
-            }
-
-            mPNotifier->NotifyBufferPosition((mBufferPosition <= mDuration ? mBufferPosition : mDuration) / 1000);
+            mBufferPosition = position + duration;
+        } else if (mSeekPositionFloorUs == INT64_MIN) {
+            /* 非 seek 窗口：真实缓冲时长测不出来（包队列暂时空）时不发布，维持原行为。 */
+            return;
+        } else {
+            /*
+             * 【2026-09-26 修：seek 之后"缓冲条先往回缩、再弹回来"】
+             *
+             * 这个分支只在"seek 已经宣告完成（isSeeking() 为假，所以上面那道闸门放行）、
+             * 但管道还没走到目标点（mSeekPositionFloorUs 还在）"这段窗口里进得来。
+             *
+             * 分片流的 seek 会把整段包缓存清空再从目标重下（见 SMPMessageControllerListener
+             * 里 seek 分支的说明），此刻 getPlayerBufferDuration() 常常返回 -1（音频/视频
+             * 队列都还没数据）。原代码此时**什么都不发布**，于是：
+             *   · 播放头那一路刚刚上报了 seek 目标（OnTimer 里 NotifyPosition），
+             *   · 缓冲条那一路还停在**上一个播放周期**的旧值上（向前 seek 时它小于目标，
+             *     也就是落在播放头后面）。
+             * 界面看到的就是"缓冲条缩到播放头后面，等真实缓冲时长测出来再弹回去"。
+             *
+             * 修正：这段窗口里把缓冲条末端**报成当前上报位置**（即 seek 目标）。
+             * 两层理由：一，PFR 已经承诺把目标点之前的数据对齐好，界面上的播放头本来就在
+             * 目标点，缓冲条末端早于播放头是不可能的取值；二，报"目标点"不会像以前那样
+             * 把缓冲条先窜到很远再塌回来 —— 它就是播放头当前位置，等真实时长测出来只会
+             * 从这里**往后长**。无计时器、不新增成员；seek 窗口之外一个字节都不改。
+             */
+            mBufferPosition = position;
         }
+
+        if (mEof) {
+            mBufferPosition = mDuration;
+        }
+
+        mPNotifier->NotifyBufferPosition((mBufferPosition <= mDuration ? mBufferPosition : mDuration) / 1000);
     }
 }
 
@@ -10145,6 +10253,8 @@ void SuperMediaPlayer::Reset()
     mSeekLandingFrameAccepted = false;
     mSeekClockAnchored = false;
     mSeekDecodeStartIsKey = false;
+    /* B15：与 SeekTo 同一个复位口径，保证 Reset 之后不会残留"已经先出过画"的闩。 */
+    mSeekFirstDecodableFrameShown = false;
     mSeekCatchStartMs = 0;
     mVideoStarveIters = 0;
     mSeekVideoAnchorDone = false;
