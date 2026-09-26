@@ -1640,6 +1640,26 @@ namespace Cicada {
          * 定义与逐项理由见 SuperMediaPlayer.cpp 里那个函数的注释。
          */
         bool qualitySwitchInFlight() const;
+
+        /*
+         * 【B20】切档在途时被推迟的用户 seek（"串行化"）
+         *
+         * 为什么必须串行而不是就地执行：切档自己的定位是 demuxer 级 seek（目标 = "当前播放位置"），
+         * 用户 seek 重定位同一条活动读链路 —— **谁后执行谁生效**。安卓日志实证：
+         * 用户 seek 到 135164000 us，随后落点窗口里出现的帧在 169886383 us，而紧跟着切档
+         * `target stream 0 seeked to 169886383` —— 差 34722 ms，落点判据必然对不上，
+         * 于是要么拒绝（画面冻住）、要么采纳错帧，切档本身也被这次 seek 打断成 canceled。
+         *
+         * 语义：**推迟而不是丢弃**。切档在途时只记下"最后一次"用户 seek 目标（后到覆盖先到），
+         * 在切档三个终态（READY / CANCELED / FAILED）各补做一次（先清闩再 SeekTo）；
+         * 补做走正常 SeekTo 流程，由既有 SeekEnd / NotifySeeking(false) 收尾。
+         * 不递归：补做前先清闩；补做期间若又有切档在途，只重新置闩，等那一次终态再补。
+         * 全部是状态判据，无计时器。
+         */
+        int64_t mDeferredUserSeekUs{INT64_MIN};
+        bool mDeferredUserSeekAccurate{false};
+        bool mDeferredUserSeekPending{false};
+        void replayDeferredUserSeek();
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

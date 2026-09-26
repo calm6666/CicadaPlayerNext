@@ -3202,6 +3202,8 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
      * 若此时又有新切档在途，它只会重新置闩，等那一次的终态 —— 不递归、不立即重试）。
      */
     runDeferredPauseFrameRestore();
+    /* B20：切档走到终态，把在途时被推迟的用户 seek 补做一次（先清闩，不递归）。 */
+    replayDeferredUserSeek();
     /*
      * ============ 【2026-09-24 修：这里**不能**清 mActiveVideoPtsOffset】============
      *
@@ -9348,6 +9350,13 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
      */
     if (switchCancelNotifiedOnEntry) {
         runDeferredPauseFrameRestore();
+        /*
+         * B20：切档被这次 flush 打成 CANCELED 时，finishQualitySwitch() 这条终态出口
+         * 不会再到，所以在**这里**补做被推迟的用户 seek（入口内先清闩，不递归；
+         * 且它自己会用播放状态把 stop / 换源 / 后台 flush 这三种情况丢掉）。
+         * 普通 seek 的 flush（cancelPendingSwitch=0）不进这个分支。
+         */
+        replayDeferredUserSeek();
     }
 }
 
@@ -10546,6 +10555,64 @@ int SuperMediaPlayer::RestorePausedVideoFrame()
 }
 
 /*
+ * 【B20】补做被推迟的用户 seek（唯一入口）。
+ * 先清闩再 SeekTo ⇒ 补做出去的那次 seek 不会再触发"再补做"（不递归）；
+ * 若此刻又有切档在途（例如刚重发的那次切档），只**重新置闩**，等那一次终态再补；
+ * 目标取最后一次请求（后到覆盖先到）。全程状态判据，无计时器。
+ * 出口：补做后走正常 SeekTo 流程，由既有 SeekEnd / NotifySeeking(false) 收尾。
+ */
+void SuperMediaPlayer::replayDeferredUserSeek()
+{
+    if (!mDeferredUserSeekPending) {
+        return;
+    }
+
+    const int64_t targetUs = mDeferredUserSeekUs;
+    const bool accurate = mDeferredUserSeekAccurate;
+
+    /* 先清闩：防止下面这次 SeekTo 又触发一次补做（不递归）。 */
+    mDeferredUserSeekPending = false;
+    mDeferredUserSeekUs = INT64_MIN;
+    mDeferredUserSeekAccurate = false;
+
+    if (targetUs == INT64_MIN) {
+        return;
+    }
+
+    /*
+     * 只在这个播放器"seek 还有意义"的状态下补做。本入口除了切档终态，也被
+     * FlushVideoPath() 末尾那条"外力中止切档"的分支调用，而 stop / 换源 / 后台 flush
+     * 走的正是同一个分支（它们的 cancelPendingSwitch 也是 1）。那时玩家已经在
+     * PLAYER_STOPPED / PREPARING 上，补做一次 seek 只会把用户早已放弃的定位需求
+     * 打进新片源的准备流程里。与 PFR 补做入口同一种写法：状态不符合就丢弃这一次。
+     */
+    const PlayerStatus statusNow = mPlayStatus.load();
+
+    if (statusNow != PLAYER_PREPARED && statusNow != PLAYER_PLAYING && statusNow != PLAYER_PAUSED &&
+        statusNow != PLAYER_COMPLETION) {
+        AF_LOGI("user seek: deferred seek DROPPED — the player is no longer in a seekable state "
+                "(status=%d), target=%lld us\n",
+                (int) statusNow, (long long) targetUs);
+        return;
+    }
+
+    if (qualitySwitchInFlight()) {
+        /* 又有一次切档在途：把目标重新挂上，等那一次的终态再补（不立即重试）。 */
+        mDeferredUserSeekUs = targetUs;
+        mDeferredUserSeekAccurate = accurate;
+        mDeferredUserSeekPending = true;
+        return;
+    }
+
+    AF_LOGW("user seek: replaying the DEFERRED seek now that the quality switch reached its terminal "
+            "state — target=%lld us accurate=%d (the landing window is built on the post-switch timeline, "
+            "so the switch's demuxer-level seek can no longer overwrite it)\n",
+            (long long) targetUs, (int) accurate);
+
+    SeekTo(targetUs / 1000, accurate);
+}
+
+/*
  * 【B19】切档终态出口的唯一补做入口（READY/FAILED/CANCELED 三处都会调到）。
  *
  * 语义：把"切档在途时被推迟的那一次 PFR"补做一次，然后清闩。
@@ -10649,6 +10716,10 @@ void SuperMediaPlayer::Reset()
     mSwitchReArmStreamIndex = -1;
     /* 【B19 硬要求】换片源/停止/Reset ⇒ 不跨片源补做 PFR：闩一起清掉。 */
     mPauseFrameRestorePending = false;
+    /* 【B20 硬要求 B】换片源/停止/Reset ⇒ 在途被推迟的用户 seek 也必须作废（不跨片源重放）。 */
+    mDeferredUserSeekPending = false;
+    mDeferredUserSeekUs = INT64_MIN;
+    mDeferredUserSeekAccurate = false;
     // 复位时必须把"落点闸门/闩"一起清掉：否则 Reset 之后残留的闸门会让
     // 下一个与 seek 无关的帧被当成落点帧（并带着一个无效的目标点去算日志）。
     mSeekRenderGateUs = INT64_MIN;

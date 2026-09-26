@@ -153,6 +153,10 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     mPlayer.mSwitchReArmStreamIndex = -1;
     /* 【B19 硬要求】换片源/重新 Prepare 同样不允许跨片源补做 PFR：闩一起清掉。 */
     mPlayer.mPauseFrameRestorePending = false;
+    /* 【B20 硬要求 B】Prepare（换片源）⇒ 在途被推迟的用户 seek 一并作废，不跨片源重放。 */
+    mPlayer.mDeferredUserSeekPending = false;
+    mPlayer.mDeferredUserSeekUs = INT64_MIN;
+    mPlayer.mDeferredUserSeekAccurate = false;
 
     //prepare之前seek
     if (mPlayer.mSeekPos > 0) {
@@ -604,6 +608,42 @@ void SMPMessageControllerListener::ProcessSetBitStreamMsg(readCB read, seekCB se
 
 void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccurate)
 {
+    /*
+     * 【③ B20：切档在途时**不执行**这次 seek，推迟到切档终态再重放】
+     *
+     * 为什么必须在最前面拦：本函数后面会（a）把主时钟钉到目标、（b）重设位置地板/渲染闸门、
+     * （c）在 :699 那一带用 `FlushVideoPath(true, true, __func__)` 把在途切档拆掉
+     * —— 一旦走到那里，切档就已经被判 CANCELED 了，之后再"补"也来不及。
+     *
+     * 为什么两套 seek 会互相覆盖（本条的动机）：切档自己的定位是 demuxer 级 seek，目标是
+     * "当前播放位置"；用户 seek 也重定位同一条读链路，谁后执行谁生效。日志实证：
+     * 用户 seek 到 135164000 us，随后落点窗口里出现的帧却在 169886383 us，而紧接着切档
+     * `target stream 0 seeked to 169886383` —— 差 34722 ms。串行化之后，用户 seek 一定在
+     * 切档终态之后、在新流的同一时间轴上执行，落点判据不会再对不上。
+     *
+     * 不丢用户意图（硬要求 C）：
+     *   · 多次点/多次 seek ⇒ 后面的覆盖前面的（只保留最后一次目标）；
+     *   · 推迟期间通知一次 NotifySeeking(true)，让界面进入"定位中"；
+     *   · 补做走的是正常的 SeekTo 流程 ⇒ 由既有的 SeekEnd / NotifySeeking(false) 收尾。
+     * 判据直接复用 SuperMediaPlayer::qualitySwitchInFlight()（B19-b 的唯一判据）；
+     * 切档自己的 demuxer 级 seek 不进本函数（全仓 putMsg(MSG_SEEKTO) 只有 SeekTo() 一处），
+     * 所以不会自锁、也不会 ping-pong。
+     */
+    if (mPlayer.qualitySwitchInFlight()) {
+        mPlayer.mDeferredUserSeekUs = seekPos;
+        mPlayer.mDeferredUserSeekAccurate = bAccurate;
+        mPlayer.mDeferredUserSeekPending = true;
+
+        mPlayer.mPNotifier->NotifySeeking(true);
+
+        AF_LOGW("user seek: DEFERRED (NOT executed now) — a quality switch is still in flight; "
+                "target=%lld us accurate=%d. It will be replayed ONCE at the switch's terminal state "
+                "(READY / CANCELED / FAILED); a newer seek request overwrites this one, and the "
+                "deferred seek no longer cancels the switch\n",
+                (long long) seekPos, (int) bAccurate);
+        return;
+    }
+
     mPlayer.mSeekNeedCatch = bAccurate;
     mPlayer.mSeekPos = seekPos;
 
