@@ -142,7 +142,7 @@
 #define ABR_MIN_SWITCH_INTERVAL_MS (8 * 1000)
 #define ABR_UP_BAN_AFTER_DOWN_MS (10 * 1000)
 /* 请求出去之后等播放器回终态的上限。必须**大于**播放器自己的切换上限
- * （SuperMediaPlayer 的 QUALITY_SWITCH_TOTAL_TIMEOUT_MS = 18s），否则
+ * （SuperMediaPlayer 侧那个 18s 的切档上限），否则
  * 一次正常的、需要等到关键帧边界的切换还没结束就被判"没完成"，
  * 放锁之后又立刻重发同一个请求 —— 实测会变成每 8 秒一次的请求风暴。 */
 #define ABR_SWITCH_WATCHDOG_MS (20 * 1000)

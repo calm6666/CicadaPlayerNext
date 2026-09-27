@@ -278,7 +278,6 @@ namespace Cicada {
                 break;
 
             case MSG_CHANGE_VIDEO_STREAM:
-                //    assert(mWillChangedVideoStreamIndex < 0);
                 mProcessor.ProcessSwitchStreamMsg(msgContent.streamParam.index);
                 break;
 
