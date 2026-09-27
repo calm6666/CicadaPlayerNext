@@ -105,6 +105,21 @@ namespace Cicada {
 
         int configureAudio(const std::string &mime, int sampleRate, int channelCount, int isADTS);
 
+        /*
+         * 【控制面：NDK 数据面专用】只做"选择"、不做"创建" —— 用与 configureVideo/
+         * configureAudio 完全相同的依据（同一份 MediaCodecList 顺序、同一份黑名单、
+         * 同一份 secure 判定）返回**将要被 createByCodecName() 使用**的 codec 名。
+         *
+         * NDK 异步绑定（ndkCodecBinding）用它 + AMediaCodec_createCodecByName() 精确锁定
+         * 同一颗 codec（按名字创建自 API 21 就有，minSdk 24 无需弱符号），从而保证
+         * "Java 能力面选中的"与"NDK 实际创建的"是同一颗。
+         *
+         * 纯查询：不创建 MediaCodec、不改任何 Java 状态（只按入参临时组一个 MediaFormat）。
+         * 返回空串 = 选择失败（调用方回落 Java 绑定）。
+         */
+        std::string selectCodecName(bool isVideo, const std::string &mime, int width, int height,
+                                    int sampleRate, int channelCount, int isADTS);
+
         /**
          * surface 重建后热重绑 MediaCodec 输出 surface（隧道直通模式专用）
          */

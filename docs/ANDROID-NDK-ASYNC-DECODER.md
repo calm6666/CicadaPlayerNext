@@ -230,10 +230,18 @@ onAsyncError: isRecoverable/isTransient 任一为真 → 交给既有的错误�
   且必须出现：每次 seek 有 `seek landing frame accepted`、**无** `async input path looks dead`、
   **无** `onAudioException -1003`。
 
-### 阶段 D：切换与删净
-- API ≥ 28 走 `NdkAsyncBinding`；24–27 走 `JavaAsyncBinding`；删除 JNI 数据面方法、
-  `OutputBufferInfo.cpp`、Java 数据面的异步泵与 `sAsyncBroken`。
-- 验收：编解码路径内 `NewByteArray` / `OutputBufferInfo` / 同步 `dequeue` 引用均为 0；
+### 阶段 D：切换（按平台能力路由；**保留** Java 数据面作为 24–27 的绑定）
+- 调度器（`codecBinding.cpp` 的 `AndroidCodecBinding`）在**第一个会碰 codec 的调用**上路由：
+  - `setDrmInfo` 成功（secure 内容，需要 Java MediaCrypto 全链路）⇒ 整实例 `java-async`；
+  - 视频 surface 为空、或 `usePlaceholderSurface`（B2 占位面是 Java 侧技巧）⇒ 整实例 `java-async`；
+  - 其余且 API ≥ 28 ⇒ `ndk-async`；NDK configure 失败 ⇒ 进程内一次性熔断并整体回落 `java-async`。
+- **要删的**：`sAsyncBroken` 及其"下个实例走轮询"分支（本设计不存在轮询路径）；
+  `mediaCodecDecoder.h` 里从未被使用的 `mUseNdk`。
+- **要保留的**：`MediaCodec_Decoder`（JNI 数据面）与 Java 数据面 —— 它们是 API 24~27 的
+  **异步绑定**，不是"待删的双实现"；`OutputBufferInfo.cpp` / `JEncryptionInfo.cpp` 同理由它使用。
+  > 本节此前写"删除 JNI 数据面方法"是**错的**：那会砍掉老系统上唯一的异步路径，与"保兼容性"冲突。
+- 验收：编解码路径内**同步 `dequeue*` 轮询**引用为 0、`sAsyncBroken` 引用为 0；
+  `ndk-async` 生效时每帧 0 次 JNI（simpleperf 中解码线程 `art::JNI*` ≈ 0）；
   `SINGLE-DECODER-REFACTOR.md` §五 残余扫描 0 命中；Android 构建 0 警告。
 
 ### 阶段 E：性能复测 + 回退判定
@@ -266,8 +274,60 @@ onAsyncError: isRecoverable/isTransient 任一为真 → 交给既有的错误�
 
 ---
 
-## 八、待确认
+## 八、决策已定（2026-09-27，用户拍板）
 
-1. DRM/secure 是否本期就迁到 `AMediaCodecCryptoInfo_*`（API 21 可用），还是先保留 JNI？
-   本文默认**先保留 JNI**，迁 DRM 单列一期。
-2. `onFrameRendered`（API 33）是否作为"上屏取证"纳入本期？本文默认**纳入诊断**（弱符号判空，不参与播放语义）。
+1. **数据面只用异步**，**不保留同步轮询**；NDK 异步绑定（`setAsyncNotifyCallback`）为 API ≥ 28 的主路径。
+2. **只用 NDK r25c**，不升级 r28；minSdk **24 不抬**（24~27 走 Java 异步绑定）。
+3. **DRM/secure 本期不迁**：`setDrmInfo` 成功即把整实例交给 Java 绑定（MediaCrypto 全链路在 Java 侧）。
+4. `onFrameRendered`（API 33）**本期不纳入**（覆盖设备太少），继续用现有渲染器日志取证。
+5. **不使用 FFmpeg 自带的 mediacodec**（理由见 §十）。
+
+## 九、实现记录（阶段 A/B/C/D 已完成编码，编译验证见下）
+
+| 文件 | 角色 |
+|---|---|
+| `framework/codec/Android/codecBinding.h/.cpp` | `IAndroidCodecBinding` 抽象 + `JavaCodecBinding`（1:1 转发既有 JNI）+ `AndroidCodecBinding` 调度器 + `createAndroidCodecBinding()` |
+| `framework/codec/Android/ndkCodecBinding.h/.cpp` | NDK 异步绑定：`AMediaCodec` + 回调队列 + 条件变量 + `flush→start` 不变量 + 防饿死 |
+| `framework/codec/Android/mediaCodecDecoder.h/.cpp` | 成员由 `MediaCodec_Decoder*` 换成 `std::unique_ptr<IAndroidCodecBinding>`；删除从未使用的 `mUseNdk` |
+| `framework/codec/Android/jni/MediaCodec_Decoder.h/.cpp` | 新增**控制面** `selectCodecName(...)`（只选不建，返回 codec 名） |
+| 两份 `MediaCodecDecoder.java` | 新增 `selectCodecName(...)`；**删除 `sAsyncBroken` 与"下个实例走轮询"分支** |
+| `framework/codec/CMakeLists.txt` + 两个模块 `CMakeLists` | 新增上述源文件；Android 链接 `mediandk` |
+
+**路由规则（`codecBinding.cpp` 的 `AndroidCodecBinding`，按平台能力，不是配置开关）**
+- `setDrmInfo` 成功（secure）⇒ 整实例 `java-async`（必要时把已 configure 的配置在 Java 侧重放一次）；
+- 视频 `surface == null` 或 `usePlaceholderSurface`（B2 占位面是 Java 能力）⇒ 整实例 `java-async`；
+- 其余 + API ≥ 28 ⇒ `ndk-async`；NDK configure 失败 ⇒ 进程内一次性熔断（`NdkCodecBinding::markUnavailable`）并整实例回落 `java-async`。
+- 两条都是**异步**，所以"无同步轮询"在所有受支持系统上成立。
+
+**一个实证结论（值得记住）**：`AMediaCodec_setAsyncNotifyCallback`(28) / `setParameters`(26) / `ActionCode_is*`(28) 在 `__ANDROID_API__ = 24` 的构建里**不能直接调用**，编译器会报
+`'AMediaCodec_setAsyncNotifyCallback' is unavailable: introduced in Android 28`，而自己再写
+`__attribute__((weak_import))` 重声明**压不住**头文件已有的 availability 属性（首个声明生效）。
+最终采用 **dlopen + dlsym 运行期解析**（句柄进程内保留、不 dlclose）——判据就是"这台设备的
+libmediandk 有没有这个符号"，比版本号更准。巧合的是 FFmpeg 上游也是这么做的
+（`external/external/ffmpeg/libavcodec/mediacodec_wrapper.c` 的 NDK 后端
+`GET_SYMBOL(setAsyncNotifyCallback)`），说明这是标准姿势。
+
+**回滚锚点**：`git tag pre-ndk-mediacodec`（已推送）。整块回退只需回到该 tag。
+
+## 十、为什么不用 FFmpeg 自带的 mediacodec（行号证据，2026-09-27 核实）
+
+用户提出"FFmpeg 9 不是直接支持安卓硬解吗、鸿蒙也一样，自己接是 FFmpeg 4 的老做法"。
+核实结论（**证据全部来自本仓库自带的 FFmpeg 源码树 `external/external/ffmpeg/`**）：
+
+| 事实 | 证据 |
+|---|---|
+| 上游**有** Android 硬解，且 wrapper 有**两套后端**（JNI 与 NDK） | `libavcodec/mediacodec_wrapper.c`：`mediacodec_jni_*` 与 `mediacodec_ndk_*` 两套 vtable |
+| **解码器是同步轮询**，没有异步 | `mediacodecdec_common.c:923` `ff_AMediaCodec_dequeueInputBuffer`、`:1015` `dequeueOutputBuffer`；解码路径**零** `setAsyncNotifyCallback` |
+| **异步只做给了编码器** | `mediacodecenc.c:583-596`（`ff_AMediaCodec_setAsyncNotifyCallback` + 失败自动退回同步的日志）、`:1045` 选项 `ndk_async` |
+| **没有 DRM/secure 通路** | `mediacodecdec_common.c:850` `ff_AMediaCodec_configure(codec, format, s->surface, NULL, 0)` —— crypto 传 `NULL` |
+| **零拷贝有**（与异步是两件事） | `s->surface` / `ff_mediacodec_surface_ref(...)`、`av_mediacodec_release_buffer[_at_time]` |
+| 上游**有** OpenHarmony 解码器 | `libavcodec/ohcodec.c`、`ohdec.c`、`ohenc.c` 就在本仓库的 FFmpeg 树里 |
+| **本工程 FFmpeg 构建并未启用它们** | `build_tools/**` 里 `mediacodec|enable-jni|ohcodec|ohdec` **零命中** |
+
+⇒ 结论：开 `--enable-jni --enable-mediacodec` **不会带来异步解码**（解码器只有同步轮询），
+也给不了 DRM、占位面/隧道、选 codec 黑名单、OEM 钩子这些本内核依赖的语义。
+所以本项目继续走"自己接"的路线；FFmpeg 那条路保留为**将来统一解码栈**的候选，
+前提是先给上游 decoder 补 async（模板就是它的 encoder 那份实现）。
+
+> 另外：`docs/Packaging_HarmonyOS.md:109` 原写"FFmpeg 上游**没有** OHOS hwaccel"，
+> 与本仓库 FFmpeg 树（`libavcodec/ohdec.c` 存在）**矛盾**，已按本表修正。

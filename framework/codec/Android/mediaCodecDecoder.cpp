@@ -35,10 +35,20 @@ namespace Cicada {
         AF_LOGD("android decoder use jni");
         mName = "VD.mediaCodec";
         mFlags |= DECFLAG_HW;
-        mDecoder = new MediaCodec_Decoder();
+        /*
+         * 平台绑定由工厂按**平台能力**选择（不是配置开关）：
+         *   · API >= 28 且 libmediandk 提供 setAsyncNotifyCallback ⇒ ndk-async
+         *     （数据面全部在 C++：每帧 0 次 JNI、0 次 Java 堆分配、0 次多余拷贝）；
+         *   · 否则（API 24~27，或 secure/占位 surface 这类必须 Java 能力的场景）⇒ java-async
+         *     （现有实现，同样是异步回调）。
+         * 两者都实现 IAndroidCodecBinding，本文件其余代码与状态机语义不变。
+         */
+        mDecoder = createAndroidCodecBinding();
+        AF_LOGI("[ndk-codec] mediaCodecDecoder created: binding=%s\n",
+                (mDecoder != nullptr) ? mDecoder->bindingName() : "none");
         /* B5-4：帧释放回调的共享状态（见头文件里的完整说明）。 */
         mReleaseState = std::make_shared<FrameReleaseState>();
-        mReleaseState->decoder = mDecoder;
+        mReleaseState->decoder = (mDecoder != nullptr) ? mDecoder.get() : nullptr;
     }
 
     mediaCodecDecoder::~mediaCodecDecoder() {
@@ -54,11 +64,9 @@ namespace Cicada {
             std::lock_guard<std::mutex> lock(mReleaseState->mutex);
             mReleaseState->alive = false;
             mReleaseState->decoder = nullptr;
-            delete mDecoder;
-            mDecoder = nullptr;
+            mDecoder.reset();
         } else {
-            delete mDecoder;
-            mDecoder = nullptr;
+            mDecoder.reset();
         }
     }
 

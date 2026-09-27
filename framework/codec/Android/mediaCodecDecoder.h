@@ -20,7 +20,13 @@
 #include <drm/WideVineDrmHandler.h>
 #include "codec/ActiveDecoder.h"
 #include "../codecPrototype.h"
-#include "jni/MediaCodec_Decoder.h"
+/*
+ * codecBinding.h 里已经包含 jni/MediaCodec_Decoder.h（CodecSpecificData / mc_out / MC_* 都在那里）。
+ * 本解码器现在只认 IAndroidCodecBinding 抽象：具体是 NDK 异步（AMediaCodec +
+ * setAsyncNotifyCallback）还是 Java 异步（现有 JNI），由 createAndroidCodecBinding() 按平台能力决定。
+ * 设计见 docs/ANDROID-NDK-ASYNC-DECODER.md。
+ */
+#include "codecBinding.h"
 
 
 #define CODEC_VIDEO (0)
@@ -137,7 +143,9 @@ namespace Cicada{
         int codecType = CODEC_VIDEO;
         std::string mMime{};
         std::list<std::unique_ptr<CodecSpecificData>> mCSDList{};
-        MediaCodec_Decoder *mDecoder{nullptr};
+        /* 平台绑定：ndk-async（AMediaCodec 异步回调）或 java-async（现有 JNI）。
+         * 两种都是异步；本工程没有同步轮询路径（见 docs/ANDROID-NDK-ASYNC-DECODER.md）。 */
+        std::unique_ptr<IAndroidCodecBinding> mDecoder;
 
         /*
          * ============ 【B5-4】帧释放回调的共享状态（不再捕获裸 this）============
@@ -171,7 +179,8 @@ namespace Cicada{
          */
         struct FrameReleaseState {
             std::mutex mutex;
-            MediaCodec_Decoder *decoder{nullptr};
+            /* 绑定接口指针（原来指向 JNI 包装；现在两种绑定都实现同一接口，语义不变）。 */
+            IAndroidCodecBinding *decoder{nullptr};
             bool alive{true};
             /* flush / close 会让所有"已出队未释放"的帧失效：每失效一次就 +1，
              * 帧在创建时快照这个代。用原子量是为了让"创建帧"这条热路径不必加锁。 */
@@ -189,7 +198,6 @@ namespace Cicada{
         int mInputTryAgainCount{0};
         int mOutputFrameCount{0};
         bool mThrowFrame{false};
-        bool mUseNdk{false};
 
         std::mutex mFlushInterruptMuex;
         int mFlushInterrupt{false};

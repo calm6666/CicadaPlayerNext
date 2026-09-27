@@ -106,8 +106,12 @@ hvigorw assembleHap --mode module -p product=default
 - **Widevine L3 为华为商用扩展**（仅 HarmonyOS NEXT 商用设备，需设备支持）；
   开源 OpenHarmony 自带 ClearKey 插件（UUID `e2719d58-…`）。
   用 `OH_MediaKeySystem_GetMaxContentProtectionLevel()` 探测能力。
-- FFmpeg 上游**没有** OHOS hwaccel：本方案采用 FFmpeg 解封装 + OH_AVCodec 硬解直连，
-  与社区 `ohos_ijkplayer` 同一模式。
+- **FFmpeg 上游有 OHOS 解码器，但本工程的 FFmpeg 构建没启用它**【2026-09-27 更正】：
+  本仓库自带的 FFmpeg 源码树里 `libavcodec/ohcodec.c` / `ohdec.c` / `ohenc.c` 都在，
+  而 `build_tools/**` 里 `ohcodec|ohdec` **零命中** ⇒ 现状是"有能力、未开启"。
+  当前方案仍是 FFmpeg 解封装 + `OH_AVCodec` 硬解直连（与社区 `ohos_ijkplayer` 同一模式），
+  因为本内核依赖的语义（选路/切档占位面/DRM/上屏取证）在 FFmpeg 的 ohdec 上没有对应通路。
+  若将来要统一到 FFmpeg 解码栈，需要先启用对应开关并重新验证 `.so`。
 - `OHOS_STL=c++_shared` 时 `libc++_shared.so` 由 hvigor 自动打包；对外 `.har` 需携带 `libs/<abi>/*.so`。
 - 首启排障可用 `export OHOS_DISABLE_ASM=TRUE` 关掉 FFmpeg 手写汇编。
 - Demo 中 `libffmpeg.so` 路径由 `FFMPEG_INSTALL_DIR_OHOS` 覆盖（默认

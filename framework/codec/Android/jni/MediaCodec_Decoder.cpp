@@ -37,6 +37,8 @@ static jmethodID jMediaCodec_queueSecureInputBuffer = nullptr;
 static jmethodID jMediaCodec_dequeueOutputBufferIndex = nullptr;
 static jmethodID jMediaCodec_getOutputBufferInfo = nullptr;
 static jmethodID jMediaCodec_getOutBuffer = nullptr;
+/* 【控制面】NDK 数据面用它取得"Java 侧选中的 codec 名"（见 MediaCodec_Decoder.h 的说明）。 */
+static jmethodID jMediaCodec_selectCodecName = nullptr;
 
 /*
  * 【设备硬解能力查询】MediaCodecUtils 的类句柄与方法 ID。
@@ -97,6 +99,19 @@ void MediaCodec_Decoder::init(JNIEnv *env) {
                                                            "(I)Ljava/lang/Object;");
         jMediaCodec_getOutBuffer = env->GetMethodID(jMediaCodecClass, "getOutBuffer",
                                                     "(I)Ljava/lang/Object;");
+        /*
+         * 控制面：选 codec 名（NDK 数据面用）。失败时清掉 pending 异常，
+         * 理由见本文件 setDecodeBoost 那段注释：GetMethodID 失败会挂起异常，
+         * 不清掉会污染后面**所有** JNI 调用。
+         */
+        jMediaCodec_selectCodecName = env->GetMethodID(jMediaCodecClass, "selectCodecName",
+                                                       "(ZLjava/lang/String;IIIII)Ljava/lang/String;");
+
+        if (JniException::clearException(env)) {
+            jMediaCodec_selectCodecName = nullptr;
+            AF_LOGW("MediaCodecDecoder.selectCodecName not found (老版本 Java 类): "
+                    "NDK 绑定将回落 Java 绑定\n");
+        }
     }
 
     /*
@@ -335,6 +350,47 @@ int MediaCodec_Decoder::configureAudio(const std::string &mime, int sampleRate, 
                                  (jint) sampleRate, (jint) channelCount, (jint) isADTS);
 
     return ret;
+}
+
+std::string MediaCodec_Decoder::selectCodecName(bool isVideo, const std::string &mime, int width,
+                                                int height, int sampleRate, int channelCount,
+                                                int isADTS) {
+    std::string result;
+    JniEnv jniEnv{};
+
+    JNIEnv *env = jniEnv.getEnv();
+
+    if (env == nullptr || mMediaCodec == nullptr || jMediaCodec_selectCodecName == nullptr) {
+        /*
+         * 拿不到就返回空串：调用方（NDK 绑定）会把整个实例回落给 Java 绑定，
+         * 功能不缺失，只是一次调用没走成 —— 与"能力查询未知即视为支持"的既有口径一致。
+         */
+        return result;
+    }
+
+    NewStringUTF jMime(env, mime.c_str());
+    jstring name = (jstring) env->CallObjectMethod(mMediaCodec, jMediaCodec_selectCodecName,
+                                                   (jboolean) isVideo, jMime.getString(),
+                                                   (jint) width, (jint) height, (jint) sampleRate,
+                                                   (jint) channelCount, (jint) isADTS);
+
+    if (JniException::clearException(env)) {
+        AF_LOGE("selectCodecName exception\n");
+        return result;
+    }
+
+    if (name != nullptr) {
+        const char *chars = env->GetStringUTFChars(name, nullptr);
+
+        if (chars != nullptr) {
+            result.assign(chars);
+            env->ReleaseStringUTFChars(name, chars);
+        }
+
+        env->DeleteLocalRef(name);
+    }
+
+    return result;
 }
 
 int MediaCodec_Decoder::start() {

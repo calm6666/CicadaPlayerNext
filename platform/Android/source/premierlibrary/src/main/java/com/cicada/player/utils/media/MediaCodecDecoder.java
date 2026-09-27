@@ -70,10 +70,22 @@ public class MediaCodecDecoder {
     private boolean mAsyncFirstInputLogged = false;
 
     // 异步回调模式（对齐 ExoPlayer AsynchronousMediaCodecAdapter）：注册必须
-    // 在 MediaCodec.start() 之前（见 start()）。个别 codec 回调不送达时运行
-    // 时检测到会自动回退轮询（sAsyncBroken）
+    // 在 MediaCodec.start() 之前（见 start()）。本工程**只用异步**，没有轮询回退。
     private static final boolean ASYNC_ENABLED = true;
-    private static boolean sAsyncBroken = false;
+
+    /*
+     * 【2026-09-27 阶段 D：删除"降级轮询"的静态闩 sAsyncBroken】
+     *
+     * 它原来的作用：一旦检测到 flush 之后输入回调不再送达，就标记本进程"异步不可用"，
+     * 之后新建的解码器实例改用**同步轮询**（dequeueInputBuffer/dequeueOutputBuffer）。
+     *
+     * 现在删除，理由两条：
+     *   1) 根因已修：异步模式下 flush() 之后必须再调 start()（AOSP 契约原文），
+     *      Java 侧与 NDK 侧都按这条不变量实现（commit 99cfd107 / ndkCodecBinding::flush）；
+     *   2) 设计约束（docs/ANDROID-NDK-ASYNC-DECODER.md）：**不保留同步轮询路径**。
+     *      轮询会引入"轮询周期"延迟，并与 NDK 异步数据面的模型相互矛盾。
+     * 因此这里只保留诊断日志；真出问题时由内核既有的"错误 → 重建解码器"路径处理。
+     */
     private boolean mAsyncMode = false;
     private int mInputWaitCount = 0;
 
@@ -190,6 +202,45 @@ public class MediaCodecDecoder {
         } catch (Throwable t) {
             Logger.w(TAG, "setDecodeBoost(" + boost + ") is not supported by this codec: " + t);
         }
+    }
+
+    /**
+     * 【控制面：NDK 数据面专用】只做"选择"、不做"创建"。
+     *
+     * 与 configureVideo/configureAudio 用**完全相同**的依据（同一份 MediaCodecList 顺序、
+     * 同一份黑名单、同一份 secure 判定）返回将被 {@code MediaCodec.createByCodecName()}
+     * 使用的 codec 名；NDK 异步绑定（ndkCodecBinding）用它 +
+     * {@code AMediaCodec_createCodecByName()} 精确锁定同一颗 codec（按名字创建自 API 21 就有），
+     * 从而保证"Java 能力面选中的"与"NDK 实际创建的"是同一颗。
+     *
+     * 纯查询：不创建 MediaCodec、不持有资源、不改本实例的播放状态（只按入参临时组一个
+     * MediaFormat 供能力筛选）。返回 null/空串 = 选择失败，调用方回落 Java 绑定。
+     * 设计见 docs/ANDROID-NDK-ASYNC-DECODER.md。
+     */
+    @NativeUsed
+    public String selectCodecName(boolean isVideo, String mime, int width, int height,
+                                  int sampleRate, int channelCount, int isADTS) {
+        if (TextUtils.isEmpty(mime)) {
+            return null;
+        }
+
+        mMime = mime;
+        mCodecCateGory = isVideo ? CODEC_CATEGORY_VIDEO : CODEC_CATEGORY_AUDIO;
+
+        MediaFormat format;
+        if (isVideo) {
+            format = MediaFormat.createVideoFormat(mime, width, height);
+        } else {
+            format = MediaFormat.createAudioFormat(mime, sampleRate, channelCount);
+            if (isADTS != 0) {
+                format.setInteger(MediaFormat.KEY_IS_ADTS, 1);
+            }
+        }
+
+        String codecName = findDecoderName(format);
+        Logger.i(TAG, "[codec-select] ndk control plane: isVideo=" + isVideo + " mime=" + mime
+                + " -> " + codecName);
+        return codecName;
     }
 
     @NativeUsed
@@ -433,8 +484,9 @@ public class MediaCodecDecoder {
          * Java 实例 —— 清一遍可以保证判据只依据**本实例**的证据，不会被
          * 上一个实例的残留影响。
          *
-         * sAsyncBroken 是 static：一旦被标记，之后新建的实例直接走轮询
-         * （下面的 if 会跳过 setCallback），这正是"降级留给下一个实例"的实现。
+         * 【2026-09-27 阶段 D】原来这里还有一句"static 的 sAsyncBroken 一旦被标记，
+         * 之后新建的实例直接走轮询"。该闩已删除：本设计**没有**同步轮询路径
+         * （见本文件顶部 ASYNC_ENABLED 处的说明与 docs/ANDROID-NDK-ASYNC-DECODER.md）。
          */
         mInputWaitCount = 0;
         mAsyncFirstInputLogged = false;
@@ -445,7 +497,7 @@ public class MediaCodecDecoder {
         // start() 之后 codec 立刻回调 onInputBufferAvailable，注册晚了会丢失
         // 首批回调，输入队列永远为空（此前误判为"设备不支持异步"）。
         // 保留 1 秒超时兜底：真遇到回调不送达的 codec 自动回退轮询。
-        if (ASYNC_ENABLED && !sAsyncBroken) {
+        if (ASYNC_ENABLED) {
             try {
                 mCallbackThread = new HandlerThread("MediaCodecCallback");
                 mCallbackThread.start();
@@ -508,9 +560,7 @@ public class MediaCodecDecoder {
                 mAsyncMode = false;
             }
         } else {
-            if (sAsyncBroken) {
-                Logger.w(TAG, "async mode disabled (previous input callback timeout), fallback to polling");
-            }
+            /* ASYNC_ENABLED 关闭时才是同步轮询；本工程恒为 true（异步唯一路径）。 */
             mAsyncMode = false;
         }
 
@@ -730,9 +780,8 @@ public class MediaCodecDecoder {
                 // 前进约 40 秒（2026-09-23 22:32 日志：errorFrames=1001，25fps 即
                 // 40.0 秒，与实测超前 43996 ms 对得上），恢复后每一帧都被判成
                 // "太早"而不上屏：画面永久冻住、声音正常、位置照走。
-                // 所以这里【只】回报 TRY_AGAIN 并做标记，绝不改 mAsyncMode、
-                // 绝不调用同步 API —— 降级动作一律留给**下一个**解码器实例
-                // （start() 会读 sAsyncBroken 决定是否 setCallback）。
+                // 所以这里【只】回报 TRY_AGAIN，绝不改 mAsyncMode、绝不调用同步 API。
+                // 阶段 D 起连"降级给下一个实例"也没有了：本设计不存在同步轮询路径。
                 //
                 // 【2026-09-24 修：下面这道保险以前是死的】
                 //
@@ -758,9 +807,8 @@ public class MediaCodecDecoder {
                 //       非空。反过来说，输出侧一个都没占（mOutputIndices 为空）
                 //       却仍然 1 秒不给输入缓冲，就不是背压，而是异步通路本身坏了。
                 //
-                // 标记 sAsyncBroken 的效果：**之后新建**的解码器实例直接走轮询
-                // （start() 里 `ASYNC_ENABLED && !sAsyncBroken`）。内核侧
-                // rebuildVideoDecoder() 重建解码器时走的就是这条 start()。
+                // 【阶段 D】这里原来还会标记 sAsyncBroken 让下一个实例走轮询；该闩已删除。
+                // 命中本判据时只留一条 WARN，兜底交给内核既有的"错误 → 重建解码器"路径。
                 mInputWaitCount++;
 
                 final long nowMs = SystemClock.uptimeMillis();
@@ -780,21 +828,21 @@ public class MediaCodecDecoder {
                 final boolean starvedWithoutBackpressure =
                         mInputWaitCount >= INPUT_STARVATION_CONFIRM_COUNT && noOutputHeld;
 
-                if (!sAsyncBroken && (flushCallbackMissing || starvedWithoutBackpressure)) {
+                if (flushCallbackMissing || starvedWithoutBackpressure) {
                     /*
-                     * 只打一条 WARN 说明"命中了哪个判据 + 下一个解码器走什么模式"。
-                     * 不在这里做任何动作 —— 当前实例仍是异步模式，同步 API 会抛
-                     * IllegalStateException，那正是历史上把解码器搞僵的路径。
+                     * 【阶段 D：这里不再标记"下个实例走轮询"】
+                     * 只打一条 WARN 说明命中了哪个判据。本设计**没有**同步轮询回退：
+                     *   · 根因（异步模式 flush 后不 start）已按平台契约修好；
+                     *   · 兜底动作交给内核既有的"错误 → 重建解码器"路径，而不是换成轮询
+                     *     （轮询会引入轮询周期延迟，并与 NDK 异步数据面模型矛盾）。
+                     * 见 docs/ANDROID-NDK-ASYNC-DECODER.md §五 阶段 D。
                      */
                     Logger.w(TAG, "async input path looks dead (criterion="
                             + (flushCallbackMissing ? "no-input-callback-after-flush" : "starved-without-backpressure")
                             + ", waitedMs=" + (mFlushCompletedMs > 0 ? (nowMs - mFlushCompletedMs) : -1)
                             + ", mInputWaitCount=" + mInputWaitCount
                             + ", noOutputHeld=" + noOutputHeld
-                            + "): keeping this instance asynchronous (never switching the pump to the "
-                            + "synchronous API) and marking the async path broken so the NEXT decoder "
-                            + "created by the native rebuild will use polling");
-                    sAsyncBroken = true;
+                            + "): 没有轮询回退；若真出现，请按 flush->start 不变量与 codec 状态排查");
                     mInputWaitCount = 0;
                 }
                 return TRY_AGAIN;
