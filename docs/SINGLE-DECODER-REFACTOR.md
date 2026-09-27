@@ -882,3 +882,59 @@ B2/B2' 占位面、四个死线常量，以及 `SMPAVDeviceManager.{h,cpp}` 的 
 裸删成行为回退 —— 这正是 §12.4 说的"不得裸删"那一类。**先定这条，再删成员。**
 
 
+
+## 十三、P4 完成记录（落点延迟线收敛成一份；构建 0/0）
+
+**做了什么**：解复用器里那条"落点延迟线"原先在 `HLSStream` 与 `DashStream` 里**各写了一份**（同形、约 50 行代码 + 60 行注释 ×2）。
+现在抽成一份共享实现 `framework/demuxer/SeekLandingStage.{h,cpp}`，两个 demuxer 各持一个 `SeekLandingStage mSeekLanding{mQueue, mDataMutex, mWaitCond};`
+（**追加在各自类成员列表末尾**）并调用它；各自那份拷贝的成员、函数与重复注释全部删除
+（`HLSStream.cpp` 2308→2032 行、`DashStream.cpp` 1800→1517 行）。`framework/demuxer/CMakeLists.txt` 显式列入新源文件
+（该 target 不用 file GLOB —— 静态库链接不会暴露未定义符号，这一步必须做；父代理已确认 `SeekLandingStage.obj` 真的产出）。
+
+**为什么必须保留它（而不是当残留删掉）**：它把解码起点从"分片片首（≤10s 之前）"挪到
+**"不晚于目标的最后一个关键帧"**，即把"seek 后必须解码前推的帧数"从分片长度量级降到关键帧间隔量级。
+删掉它 = 分片源 seek 变慢（用户抱怨过的"seek 后很慢"会回来），属于"精度换流畅"的反面。
+**它不是第二个精度权威**：即使它交接早了（多给了前缀帧），renderer 的 `shouldDropForDiscontinuity()` 也会把这些帧丢掉。
+这句话已写进 `SeekLandingStage.h` 的类注释。
+
+**行为逐字等价**（P4 的硬要求，逐条对照）：(a) 只有 `timePosition ≤ 目标` 的包进延迟线；
+(b) 读到 `timePosition > 目标` ⇒ 丢掉"最后一个 ≤ 目标的关键帧"之前攒下的整批，从它起（含当前包）按原序交出；
+(c) 包没有 `timePosition` ⇒ ABANDON（已收下的按原序交出，只慢不错）；(d) "本片读完 / 停在本片界"两个切换点整批交出；
+(e) 任何情况下不丢目标帧，**无任何计时器**（"攒前缀时不要每包白等 10ms"的判据是 `consumeProgress()` 这个进度事实）。
+加锁语义也与原实现**逐字相同**（`flush()` 锁宿主 `mDataMutex`，且原实现同样在 `filter()` 的 ABANDON/RELEASE 分支里调它）——
+父代理用 `git show` 对比过，没有引入新的死锁面。
+
+**日志**：前缀仍是字面 `[seekLanding]`（既有 grep 照旧命中），来源紧随其后（`[seekLanding] HLS armed: …` / `[seekLanding] DASH armed: …`），
+12 条消息文本/级别与"每轮各状态一条 + 限频"不变。
+
+**效果**：`seekLanding`/`mSeekLandingStage` 命中 190 → **18**（12 在共享实现、3 在其头文件、3 是内核注释）；
+§5 验收命令仍为 **0**；MSVC 构建 **0 错误 0 警告**。
+
+## 十四、P5 终检记录（静态门 + 构建 + 验收）
+
+**构建**：`cmake --build platform\QtPlayer\build\msvc-static --target media_player --config Release` → **0 error / 0 warning**
+（MSVC 14.39.33519）。本阶段消掉的三条警告：`C4005 AV_DISPOSITION_ATTACHED_PIC` 宏重定义（把 `AFMediaType.h` 的写法对齐
+ffmpeg 的 `(1 << 10)` —— MSVC 比较的是记号序列而非取值）、`C4244`（`MediaPlayerAnalyticsUtil.cpp` 的 float→int64 显式化）、
+`C4305`（`AbrBufferRefererData.cpp` 的 `return -1` → `false`）。
+
+**验收命令**：§5（32 个模式、`-CaseSensitive`）→ **0**。
+
+**工程硬约束静态门**（对本阶段**全部 +3210 新增行**逐条 grep，而不是全仓）：
+
+| 门 | 结果 |
+|---|---|
+| 平台宏（`__ANDROID__`/`__APPLE__`/`_WIN32`/OHOS/`TARGET_OS_`/`__linux__`/`_MSC_VER`） | **0**（唯一命中在文档表格里） |
+| 新虚函数 `virtual` | **0** ⇒ vtable 未动 |
+| 新增配置开关（`setOption`/`options::SET|REPLACE`/`addValue`） | **0** |
+| 计时器/看门狗（`af_msleep(≥100)`/`usleep`/`watchdog`/`*_TIMEOUT_MS`/`*_DEADLINE_`） | **0**（命中全是文档里"已删除"的记述） |
+| 注释内"星号紧跟斜杠" | 修掉最后一处字面违反（`SuperMediaPlayer.cpp` 的 `/*mAdaptiveVideo &&*/`，改成上一行普通注释），现为 0 |
+| UI/QML | 未碰逻辑；`platform/QtPlayer/src/CicadaPlayerItem.cpp` 只改了两处注释 |
+| 新成员追加类末尾 | P3 的 `mVideoSwitchInFlight`/`mVideoSwitchTargetIndex`、P4 的 `mSeekLanding` 均为追加；`mDiscontinuity` 仍是最后成员 |
+
+**必须全量重编的理由**：P1/P2/P2.1/P3 在成员列表中间删过成员、并追加过成员 ⇒ 旧 `.obj` 按旧偏移编译会错位。
+构建步骤见 `docs/HANDOVER-P0-P3.md` 第二节。
+
+**仍需用户执行**：真机（Qt / Android / iOS / HarmonyOS）构建 + 按 `docs/HANDOVER-P0-P3.md` 第三节的日志标记回归
+（seek 落点 `offsetFromTarget`、位置单调、暂停/缓冲时位置恒定、音频 `afterSeekMs ≤ 200` 与 `audio landing drop` 的
+`target` 与视频落点一致、切档只有 `status=0 → 1` 且不再出现 pending/占位面/死线日志）。**行为结论只能由这些日志判定**，
+父代理能给出的只是"编译与静态规则的证据"。

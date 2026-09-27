@@ -5680,7 +5680,9 @@ int SuperMediaPlayer::ReadPacket()
                  * seek would clean the packet which have ExtraData in decoder queue,
                  * so add the ExtraData after seek on key frame
                  */
-            if (/*mAdaptiveVideo &&*/ pFrame->getInfo().flags) {
+            /* 这里原来还有一个 `mAdaptiveVideo &&` 的条件：该状态随双解码器/自适应切档机器一起删除，
+             * 现在只看"是不是关键帧包"。 */
+            if (pFrame->getInfo().flags) {
                 unique_ptr<streamMeta> pMeta;
                 mDemuxerService->GetStreamMeta(pMeta, pFrame->getInfo().streamIndex, false);
                 pFrame->setExtraData(((Stream_meta *) (*pMeta))->extradata, ((Stream_meta *) (*pMeta))->extradata_size);
