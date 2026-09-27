@@ -1555,4 +1555,62 @@ public interface CicadaPlayer {
      * @param l The quality switch status notification.
      */
     abstract public void setOnVideoQualitySwitchListener(OnVideoQualitySwitchListener l);
+
+    /**
+     * 取当前"设备硬解能力 + 编码效率偏好"（JSON，内核 CicadaGetVideoCodecSupport 的 Java 落点）。
+     *
+     * 返回（字段名固定，见内核 media_player_api.h）：
+     * <pre>
+     * {"source":"app"|"kernel",
+     *  "hwDecode":["H.265","H.264"],
+     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"]}
+     * </pre>
+     * 语义：
+     * <ul>
+     *   <li>{@code source} = "kernel"：这份是**内核探测本设备**得到的；
+     *       "app"：是应用侧通过 {@link #setVideoCodecSupport} 传进去、正在生效的那份；</li>
+     *   <li>{@code hwDecode}：本设备**能硬解**的编码短名集合，顺序无关；</li>
+     *   <li>{@code preference}：从高到低的编码效率偏好序。</li>
+     * </ul>
+     * 拿不到时返回 null（没有播放器 / 内核失败）。
+     *
+     * @return 上面那份 JSON；取不到时 null
+     */
+    /****
+     * Current "device hardware-decode capability + codec efficiency preference" as JSON
+     * (Java landing point of the core's CicadaGetVideoCodecSupport).
+     *
+     * <p>Fields are fixed: {@code source} ("app" when the value was supplied by the app and is
+     * in effect, "kernel" when the core probed the device), {@code hwDecode} (short names of the
+     * codecs this device can decode in hardware, order does not matter) and {@code preference}
+     * (codec efficiency order, best first). Returns null when the player is not available.
+     *
+     * @return the JSON above, or null when it cannot be obtained
+     */
+    abstract public String getVideoCodecSupport();
+
+    /**
+     * 传入应用侧的"设备硬解能力 + 编码效率偏好"（JSON，契约与上面 get 的同一份）。
+     *
+     * <p><b>一旦传进去，内核就不再探测设备</b>：ABR 选档与起播默认档都按这份集合/偏好来。
+     * 应用侧可以自己持久化它，以便下次起播直接传，省掉一次设备探测。</p>
+     *
+     * <p>传 {@code null} 或空串 = 清除，恢复内核自己探测。</p>
+     *
+     * <p>畸形/不合契约的 JSON 由内核拒绝（当前状态不变、内核打日志），本方法不抛异常。</p>
+     *
+     * @param json 见上；null / 空串表示清除
+     */
+    /****
+     * Supply the app side's "device hardware-decode capability + codec efficiency preference"
+     * (same JSON contract as {@link #getVideoCodecSupport()}).
+     *
+     * <p>Once supplied the core stops probing the device and both ABR and the initial rendition
+     * follow this data, so an app may persist it and pass it again to skip probing.
+     * Passing null or an empty string clears it and restores core probing. Malformed JSON is
+     * rejected by the core (state unchanged, logged); this method does not throw.</p>
+     *
+     * @param json see above; null / empty clears it
+     */
+    abstract public void setVideoCodecSupport(String json);
 }

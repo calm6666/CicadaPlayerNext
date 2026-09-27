@@ -476,6 +476,12 @@ namespace Cicada {
         return CicadaGetCurrentStreamInfo(handle, type);
     }
 
+    bool MediaPlayer::IsVideoDecoderHardware()
+    {
+        GET_PLAYER_HANDLE
+        return CicadaIsVideoDecoderHardware(handle);
+    }
+
     int64_t MediaPlayer::GetCurrentPosition()
     {
         GET_PLAYER_HANDLE
@@ -701,6 +707,36 @@ namespace Cicada {
 
         GET_PLAYER_HANDLE
         CicadaSetColorMatrix(handle, matrix);
+    }
+
+    std::string MediaPlayer::GetVideoCodecSupport()
+    {
+        GET_PLAYER_HANDLE
+
+        if (handle == nullptr) {
+            return std::string();
+        }
+
+        const char *json = CicadaGetVideoCodecSupport(handle);
+
+        /*
+         * 先拷贝再释放：返回的是 malloc 出来的副本，必须用 CicadaFreeString()（不能 free/delete）。
+         * 传空指针给释放函数是安全的。
+         */
+        std::string result = (json != nullptr) ? std::string(json) : std::string();
+        CicadaFreeString(json);
+        return result;
+    }
+
+    int MediaPlayer::SetVideoCodecSupport(const char *json)
+    {
+        GET_PLAYER_HANDLE
+
+        if (handle == nullptr) {
+            return -1;
+        }
+
+        return CicadaSetVideoCodecSupport(handle, json);
     }
 
     void MediaPlayer::SetVideoBackgroundColor(uint32_t color)

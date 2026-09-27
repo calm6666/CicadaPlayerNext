@@ -508,8 +508,9 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
      * 候选档的同分辨率编码收敛。BestIndexForBudget() 只按码率选档，同一个清晰度上
      * 同时有 H.264 / H.265 / AV1 时它可能落到"白花带宽"的那一路上（也可能落到设备
      * 根本解不了的那一路上）。FindSameResolutionEfficientCodec() 负责在**同一分辨率**
-     * 内部把它收敛成该清晰度上更该选的那一档：硬解优先，其次压缩效率（AV1 > H.265 >
-     * VP9 > H.264 > MPEG-4/2），分辨率不会变。
+     * 内部把它收敛成该清晰度上更该选的那一档：**应用层手动指定的编码（preferred）
+     * 最高，其次硬解优先，再其次压缩效率**（AV1 > H.265 > VP9 > H.264 > MPEG-4/2），
+     * 分辨率不会变。
      *
      * 两条路径的码率上限刻意不同：
      *   * 上切/稳态（upCandidate）：**不限**码率。硬解是第一约束 —— 当预算挑中的那一档
@@ -519,6 +520,10 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
      *   * 降清晰度（downCandidate）：上限 = 该目标档自己的码率。缓冲已经不够了，
      *     这时换到一个**更贵**的编码等于把这次降档白做（很可能立刻又掉进紧急降档），
      *     所以这一路只接受"同分辨率里更省带宽的编码"（用户第 2 条），不允许抬码率。
+     *     **例外只有一个**：应用层手动指定了 preferred 时，手动意图压过这条带宽门限
+     *     （同一分辨率里没有负担得起的那一路时仍然换成它；有多路同编码变体时优先挑
+     *     负担得起的那一路）—— 这是"手动更改编码格式"必须能落地的代价，
+     *     详见 AbrAlgoStrategy::FindSameResolutionEfficientCodec() 的注释。
      */
     int upCandidate = BestIndexForBudget(ABR_UP_BANDWIDTH_FACTOR * throughput, count - 1);
     int downCandidate = BestIndexForBudget(ABR_DOWN_BANDWIDTH_FACTOR * throughput, currentIndex);
@@ -553,9 +558,13 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
     /*
      * ---- 3.5) 同一清晰度内换编码：当前档所在的分辨率上有更该选的那一档 ----
      *
-     * 两个诉求都靠这条落地：
-     *   * 手动/起播落到了 H.264 那条，而同一清晰度还有更省带宽的 H.265/AV1 时，
-     *     自动档主动搬到省带宽的那一路；
+     * 三个诉求都靠这条落地：
+     *   * **应用层手动指定了编码（preferred）**、而当前这一档不是它时，搬到同一清晰度
+     *     上那个编码的那一路（手动压过硬解偏好与效率序，且**允许软解**）。这就是
+     *     "设置默认视频格式之后，下一次分片请求就优先用该格式"在 ABR 上的落点：
+     *     设置本身不切，ABR 的下一次决策（≤ 一个 tick）才按 preference 选流；
+     *   * 自动档落到了 H.264 那条，而同一清晰度还有更省带宽的 H.265/AV1 时，
+     *     主动搬到省带宽的那一路；
      *   * **设备解不了当前这一路**（例如只支持 H.264 却起播在 AV1 上）时，搬到同一
      *     清晰度上设备能硬解的那一路 —— 这时即便那一档码率更高也换（硬解第一约束，
      *     与上面 upCandidate 用"不限码率"是同一个理由）。
@@ -569,7 +578,7 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
         const int lateral = FindSameResolutionEfficientCodec(currentIndex, 0);
 
         if (lateral >= 0) {
-            RequestSwitch(lateral, false, false, "same resolution, better codec (hw first, then efficiency)");
+            RequestSwitch(lateral, false, false, "same resolution, better codec (preferred > hw > efficiency)");
             return;
         }
     }
@@ -585,6 +594,7 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
      * downCandidate 已经在上面的"候选档同分辨率编码收敛"里处理过（带码率上限），
      * 所以这里落地的就是用户第 2 条要的那一档：**目标清晰度内**优先能硬解的编码、
      * 其次压缩效率更高的编码，且永远不会比 BestIndexForBudget() 选出的那一档更贵。
+     * 唯一的例外还是应用层手动指定的 preferred：它压过这个带宽门限（见上面那段注释）。
      * 清晰度档位只降不升 —— 换编码绝不跨分辨率。
      */
     if (bufferMs < ABR_LOW_BUFFER_MS && mLowBufferTicks >= ABR_LOW_BUFFER_TICKS && !inPostSwitchGrace) {

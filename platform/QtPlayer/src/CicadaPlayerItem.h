@@ -162,6 +162,30 @@ namespace cicadaqt {
         Q_PROPERTY(QString backend READ backend NOTIFY backendChanged)
         Q_PROPERTY(bool zeroCopy READ zeroCopy NOTIFY backendChanged)
         Q_PROPERTY(QString device READ device NOTIFY backendChanged)
+        /*
+         * 【解码方式】（只读）：**当前活动解码器实际在用**的硬解/软解，配上当前流的
+         * 编码短名，按市面通用写法组装：
+         *     硬解 HEVC（NVIDIA GeForce RTX 4060）   —— 硬解且拿得到显卡名
+         *     硬解 HEVC                              —— 硬解、但拿不到显卡名
+         *     软解 H.264                              —— 软解（**不写**型号）
+         *     硬解 / 软解                             —— 编码拿不到（不写"未知"、不猜）
+         * 没有视频流 / 还没有播放器时是**空串**（界面按 "--" 处理）。
+         *
+         * 事实来源（不是能力、也不是配置）：内核**活动解码器实例**自己的读数
+         * （MediaPlayer::IsVideoDecoderHardware() → ICicadaPlayer::IsVideoDecoderHardware()
+         * → IDecoder::isHardwareDecoderInUse()），所以运行期从硬解退回软解之后，
+         * 这里会跟着变成"软解"。编码来自当前流的 StreamInfo::videoCodec
+         * （内核归一化好的**规范短名** "H.264" / "H.265" / "AV1" / "VP9" / "MPEG-4" / "MPEG-2"）；
+         * 显示时经 .cpp 的 codecDisplayName() 换成用户认得的写法（H.265 → **HEVC**），
+         * 其余编码原样 —— 短名本身没改，内部（分组/认行）用的还是它。
+         *
+         * 值跟着统计信息一起 2Hz 刷新（见 .cpp 的 refreshDecodeMethod()），
+         * **不新增计时器**；变了才发 decodeMethodChanged()。
+         *
+         * 与 backend() 的区别：那个是"渲染/呈现走哪条路"（零拷贝还是 CPU 回拷），
+         * 这个是"解码在 GPU 还是 CPU"，两者不是一回事，所以两个属性都保留。
+         */
+        Q_PROPERTY(QString decodeMethod READ decodeMethod NOTIFY decodeMethodChanged)
         /* 最近一次错误信息（空串表示没有错误）。 */
         Q_PROPERTY(QString errorString READ errorString NOTIFY errorStringChanged)
 
@@ -243,7 +267,12 @@ namespace cicadaqt {
          *   renderFps                     实际渲染帧率（GetOption("renderFps")）
          *   droppedFrames/totalFrames     丢帧/总渲染帧（GetOption("videoDroppedInfo")）
          *   bufferMs/positionMs/durationMs 缓冲时长/位置/总时长（毫秒）
-         *   decodeMode/container          解码方式（零拷贝/CPU 回拷）与容器名
+         *   decodeMode                    渲染/呈现走哪条路（零拷贝还是 CPU 回拷），
+         *                                 取值是 backend() 那一类**实现细节**文案
+         *   decodeMethod                  解码方式（"硬解 HEVC（显卡名）"/"软解 H.264"），
+         *                                 统计面板「解码方式」那一行用的就是它，见 Q_PROPERTY
+         *                                 decodeMethod（两个键不是一回事，别混用）
+         *   container                     容器名
          *   hdr                           静态 HDR 类型（"SDR"/"HDR10"，拿不到就是空串）
          */
         Q_PROPERTY(QVariantMap stats READ stats NOTIFY statsChanged)
@@ -293,8 +322,10 @@ namespace cicadaqt {
          * 按带宽从高到低排好序，界面直接照着渲染就行。
          *
          * `label`      —— 档位名（4K / 2K / 1080P / …，见 .cpp 里那套换算）。
-         * `codec`      —— 框架归一化后的编码短名（"H.264"/"H.265"/"AV1"/…）。
-         * `codecLabel` —— 给徽标直接显示的文本，内容就是 codec；**认不出来时是空串**，
+         * `codec`      —— 框架归一化后的**编码短名**（"H.264"/"H.265"/"AV1"/…），**内部标识**：
+         *                 合并分组与认行（sameQualityRow）用它，界面别拿它当显示文案。
+         * `codecLabel` —— 给徽标直接显示的文本，= codec 经 .cpp 的 codecDisplayName() 换成的
+         *                 **显示名**（H.265 → "HEVC"，其余同 codec）；**认不出来时是空串**，
          *                 界面此时不渲染徽标（不显示"未知"、也不去猜）。
          *
          * **一行 = 一个分辨率 + 一套编码**：同一分辨率挂着多条流时（DASH 里常见的
@@ -448,6 +479,14 @@ namespace cicadaqt {
         QString backend() const;
         bool zeroCopy() const;
         QString device() const;
+        /*
+         * 解码方式（见上面 Q_PROPERTY 的说明）：返回最近一次刷新算出来的值，
+         * 本身只是读成员，不去问框架（所以 QML 绑定里读它没有副作用、也没有锁）。
+         */
+        QString decodeMethod() const
+        {
+            return m_decodeMethod;
+        }
         QString errorString() const
         {
             return m_errorString;
@@ -648,6 +687,55 @@ namespace cicadaqt {
         Q_INVOKABLE void setInitialBandwidth(int bitsPerSecond);
 
         /*
+         * ---- 【设备硬解能力 + 编码效率偏好：取一次、应用侧持久化、下次起播直接传】----
+         *
+         * 这两个方法把内核的新接口
+         *     CicadaGetVideoCodecSupport(player) / CicadaSetVideoCodecSupport(player, json)
+         * 暴露给 QML/应用层（内核契约见 mediaPlayer/media_player_api.h 里的注释）。
+         * 组件内部走的是 **Cicada::MediaPlayer 的包装转发**
+         *     MediaPlayer::GetVideoCodecSupport() / SetVideoCodecSupport(const char *)
+         * （mediaPlayer/MediaPlayer.h 里为平台层加的这一对）：**字符串的所有权、
+         * malloc/CicadaFreeString 的释放都在包装类里做完了 —— 本组件不持有、也不需要释放
+         * 任何 C 字符串**，拿到的就是一个 std::string / QString 值。
+         *
+         *   videoCodecSupport()         取**当前生效**的那份 JSON：
+         *                               {"source":"app"|"kernel",
+         *                                "hwDecode":["H.265","H.264"],
+         *                                "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"]}
+         *                               source == "kernel" 表示这份是**内核探测本机**得到的；
+         *                               "app" 表示是应用侧传进去、正在生效的那份。
+         *                               拿不到（没有播放器 / 内核返回空）时返回空串。
+         *   setVideoCodecSupport(json)  把应用侧的那份传给内核：**一旦传进去，内核就不再
+         *                               探测设备**，ABR 与起播默认档都按这份集合/偏好选流。
+         *                               传空串 = 清除，恢复内核自己探测。
+         *                               返回 void：内核解析失败（畸形 JSON）时只是拒绝、
+         *                               保持原状态（内核会打日志），组件不额外造一个错误通道。
+         *
+         * 【为什么应用侧要持久化】
+         *   1. 探测"这台设备能硬解哪些编码"在部分平台上是**有成本的**（Android 要枚举
+         *      MediaCodecList、Apple 要问 VTIsHardwareDecodeSupported、桌面要问 FFmpeg 的
+         *      avcodec_get_hw_config）；而这份结果在一台设备上**基本不变**（除非换硬件/刷机），
+         *      播放器却每次起播都要问它；
+         *   2. 内核为此把"应用层传进来的那份"设计成**进程内共享的能力快照**
+         *      （decoderFactory::AppCodecSupport），传一次就够 —— 它明确建议应用侧
+         *      "持久化它，避免每次起播都探测设备"（见 media_player_api.h 的原文）。
+         *   所以组件替应用把这件事收口：**QSettings 里有就直接传给内核；没有就先向内核取一次
+         *   探测结果、存进 QSettings**（见 .cpp 的 applyPersistedCodecSupport）。
+         *   QML 侧什么都不用做就能吃到这个省事；也可以在设置页里自己调这两个接口，
+         *   例如把用户挑的偏好序存下来：
+         *       Component.onCompleted: console.log(player.videoCodecSupport())
+         *       player.setVideoCodecSupport('{"hwDecode":["H.265","H.264"],"preference":["H.265","H.264"]}')
+         *
+         * 落盘位置：QSettings(IniFormat, UserScope, org "CicadaPlayerNext", app "QtPlayer")，
+         * 键 "videoCodecSupport/json"（Windows 上就是 %APPDATA%\CicadaPlayerNext\QtPlayer.ini）。
+         * **只在 GUI 线程读写**（QSettings 不是线程安全的）—— 这两个入口、以及下面那个
+         * 自动收口点 createPlayer() 本来就都跑在 GUI 线程上。类里不为此新增任何成员：
+         * 唯一的存储就是 QSettings（见 .cpp 里的说明）。
+         */
+        Q_INVOKABLE QString videoCodecSupport() const;
+        Q_INVOKABLE void setVideoCodecSupport(const QString &json);
+
+        /*
          * 框架的帧回调（在框架的 VSync 线程上被调用，见 CicadaVideoRender）。
          * 由 QML 组件的构造/析构管理生命周期，外部不要直接调用。
          *
@@ -706,6 +794,17 @@ namespace cicadaqt {
                                   int bandwidth, const QString &codec);
         void notifyQualitySwitchStatus(int status, int streamIndex, const QString &description);
 
+        /*
+         * 重新算一遍"解码方式"（硬解/软解 + 编码 + 显卡名，见 Q_PROPERTY decodeMethod）。
+         *
+         * 由 refreshStats() 在 GUI 线程上顺手调用（统计定时器 2Hz），**不新增计时器**：
+         *   * 解码器是 Prepare 之后才有的，统计定时器也正好从那时起跑；
+         *   * 运行期从硬解退回软解没有回调可挂，靠这个 2Hz 轮询跟上是合适的
+         *     （面板本来就是这个刷新率）。
+         * 值变了才发 decodeMethodChanged()。
+         */
+        void refreshDecodeMethod();
+
     signals:
         void sourceChanged();
         void playingChanged();
@@ -726,6 +825,8 @@ namespace cicadaqt {
         void extraRotationChanged();
         void mirrorChanged();
         void backendChanged();
+        /* 解码方式（硬解/软解 …）变了：见 Q_PROPERTY decodeMethod。 */
+        void decodeMethodChanged();
         void errorStringChanged();
         /* 流媒体片源（清单对象）的有无/内容变化。 */
         void streamingChanged();
@@ -781,6 +882,16 @@ namespace cicadaqt {
         /* 创建/销毁播放器（都在主线程）。 */
         void createPlayer();
         void destroyPlayer();
+        /*
+         * 【硬解能力/偏好的"取回 + 持久化"口子】只在 createPlayer() 里调一次（= 每次
+         * 打开片源的那一刻），语义见上面两个 Q_INVOKABLE 的说明：
+         *   * QSettings 里有存过的 JSON → 直接 setVideoCodecSupport 给内核（**不再探测设备**）；
+         *   * 没有 → 先 videoCodecSupport() 取一次内核探测结果，落盘供下次直接用。
+         * 析构时**什么都不做**：这份数据是要跨进程存活的（下次起播直接用），本来就不该
+         * 在退出时删；而内核那份"应用层覆盖值"由内核自己在播放器析构时撤销
+         * （SuperMediaPlayer 的 clearAppCodecSupportIf）。
+         */
+        void applyPersistedCodecSupport();
         /*
          * 现取一次总时长并发 durationChanged（变了才发）。
          *
@@ -1046,6 +1157,16 @@ namespace cicadaqt {
          * 按旧尺寸分配"的类尤其致命，这里同样遵守，省得以后挪动位置时踩雷。
          */
         bool mLiveMode = false;
+
+        /*
+         * 解码方式（"硬解 HEVC（显卡名）"/"软解 H.264" …；编码是显示名，内核短名 H.265 →
+         * HEVC，见 .cpp 的 codecDisplayName()）的当前值，见 Q_PROPERTY
+         * decodeMethod 与 refreshDecodeMethod()。
+         *
+         * 【成员一律加在最后】理由同上：QML 引擎按 sizeof 分配本对象，
+         * 中间插成员会和已有偏移量对不上。
+         */
+        QString m_decodeMethod;
     };
 
 }// namespace cicadaqt

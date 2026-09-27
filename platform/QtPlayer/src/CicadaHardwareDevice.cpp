@@ -197,6 +197,11 @@ namespace cicadaqt {
 
         if (rif == nullptr || rif->graphicsApi() != QSGRendererInterface::Direct3D11) {
             m_description = QStringLiteral("no Qt D3D11 device (scene graph uses another API)");
+            /*
+             * 场景图不在 D3D11 上：这份设备我们没拿到，"显卡名"也就无从谈起
+             * （界面按"拿不到型号"处理，只写"硬解 <编码>"，见 deviceName()）。
+             */
+            m_deviceName.clear();
             AF_LOGW("Qt scene graph is not on D3D11, zero copy with FFmpeg D3D11VA is not "
                     "possible; the framework will create its own device (copy-back)\n");
             return false;
@@ -290,7 +295,7 @@ namespace cicadaqt {
 
         /* 描述信息里带上设备名，方便确认到底用的哪块卡。 */
         IDXGIDevice *dxgiDevice = nullptr;
-        QString adapterName = QStringLiteral("unknown adapter");
+        QString adapterName;
 
         if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))) {
             IDXGIAdapter *adapter = nullptr;
@@ -308,7 +313,17 @@ namespace cicadaqt {
             dxgiDevice->Release();
         }
 
-        m_description = QStringLiteral("Qt D3D11 device (%1)").arg(adapterName);
+        /*
+         * 显卡名单独留一份给界面（见 deviceName()）：界面上"硬解 HEVC（<显卡名>）"
+         * 显示的就是它（编码那一段是显示名，内核短名 H.265 由
+         * CicadaPlayerItem::codecDisplayName() 换过来）。DXGI 查不出来时留**空串** ——
+         * 界面按"拿不到型号"处理，只写"硬解 <编码>"，不会把下面的 "unknown adapter"
+         * 当成一块卡的名字显示出去。
+         */
+        m_deviceName = adapterName;
+
+        m_description = QStringLiteral("Qt D3D11 device (%1)")
+                                .arg(adapterName.isEmpty() ? QStringLiteral("unknown adapter") : adapterName);
         m_ready = true;
         AF_LOGI("captured Qt's D3D11 device for zero-copy decoding: %s (window %p)\n",
                 m_description.toUtf8().constData(), static_cast<void *>(window));
@@ -333,6 +348,8 @@ namespace cicadaqt {
         releaseDeviceLocked("its scene graph went away");
         m_ready = false;
         m_description = QStringLiteral("no Qt D3D11 device captured yet");
+        /* 设备都还回去了，显卡名跟着清空（下次 capture 会重新填）。 */
+        m_deviceName.clear();
     }
 
 #elif defined(Q_OS_MACOS)

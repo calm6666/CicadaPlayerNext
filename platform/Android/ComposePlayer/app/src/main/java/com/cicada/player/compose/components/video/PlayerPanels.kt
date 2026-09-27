@@ -79,7 +79,8 @@ private fun PanelTitle(text: String) {
 /**
  * 一行面板条目（所有面板共用）。
  *
- * [badge] 是行尾那个**小圆角徽标**的文本（当前只有清晰度面板用它显示编码，例如 "H.265"）：
+ * [badge] 是行尾那个**小圆角徽标**的文本（当前只有清晰度面板用它显示编码，
+ * 例如 "H.264" / "HEVC" —— 显示名由 `codecDisplayNameOf()` 统一给出，内核短名 H.265 → HEVC）：
  *   * 非空 → 在文字右边的行尾画一个小标签（半透明白底 + 次要文字色，风格跟面板一致）；
  *   * 空串 / null（默认）→ **整个徽标不渲染**，这一行的排版和以前完全一样。
  * 默认值让既有调用方（倍速/字幕/镜像/色觉…）一行都不用改。
@@ -239,8 +240,9 @@ fun PlayerQualityPanel(
         } else {
             /*
              * 每一档一行，行尾带一个**编码徽标**（`QualityOption.codec`，来自内核
-             * `TrackInfo.getVideoCodec()`）：同分辨率不同编码现在是两行（buildQualities 按
-             * "分辨率 + 编码"分组），徽标就是用来区分它们的（`1080P [H.264]` / `1080P [H.265]`）。
+             * `TrackInfo.getVideoCodec()` 之后经 `codecDisplayNameOf()` 换成的**显示名**：
+             * H.265 → HEVC，其余原样）：同分辨率不同编码现在是两行（buildQualities 按
+             * "分辨率 + 编码"分组），徽标就是用来区分它们的（`1080P [H.264]` / `1080P [HEVC]`）。
              * codec 为空串时 PanelRow 不渲染徽标 —— 内核认不出编码就不显示，不猜。
              */
             qualities.forEach { q -> PanelRow(q.label, q.selected, q.codec) { onPick(q) } }

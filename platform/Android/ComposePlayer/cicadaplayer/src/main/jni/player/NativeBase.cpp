@@ -997,6 +997,57 @@ void NativeBase::java_SetDefaultBandWidth(JNIEnv *env, jobject instance, jint de
     }
 }
 
+/*
+ * 设备硬解能力 / 编码效率偏好。
+ *
+ * 【走包装转发，不碰 C 字符串的所有权】本层只持有 Cicada::MediaPlayer *，
+ * 调的是它为平台层加的那对包装方法：
+ *     MediaPlayer::GetVideoCodecSupport()           -> std::string（空串 = 没有/取不到）
+ *     MediaPlayer::SetVideoCodecSupport(const char *)-> 0 成功；非 0 参数非法；nullptr/"" = 清除
+ * 内核那次 malloc + CicadaFreeString 的释放**全在包装类内部做完**（见 MediaPlayer.cpp），
+ * 所以这里既不需要 include media_player_api.h，也**不许**自己去 free 任何东西。
+ */
+jstring NativeBase::java_GetVideoCodecSupport(JNIEnv *env, jobject instance)
+{
+    AF_TRACE;
+    MediaPlayer *player = getPlayer(env, instance);
+
+    if (player == nullptr) {
+        /* 没有播放器 / 内核取不到：Java 侧拿 null（语义见 CicadaPlayer.java 的 javadoc）。 */
+        return nullptr;
+    }
+
+    const std::string json = player->GetVideoCodecSupport();
+
+    if (json.empty()) {
+        return nullptr;
+    }
+
+    jstring result = env->NewStringUTF(json.c_str());
+    JniException::clearException(env);
+    return result;
+}
+
+void NativeBase::java_SetVideoCodecSupport(JNIEnv *env, jobject instance, jstring json)
+{
+    AF_TRACE;
+    MediaPlayer *player = getPlayer(env, instance);
+
+    if (player == nullptr) {
+        return;
+    }
+
+    GetStringUTFChars tmpJson(env, json);
+    const char *chars = tmpJson.getChars();
+
+    /*
+     * Java 传 null（或空串）时 chars 是 nullptr —— 内核的语义"NULL / 空串 = 清除，
+     * 恢复内核自己探测"正好对得上，所以这里原样往下传，不做转换。
+     * 包装类只读这个指针、内核保存的是解析后的副本（畸形 JSON 由内核拒绝并保持原状态）。
+     */
+    player->SetVideoCodecSupport(chars == nullptr ? "" : chars);
+}
+
 void NativeBase::java_SetVideoBackgroundColor(JNIEnv *env, jobject instance, jint color)
 {
     MediaPlayer *player = getPlayer(env, instance);
@@ -1184,6 +1235,12 @@ static JNINativeMethod nativePlayer_method_table[] = {
         {"nSetDefaultBandWidth", "(I)V", (void *) NativeBase::java_SetDefaultBandWidth},
         {"nInvokeComponent", "(Ljava/lang/String;)I", (void *) NativeBase::java_InvokeComponent},
         {"nEnableVideoRenderedCallback", "(Z)V", (void *) NativeBase::java_EnableVideoRenderedCallback},
+        /* 设备硬解能力 / 编码效率偏好。签名必须和 NativePlayerBase.java 里的
+         *   protected native String nGetVideoCodecSupport();
+         *   protected native void   nSetVideoCodecSupport(String json);
+         * 一字不差（写错不会编译报错，只在运行期抛 UnsatisfiedLinkError）。 */
+        {"nGetVideoCodecSupport", "()Ljava/lang/String;", (void *) NativeBase::java_GetVideoCodecSupport},
+        {"nSetVideoCodecSupport", "(Ljava/lang/String;)V", (void *) NativeBase::java_SetVideoCodecSupport},
 
 };
 

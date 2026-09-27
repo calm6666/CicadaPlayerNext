@@ -3,6 +3,8 @@
 
 #include <string>
 #include <atomic>
+#include <memory>
+#include <mutex>
 
 using namespace std;
 
@@ -33,6 +35,12 @@ using namespace std;
 #include <cacheModule/CacheModule.h>
 #include <cacheModule/cache/CacheConfig.h>
 #include <codec/IDecoder.h>
+/*
+ * 应用层传入的"设备硬解能力 + 编码偏好"覆盖值的类型
+ * （decoderFactory::AppCodecSupport）：本类持有它的一份 shared_ptr，并把同一份
+ * 发布给 decoderFactory 供 ABR / 起播回调读取。见成员列表末尾。
+ */
+#include <codec/decoderFactory.h>
 #ifdef ENABLE_VIDEO_FILTER
 #include <filter/FilterManager.h>
 #endif
@@ -250,6 +258,12 @@ namespace Cicada {
 
         DecoderType GetDecoderType() override;
 
+        /*
+         * 当前视频解码器**实际在用**硬解还是软解（见 ICicadaPlayer 里的完整说明：
+         * 事实读数，含运行期退回软解；没有视频解码器时是 false）。
+         */
+        bool IsVideoDecoderHardware() override;
+
         bool IsMute() const override;
 
         float GetVideoRenderFps() override;
@@ -366,6 +380,21 @@ namespace Cicada {
         void setDrmRequestCallback(const std::function<DrmResponseData*(const DrmRequestParam& drmRequestParam)>  &drmCallback) override;
 
         float getCurrentDownloadSpeed() override;
+
+        /*
+         * 【应用层视频编码"硬解能力 + 效率偏好"】见 ICicadaPlayer.h 里那一段契约说明。
+         *
+         * get：返回**当前实际生效**的能力/偏好 JSON。应用层没传过时是内核探测结果
+         *      （source = "kernel"），传过时是应用层那份（source = "app"，
+         *      探测完全不再发生）。
+         * set：json 为空串 = 清除应用层覆盖（恢复内核探测），返回 0；
+         *      畸形/非法 JSON 返回非 0（-EINVAL）且**不改变**当前状态。
+         *
+         * 状态本体与线程安全见成员列表末尾的 mAppCodecSupport。
+         */
+        std::string GetVideoCodecSupportJson() override;
+
+        int SetVideoCodecSupportJson(const std::string &json) override;
 
     private:
         void NotifyPosition(int64_t position);
@@ -1462,6 +1491,23 @@ namespace Cicada {
          * 偏移访问（见本文件里"以下这些成员必须留在成员列表的最末尾"那段）。
          */
         Discontinuity mDiscontinuity{};
+
+        /*
+         * ============ 【应用层视频编码"硬解能力 + 效率偏好"的状态】============
+         *
+         * 这是本播放器实例"应用层传进来的那一份"（CicadaSetVideoCodecSupport 的
+         * 参数解析结果）。对象**发布后不再改动**（改 = 造一份新的再发布），所以：
+         *   · ABR 线程 / 起播回调线程只用 decoderFactory 里那把锁取到的 shared_ptr
+         *     快照，不读本成员 ⇒ 它们与 API 线程之间没有共享可变状态；
+         *   · 本成员自己由 mAppCodecSupportMutex 保护，只在 set（API 线程）与
+         *     析构（清覆盖值）时读写。
+         * 没有计时器、没有看门狗：清除只由 set("") / 析构这两个事件触发。
+         *
+         * 追加在成员列表**最末尾**（本工程硬规则：只有追加才是增量 ABI 安全的，
+         * 见文件顶部那段说明）。
+         */
+        std::mutex mAppCodecSupportMutex;
+        std::shared_ptr<const decoderFactory::AppCodecSupport> mAppCodecSupport;
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

@@ -154,7 +154,19 @@ Rectangle {
         { title: qsTr("丢帧/总帧:"),  value: droppedText() },
         { title: qsTr("缓冲时长:"),   value: msText("bufferMs") },
         { title: qsTr("播放位置:"),   value: positionText() },
-        { title: qsTr("解码方式:"),   value: text("decodeMode") },
+        /*
+         * 【解码方式：硬解/软解 + 编码（+ 硬解时的显卡名）】
+         *
+         * 取的是 stats.decodeMethod —— C++ 侧组装好的标准文案，事实来源是**活动解码器
+         * 实例**（硬解还是软解，含运行期退回软解）＋ 当前流的编码 ＋ 显卡名：
+         *     硬解 HEVC（NVIDIA GeForce RTX 4060） / 硬解 HEVC / 软解 H.264 / 硬解 / 软解
+         * （编码在 C++ 侧经 codecDisplayName() 换过显示名：内核短名 H.265 → **HEVC**。）
+         * 拿不到时是空串，上面的 text() 会显示成 "--"。
+         *
+         * 注意别退回 stats.decodeMode：那个是"渲染/呈现走哪条路"（零拷贝还是 CPU 回拷，
+         * 取值是 CicadaTextureD3D11::backendName() 那一类**实现细节**文案），不是解码方式。
+         */
+        { title: qsTr("解码方式:"),   value: text("decodeMethod") },
         { title: qsTr("容器:"),       value: text("container") },
         { title: qsTr("分辨率刷新:"), value: text("hdr") }
     ]

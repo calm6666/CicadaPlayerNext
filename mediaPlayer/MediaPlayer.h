@@ -197,6 +197,15 @@ namespace Cicada {
         StreamInfo *GetCurrentStreamInfo(StreamType type);
 
         /*
+         * 【当前视频解码器实际在用硬解还是软解】
+         *
+         * 事实读数（活动解码器实例眼下走的那条路，含解码途中退回软解），不是
+         * "配置想用哪种"、也不是"设备支持不支持"。没有视频解码器时是 false。
+         * 界面上的"解码方式"显示用它，见 ICicadaPlayer::IsVideoDecoderHardware()。
+         */
+        bool IsVideoDecoderHardware();
+
+        /*
          * get the current playing position of the player
          */
         int64_t GetCurrentPosition();
@@ -294,6 +303,28 @@ namespace Cicada {
          * 【回退点 C2】删掉本声明 + MediaPlayer.cpp 里的实现（2 处，可独立回退）。
          */
         void SetColorMatrix(const float matrix[9]);
+
+        /*
+         * 【应用层"设备硬解能力 + 编码偏好"：传入 / 取出】
+         * 与 SetColorMatrix 同一层转发语义：转发到 native handle 的新接口。
+         *
+         * 为什么在包装类上再包一层：平台层（Android JNI 与 Qt）只持有 MediaPlayer、
+         * 拿不到 playerHandle；而返回字符串的 C API 要求调用方用 CicadaFreeString 释放。
+         * 包成 std::string 后平台侧不必关心所有权，也不会漏释放。
+         *
+         * GetVideoCodecSupport()：返回 JSON（字段契约见 CicadaGetVideoCodecSupport）。
+         *   无播放器或失败时返回空串。里面的 "preferred" 就是当前生效的手动指定编码
+         *   （空串 = 不指定 = 全自动）。
+         * SetVideoCodecSupport(json)：0 = 成功；非 0 = 参数非法（内核状态不变，不半套用）；
+         *   json 为空指针或空串 = 清除应用层覆盖，恢复内核自行探测。
+         *   同一个 JSON 里的 "preferred" 是应用侧"设置默认视频格式"的入口：指定之后
+         *   **下一次**等级选择（起播默认档 / ABR 下一次决策 / ABR 触发的切档）优先用该
+         *   编码，该分辨率下没有它的流或内核解不了它时回退到自动规则；设置本身不会
+         *   立即触发一次切换（详见 CicadaSetVideoCodecSupport 的契约注释）。
+         */
+        std::string GetVideoCodecSupport();
+
+        int SetVideoCodecSupport(const char *json);
 
         /*
          * set clear color

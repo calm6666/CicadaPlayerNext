@@ -1728,19 +1728,158 @@ import QtPlayer
                      * 鼠标停在第几项上（-1 = 没有）：0..n-1 = qualities[i]（手动档在上），
                      * n = "自动"（在最后一项，见 contentItem 里的顺序说明）。
                      * 项自己不带 hover（会和浮层这层判据互相抢），高亮按鼠标位置算。
+                     *
+                     * 【本轮修的 bug：列表滚动之后高亮错行】
+                     * 原来这里写的是 `Math.floor(qualityMenuHover.mouseY / qualityItemHeight)` ——
+                     * `MouseArea.mouseY` 是**视口坐标**，而列表一旦滚动（`contentY > 0`），
+                     * 行在视口里的位置就整体上移了 `contentY`，mouseY 却还是从视口顶算起
+                     * → 算出来的行号**偏小**（差几行 = contentY / 行高；鼠标在第 N 项上、
+                     * 亮的却是上面第 N-1 项）。菜单在上一轮只有内容刚好等于可视高时才成立
+                     * （interactive 恒为 false），所以没暴露；本轮加了上限之后它**一定能滚**，
+                     * 必须一起修。
+                     *
+                     * 现在改成用 `mapToItem` 把鼠标点映射进**行列自己的坐标系**（内容坐标系，
+                     * 已经含滚动量）再除行高：滚动量、以后加内边距 / 再套一层容器都由映射负责，
+                     * 不用手算 —— 和"选集"菜单的 `eplistMenu.rowAt()` 完全同一套写法，
+                     * 依据是 docs/QML-POPUP-HOVER-PITFALLS.md 第 21 条。
+                     *
+                     * 【为什么依赖里要显式写 contentY / height】滚轮滚动时鼠标是不动的：
+                     * 只依赖 mouseX/mouseY 的话，滚动后这个绑定不会重算，高亮会停在旧行上。
+                     *
+                     * 【pointerIn 的检查必须放在最前面】那两行是"读一下当依赖"，本身没有副作用；
+                     * 但绑定第一次求值时（pointerIn 还是 false）background/contentItem 里的对象
+                     * 可能还没建好，先读它们会抛 TypeError。鼠标没进面板时提前 return 就没这问题，
+                     * 而且 pointerIn 本身是依赖 —— 它一变真，绑定会重算，那时才把 contentY 记成依赖。
                      */
                     readonly property int hoverIndex: {
                         if (!pointerIn)
                             return -1
 
-                        var i = Math.floor(qualityMenuHover.mouseY / QtPlayerTheme.qualityItemHeight)
+                        qualityScroll.contentY        /* 依赖：滚轮滚动（鼠标不动）也要重算 */
+                        qualityColumn.height          /* 依赖：行数 / 行高变化 */
+
+                        return rowAt(qualityMenuHover.mouseX, qualityMenuHover.mouseY)
+                    }
+
+                    /*
+                     * 浮层坐标 (x, y) → 命中第几行（-1 = 没命中任何一行）。
+                     *
+                     * 坐标系以 qualityMenuHover（浮层背景那层判据 MouseArea）为基准 ——
+                     * 和 mouse.x / mouse.y、mouseX / mouseY 是同一套，调用方直接传即可。
+                     * 映射到 qualityColumn 之后，y 就是**内容坐标**（已经含 contentY 的滚动量），
+                     * 所以滚动多少行都不会算歪。
+                     *
+                     * 行号语义不变：0..n-1 = qualities[i]，n = "自动"（最后一项）。
+                     */
+                    function rowAt(x, y) {
                         var rows = (bar.player ? bar.player.qualities.length : 0) + 1
+
+                        if (rows <= 1 || !qualityMenuHover || !qualityColumn
+                                || qualityColumn.height <= 0)
+                            return -1
+
+                        var p = qualityMenuHover.mapToItem(qualityColumn, x, y)
+
+                        if (p.y < 0 || p.y >= qualityColumn.height)
+                            return -1
+
+                        var i = Math.floor(p.y / QtPlayerTheme.qualityItemHeight)
                         return (i >= 0 && i < rows) ? i : -1
+                    }
+
+                    /*
+                     * 选中某一行（点击语义和以前完全一样，只是抽成一个函数，
+                     * 让"行自己的 MouseArea"和"判据层的兜底 onClicked"共用同一份逻辑）：
+                     *   index <  n → selectQuality(qualities[index].streamIndex)（手动选档）
+                     *   index == n → useAutoQuality()（回到自动 / ABR）
+                     * 末尾都关菜单。越界（点在没有行的空白处）什么都不做。
+                     */
+                    function activateRow(index) {
+                        if (!bar.player)
+                            return
+
+                        var rows = bar.player.qualities.length
+
+                        if (index < 0 || index > rows)
+                            return
+
+                        if (index === rows)
+                            bar.player.useAutoQuality()
+                        else
+                            bar.player.selectQuality(bar.player.qualities[index].streamIndex)
+
+                        qualityMenu.close()
                     }
 
                     parent: qualityButton
                     width: QtPlayerTheme.qualityItemWidth
-                    height: contentItem.implicitHeight
+
+                    /*
+                     * 菜单顶边与窗口上沿之间的安全边距（px）。**只在本菜单用，不进主题**
+                     * （QtPlayerTheme.qml 不在本轮改动范围内）。
+                     */
+                    readonly property int menuTopGap: 8
+
+                    /*
+                     * 【按钮上方可用高度】菜单是**向上弹**的（几何见下面 y 的表达式），所以它能用的
+                     * 垂直空间只有"菜单底边在窗口里的 y"再往上那一段；再减掉一点安全边距，
+                     * 免得菜单顶边贴死窗口上沿（全屏时那就是画面最上沿）。
+                     *
+                     * 菜单底边在窗口里的 y = 按钮顶边的窗口 y + 按钮高 - bar.menuBottom
+                     *   —— 和下面 y 的表达式是**同一个几何**（y 只决定顶边，底边与菜单高度无关），
+                     *      改一处别忘了另一处。
+                     *
+                     * 【窗口缩放时必须重算】这件事的坑和做法写在下面 aboveAvailableHeight 里
+                     * （mapToItem 不进依赖表 ⇒ 依赖要手写读一遍），这里不重复。
+                     *
+                     * 【至少一行】算出来的可用高度比一行（qualityItemHeight = 36）还小时也按一行算 ——
+                     * 绝不能得到 0 或负数，那会是一个高度为 0、点不动的空菜单
+                     * （只有"菜单底边离窗口上沿太近"时才可能发生；此时"能滚的一行"仍是正确的降级形态）。
+                     */
+                    readonly property real aboveAvailableHeight: {
+                        var win = qualityButton.window
+
+                        /* 还没进窗口（极端早期）：不收窄，交回给 qualityMenuMaxHeight 那道上限 */
+                        if (win === null || win === undefined)
+                            return QtPlayerTheme.qualityMenuMaxHeight
+
+                        /*
+                         * 【显式依赖：必须手写读一遍 —— 这就是本改动唯一的坑】
+                         * `mapToItem()` 内部走的是 C++ 属性读取，**不会进 QML 绑定的依赖表**：
+                         * 只写 mapToItem 的话，窗口一缩放这个绑定不会重算，菜单高度就停在旧值上
+                         * （窗口变小时菜单又会被上沿截掉）。所以下面几个"会变的量"要自己读一次
+                         * 当依赖 —— 写法同本文件 eplistMenu.hoverIndex 里那两行裸表达式。
+                         */
+                        win.height                /* 窗口缩放（主要就是靠它重算） */
+                        bar.height                /* 控制栏高度 / 布局变化 */
+                        qualityButton.height      /* 按钮高度（全屏 / 网页档两套 btnLineHeight） */
+                        bar.menuBottom            /* 菜单底边距按钮底边：全屏 74 / 非全屏 41 */
+
+                        /* 按钮顶边在**窗口**里的 y：mapToItem(null, …) 给的就是场景（= 窗口内容区）坐标 */
+                        var buttonTopY = qualityButton.mapToItem(null, 0, 0).y
+                        var menuBottomY = buttonTopY + qualityButton.height - bar.menuBottom
+                        var avail = Math.min(menuBottomY - menuTopGap,
+                                             win.height - menuTopGap)
+
+                        /* 至少一行（qualityItemHeight = 36）：绝不出现高度 0、点不动的空菜单 */
+                        return Math.max(QtPlayerTheme.qualityItemHeight, avail)
+                    }
+
+                    /*
+                     * 【本轮加的上限 + 滚动】
+                     * 菜单高度取三个上限的最小值：
+                     *   1. 内容自然高度（档位少时就是它）；
+                     *   2. 主题里的 `qualityMenuMaxHeight`（= 580，参考实现的 max-height）；
+                     *   3. `aboveAvailableHeight` —— 按钮上方到窗口上沿的可用高度（至少一行）。
+                     * 只要 1 > min(2, 3)，下面 contentItem 的 Flickable 就能滚（写法照 eplistMenu，
+                     * 含右边缘那条 3px 滚动条）；上限都不起作用时和以前一模一样（interactive = false）。
+                     *
+                     * 用 `contentItem.implicitHeight`（Flickable 的**自然**高度）而不是去读它自己的
+                     * height：后者会被 Popup 定成可视高，形成绑定环。
+                     */
+                    height: Math.min(contentItem.implicitHeight,
+                                     QtPlayerTheme.qualityMenuMaxHeight,
+                                     aboveAvailableHeight)
                     x: (parent.width - width) / 2
                     y: parent.height - bar.menuBottom - height
 
@@ -1774,6 +1913,21 @@ import QtPlayer
                                 qualityMenu.pointerIn = false
                                 qualityCloseTimer.restart()
                             }
+
+                            /*
+                             * 【本轮加的兜底】按下没落到任何一行上时（比如落在滚动条那条
+                             * 3px 宽的带子里），也按同一套坐标换算补一刀；落在空白处
+                             * rowAt 返回 -1，什么也不做。
+                             *
+                             * 正常情况下这条不会触发 —— 按下落在行上时由行那层接走
+                             * （一个按下事件只投递给一个 item），所以不会和行那条路重复选档。
+                             * 留着的原因和"选集"面板完全一样（docs/QML-POPUP-HOVER-PITFALLS.md
+                             * 第 22 条的第二条对策）：行那层哪天被别的层盖住时这里还能兜住，
+                             * 而这一层是"鼠标在不在浮层里"（hover 高亮）实际在用的那层。
+                             */
+                            onClicked: function (mouse) {
+                                qualityMenu.activateRow(qualityMenu.rowAt(mouse.x, mouse.y))
+                            }
                         }
                     }
 
@@ -1784,6 +1938,10 @@ import QtPlayer
                      * 菜单高度 = 档位数 x 36，小窗口/非全屏下会顶出窗口上沿、最高档点不到 ——
                      * 这是本轮 UI 改动的直接后果，所以在这里收口（不改任何其它交互）。
                      *
+                     * 【可视高从哪来】上面的 Popup.height = min(内容自然高, qualityMenuMaxHeight)，
+                     * Popup 会把 contentItem（本 Flickable）定成那个高度，于是
+                     * `interactive: contentHeight > height` 只在上限真正生效时才为真。
+                     *
                      * 【滚轮不需要额外的 MouseArea】行里的 MouseArea 不收滚轮，事件会冒到
                      * 这里的 Flickable（eplistMenu 那段注释里已核实过同一件事）。
                      * 只有"内容超过可视区"时才 interactive，档位少的片源和以前一模一样。
@@ -1791,7 +1949,14 @@ import QtPlayer
                     contentItem: Flickable {
                         id: qualityScroll
 
-                        /* 内容自然高度：上面的 height 表达式仍是"它和上限取小" */
+                        /*
+                         * 内容自然高度（= 所有档位行 + "自动"那一行的总高）。
+                         * 上面的 Popup.height 是"它和 qualityMenuMaxHeight 取小"：
+                         * 这里给的是**内容**高，Popup 只决定**可视**高 —— 两者不等时
+                         * 下面 interactive 为真，可以滚。
+                         * （不能把上限写在这一行：implicitHeight 一旦被压小，
+                         *  Popup.height 跟着变小，就再也滚不动了。）
+                         */
                         implicitHeight: qualityColumn.implicitHeight
                         contentHeight: qualityColumn.implicitHeight
                         clip: true
@@ -1845,8 +2010,11 @@ import QtPlayer
                                 required property int index
 
                                 /*
-                                 * 这一档的**编码徽标文本**：框架归一化后的编码短名
-                                 * （qualities[i].codecLabel，例如 "H.264" / "H.265" / "AV1"）。
+                                 * 这一档的**编码徽标文本**：C++ 侧已经在
+                                 * CicadaPlayerItem.cpp::codecDisplayName() 里换成了**显示名**
+                                 * （qualities[i].codecLabel，例如 "H.264" / "HEVC" / "AV1"；
+                                 *  内核短名 H.265 → HEVC）。界面这边**不再做任何映射**：
+                                 * 显示名只有那一处来源，免得同一个 UI 里两套写法并存。
                                  *
                                  * 【空串就不渲染徽标】内核认不出编码时给的是空串（不猜、不写"未知"），
                                  * 这时下面那颗 codecBadge 整个不显示，档位行还是老样子。
@@ -1854,7 +2022,8 @@ import QtPlayer
                                  * 【同分辨率不同编码是两行】1080P 的 H.264 与 H.265 在
                                  * CicadaPlayerItem.cpp 的 onMediaInfoGetCb 里已按"分辨率 + 编码"
                                  * 分成两条独立条目，所以这里会出现两行 1080P、各带自己的徽标
-                                 * （`1080P [H.264]` / `1080P [H.265]`）—— 这是预期效果，不是重复。
+                                 * （`1080P [H.264]` / `1080P [HEVC]`）—— 这是预期效果，不是重复。
+                                 * （分组/认行用的仍是内核短名，见那边 onMediaInfoGetCb 的说明。）
                                  */
                                 readonly property string codecLabel: {
                                     if (modelData === undefined || modelData === null)
@@ -1885,7 +2054,8 @@ import QtPlayer
                                 }
 
                                 /*
-                                 * 编码徽标：紧跟在档位名右边的那个小圆角标签（`1080P [H.265]`）。
+                                 * 编码徽标：紧跟在档位名右边的那个小圆角标签（`1080P [HEVC]`；
+                                 * 文本就是上面的 codecLabel，显示名已在 C++ 侧统一换好）。
                                  * 样式沿用"自动"角标那一套（半透明白底 + 1px 描边 + 次要白字，
                                  * 见上面 autoBadge 的说明），只是字号更小、位置贴在档位名右侧。
                                  * 只做展示，不接收鼠标 —— 整行的点击仍然由下面的 MouseArea 负责。
@@ -1925,6 +2095,24 @@ import QtPlayer
 
                                     anchors.fill: parent
                                     cursorShape: Qt.PointingHandCursor
+
+                                    /*
+                                     * 【本轮修"滚动之后点一下没反应"的关键】
+                                     * 能滚的 Flickable（interactive: true）会把"下一拍"的按下事件
+                                     * 从行里的 MouseArea 手上过滤掉 —— 现象是"滚轮滚动之后那一拍
+                                     * 点击会丢"（不滚动直接点、或按下后抖 2px 再点都正常）。
+                                     * 依据与实测见 docs/QML-POPUP-HOVER-PITFALLS.md 第 22 条，
+                                     * 和"选集"面板行里的那一行是同一件事（eplistRow）。
+                                     * `preventStealing` 内部就是 setKeepMouseGrab(true)，Flickable
+                                     * 看到子项 keepMouseGrab 就不再过滤。代价：在行上按住拖动不再能
+                                     * 滚列表（行占满整个视口，相当于关掉拖动滚动；**滚轮照旧**）。
+                                     *
+                                     * 本轮的滚动是新增能力，所以这一行属于"点击语义保持不变"的必要
+                                     * 配套：不加它，档位一多、一滚动，用户点档就会丢。
+                                     */
+                                    preventStealing: true
+
+                                    /* 点击语义**一字未改**（这一行和下面那个 onClicked 都是原文） */
                                     onClicked: {
                                         if (bar.player)
                                             bar.player.selectQuality(modelData.streamIndex)
@@ -1989,6 +2177,14 @@ import QtPlayer
 
                                 anchors.fill: parent
                                 cursorShape: Qt.PointingHandCursor
+
+                                /*
+                                 * 和上面手动档那一行同理：菜单能滚之后，不加这一行
+                                 * "滚过一下再点自动"会丢点击（docs/QML-POPUP-HOVER-PITFALLS.md
+                                 * 第 22 条）。点击语义本身一字未改。
+                                 */
+                                preventStealing: true
+
                                 onClicked: {
                                     if (bar.player)
                                         bar.player.useAutoQuality()

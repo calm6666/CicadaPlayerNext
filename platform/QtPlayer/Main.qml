@@ -2250,10 +2250,20 @@ Window {
             text: "文件: " + sourceName()
         }
 
+        /*
+         * 解码方式（诊断用这一行）。
+         *
+         * 【为什么不显示 player.device 了】那是**设备描述**（排查零拷贝用的实现细节
+         * 文案，形如 "Qt D3D11 device (NVIDIA ...)"），不是"解码方式"。用户要的是
+         * 市面通用的写法：硬解/软解 + 编码（硬解时再带显卡名），也就是
+         * player.decodeMethod，和统计信息面板「解码方式」那一行是**同一个数据源**
+         * （CicadaPlayerItem::refreshDecodeMethod）。
+         * 没有片源/没有视频流时它是空串，这里按 "--" 显示（面板那边也是这个约定）。
+         */
         Text {
             color: parent.textColor
             font.pixelSize: 12
-            text: "解码设备: " + player.device
+            text: "解码方式: " + (player.decodeMethod !== "" ? player.decodeMethod : "--")
         }
 
         Text {

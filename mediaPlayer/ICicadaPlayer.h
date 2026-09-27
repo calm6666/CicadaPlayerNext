@@ -328,6 +328,69 @@ namespace Cicada {
             return false;
         }
 
+        /*
+         * 【应用层视频编码"硬解能力 + 效率偏好"】C 接口
+         * CicadaGetVideoCodecSupport / CicadaSetVideoCodecSupport 的 C++ 落点。
+         *
+         * JSON 契约（get/set 同一份，字段名固定）：
+         *   {"source":"app"|"kernel",
+         *    "hwDecode":["H.265","H.264"],
+         *    "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"],
+         *    "preferred":"H.265"}
+         *   · source     ：get 时说明这份数据来自应用层还是内核探测；set 时忽略；
+         *   · hwDecode   ：设备能硬解的编码短名集合（顺序无关），set 时必填；
+         *   · preference ：可选，从高到低的效率序覆盖；缺省用内核默认序；
+         *   · preferred  ：可选，手动指定的"默认视频格式"（应用侧"设置默认视频格式"）。
+         *                  空串 / 不在表内 = 不指定（全自动）。指定后**下一次**等级选择
+         *                  （起播默认档、ABR 下一次决策/切档）优先用该编码，压过自动的
+         *                  效率序与硬解偏好；该分辨率下没有它的流、或内核根本解不了它
+         *                  （硬解与软解都没有）时回退到自动规则并打日志。设置本身不发起
+         *                  立即切换，且只在同一分辨率内换编码。
+         * 短名只认 H.264 / H.265 / AV1 / VP9 / MPEG-4 / MPEG-2（见 afCodecShortName），
+         * 数组里的未知项忽略；preferred 不是字符串 = 结构畸形。畸形 JSON 整份拒绝
+         * （set 返回非 0 且不改变当前状态）。
+         *
+         * set 传空串 = 清除应用层覆盖，恢复内核自己探测；此时 get 返回
+         * source = "kernel"。
+         *
+         * 两个都是**带默认实现**的虚函数，且**追加在 vtable 末尾**（本工程硬规则：
+         * 既有实现的槽位编号不变）。默认实现不参与任何状态，所以只有
+         * SuperMediaPlayer 需要覆盖它，AppleAVPlayer / JavaExternalPlayer 等
+         * 实现类一行都不用改（它们保持默认实现：get 返回空、set 返回 -1）。
+         */
+        virtual std::string GetVideoCodecSupportJson()
+        {
+            return {};
+        }
+
+        virtual int SetVideoCodecSupportJson(const std::string &json)
+        {
+            return -1;
+        }
+
+        /*
+         * 【当前视频解码器实际在用硬解还是软解（事实读数，**不是**能力查询）】
+         *
+         * 与 GetDecoderType() 的区别是这个方法存在的全部理由：GetDecoderType() 读的是
+         * 解码器打开时留下的标志位（"配置/标志"口径），而这里问的是**活动解码器实例**
+         * 眼下真正走的那条路 —— 包括
+         *   * 建解码器时硬解没起来（构建里没有该编码的硬解配置、GPU 设备建不出来）
+         *     而由 CreateVideoDecoder 的 hw → sw 兜底链换成软解的情况；
+         *   * 解码途中硬解掉了、这条流退回软解的情况（avcodecDecoder 的 getHwFormat）。
+         * 界面（Qt 的"解码方式"那一栏）据此显示，不许读"配置想用什么"。
+         *
+         * 语义：true = 当前视频解码器在硬解；false = 软解，或者**当前根本没有视频解码器**
+         * （没有片源 / 还没建起来 / 已销毁）。调用方拿不到"有没有解码器"时按"没有"处理。
+         *
+         * 带默认实现的虚函数，且**追加在 vtable 末尾**（本工程硬规则：既有实现的槽位
+         * 编号不变）。默认实现返回 false：只有 SuperMediaPlayer 覆盖它，
+         * AppleAVPlayer / JavaExternalPlayer 等实现类一行都不用改。
+         */
+        virtual bool IsVideoDecoderHardware()
+        {
+            return false;
+        }
+
 
     protected:
         playerMediaFrameCb mMediaFrameCb = nullptr;

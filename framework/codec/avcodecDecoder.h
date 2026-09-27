@@ -7,6 +7,7 @@
 
 #include "codec/ActiveDecoder.h"
 
+#include <atomic>
 #include <mutex>
 #include <codec/IDecoder.h>
 #include "base/media/AVAFPacket.h"
@@ -125,6 +126,12 @@ namespace Cicada{
             bool directOutput;
 #endif
             int flags;
+            /*
+             * 反向指针：getHwFormat() 是给 FFmpeg 的**静态**回调（ctx->opaque 里只能
+             * 拿到本结构），而"硬解在不在用"这个对外读数记在 avcodecDecoder 自己身上，
+             * 所以要借它回到那个对象上写。构造函数里 memset 之后立刻赋值。
+             */
+            avcodecDecoder *owner = nullptr;
         };
     public:
         avcodecDecoder();
@@ -155,6 +162,21 @@ namespace Cicada{
         void setEOF() override
         {
         }
+
+        /*
+         * 【当前解码方式（硬解/软解）的事实读数，界面显示用】
+         *
+         * 只看**本解码器实例实际在用**的那条路，不回答"设备支持不支持"：
+         *   * initHwDecoder() 真的把硬解设备建起来、并且 FFmpeg 一路都用硬解格式
+         *     ⇒ true；
+         *   * 构建里没有该编码的硬解配置、硬解设备建不出来、或者解码途中 FFmpeg
+         *     把硬解格式从协商列表里摘掉（getHwFormat() 的运行期降级，画面继续播、
+         *     这条流退回软解）⇒ false。
+         *
+         * 覆盖 IDecoder::isHardwareDecoderInUse()：基类那个默认实现只看打开时留下的
+         * 标志位，而这里的状态在解码途中还会变（运行期降级），必须单独跟踪。
+         */
+        bool isHardwareDecoderInUse() override;
 
     private:
         explicit avcodecDecoder(int dummy)
@@ -228,6 +250,15 @@ namespace Cicada{
 
     private:
         decoder_handle_v *mPDecoder = nullptr;
+        /*
+         * "这条流的解码器现在在不在用硬解"的对外读数（**追加在类成员末尾**）。
+         *
+         * 用原子量：写它的有两处线程 —— 初始化/关闭在调用 open/close 的线程上，
+         * 而运行期降级发生在 getHwFormat()（FFmpeg 解码线程）；读它的是界面线程
+         * （Qt 每 2Hz 组装"解码方式"那一栏）。普通 bool 跨线程读写是数据竞争，
+         * 这里只求一个一致的单值，原子量正合适。
+         */
+        std::atomic_bool mHwDecodeInUse{false};
     };
 }
 

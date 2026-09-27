@@ -228,9 +228,11 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
 
     /*
      * 视频档位快照，只用于下面那次"起播档同分辨率编码偏好"的收尾。
-     * codecRank 就是 afCodecEfficiencyRank() 的结果（AV1 5 / H.265 4 / VP9 3 /
-     * H.264 2 / MPEG-4、MPEG-2 1 / 未知 0）；
-     * hwDecodeSupported 是"这台设备能不能硬解这一路"（decoderFactory，未知时视为支持）。
+     * codecRank 取的是 decoderFactory::getEffectiveCodecEfficiencyRank()，与 ABR 侧
+     * **同一份来源**：应用层传过 preference 就是应用层的位置序，否则是内核默认序
+     * （AV1 5 / H.265 4 / VP9 3 / H.264 2 / MPEG-4、MPEG-2 1 / 未知 0）；
+     * hwDecodeSupported 是"这台设备能不能硬解这一路"（同一个 decoderFactory 接口，
+     * 应用层传过硬解编码集合时直接用应用层的集合，不再探测；未知时视为支持）。
      */
     struct StartUpVideoVariant {
         int index;
@@ -269,10 +271,15 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
             variant.width = meta->width;
             variant.height = meta->height;
             variant.bandwidth = metaBandWidth;
-            variant.codecRank = afCodecEfficiencyRank(meta->codec, nullptr);
             variant.codec = afCodecShortName(meta->codec, nullptr);
             /*
+             * 效率序与 ABR 侧**同一份来源、同一个函数**：应用层传过 preference 就用
+             * 应用层的位置序，否则用内核默认序。这里不再自己挑顺序，也不把两套混用。
+             */
+            variant.codecRank = decoderFactory::getEffectiveCodecEfficiencyRank(variant.codec.c_str());
+            /*
              * 硬解能力直接拿 Stream_meta.codec（这里就是 AFCodecID）去问，不用绕短名。
+             * 应用层传过"设备能硬解的编码集合"时那个函数直接用应用层的集合（不探测）；
              * AF_CODEC_ID_NONE（清单里没有编码信息）会得到 true —— "编码未知 =
              * 能力未知 = 视为支持"，不会因为认不出编码就把这一路排到最后。
              */
@@ -282,13 +289,20 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     }
 
     /*
-     * 【起播档的同分辨率编码偏好：硬解第一约束，压缩效率第二偏好】
+     * 【起播档的同分辨率编码偏好：手动指定最高，硬解第一约束，压缩效率第二偏好】
      *
      * 上面那轮选起播档只看"离 mDefaultBandWidth 最近的码率"。当同一清晰度同时有
      * H.264 / H.265 / AV1 多路时（用户片单里的实际情况），它可能落到**白花带宽**、
      * 甚至**设备根本解不了**的那一路上。这里做一次收尾，规则与 ABR 侧**完全一致**
      * （AbrAlgoStrategy::FindSameResolutionEfficientCodec）：
      *
+     *   0) 应用层手动指定了编码（preferred，见 decoderFactory::getEffectivePreferredCodec）
+     *      且这一清晰度下有该编码的流、且内核解得了它 => **就用它**，并且**不再做下面
+     *      的自动收尾** —— 手动压过硬解偏好与效率序（用户的目的就是手动更改编码格式，
+     *      哪怕设备能硬解 H.265、哪怕 H.265 更省带宽，指定 H.264 就给 H.264），
+     *      允许软解（日志里用 decodedBy=hw|sw 记录实际走的那条路）。
+     *      这一清晰度下没有该编码的流、或内核根本解不了它 => 回退到下面的自动规则，
+     *      并打一条说明回退原因的日志；
      *   1) 候选集 = 与已选档**宽高完全相同**的流（宽高不是都 > 0 就不做收尾）；
      *   2) 候选里只要存在能硬解的变体，就只在能硬解的变体里挑；一个能硬解的都没有
      *      才允许软解变体 —— 绝不选一条"硬解不了、又不比别的更优"的编码；
@@ -300,7 +314,10 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
      *      一律不动（不会因为"另一路带宽更低"就换到压缩效率更差的编码上）。
      *
      * 绝不跨分辨率替换（不为了省带宽降低起播清晰度）。这里没有任何计时器/开关，
-     * 只是把"选哪一路"的判据补全。
+     * 只是把"选哪一路"的判据补全；读 preferred 的是**同一个函数、同一份快照**
+     * （decoderFactory::getEffectivePreferredCodec），ABR 侧也读它，两处不各自判断。
+     * 起播这一档是"下一次分片请求"的一种：设置 preferred 本身不切，Prepare 时
+     * （也就是第一次选流时）才按它选。
      */
     if (bandWidthNearStreamIndex >= 0) {
         const StartUpVideoVariant *chosen = nullptr;
@@ -312,7 +329,80 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
             }
         }
 
+        /* 手动指定是否已经把起播档定死（true = 不再走下面的自动收尾）。 */
+        bool manualPreferredDecided = false;
+
         if (chosen != nullptr && chosen->width > 0 && chosen->height > 0) {
+            /*
+             * ---- 优先级 1：应用层手动指定的编码（preferred） ----
+             *
+             * 与 ABR 侧同一套判据、同一份快照，只做"起播这一档选哪一路"：
+             *   · 内核根本解不了它（既不能硬解、也没有软解路径）=> 回退 + 日志；
+             *   · 这一清晰度下没有该编码的流 => 回退 + 日志；
+             *   · 有 => 选它（同一编码同一清晰度有多路时取带宽最低者，
+             *     带宽相同取下标小者，结果与遍历顺序无关），并结束自动收尾。
+             */
+            const std::string preferred = decoderFactory::getEffectivePreferredCodec();
+
+            if (!preferred.empty()) {
+                if (!decoderFactory::isCodecDecodable(preferred.c_str())) {
+                    AF_LOGW("startup video codec preference: preferred=%s (manual) cannot be decoded by the "
+                            "kernel (neither hardware nor software path), falling back to the automatic rules\n",
+                            preferred.c_str());
+                } else {
+                    const StartUpVideoVariant *manual = nullptr;
+
+                    for (size_t v = 0; v < videoVariants.size(); v++) {
+                        const StartUpVideoVariant &cand = videoVariants[v];
+
+                        if (cand.width != chosen->width || cand.height != chosen->height) {
+                            continue;
+                        }
+
+                        if (cand.codec != preferred) {
+                            continue;
+                        }
+
+                        if (manual == nullptr || cand.bandwidth < manual->bandwidth ||
+                            (cand.bandwidth == manual->bandwidth && cand.index < manual->index)) {
+                            manual = &cand;
+                        }
+                    }
+
+                    if (manual != nullptr) {
+                        /*
+                         * 手动指定已经把起播档定死：**不**再做下面的自动收尾 ——
+                         * 否则自动规则会以"效率收益"为名把它换成 H.265/AV1，
+                         * 用户的手动指定等于失效。
+                         */
+                        manualPreferredDecided = true;
+
+                        if (manual->index != chosen->index) {
+                            AF_LOGI("startup video stream %d -> %d: preferred=%s (manual) at %dx%d, "
+                                    "decodedBy=%s, bandwidth %d -> %d (automatic rules bypassed)\n",
+                                    chosen->index, manual->index, preferred.c_str(),
+                                    chosen->width, chosen->height,
+                                    manual->hwDecodeSupported ? "hw" : "sw",
+                                    chosen->bandwidth, manual->bandwidth);
+                            bandWidthNearStreamIndex = manual->index;
+                        } else {
+                            /* 已选档就是 preferred：不换，但也明确记一条，便于真机核对。 */
+                            AF_LOGI("startup video stream %d: preferred=%s (manual) is already the chosen "
+                                    "stream at %dx%d, decodedBy=%s (automatic rules bypassed)\n",
+                                    chosen->index, preferred.c_str(), chosen->width, chosen->height,
+                                    manual->hwDecodeSupported ? "hw" : "sw");
+                        }
+                    } else {
+                        AF_LOGW("startup video codec preference: preferred=%s (manual) but there is no such "
+                                "stream at %dx%d, falling back to the automatic rules "
+                                "(hardware decode first, then efficiency)\n",
+                                preferred.c_str(), chosen->width, chosen->height);
+                    }
+                }
+            }
+        }
+
+        if (!manualPreferredDecided && chosen != nullptr && chosen->width > 0 && chosen->height > 0) {
             /*
              * 这一清晰度上有没有能硬解的变体（chosen 自己也在候选集里，所以它解不了
              * 时这里只要为 true，下面就一定能找到同一清晰度上能硬解的那一路）。

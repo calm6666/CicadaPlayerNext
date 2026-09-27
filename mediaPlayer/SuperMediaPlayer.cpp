@@ -369,6 +369,28 @@ SuperMediaPlayer::SuperMediaPlayer()
 
 SuperMediaPlayer::~SuperMediaPlayer()
 {
+    /*
+     * 先把本实例发布给内核的"应用层编码能力/偏好"覆盖值撤掉（只撤自己发布的那一份），
+     * 否则播放器释放之后 decoderFactory 还在按一个已经不存在的应用层结论做判定。
+     * 纯状态收尾，不涉及任何线程/计时器。
+     *
+     * mine == nullptr（本实例从没接受过 CicadaSetVideoCodecSupport，包括进程级的
+     * 原型实例 se）时**不碰**那个进程级落点：它是个函数内静态对象，退出阶段可能
+     * 已经先于本对象析构，不必要地访问它没有好处。
+     */
+    {
+        std::shared_ptr<const decoderFactory::AppCodecSupport> mine;
+        {
+            std::lock_guard<std::mutex> lock(mAppCodecSupportMutex);
+            mine = mAppCodecSupport;
+            mAppCodecSupport.reset();
+        }
+
+        if (mine != nullptr) {
+            decoderFactory::clearAppCodecSupportIf(mine);
+        }
+    }
+
     if (mIsDummy) {
         return;
     }
@@ -1321,6 +1343,32 @@ DecoderType SuperMediaPlayer::GetDecoderType()
     }
 
     return DT_SOFTWARE;
+}
+
+bool SuperMediaPlayer::IsVideoDecoderHardware()
+{
+    /*
+     * 【"实际在用硬解还是软解"的唯一事实来源】问**活动解码器对象**自己
+     * （IDecoder::isHardwareDecoderInUse），而不是配置或标志位：
+     *   * 走的是本文件里既有的那条取解码器的路（getDecoder(DEVICE_TYPE_VIDEO)，
+     *     与 3452 行读 getFlags()、3943 行读 get_error_frame_no() 同一个入口），
+     *     因此不新增成员、不改任何既有方法的语义；
+     *   * avcodecDecoder 内部跟踪的状态包含**运行期降级**（FFmpeg 中途把硬解格式
+     *     摘掉就退回软解），所以这个读数会跟着变；
+     *   * 解码器还不存在（没有片源 / 刚换片源 / 已销毁）时返回 false —— 语义是
+     *     "现在没有在硬解"。调用方（Qt）另外用"有没有当前视频流"区分"没有解码器"。
+     */
+    if (mAVDeviceManager == nullptr) {
+        return false;
+    }
+
+    IDecoder *videoDecoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
+
+    if (videoDecoder == nullptr) {
+        return false;
+    }
+
+    return videoDecoder->isHardwareDecoderInUse();
 }
 
 PlayerStatus SuperMediaPlayer::GetPlayerStatus() const
@@ -8190,4 +8238,62 @@ void SuperMediaPlayer::acceptDiscontinuityLandingFrame(int64_t framePos, int gen
             (long long) framePos, (long long) (offsetFromTargetUs / 1000), generation,
             (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1),
             reason != nullptr ? reason : "-", (long long) targetUs);
+}
+
+/*
+ * ==================== 【应用层视频编码"硬解能力 + 效率偏好"】实现 ====================
+ *
+ * JSON 契约与 C API 的字符串所有权见 media_player_api.h；语义见 ICicadaPlayer.h。
+ * 这一对函数只做三件事：get 转发给 decoderFactory 取"当前生效"的那一份、
+ * set 解析 + 校验 + 发布、清除时撤销自己发布的那一份。所有"内核怎么用这份数据"
+ * 的逻辑都在 decoderFactory.cpp 里（ABR 与起播默认档读的是同一个落点）。
+ */
+std::string SuperMediaPlayer::GetVideoCodecSupportJson()
+{
+    /*
+     * 直接要"当前生效"的那份：decoderFactory 自己决定回应用层传入的（source = "app"）
+     * 还是内核探测结果（source = "kernel"）。get 与 ABR / 起播默认档读同一个落点，
+     * 所以不会出现"get 说 app、实际却按 kernel 的结论选流"。
+     */
+    return decoderFactory::getEffectiveCodecSupportJson();
+}
+
+int SuperMediaPlayer::SetVideoCodecSupportJson(const std::string &json)
+{
+    if (json.empty()) {
+        /* 空串 = 清除应用层覆盖，恢复内核自己探测（get 之后返回 source = "kernel"）。 */
+        std::shared_ptr<const decoderFactory::AppCodecSupport> mine;
+        {
+            std::lock_guard<std::mutex> lock(mAppCodecSupportMutex);
+            mine = mAppCodecSupport;
+            mAppCodecSupport.reset();
+        }
+        /* 只清"还是自己发布的那一份"：别的播放器实例后来发布过就不动它。 */
+        decoderFactory::clearAppCodecSupportIf(mine);
+        AF_LOGI("app video codec support cleared: the kernel probes the device again\n");
+        return 0;
+    }
+
+    /*
+     * 先解析并**完整校验**，成功了才动状态：畸形/非法 JSON 一律返回非 0，
+     * 当前状态一个字节都不变（不允许半套用）。
+     */
+    std::shared_ptr<const decoderFactory::AppCodecSupport> parsed;
+    const int ret = decoderFactory::parseAppCodecSupportJson(json, parsed);
+
+    if (ret != 0 || parsed == nullptr) {
+        AF_LOGW("reject app video codec support json (ret=%d): the current state is unchanged\n", ret);
+        return (ret != 0) ? ret : -EINVAL;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(mAppCodecSupportMutex);
+        mAppCodecSupport = parsed;
+    }
+    decoderFactory::publishAppCodecSupport(parsed);
+    AF_LOGI("app video codec support accepted: %d hardware codec(s), %d preference entr(ies), "
+            "preferred=%s; the kernel will NOT probe the device while this is set\n",
+            (int) parsed->hwDecode.size(), (int) parsed->preference.size(),
+            parsed->preferred.empty() ? "(auto)" : parsed->preferred.c_str());
+    return 0;
 }

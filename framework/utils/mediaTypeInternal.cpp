@@ -275,6 +275,60 @@ int afCodecEfficiencyRank(enum AFCodecID id, const char *rawCodecs)
     return afCodecEfficiencyRankByShortName(afCodecShortName(id, rawCodecs));
 }
 
+namespace {
+
+    /*
+     * 内核认得的全部视频编码短名（就是 afCodecShortNameById 的值域），**只此一份**。
+     * 这里的书写次序没有含义 —— 效率序由下面的 AfCodecEfficiencyOrder 按等级表排出来。
+     */
+    const char *const kAfCodecShortNames[] = {
+        "H.264", "H.265", "AV1", "VP9", "MPEG-4", "MPEG-2",
+    };
+
+    /*
+     * 首次调用时把 kAfCodecShortNames 按 afCodecEfficiencyRankByShortName() 的等级
+     * **降序稳定排序**，存成 nullptr 结尾的数组。等级表只有那一份（就是这个函数），
+     * 所以"效率序"在内核里只有一个定义点，这里不可能与它漂移。
+     */
+    struct AfCodecEfficiencyOrder {
+        const char *names[sizeof(kAfCodecShortNames) / sizeof(kAfCodecShortNames[0]) + 1];
+
+        AfCodecEfficiencyOrder()
+        {
+            const size_t count = sizeof(kAfCodecShortNames) / sizeof(kAfCodecShortNames[0]);
+
+            for (size_t i = 0; i < count; i++) {
+                names[i] = kAfCodecShortNames[i];
+            }
+
+            /* 插入排序（稳定，等级相同保持上面那张表的次序）。元素只有 6 个，
+             * 没必要为此引 <algorithm>。 */
+            for (size_t i = 1; i < count; i++) {
+                const char *key = names[i];
+                const int keyRank = afCodecEfficiencyRankByShortName(key);
+                size_t j = i;
+
+                while (j > 0 && afCodecEfficiencyRankByShortName(names[j - 1]) < keyRank) {
+                    names[j] = names[j - 1];
+                    j--;
+                }
+
+                names[j] = key;
+            }
+
+            names[count] = nullptr;
+        }
+    };
+
+}// namespace
+
+const char *const *afCodecEfficiencyOrder()
+{
+    /* C++11 起函数内静态量的初始化线程安全：第一次调用时构造一次，之后只读。 */
+    static const AfCodecEfficiencyOrder order;
+    return order.names;
+}
+
 enum AFCodecID afCodecIDFromShortName(const char *shortName)
 {
     if (shortName == nullptr) {

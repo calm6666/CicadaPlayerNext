@@ -240,6 +240,28 @@ namespace Cicada {
             return 0;
         }
 
+        /*
+         * 【当前解码方式的事实读数：这个解码器实例实际在用硬解还是软解】
+         *
+         * 与"设备/构建支持不支持硬解"的能力查询（decoderFactory::isHardwareDecodeSupported）
+         * 是两件事：这里回答的是**活动解码器**眼下真正走的那条路，所以
+         *   * 建解码器时硬解没能起来（构建里没有该编码的硬解配置、GPU 设备建不出来）
+         *     ⇒ false；
+         *   * 解码途中硬解掉了、退回软解（avcodecDecoder 的 getHwFormat 会把状态复位）
+         *     ⇒ false。
+         * 界面（Qt 的"解码方式"那一栏）据此显示"硬解/软解"，不许读"配置想用什么"。
+         *
+         * 默认实现按解码器打开后留下的标志位回答（Android 的 mediaCodecDecoder、
+         * Apple 的 AFVTBDecoder 在 open 时就置了 DECFLAG_HW，语义正确）；桌面 FFmpeg
+         * 那条路（avcodecDecoder）有运行期状态，由它自己覆盖。
+         *
+         * **追加在 vtable 末尾**，保证增量 ABI 安全。
+         */
+        virtual bool isHardwareDecoderInUse()
+        {
+            return (mFlags & DECFLAG_HW) != 0;
+        }
+
         void setRequireDrmHandlerCallback(std::function<std::shared_ptr<DrmHandler>(const DrmInfo &drmInfo)> callback)
         {
             mRequireDrmHandlerCallback  = callback;

@@ -490,6 +490,33 @@ public class NativePlayerBase {
         return nInvokeComponent(content);
     }
 
+    /*
+     * ---- 设备硬解能力 / 编码效率偏好 ----
+     *
+     * JNI 落点：nGetVideoCodecSupport() / nSetVideoCodecSupport(String)。
+     * native 侧（jni/player/NativeBase.cpp）把这两个调用转成内核的新 C API
+     *     CicadaGetVideoCodecSupport(player) / CicadaSetVideoCodecSupport(player, json)
+     * 返回的 JSON 契约、以及"传进去之后内核就不再探测设备"的语义，见
+     * CicadaPlayer.getVideoCodecSupport() / setVideoCodecSupport(String) 的 javadoc。
+     */
+
+    /**
+     * 取当前生效的"硬解能力 + 偏好" JSON；取不到时 null。
+     */
+    public String getVideoCodecSupport() {
+        String json = nGetVideoCodecSupport();
+        Logger.v(TAG, "getVideoCodecSupport = " + json);
+        return json;
+    }
+
+    /**
+     * 传入应用侧的"硬解能力 + 偏好" JSON；null / 空串 = 清除（恢复内核自己探测）。
+     */
+    public void setVideoCodecSupport(String json) {
+        Logger.v(TAG, "setVideoCodecSupport = " + json);
+        nSetVideoCodecSupport(json);
+    }
+
     ////===============-------------------==================------------------////
 
     protected native void nConstruct(String name);
@@ -609,6 +636,16 @@ public class NativePlayerBase {
     protected native void nSetFastStart(boolean open);
 
     protected native int nInvokeComponent(String content);
+
+    /*
+     * 设备硬解能力 / 编码效率偏好。
+     * 对应 NativeBase.cpp 里注册的 "nGetVideoCodecSupport" / "nSetVideoCodecSupport"
+     * （签名见那边的 nativePlayer_method_table），最终转发到内核的
+     * CicadaGetVideoCodecSupport() / CicadaSetVideoCodecSupport()。
+     */
+    protected native String nGetVideoCodecSupport();
+
+    protected native void nSetVideoCodecSupport(String json);
 
     //////==========--------------==================------------------================//
 

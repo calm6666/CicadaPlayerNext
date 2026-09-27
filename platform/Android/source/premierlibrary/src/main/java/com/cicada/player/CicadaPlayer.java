@@ -1475,4 +1475,40 @@ public interface CicadaPlayer {
      * 设置drm请求。比如播放WideVine时。
      */
     abstract public void setDrmCallback(DrmCallback callback);
+
+    /**
+     * 取当前"设备硬解能力 + 编码效率偏好"（JSON，内核 CicadaGetVideoCodecSupport 的 Java 落点）。
+     *
+     * 返回（字段名固定，见内核 media_player_api.h）：
+     * <pre>
+     * {"source":"app"|"kernel",
+     *  "hwDecode":["H.265","H.264"],
+     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"]}
+     * </pre>
+     * 语义：
+     * <ul>
+     *   <li>{@code source} = "kernel"：这份是**内核探测本设备**得到的；
+     *       "app"：是应用侧通过 {@link #setVideoCodecSupport} 传进去、正在生效的那份；</li>
+     *   <li>{@code hwDecode}：本设备**能硬解**的编码短名集合，顺序无关；</li>
+     *   <li>{@code preference}：从高到低的编码效率偏好序。</li>
+     * </ul>
+     * 拿不到时返回 null（没有播放器 / 内核失败）。
+     *
+     * @return 上面那份 JSON；取不到时 null
+     */
+    abstract public String getVideoCodecSupport();
+
+    /**
+     * 传入应用侧的"设备硬解能力 + 编码效率偏好"（JSON，契约与上面 get 的同一份）。
+     *
+     * <p><b>一旦传进去，内核就不再探测设备</b>：ABR 选档与起播默认档都按这份集合/偏好来。
+     * 应用侧可以自己持久化它，以便下次起播直接传，省掉一次设备探测。</p>
+     *
+     * <p>传 {@code null} 或空串 = 清除，恢复内核自己探测。</p>
+     *
+     * <p>畸形/不合契约的 JSON 由内核拒绝（当前状态不变、内核打日志），本方法不抛异常。</p>
+     *
+     * @param json 见上；null / 空串表示清除
+     */
+    abstract public void setVideoCodecSupport(String json);
 }

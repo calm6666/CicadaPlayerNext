@@ -486,6 +486,19 @@ int afCodecEfficiencyRankByShortName(const char *shortName);
 int afCodecEfficiencyRank(enum AFCodecID id, const char *rawCodecs);
 
 /*
+ * 内核默认的编码效率序，**从高到低**：AV1、H.265、VP9、H.264、MPEG-4、MPEG-2。
+ *
+ * 返回以 nullptr 结尾的静态数组，元素是 afCodecShortName() 的那组静态短名
+ * （调用方不得释放、不得改写）。数组内容由 afCodecEfficiencyRankByShortName()
+ * 的等级表在首次调用时**排出来**（同级保持名字表内次序），所以内核里"效率序"
+ * 只有等级表这一个定义点，这里不会与它漂移；调用方也不允许再抄一份名字列表。
+ *
+ * 用途：应用层没传 preference 时，ABR 与起播默认档用它当默认效率序；
+ * CicadaGetVideoCodecSupport 也用同一份把它交给应用层。
+ */
+const char *const *afCodecEfficiencyOrder();
+
+/*
  * 短名 -> AFCodecID，afCodecShortName() 的逆映射。存在的唯一理由是：应用层拿到的
  * 是 StreamInfo.videoCodec 这个短名字符串（见 mediaPlayer/native_cicada_player_def.h），
  * 而"设备能不能硬解这个编码"是按 AFCodecID 问的（decoderFactory::isHardwareDecodeSupported），

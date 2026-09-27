@@ -156,6 +156,23 @@ public:
     static jstring java_GetCacheFilePathByURL(JNIEnv *env, jobject instance, jstring URL);
 
     static void java_SetDefaultBandWidth(JNIEnv *env , jobject instance , jint defaultBandWidth);
+
+    /*
+     * 设备硬解能力 / 编码效率偏好。
+     *
+     * 走本层唯一持有那个对象（PlayerPrivateData::player，Cicada::MediaPlayer *）的包装转发，
+     * 和 java_SetColorMatrix / java_SetFastStart 等既有方法同一条取法：
+     *     MediaPlayer::GetVideoCodecSupport()             -> std::string
+     *     MediaPlayer::SetVideoCodecSupport(const char *) -> 0 成功；nullptr/"" = 清除
+     * 内核那次 malloc + CicadaFreeString 的释放都在包装类内部完成，本层**不需要**
+     * include media_player_api.h、也**不许**自己释放任何 C 字符串（见 .cpp 里的说明）。
+     *
+     * Java 侧对应：NativePlayerBase.nGetVideoCodecSupport() / nSetVideoCodecSupport(String)，
+     * 签名见下面 nativePlayer_method_table 里那两行。
+     */
+    static jstring java_GetVideoCodecSupport(JNIEnv *env, jobject instance);
+
+    static void java_SetVideoCodecSupport(JNIEnv *env, jobject instance, jstring json);
 public:
 
     static void onRequestProvisionCallback(char**responseData, int* responseSize, const char* url, const char *data, int size , void *arg);

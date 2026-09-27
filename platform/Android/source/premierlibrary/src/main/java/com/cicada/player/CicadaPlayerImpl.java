@@ -1140,6 +1140,22 @@ import java.lang.ref.WeakReference;
     public void setDrmCallback( DrmCallback callback){
         mCorePlayer.setDrmCallback(callback);
     }
+
+    /*
+     * ---- 设备硬解能力 / 编码效率偏好（见 CicadaPlayer 接口上的说明）----
+     * 只是转发给 NativePlayerBase（那边再走 JNI -> 内核 CicadaGetVideoCodecSupport /
+     * CicadaSetVideoCodecSupport）；不做任何加工/缓存，应用侧要持久化就自己存返回的 JSON。
+     */
+
+    @Override
+    public String getVideoCodecSupport() {
+        return mCorePlayer.getVideoCodecSupport();
+    }
+
+    @Override
+    public void setVideoCodecSupport(String json) {
+        mCorePlayer.setVideoCodecSupport(json);
+    }
 }
 
 

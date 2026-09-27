@@ -160,13 +160,14 @@ public class PlayerTrackFragment extends BaseFragment {
                         RadioButton videoBtn = createRadioButton();
                         videoBtn.setTag(trackInfo);
                         /*
-                         * 码率行后面带上**编码短名**（内核归一化后给的，例如 "H.264"/"H.265"；
+                         * 码率行后面带上**编码显示名**（内核归一化后的短名 "H.264"/"H.265"，
+                         * 经 codecDisplayName() 换成用户认得的写法：H.265 → **HEVC**；
                          * 内核认不出来时是空串）。这里每一路视频流本来就是一行、不做任何合并，
-                         * 但同一个码率/同一分辨率下的 H.264 与 H.265 两行文字完全一样，用户分不出
+                         * 但同一个码率/同一分辨率下的两套编码两行文字完全一样，用户分不出
                          * 哪行是哪套编码 —— 所以把编码缀在码率后面。
                          * 空串就只显示码率，不写"未知"、也不猜。
                          */
-                        String codec = trackInfo.getVideoCodec();
+                        String codec = codecDisplayName(trackInfo.getVideoCodec());
                         videoBtn.setText(trackInfo.getVideoBitrate() + ""
                                 + (TextUtils.isEmpty(codec) ? "" : "  " + codec));
                         mBitrateRadioGroup.addView(videoBtn);
@@ -196,6 +197,26 @@ public class PlayerTrackFragment extends BaseFragment {
 
             hideRadioGroup();
         }
+    }
+
+    /**
+     * 【编码短名 → 显示名】本界面的**显示**映射（与 Qt 的
+     * `CicadaPlayerItem.cpp::codecDisplayName()`、Compose 的 `PlayerStats.kt::codecDisplayNameOf()`
+     * 同一口径）：
+     *
+     *     H.265 → HEVC；其余（H.264 / AV1 / VP9 / MPEG-4 / MPEG-2 / 空串 …）原样返回。
+     *
+     * 内核（以及 TrackInfo.getVideoCodec()）给的是**规范短名** "H.265"，对用户说 HEVC 才是
+     * 通行叫法。所以只在**显示**这一层换名 —— 内部标识/比较一律继续用短名。
+     * 空串仍返回空串（"认不出来"时不写"未知"，也不猜）。
+     */
+    private static String codecDisplayName(String codec) {
+        if (codec == null) {
+            return "";
+        }
+
+        String trimmed = codec.trim();
+        return "H.265".equals(trimmed) ? "HEVC" : trimmed;
     }
 
     /**

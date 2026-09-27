@@ -71,8 +71,9 @@ data class QualityOption(
     val label: String,
     val selected: Boolean,
     /*
-     * 这一档的**编码短名**（`TrackInfo.getVideoCodec()`，内核归一化后的 "H.264"/"H.265"/"AV1"…），
-     * 只用来在档位行右侧画一个小徽标。**内核认不出来时是空串**，界面此时不渲染徽标
+     * 这一档的**编码显示名**（徽标文本）：来自 `TrackInfo.getVideoCodec()`（内核归一化后的
+     * 短名 "H.264"/"H.265"/"AV1"…），再经 `codecDisplayNameOf()` 换成用户认得的写法
+     * （H.265 → **HEVC**；其余原样）。**内核认不出来时是空串**，界面此时不渲染徽标
      * （不写"未知"、也不按分辨率/码率反推）。默认空串：只改文案的调用方不必关心它。
      */
     val codec: String = "",
@@ -154,7 +155,8 @@ fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int, autoQuality: Boolea
             index = t.getIndex(),
             label = qualityLabelOf(t),
             selected = !autoQuality && t.getIndex() == currentIndex,
-            codec = codecLabelOf(t),
+            /* 徽标是**显示**，所以走短名→显示名映射（H.265 → HEVC）；见 codecDisplayNameOf。 */
+            codec = codecDisplayNameOf(codecLabelOf(t)),
         )
     } + auto
 }
@@ -178,14 +180,37 @@ private fun qualityGroupKey(track: TrackInfo): String {
 }
 
 /**
- * 一档视频轨的**编码短名**（徽标文本）—— 直接取内核归一化后的名字（`TrackInfo.getVideoCodec()`）。
+ * 一档视频轨的**编码短名**（内核的规范名，徽标文本的原料）——
+ * 直接取内核归一化后的名字（`TrackInfo.getVideoCodec()`）。
  *
  * **认不出来时内核给空串**，这里原样返回空串（界面按"空串 = 不渲染徽标"处理）：
  * 不做任何映射/猜测，既不显示"未知"，也不按分辨率/码率反推编码。
  * 用显式 getter（TrackInfo 同时有公有字段与 getter，Kotlin 属性语法可能歧义）。
+ *
+ * ⚠ 本函数**同时是合并分组键的一半**（见 [qualityGroupKey]），所以它必须保持"内核短名"这个
+ * 身份口径 —— **显示名不要塞进这里**，否则以后谁改一句文案就可能悄悄把两档并成一档。
+ * 徽标要显示成用户认得的写法，请再过一道 [codecDisplayNameOf]。
  */
 fun codecLabelOf(track: TrackInfo): String =
     (track.getVideoCodec() ?: "").trim()
+
+/**
+ * 【编码短名 → 显示名】整个 App 唯一的一处映射，**只用于显示**（对应 Qt 的
+ * `CicadaPlayerItem.cpp` 里的 `codecDisplayName()`，两处口径必须一致）：
+ *
+ *     H.265 → HEVC；其余（H.264 / AV1 / VP9 / MPEG-4 / MPEG-2 / 空串 …）原样返回。
+ *
+ * 内核（以及 `TrackInfo.getVideoCodec()`、合并分组键）用的是**规范短名** "H.265"；
+ * 对用户说 HEVC 才是通行的叫法（`硬解 HEVC（显卡名）`）。所以只在**显示**这一层换名。
+ *
+ * ⚠ 别拿它当内部标识用：分组 [qualityGroupKey]、认轨、切档比较一律继续用
+ * [codecLabelOf]（内核短名）。空串仍返回空串 —— "认不出来"的语义不变，界面照旧不画徽标。
+ */
+fun codecDisplayNameOf(codec: String): String {
+    val trimmed = codec.trim()
+
+    return if (trimmed == "H.265") "HEVC" else trimmed
+}
 
 /**
  * 一档视频轨的显示名 —— 与 Qt 完全一致的写法（`CicadaPlayerItem.cpp:470-491`）：

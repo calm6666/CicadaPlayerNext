@@ -111,12 +111,33 @@ namespace cicadaqt {
             return m_description;
         }
 
+        /*
+         * 界面显示用：当前交给框架解码的那块**显卡的名字**（Windows 上就是 DXGI 的
+         * adapter 名，例如 "NVIDIA GeForce RTX 4060"）。
+         *
+         * 专门一个访问器，**不是**从 description() 那段文本里抠出来的 —— description()
+         * 是排查用的实现细节文案（"Qt D3D11 device (...)"），界面不许解析它。
+         *
+         * 取不到时是**空串**（非 Windows 平台、场景图还没初始化、DXGI 查不出名字），
+         * 调用方据此只写"硬解 <编码>"、不写型号，不许拿 "unknown adapter" 之类的
+         * 占位文本当显卡名显示。
+         */
+        QString deviceName() const
+        {
+            return m_deviceName;
+        }
+
     private:
         CicadaHardwareDevice() = default;
         ~CicadaHardwareDevice() = default;
 
         std::atomic<bool> m_ready{false};
         QString m_description;
+        /*
+         * 显卡名（**追加在成员末尾**）：与 m_description 同一套线程约定 —— 渲染线程在
+         * captureFromSceneGraph() 里写，界面线程读（Qt 组装"解码方式"那一栏）。
+         */
+        QString m_deviceName;
     };
 
 }// namespace cicadaqt

@@ -1,6 +1,8 @@
 #include "media_player_api.h"
 #include "CicadaPlayerPrototype.h"
 #include <complex>
+#include <cstdlib>
+#include <cstring>
 #include <utils/CicadaJSON.h>
 #include <utils/af_string.h>
 #include <utils/frame_work_log.h>
@@ -611,6 +613,17 @@ DecoderType CicadaGetDecoderType(playerHandle *pHandle)
     return DT_SOFTWARE;
 }
 
+bool CicadaIsVideoDecoderHardware(playerHandle *pHandle)
+{
+    GET_PLAYER;
+
+    if (player) {
+        return player->IsVideoDecoderHardware();
+    }
+
+    return false;
+}
+
 int CicadaGetCurrentStreamIndex(playerHandle *pHandle, StreamType type)
 {
     GET_PLAYER;
@@ -809,4 +822,65 @@ std::string CicadaGetPlayerName(playerHandle *pHandle)
         return player->getName();
     }
     return "";
+}
+
+/*
+ * ============ 【应用层视频编码"硬解能力 + 效率偏好"】C 接口实现 ============
+ *
+ * JSON 契约、字符串所有权与释放方式见 media_player_api.h；语义见 ICicadaPlayer.h
+ * （内核侧的实际消费点在 decoderFactory.cpp / AbrAlgoStrategy.cpp /
+ * SMPMessageControllerListener.cpp）。
+ *
+ * 这两个函数刻意不用 GET_PLAYER 宏：那个宏直接解引用 pHandle，而这两个接口是给
+ * JNI/Qt 调的新入口，句柄为空时应该返回 NULL / 非 0，而不是先崩一下。
+ */
+const char *CicadaGetVideoCodecSupport(playerHandle *pHandle)
+{
+    ICicadaPlayer *player = (pHandle != nullptr) ? pHandle->pPlayer : nullptr;
+
+    if (player == nullptr) {
+        return nullptr;
+    }
+
+    const std::string json = player->GetVideoCodecSupportJson();
+
+    if (json.empty()) {
+        return nullptr;
+    }
+
+    /* malloc 出来的是**副本**，调用方用 CicadaFreeString() / CicadaFree() 释放。 */
+    char *buffer = (char *) malloc(json.size() + 1);
+
+    if (buffer == nullptr) {
+        return nullptr;
+    }
+
+    memcpy(buffer, json.c_str(), json.size() + 1);
+    return buffer;
+}
+
+int CicadaSetVideoCodecSupport(playerHandle *pHandle, const char *json)
+{
+    ICicadaPlayer *player = (pHandle != nullptr) ? pHandle->pPlayer : nullptr;
+
+    if (player == nullptr) {
+        return -EINVAL;
+    }
+
+    /* NULL / 空串 = 清除应用层覆盖，恢复内核自己探测。 */
+    if (json == nullptr || json[0] == '\0') {
+        return player->SetVideoCodecSupportJson(std::string());
+    }
+
+    return player->SetVideoCodecSupportJson(std::string(json));
+}
+
+void CicadaFreeString(const char *str)
+{
+    free((void *) str);
+}
+
+void CicadaFree(const char *str)
+{
+    free((void *) str);
 }

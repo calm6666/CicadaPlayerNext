@@ -131,6 +131,7 @@ namespace Cicada {
                 }
 
                 dec->hwDecodeActive = true;
+                dec->owner->mHwDecodeInUse.store(true);
                 return *p;
             }
         }
@@ -144,6 +145,8 @@ namespace Cicada {
                             "this stream as %s\n", CICADA_HW_NAME,
                             av_get_pix_fmt_name(dec->hwPixFmt), av_get_pix_fmt_name(*p));
                     dec->hwDecodeActive = false;
+                    /* 运行期降级：界面上的"硬解"必须跟着变成"软解"。 */
+                    dec->owner->mHwDecodeInUse.store(false);
                     return *p;
                 }
             }
@@ -216,6 +219,8 @@ namespace Cicada {
 
 #if defined(CICADA_HW_DEVICE_TYPE)
         mPDecoder->hwDecodeActive = false;
+        /* 解码器已经关掉：对外读数回到"没有硬解在用"（下次 open 会重新判定）。 */
+        mHwDecodeInUse.store(false);
 
         if (mPDecoder->swsCtx != nullptr) {
             sws_freeContext(static_cast<SwsContext *>(mPDecoder->swsCtx));
@@ -431,6 +436,12 @@ namespace Cicada {
         mPDecoder->hwDeviceRef = deviceRef;
         mPDecoder->hwPixFmt = hwPixFmt;
         mPDecoder->hwDecodeActive = true;
+        /*
+         * 设备真的建起来了 ⇒ 这条流在用硬解。这是"当前解码方式"的对外读数
+         * （见 isHardwareDecoderInUse()）：解码途中若 FFmpeg 把硬解格式摘掉，
+         * getHwFormat() 会把它复位。
+         */
+        mHwDecodeInUse.store(true);
 
         // 3. Hand the device to the codec context and install the format
         //    negotiation callback. FFmpeg allocates the D3D11 surface pool for
@@ -696,12 +707,29 @@ namespace Cicada {
         mName = "VD.avcodec";
         mPDecoder = new decoder_handle_v();
         memset(mPDecoder, 0, sizeof(decoder_handle_v));
+        /*
+         * 反向指针（见 decoder_handle_v::owner）：静态回调 getHwFormat() 只能从
+         * ctx->opaque 拿到本结构，而"硬解在不在用"的对外读数记在本对象上。
+         * 必须在 memset **之后**赋值。
+         */
+        mPDecoder->owner = this;
 #if defined(CICADA_HW_DEVICE_TYPE)
         mPDecoder->hwPixFmt = AV_PIX_FMT_NONE;
         mPDecoder->swPixFmt = AV_PIX_FMT_NONE;
 #endif
         // avcodec_register_all was removed in FFmpeg 5.0 (decoders self-register).
         mFlags |= DECFLAG_PASSTHROUGH_INFO;
+    }
+
+    bool avcodecDecoder::isHardwareDecoderInUse()
+    {
+        /*
+         * 只报**活动解码器**眼下走的那条路（写它的地方：initHwDecoder() 建成设备时置真，
+         * getHwFormat() 的运行期降级、close_decoder() 复位）。构建里没有硬解配置、
+         * 硬解设备建不出来时这个读数一直是假，也就是如实报"软解"。
+         * 没有平台分支：本平台没有硬解后端时 initHwDecoder() 根本不会被调用。
+         */
+        return mHwDecodeInUse.load();
     }
 
     avcodecDecoder::~avcodecDecoder()

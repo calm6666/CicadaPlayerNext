@@ -67,12 +67,13 @@ private:
     int BestIndexForBudget(double budgetBps, int maxIndex) const;
     /*
      * 同分辨率编码偏好的落地：把 index 收敛成"同一清晰度下更该选的那一档"
-     * （硬解优先，其次压缩效率；判据全部在基类
-     * AbrAlgoStrategy::FindSameResolutionEfficientCodec() 里），这里只负责
+     * （**应用层手动指定（preferred）最高，其次硬解优先、再其次压缩效率**；判据全部
+     * 在基类 AbrAlgoStrategy::FindSameResolutionEfficientCodec() 里），这里只负责
      * "没有可换的档就原样返回"。
      *
      * maxBitrate 的语义见基类：> 0 是"换过去的码率上限"（降清晰度那条路径用，
      * 保证一次降档不会被换成更贵的编码），<= 0 是不限（升清晰度/稳态那条路径用）。
+     * 手动指定（preferred）是唯一不受这个上限否决的东西 —— 见基类的说明。
      */
     int PreferEfficientCodecAtSameResolution(int index, int maxBitrate) const;
     /*
