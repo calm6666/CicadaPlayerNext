@@ -772,10 +772,11 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
     mSeekPos = seekTargetUs;
     mSeekNeedCatch = bAccurate;
     /*
-     * 【P1-b】位置上报不再有"地板"：位置基准由 acceptDiscontinuityLandingFrame()
-     * 在落点帧上屏时钉在 targetUs，之后 position = targetUs + 单调时钟增量 ——
-     * 数学上单调，回弹不可能发生。所以这里既没有 mSeekPositionFloorUs，
-     * 也没有它的归属标记 mSeekLandingFloorOwnerUs（两者已随 P1-b 删除）。
+     * 【位置上报在这里不做任何事，这是对的】
+     * 位置基准由 acceptDiscontinuityLandingFrame() 在落点帧上屏时钉在 targetUs，
+     * 之后 position = targetUs + 单调时钟增量（暂停时冻结，见 getCurrentPosition()）——
+     * 数学上单调，回弹不可能发生。所以既不需要"下界"，也不需要"归属标记"，
+     * 更不需要在 seek 入口预置任何位置类状态；上面那次 beginDiscontinuity() 已经够了。
      */
 }
 
@@ -1241,10 +1242,11 @@ int64_t SuperMediaPlayer::getCurrentPosition()
     /*
      * ============ 【P1-b：位置上报 = 不连续点目标 + 单调时钟增量】============
      *
-     * 旧实现在这里挂了一条"地板"兜底链（mSeekPositionFloorUs + SEEK_FLOOR_GIVEUP_US
-     * + 过期自愈），本质是"管道还没走到目标之前，先把上报值钉在目标上"。
+     * 旧实现（P1 之前）在这里挂了一条"地板"兜底链加一条"离目标差太多就放弃"的例外，
+     * 本质是"管道还没走到目标之前，先把上报值钉在目标上"。
      * 那是**打补丁**：它要求管道位置与目标点这两条轴永远可比，于是又派生出一堆
-     * "地板被谁改写/归属/过期"的判断，而回弹依然会发生（音频时钟接管时把上报拽回去）。
+     * "谁改写了地板/归属/是否过期"的判断，而回弹依然会发生（音频时钟接管时把上报拽回去）。
+     * 那些成员与判据已随 P1 整体删除，这里不再有它们的任何读点。
      *
      * 现在改成主流做法：不连续点上把基准钉在 targetUs，之后
      *     position = clockBaseUs + (now - clockBaseSteadyMs)
@@ -1262,17 +1264,55 @@ int64_t SuperMediaPlayer::getCurrentPosition()
     const int64_t clockBaseUs = mDiscontinuity.clockBaseUs.load();
 
     if (clockBaseUs != INT64_MIN) {
-        const int64_t baseSteadyMs = mDiscontinuity.clockBaseSteadyMs.load();
+        /*
+         * 【暂停：位置绝不能自己往前走】
+         *
+         * 上面那条"基准 + 墙钟增量"隐含一个前提：**媒体时间在走**。而暂停时它不走 ——
+         * 唯一的暂停开关是 startRendering(bool)（SuperMediaPlayer.cpp:11354-11368）：
+         *     if (start) mMasterClock.start(); else mMasterClock.pause();
+         * 它同时把音频渲染 pause 掉（`pauseAudioRender(!start)`）。SystemReferClock::pause()
+         * → af_scalable_clock::pause()（system_refer_clock.cpp:79-89），
+         * 而 SystemReferClock::GetTime() 只在 `!mClock.isPaused()` 时才去取参考时钟
+         * （system_refer_clock.cpp:16）—— 也就是说"暂停 = 时间不前进"是这块时钟的既定语义。
+         * 旧路径返回的 mCurrentPos 之所以在暂停时恒定，是因为它的每一个写入者都在
+         * "有帧真的流过"的路径上（RenderCallback / DecodeVideoPacket / RenderAudio /
+         * doRender 的 mPlayedVideoPts），暂停时那些路径不再推进。
+         *
+         * 所以这里必须显式把基准**冻住**：发现暂停就把"已经走过的量"折算进基准值，
+         * 并把 clockBaseSteadyMs 置 0（= 冻结哨兵），之后 byClock 恒等于基准值；
+         * 恢复播放时再从 0 重新起算（`if (baseSteadyMs == 0) baseSteadyMs = now;`）。
+         * 全程只用这两个既有字段，不加成员、不加计时器、不读播放状态以外的任何东西。
+         * 效果：暂停态 seek（PFR）表现为"位置 == 目标且冻住"，直到恢复播放才继续前进。
+         */
+        const bool clockPaused = mMasterClock.isPaused();
+        int64_t baseSteadyMs = mDiscontinuity.clockBaseSteadyMs.load();
         int64_t byClock = clockBaseUs;
 
-        if (baseSteadyMs > 0) {
+        if (clockPaused) {
+            if (baseSteadyMs > 0) {
+                /* 刚发现暂停：把已走过的一段折算进基准，然后冻结。 */
+                byClock = clockBaseUs + (af_getsteady_ms() - baseSteadyMs) * 1000;
+                mDiscontinuity.clockBaseUs = byClock;
+                mDiscontinuity.clockBaseSteadyMs = 0;
+            }
+            /* baseSteadyMs == 0 ⇒ 已经冻住，byClock 就是基准值本身，不动。 */
+        } else {
+            if (baseSteadyMs == 0) {
+                /* 从暂停恢复（或基准刚建立）：以"现在"为新起点继续前进。 */
+                baseSteadyMs = af_getsteady_ms();
+                mDiscontinuity.clockBaseSteadyMs = baseSteadyMs;
+            }
+
             byClock = clockBaseUs + (af_getsteady_ms() - baseSteadyMs) * 1000;
         }
 
         if (byClock < mCurrentPos.load()) {
-            /* 管道已经走到时钟估算值之前 ⇒ 把基准回收过来（保持单调、恢复同基准）。 */
-            mDiscontinuity.clockBaseSteadyMs = af_getsteady_ms();
+            /*
+             * 管道已经走到时钟估算值之前 ⇒ 把基准回收过来（保持单调、与主时钟恢复同基准）。
+             * 暂停时保持冻结（steadyMs 仍为 0），否则以"现在"为新起点。
+             */
             mDiscontinuity.clockBaseUs = mCurrentPos.load();
+            mDiscontinuity.clockBaseSteadyMs = clockPaused ? 0 : af_getsteady_ms();
             byClock = mCurrentPos.load();
         }
 
@@ -1863,10 +1903,10 @@ int SuperMediaPlayer::mainService()
          * 地往前挪的 —— 落点比目标早 11 秒（≈300 帧）时，光前推就要 6~7 秒，
          * 用户看到的就是"seek 之后卡一下才动"。精确落点判据（包含目标）是对的，卡在前推速度上。
          *
-         * seek 窗口期间（`mSeekFlag` 在途，或落点帧尚未采纳即 mSeekRenderGateUs 仍置位）
+         * seek 窗口期间（`mSeekFlag` 在途，或落点过滤仍然激活）
          * 不再看缓冲：持续 2ms 一拍把包喂给解码器，直到"包含目标的那一帧"进入帧队列并被采纳。
          * 这是**状态判据**（seek 还在不在进行），不引入计时器；窗口一结束
-         * （采纳时 mSeekRenderGateUs 归 INT64_MIN）自动回到正常节拍，不会长期快跑。
+         * （采纳落点帧时过滤闩清假）自动回到正常节拍，不会长期快跑。
          * 追赶（mVideoCatchingUp）那条保留原样，仍要求"缓冲 > 0"。
          * ==================================================================================
          */
@@ -8001,37 +8041,23 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
      */
 
     /*
-     * 【2026-09-21 修：seek 前后都不要把“还没到目标点”的帧推给渲染器】
-     *
-     * seek 期间 doRender() 用 force_render=true 调进来（为了拿到目标帧、结束 seek），
-     * 而 force_render 会绕过下面**所有**时钟节拍判断，于是从“目标点之前的关键帧”
-     * 到目标点之间的每一帧都被推给了渲染器。渲染器的输入队列（AFActiveVideoRender::
-     * mInputQueue）一满就 dropFrame() 并把自己的渲染时钟重锚到最新帧 ——
-     * 现象是 seek 之后画面快进一段、进度条跳、而且**视频跑到主时钟前面**
-     * （实测 seek 到 33.62s 之后包队列队首已经在 37.05s，超前 3.4 秒；
-     * 随后就是“每秒往前跳一个分片”、gap 涨到 16.7 秒的永久冻死）。
-     *
-     * 原来这里只在 `mSeekFlag` 为真时生效。不够：seek 一结束 mSeekFlag 就清了，
-     * 而管道离目标点还差好几秒（HLS 实测 seek 到 26.708s、tracker 落在 20.854s，
-     * 差 5.9 秒），这段“目标点之前的帧”照样上屏 —— 画面往回倒，位置回调跟着
-     * 往回跳（用户反馈的“进度跳切过去又跳回来再跳回去”）。
-     *
-     * 所以改用 mSeekPositionFloorUs（seek 一发起就记下的目标点，直到管道真的
-     * 走到它为止）。ExoPlayer 的做法完全一样：`positionUs < 目标点` 的输出缓冲
-     * 一律 `FRAME_RELEASE_SKIP`（解码但不显示）。
-     *
-     * 兜底：目标点如果离谱到差 15 秒以上，就撤掉地板照常渲染 —— 宁可倒一下，
-     * 也不能因为一个坏目标点把画面永久冻住。
-     */
-    /*
      * ============ 【P1：renderer 单一过滤（唯一实现）】============
      *
-     * 判据本体在 shouldDropForDiscontinuity() 里（P1-a 已实现，见 .cpp 末尾）。
-     * 这里只做四件事：
-     *   1. 把帧的"位置 + 帧长"喂给判据；
-     *   2. 处理"flush 之后第一帧无条件出画"这条例外；
-     *   3. 判据说丢 ⇒ 不上屏（继续解下一帧，直到"包含目标"或"越过目标"的帧出现）；
-     *   4. 判据结束过滤时收尾一次（收回追帧加速、复位两个 revert 闩）。
+     * 历史（为什么这里曾经有"地板 / 差 15 秒放弃 / 落点闸门"这一大堆东西）：
+     * doRender() 在 seek 期间用 force_render=true 调进来（为了拿到目标帧、结束 seek），
+     * 而 force_render 会绕过下面**所有**时钟节拍判断，于是从"目标点之前的关键帧"到目标点
+     * 之间的每一帧都被推给了渲染器：渲染器的输入队列一满就 dropFrame() 并把渲染时钟重锚到
+     * 最新帧 —— 现象是 seek 之后画面快进一段、进度条跳、视频跑到主时钟前面。当时的补法是
+     * 一条"位置地板"+ 一条"离目标还差 15 秒就放弃"的兜底，于是又派生出"地板被谁改写/
+     * 归属/过期"一串判断，而回弹与不精准依然会发生。
+     *
+     * 现在只有一条规则，判据本体在 shouldDropForDiscontinuity()（见 .cpp 末尾）：
+     *   1. 把帧的"位置 + 帧长"喂给它 —— **无条件先调**，因为它负责结束本次过滤；
+     *   2. 完全落在目标之前（framePos + 帧长 <= targetUs）⇒ 不上屏，继续解下一帧；
+     *   3. 包含目标、或已经越过目标 ⇒ 强制上屏，并结束过滤；
+     *   4. 不会再有帧（EOF）⇒ 结束过滤（见下面那条），必要时采纳最后一帧。
+     * "不等时钟"体现在第 3 条用的 force_render（它跳过下面的节拍判定），**不是**靠
+     * "先出一张前缀帧"—— 早于目标的帧绝不上屏（那是用户看到的"画面往回倒"）。
      *
      * **不再有**落点闸门 / 位置地板 / 归属标记 / 晚出容差 / 预算判据 / 重开窗口
      * 这一整组闩 —— 它们的职责全部由"目标点 + 代际"承担。
@@ -8057,22 +8083,18 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
         }
 
         /*
-         * 【顺序不能反】必须**无条件**先调一次判据：它在"包含目标"时负责结束过滤，
-         * 而"第一帧就包含目标"是完全正常的情形 —— 若因为第一帧例外而跳过调用，
-         * 过滤就永远不会结束。所以先拿判据结果，再用第一帧例外覆盖 render 决定。
+         * 【顺序不能反】必须**无条件**先调一次判据：它在"包含目标 / 越过目标"时负责结束过滤，
+         * 而"某一帧恰好就包含目标"是完全正常的情形 —— 若因为别的分支而跳过调用，过滤就永远
+         * 不会结束。所以先拿判据结果，再决定这一帧上不上屏。
          */
         const bool dropForLanding = shouldDropForDiscontinuity(frameTimePos, seekFrameDurUs);
+        /*
+         * 【EOF 的结构性终止的判定】"判据说这一帧还该丢" + "不会再有帧了" + "队列里只剩手里这一张"。
+         * 三项都是既有状态，理由见下面那条注释。
+         */
+        const bool eofLanding = dropForLanding && videoDecoderEOS && mVideoFrameQue.size() == 1;
 
-        if (!mSeekDecodeStartIsKey) {
-            /*
-             * 花屏（马赛克）保护：解码不是从关键帧起步（demuxer 落点在 GOP 中间）时，
-             * 这一帧缺参考帧、是脏数据 —— 不显示，保持上一张好画面，直到关键帧解出来
-             * （DecodeVideoPacket 里把 mSeekDecodeStartIsKey 置真）。最多等一个 GOP。
-             * 这条与落点判据无关，是一次**保留**的独立保护；脏帧也不消耗 firstFrameShown，
-             * 于是"第一帧无条件出画"落在第一张**干净**帧上。
-             */
-            render = false;
-        } else if (dropForLanding && videoDecoderEOS && mVideoFrameQue.size() == 1) {
+        if (eofLanding) {
             /*
              * ============ 【EOF 的结构性终止】============
              *
@@ -8087,31 +8109,63 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
              *     都为空，此刻必然还是假，偏晚。所以只有 videoDecoderEOS 是"不会再有视频帧"。
              *   · mVideoFrameQue.size() == 1 —— EOS 之后队列只减不增，所以"只剩手里这一张"
              *     就是最后一张可渲染的帧。
-             * 两者同时成立 ⇒ 采纳这一帧（与"越过目标"同义），打一条明确的 reason 日志。
+             * 三者同时成立 ⇒ 采纳这一帧（与"越过目标"同义），打一条明确的 reason 日志。
              * 纯状态判定，只发生一次，不是超时、不是看门狗、也不是"X 帧没进展"计数器。
+             *
+             * 【它必须排在脏帧门**之前**】否则"解码器已 EOS、而最后这一帧恰好不是从关键帧
+             * 解出来的"这条路径会既结束不了过滤、也永远不上屏 ⇒ filterActive 永久为真，
+             * 连带让 inSeekWindow / 追赶阀门 / 缓冲发布这些读它的地方一直走 seek 分支。
+             * 所以这里**无论如何**都要走 acceptDiscontinuityLandingFrame() 结束过滤；
+             * 只有"这一帧是干净的"才真的出画，脏帧仍然不上屏（花屏绝不放行）。
              */
             acceptDiscontinuityLandingFrame(frameTimePos, mDiscontinuity.generation.load(),
                                             "no frame can reach the target (eof)");
-            force_render = true;
-            render = true;
-        } else if (!mDiscontinuity.firstFrameShown.exchange(true)) {
-            /* flush 之后的第一帧：无条件出画（不等时钟、不丢）。 */
-            force_render = true;
-            render = true;
 
-            AF_LOGI("seek first frame shown: pts=%lld afterSeekMs=%lld — the frame that CONTAINS the target "
-                    "will replace it; the landing filter is ended ONLY by that frame or by the next "
-                    "seek/Reset, never by SeekEnd\n",
-                    (long long) frameTimePos,
-                    (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
+            if (mSeekDecodeStartIsKey) {
+                force_render = true;
+                render = true;
+            } else {
+                render = false;
+            }
+        } else if (!mSeekDecodeStartIsKey) {
+            /*
+             * 花屏（马赛克）保护：解码不是从关键帧起步（demuxer 落点在 GOP 中间）时，
+             * 这一帧缺参考帧、是脏数据 —— 不显示，保持上一张好画面，直到关键帧解出来
+             * （DecodeVideoPacket 里把 mSeekDecodeStartIsKey 置真）。最多等一个 GOP。
+             * 这条与落点判据无关，是一次**保留**的独立保护。
+             */
+            render = false;
         } else if (dropForLanding) {
             /*
-             * 完全落在目标之前 ⇒ 不包含目标 ⇒ 不上屏（解码继续前推）。
+             * 完全落在目标之前 ⇒ 不包含目标 ⇒ **不上屏**（解码继续前推）。
              * 帧 PTS 单调前进 ⇒ 必然在有限帧内结束，不需要任何预算 / 超时。
+             *
+             * 【没有"第一帧无条件出画"这条例外（P1-c 删除）】
+             * 那条例外只会把一张**早于目标**的帧推上屏 —— 直接违反"首个最终上屏帧必须是
+             * 包含目标时刻的那一帧"，也就是用户看到的"画面往回倒"。它当初的动机是"让 seek
+             * 早点结束"，但结束 seek 并不需要它：
+             *   · 包含/越过目标的那一帧渲染 ⇒ doRender() 里 `videoDecoder->isRenderGateHit()`
+             *     命中 ⇒ mSeekFlag 正常清除（那才是 seek 的完成条件）；
+             *   · 前缀帧不上屏**不会黑屏**（这条已逐处核实）：
+             *       - clearScreen() 在全文件只有两处调用 —— SuperMediaPlayer::ClearScreen()
+             *         与 stop 且 mSet->clearShowWhenStop 为真时；**seek / FlushVideoPath
+             *         路径不会清屏**；
+             *       - FlushVideoPath() 走 mAVDeviceManager->flushDevice(DEVICE_TYPE_VIDEO)
+             *         或 decoder->flush()，其 flushRender=false 分支的既有注释本来就写明
+             *         "渲染器里缓存的旧帧下一帧本来就会被覆盖"。
+             *     所以画面只是**停在上一张**，用户看到的是"画面停在原地，随后直接切到目标帧"。
+             *     这与脏帧保护依赖的是同一条性质。
+             *   · 真到片尾也结束不了的情况已被结构性封口：目标钳位保证"包含/越过目标的帧"
+             *     存在，另有上面那条 EOF 采纳，以及 playCompleted() 自己清 mSeekFlag。
              */
             render = false;
         } else {
-            /* 包含目标（或第一帧就晚于目标）⇒ 强制上屏；判据已结束本次过滤。 */
+            /*
+             * 包含目标（framePos <= target < framePos + 帧长），或者已经越过目标
+             * （framePos > target：目标落在本段之前，没有更早的帧可选）⇒ **强制上屏**。
+             * 判据已在同一调用里结束本次过滤；"不等时钟"就体现在这里（force_render 跳过
+             * 下面的节拍判定），不是靠"先出一张前缀帧"。
+             */
             force_render = true;
             render = true;
         }
@@ -10907,7 +10961,7 @@ void SuperMediaPlayer::Reset()
     mPendingVideoStallChecks = 0;
     /*
      * 落点闸门/落点采纳/先出画那三个闩已随 P1-b 删除：它们的职责全部由
-     * beginDiscontinuity(INT64_MIN) 一次覆盖（filterActive 不激活、firstFrameShown 复位）。
+     * beginDiscontinuity(INT64_MIN) 一次覆盖（落点过滤不激活、位置基准与落点诊断一起复位）。
      * 下面余下的两个是**与 seek 落点无关**的解码器/时间戳连续性状态，照旧复位。
      */
     mSeekClockAnchored = false;
@@ -11105,9 +11159,9 @@ void SuperMediaPlayer::ResetSeekStatus()
     /*
      * ============ 【P1-b：seek 结束**没有能力**关掉落点过滤】============
      *
-     * 这里原来是一整段"落点窗口出口"：把 mSeekRenderGateUs / mSeekPositionFloorUs /
-     * mSeekLandingFloorOwnerUs / mSeekFirstDecodableFrameShown 一起关掉（并且在"落点
-     * 还没被采纳"时又特意留着它们不关）。那正是**分片源 seek 永远差一个落点前缀**的根因：
+     * 这里原来是一整段"落点窗口出口"：把落点闸门、位置地板、落点归属与"先出画"那四个
+     * 状态一起关掉（并且在"落点还没被采纳"时又特意留着它们不关）。那正是
+     * **分片源 seek 永远差一个落点前缀**的根因：
      * 真机日志（2026-09-27 10:47:34，DASH 分片）
      *   seek first decodable frame shown: pts=60060000 is 5353 ms before the target
      *   （此后没有 `seek landing frame accepted`）
@@ -11174,7 +11228,7 @@ void SuperMediaPlayer::ResetSeekStatus()
  * 只在"一次 seek 只锚一次"（mSeekClockAnchored 为假）时才会被调用处调用；这里再
  * 复核一遍，因为它同时是"这一帧能不能当锚点"的唯一判据。
  *
- * 目标点取 **mSeekPositionFloorUs 优先、mSeekPos 兜底**：前者是 seek 入口写下的
+ * 目标点取**本次不连续点的 targetUs 优先、mSeekPos 兜底**：前者是 seek 入口写下的
  * 位置地板（本次 seek 的目标），兜底那条覆盖"尚未设地板的旧路径 / 管道已经走完
  * 目标点把地板撤掉"这两种状态 —— 两种情况下 mSeekPos 都还是本次 seek 的目标。
  *
@@ -11525,11 +11579,10 @@ void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
     mDiscontinuity.startUs = INT64_MIN;
 
     /*
-     * 【P1-a】同时把"落点过滤"与"位置上报基准"一起复位：
+     * 【P1-a/P1-c】同时把"落点过滤"与"位置上报基准"一起复位：
      *   · acceptedFramePos —— 上一次采纳的落点帧位置，只服务诊断；
-     *   · firstFrameShown  —— flush 之后的第一帧还没出画；
      *   · clockBase*       —— 上一次的位置基准作废。基准**不在这里钉**，
-     *     而是等"包含目标的那一帧"上屏时由 shouldDropForDiscontinuity() 钉在
+     *     而是等"包含目标的那一帧"上屏时由 acceptDiscontinuityLandingFrame() 钉在
      *     targetUs 上（用户要的语义是"位置等于目标、之后单调前进"）。
      *
      * filterActive 只在**真的有目标点**（= 一次 seek / 换档）时激活；
@@ -11537,7 +11590,6 @@ void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
      * 于是"没有在途不连续点"的正常播放路径上，过滤判据一行都不参与。
      */
     mDiscontinuity.acceptedFramePos = INT64_MIN;
-    mDiscontinuity.firstFrameShown = false;
     mDiscontinuity.clockBaseUs = INT64_MIN;
     mDiscontinuity.clockBaseSteadyMs = 0;
     mDiscontinuity.filterActive = (targetUs != INT64_MIN);

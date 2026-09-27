@@ -112,14 +112,13 @@ namespace Cicada {
          * ---- P1：renderer 单一过滤 + 位置上报基准 ----
          *
          * filterActive     本次不连续点的"落点过滤"是否仍然生效。它**只**由
-         *                  "包含目标的那一帧已上屏"（shouldDropForDiscontinuity 的结束分支）
-         *                  或"下一次 seek / Reset / Prepare"（beginDiscontinuity）关闭。
-         *                  **SeekEnd / ResetSeekStatus 一律不得关它** —— 那是分片源
-         *                  "seek 永远差一个落点前缀"的根因。
-         * firstFrameShown  flush 之后的第一帧是否已经无条件出画（不等时钟、不丢）。
-         *                  每次 beginDiscontinuity 复位。
+         *                  "包含目标的那一帧已上屏"（shouldDropForDiscontinuity 的结束分支，
+         *                  含 EOF 兜底那条）或"下一次 seek / Reset / Prepare"
+         *                  （beginDiscontinuity）关闭。**SeekEnd / ResetSeekStatus 一律不得
+         *                  关它** —— 那是分片源"seek 永远差一个落点前缀"的根因。
          * clockBaseUs       位置上报基准的**媒体值**（= targetUs，即用户请求点）。
-         * clockBaseSteadyMs 写 clockBaseUs 那一刻的单调毫秒。
+         * clockBaseSteadyMs 写 clockBaseUs 那一刻的单调毫秒；**0 表示"基准已冻结、不再前进"**
+         *                  （暂停态：位置必须绝对不动，见 getCurrentPosition()）。
          *                  position = clockBaseUs + (now - clockBaseSteadyMs) ⇒ 数学上单调，
          *                  回弹不可能发生，因此不再需要任何"地板"兜底链。
          * acceptedFramePos  真正被采纳为落点的那一帧的位置。只服务诊断（回答"落点到底
@@ -133,7 +132,6 @@ namespace Cicada {
          * 再读它们；shouldDropForDiscontinuity 就是按这个顺序写的）。
          */
         std::atomic<bool> filterActive{false};
-        std::atomic<bool> firstFrameShown{false};
         std::atomic<int64_t> clockBaseUs{INT64_MIN};
         std::atomic<int64_t> clockBaseSteadyMs{0};
         std::atomic<int64_t> acceptedFramePos{INT64_MIN};
@@ -1575,9 +1573,8 @@ namespace Cicada {
          *
          * 这里原来有一个"seek 之后是否已经先出过一张干净帧"的闩（配合"只先出一张、其余
          * 前缀帧一律丢"的旧语义）。P1 起改为**单一过滤规则**：
-         *   · flush 之后的第一帧无条件出画（由 mDiscontinuity.firstFrameShown 承担，
-         *     且只认**干净**帧：解码未过关键帧时不上屏、也不消耗这个闩）；
-         *   · 之后完全落在目标之前的帧全部丢弃，直到"包含目标"的那一帧强制上屏并结束过滤。
+         *   · 完全落在目标之前的帧**一律不上屏**（画面停在上一张，不会黑屏）；
+         *   · 包含目标、或已经越过目标的那一帧强制上屏，并结束本次过滤。
          * 所以"只先出一张"这个语义已经不存在了，本闩删除。
          *
          * ============ 【B16】"追赶不收敛 ⇒ 一帧都不送"的连续事件计数 ============
@@ -1777,10 +1774,20 @@ namespace Cicada {
          *     beginDiscontinuity（seek / Reset / Prepare）。SeekEnd 不算 ——
          *     这正是分片源"seek 永远差一个落点前缀"的根因所在。
          *
-         * 关于"第一帧无条件出画"：本函数是**纯判据**，不负责那条例外。
-         * 调用方（RenderVideo）必须**无条件**先调它一次（这样"第一帧就包含目标"
-         * 时结束副作用也会正确发生），再用自己的 firstFrameShown 闩把
-         * "第一帧"的 render 决定覆盖成"出画"。
+         * 调用约定：本函数是**纯判据**，但调用方（RenderVideo）必须**无条件**先调它一次 ——
+         * 因为"某一帧恰好包含目标"时结束过滤的副作用就发生在这一次调用里；若因为别的分支
+         * 而跳过调用，过滤就永远不会结束（P1-c 之前正是这个形状）。
+         *
+         * **没有"第一帧无条件出画"这条例外**（P1-c 删除）：早于目标的帧绝不上屏，
+         * 否则首个上屏帧就不是"包含目标的那一帧"。删掉它不会黑屏 ——
+         *   · clearScreen() 在全文件只有两处调用（SuperMediaPlayer::ClearScreen() 与
+         *     stop 且 mSet->clearShowWhenStop 为真时），seek / FlushVideoPath 路径**不清屏**；
+         *   · FlushVideoPath() 走 flushDevice() / decoder->flush()，其 flushRender=false
+         *     分支的既有注释本来就写明"渲染器里缓存的旧帧下一帧会被覆盖"。
+         * 所以"目标帧到达前不上屏"只会让画面**停在上一张**。seek 的结束改由落点帧的渲染
+         * 触发（doRender 里 videoDecoder->isRenderGateHit() 命中），而这必然发生：
+         * 目标钳位保证"包含/越过目标"的帧存在，另有 RenderVideo 的 EOF 采纳，
+         * 以及 playCompleted() 自己清 mSeekFlag。
          *
          * 过滤未激活（targetUs 未知，或本次已经结束）⇒ 直接返回 false 且无副作用，
          * 也就是正常播放路径上一行行为都不变。
