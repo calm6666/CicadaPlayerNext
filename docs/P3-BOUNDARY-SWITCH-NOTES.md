@@ -72,3 +72,47 @@ pending/retired 槽位与 `promotePendingVideoDecoder()` 之类的槽位交换�
 **必须保留**：`NotifyVideoQualitySwitch(...)` 生命周期（`status=0 → status=1`，失败才 `2/3`）、
 `isVideoDecoderMetaMatched()`、`rebuildVideoDecoder()`、`CreateVideoDecoder()`、`FlushVideoPath()`、
 `mCurrentVideoIndex`、ABR 接口与 `ICicadaPlayer::IsStreamSwitchInFlight()`、JNI/Java 签名。
+
+## 五、被 P3 删除的成员在别处承担的语义（必须替代，不得裸删）
+
+P3 的删除面很大，其中若干成员**不只服务于 pending 状态机**，还兼着别处的守卫。
+删之前必须为每条语义找到新载体；否则会出现"删干净了但行为悄悄回退"。
+
+### 5.1 `mPausedSwitchRenderPending` —— 兼着"暂停态切档不锚主时钟"（S6）
+
+两处主时钟锚点都用它做守卫，且**必须保留这两个守卫的语义**：
+
+| 位置 | 代码 | 语义 |
+|---|---|---|
+| `SuperMediaPlayer.cpp:7512-7523` | `if ((!mMasterClock.haveMaster() \|\| !mMasterClock.isMasterValid()) && !mSeekFlag && !mPausedSwitchRenderPending) mMasterClock.setTime(videoPts);` | 无有效参考（无音频）时，用第一张上屏帧的 pts 锚主时钟 |
+| `SuperMediaPlayer.cpp:7919-7927` | 纯视频片源（`!HAVE_AUDIO`）且 `mPlayedVideoPts == INT64_MIN` 时同样锚 + `setReferenceClock()` | 同上 |
+
+原因（原注释 S6）：暂停态切档时，第一张帧是"暂停点之前的关键帧到暂停点之间"解出来的，pts 可能早于或晚于暂停位置；
+一旦锚上去，用户暂停时看到的位置就被改写（并会经 `getCurrentPosition` 推给界面）。**暂停语义要求时间绝对不动。**
+
+**P3 的替代**：暂停态切档的第一张帧不再是"任意前缀帧"，而是
+`shouldDropForDiscontinuity()` 采纳的**落点帧**（`mDiscontinuity.filterActive` 从真变假的那一刻）。
+所以守卫可以结构化地写成"**落点过滤仍然激活时不许改写主时钟**"：
+```
+if (!mDiscontinuity.filterActive.load() && !mSeekFlag) { mMasterClock.setTime(videoPts); ... }
+```
+这比原来的 `mPausedSwitchRenderPending` **更强也更简单**：它同时覆盖"seek 在途"与"暂停态切档"两种情形，
+且判据来自唯一权威（不连续点），不再需要一个专门为暂停切档设置的布尔量。
+
+### 5.2 其余"身兼二职"的成员（P3 施工时必须逐条确认替代物）
+
+| 成员 | 兼着的语义 | 替代 |
+|---|---|---|
+| `mQualitySwitchCommittedStreamIndex` | 提交流索引 + `finishQualitySwitch(true, "quality switch rendered")` 的入口 | 保留 `finishQualitySwitch`/`NotifyVideoQualitySwitch` 生命周期，索引改用 `mCurrentVideoIndex` |
+| `mWillChangedVideoStreamIndex` | "切档在途"判据（被 ABR 让路、read-ahead 门等多处读取） | `ICicadaPlayer::IsStreamSwitchInFlight()` 的既有语义（P1 已建立的同一判据） |
+| `mSwitchStartedWhilePaused` / `mPausedSwitch*` | 暂停态切档的补做（PFR 欠帧） | 落点帧渲染本身就是"补做"：`filterActive` 转假时渲染即完成，不需要额外欠帧状态 |
+| `mRetiredVideoStreamIndex` / `mPendingVideoStreamIndex` | demuxer 侧"旧流何时 CloseStream" | 交回 `SwitchStreamAligned` + `stopOnSegEnd`（见本文第二节） |
+| `DECODE_STALL_REBUILD_ROUNDS` / `QUALITY_SWITCH_TOTAL_TIMEOUT_MS` / `PENDING_VIDEO_STALL_CHECKS_MAX` / `PENDING_PREROLL_WAIT_MAX_MS` | 死线兜底 | **直接删除**，不替代：单解码器 + 落点过滤没有"等不到"的状态（`isVideoDecoderMetaMatched()` 一次重建即可，重建失败按既有 error 路径上报） |
+
+### 5.3 验收口径（P3）
+
+- 切档只有 `status=0 → status=1`；不得出现 `FAILED`/`CANCELED`（用户手动与 ABR 都要成功）；
+- 以下字符串在日志里**不得再出现**：`[switch] state=decoderSwitch`、`pendingPktQ`/`pendingFrameQ`、
+  `pending preroll`、`placeholder surface handover`、`quality switch timed out`、
+  `wait a key frame` 风暴、两块 4K 实例 `-1010`、`video decoder accepts no input … rebuilding it once`；
+- 切档期间不得出现"位置被改写"（见 5.1：落点过滤激活时不许 `setTime`）。
