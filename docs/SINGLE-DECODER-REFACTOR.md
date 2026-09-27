@@ -167,85 +167,108 @@ L1 核心（mediaPlayer/、framework/）不引入平台宏；零编译错误、�
 
 ## 八、P1 施工图（静态勘察已完成，可机械执行）
 
-### 8.1 新增成员（追加在类成员列表末尾，紧接 `mDiscontinuity`）
+### 8.1 新增成员 —— **P1-a 已完成，实现与本节原计划不同，以实际代码为准**
+
+实际做法（比本节原计划更好，理由见下）：把这些字段放进 `Discontinuity` 结构体本身
+（`SuperMediaPlayer.h:111-139`），并且**全部取 atomic**：
 
 ```cpp
-    /* renderer 单一过滤（P1）：只由"包含目标的帧已上屏"或下一次 seek/Reset/Prepare 结束。 */
-    bool    mDiscontinuityFilterActive{false};
-    bool    mDiscontinuityFirstShown{false};
-    /* 位置上报基准（P1）：position = targetUs + (now - baseMs)，数学上单调。 */
-    int64_t mDiscontinuityBaseMs{0};
+        std::atomic<bool>    filterActive{false};
+        std::atomic<bool>    firstFrameShown{false};
+        std::atomic<int64_t> clockBaseUs{INT64_MIN};
+        std::atomic<int64_t> clockBaseSteadyMs{0};
+        std::atomic<int64_t> acceptedFramePos{INT64_MIN};
 ```
 
-`mDiscontinuityFilterActive` / `mDiscontinuityFirstShown` 由内核工作线程读写；
-`mDiscontinuityBaseMs` 由 API 线程写、工作线程读 ⇒ 用 `std::atomic<int64_t>`，或者干脆
-把它们一起放进 `Discontinuity` 结构体（结构体成员是 public，clang 的
-`-Wunused-private-field` 不会对一时还没被读的字段告警，这是更省事、告警风险最低的写法）。
+为什么取 atomic 而不是普通字段：它们是**跨线程发布的值** —— 写侧是 `SeekTo` / `SwitchStream`
+所在的 API 线程（或 `Reset` 所在的消息线程），读侧是内核工作线程的渲染路径与上报路径。
+`clockBaseUs` / `clockBaseSteadyMs` 会被 `getCurrentPosition()`（API 线程）读，
+一旦读出陈旧值就**直接体现在上报的位置上**；`filterActive` 读出陈旧值会多渲染或漏渲染一帧。
+放进结构体（而不是当 `SuperMediaPlayer` 的私有成员）同时也避开了 clang
+`-Wunused-private-field` 对"一时还没被读的私有字段"的告警。
+
+`targetUs` / `startUs` 保持普通字段（P0 已提交的形态），访问顺序约定：
+**任何读侧先 `generation.load()`**（seq_cst ⇒ acquire）建立与写入侧的配对，再读它们；
+`shouldDropForDiscontinuity()` 就是按这个顺序写的。
 
 ### 8.2 要删的 6 个成员（`SuperMediaPlayer.h`）
 
-`mSeekRenderGateUs`(`:1269`)、`mSeekLandingFrameAccepted`(`:1270`)、
-`mSeekLandingFloorOwnerUs`(`:1633`)、`mSeekFirstDecodableFrameShown`(`:1573`)、
-`mSeekExactLandingByBudget`(`:1363`)、`mSeekPositionFloorUs`(`:1126`)。
-**保留** `mSeekExactLanding`(`:1272`，用户选项，不在本次删除范围)。
+> **行号已按 P1-a 之后校正**：P1-a 把 `Discontinuity` 结构体从 5 行扩到 34 行，
+> 所以 `.h` 里 110 行之后的声明整体下移 **+30**。`.cpp` 里 §8.4 的行号**不受影响**，
+> 因为 P1-a 的改动全部落在 11774 行之后。
+
+`mSeekRenderGateUs`(`:1299`)、`mSeekLandingFrameAccepted`(`:1300`)、
+`mSeekLandingFloorOwnerUs`(`:1663`)、`mSeekFirstDecodableFrameShown`(`:1603`)、
+`mSeekExactLandingByBudget`(`:1393`)、`mSeekPositionFloorUs`(`:1156`)。
+**保留** `mSeekExactLanding`(`:1302`，用户选项，不在本次删除范围)。
 
 ### 8.3 renderer 单一过滤（替换 `RenderVideo()` 的整块落点逻辑）
 
 删掉 `SuperMediaPlayer.cpp:8011-8358`（从"落点帧即上屏（K1）"注释块起，到
-`} else if (mSeekExactLanding) { render = false; }` 那段结束），以单一规则取代：
+`} else if (mSeekExactLanding) { render = false; }` 那段结束），以单一规则取代。
+
+**注意**：判据本体已经在 **P1-a 里实现完毕**，就是
+`SuperMediaPlayer::shouldDropForDiscontinuity(framePos, frameDur)`
+（声明 `SuperMediaPlayer.h:1815`，定义 `SuperMediaPlayer.cpp:11831-11910`）。
+所以 P1-b 的 `RenderVideo()` 只需要**调用**它，不要再把判据内联一遍：
 
 ```cpp
     /*
-     * renderer 单一过滤：seek / 换档 flush 之后第一帧立即出画；此后
-     * [timePosition, timePosition + 帧长) 完全落在 targetUs 之前的帧全部丢弃；
-     * 一旦出现"包含目标"（或第一帧就晚于目标）的帧，强制上屏并终止本次过滤。
-     * 终止**只**由这一事件或下一次 seek / Reset / Prepare 触发 ——
-     * SeekEnd / ResetSeekStatus 一律不得关掉它（那是分片源"永远差一个落点前缀"的根因）。
+     * renderer 单一过滤：判据本体在 shouldDropForDiscontinuity() 里（P1-a 已实现）。
+     * 这里只做三件事：把帧的"位置 + 帧长"喂给它、处理"第一帧无条件出画"这条例外、
+     * 以及在它结束过滤时收掉"追帧加速"并复位两个 revert 闩。
      */
-    if (mDiscontinuityFilterActive) {
+    if (mDiscontinuity.filterActive.load()) {
         int64_t frameTimePos = videoFrame->getInfo().timePosition;
         if (frameTimePos < 0) {
             frameTimePos = videoFrame->getInfo().pts;   /* 容器不填 timePosition 的退回 */
         }
-        const int64_t targetUs = mDiscontinuity.targetUs;
         int64_t frameDurUs = videoFrame->getInfo().duration;
         if (frameDurUs <= 0) {
             const int fps = (mCurrentVideoMeta != nullptr)
                             ? std::max(1, (int) (mCurrentVideoMeta->operator Stream_meta *()->avg_fps)) : 25;
             frameDurUs = 1000000 / fps;
         }
-        if (!mSeekDecodeStartIsKey) {
-            /* 解码不是从关键帧起步 ⇒ 这一帧缺参考帧、是脏帧：不上屏（与 seek 无关的保护，保留）。 */
-            render = false;
-        } else if (!mDiscontinuityFirstShown) {
-            /* 第一帧：无条件出画（不等时钟、不丢）。 */
-            mDiscontinuityFirstShown = true;
+
+        /*
+         * 【顺序不能反】必须**无条件**先调一次：判据在"包含目标"时结束过滤，
+         * 而"第一帧就包含目标"是完全正常的情形 —— 若因为第一帧例外而跳过调用，
+         * 过滤就永远不会结束。所以先拿判据结果，再用第一帧例外覆盖 render 决定。
+         */
+        const bool dropForLanding = shouldDropForDiscontinuity(frameTimePos, frameDurUs);
+
+        if (!mDiscontinuity.firstFrameShown.load()) {
+            /* flush 之后的第一帧：无条件出画（不等时钟、不丢）。 */
+            mDiscontinuity.firstFrameShown = true;
             force_render = true;
             render = true;
-            AF_LOGI("seek first frame shown: pts=%lld target=%lld afterSeekMs=%lld\n", ...);
-        } else if (targetUs != INT64_MIN && frameTimePos >= 0 && frameTimePos + frameDurUs <= targetUs) {
-            render = false;   /* 完全在目标之前 ⇒ 继续解 */
+            AF_LOGI("seek first frame shown: pts=%lld afterSeekMs=%lld\n", ...);
+        } else if (dropForLanding) {
+            render = false;   /* 完全在目标之前 ⇒ 不上屏，继续解 */
         } else {
             force_render = true;
-            render = true;    /* 包含目标（或第一帧就晚于目标）⇒ 强制上屏 */
+            render = true;    /* 包含目标（或第一帧就晚于目标）⇒ 强制上屏、过滤已结束 */
         }
-        if (mSeekDecodeStartIsKey && targetUs != INT64_MIN && frameTimePos >= 0 &&
-            frameTimePos + frameDurUs > targetUs) {
-            if (render) {
-                AF_LOGW("seek landing frame accepted: pts=%lld, offsetFromTarget=%+lld ms, afterSeekMs=%lld\n", ...);
-                setVideoDecodeBoost(false);
-            }
-            mDiscontinuityFilterActive = false;   /* 唯一的终止点（除下一次 seek / Reset） */
+
+        if (!mDiscontinuity.filterActive.load()) {
+            /* 判据刚刚结束了本次过滤（或本来就没激活）：收尾一次，幂等。 */
+            setVideoDecodeBoost(false);
             mVideoPtsRevert = false;
             mAudioPtsRevert = false;
             mPtsRevertWaitLogged = 0;
         }
+    } else if (!mSeekDecodeStartIsKey && mSeekFlag) {
+        /*
+         * 解码不是从关键帧起步（demuxer 落点在 GOP 中间）⇒ 这一帧缺参考帧、是脏帧：
+         * 不上屏，保持上一张好画面。这条与 seek 无关，是**保留**的花屏保护。
+         */
+        render = false;
     }
 ```
 
-`beginDiscontinuity()`（P0 已有）改为同时置 `mDiscontinuityFilterActive = true`、
-清 `mDiscontinuityFirstShown`、写 `mDiscontinuityBaseMs = af_getsteady_ms()`；
-`beginDiscontinuity(INT64_MIN)`（Reset 路径）置 `mDiscontinuityFilterActive = false`（Reset 结束过滤）。
+`beginDiscontinuity()` 已经在 P1-a 里补齐（激活/复位过滤与基准，`SuperMediaPlayer.cpp:11781-11809`），
+P1-b 不需要再动它。P1-b 仍要做的两件事：删掉 `mSeekDecodeStartIsKey` 相关的**旧**落点分支
+（上面那段 `else if` 是新写的等价保护），以及把 `mSeekExactLanding` 的旧语义分支一并去掉。
 
 ### 8.4 P1 必须逐个改掉的代码点（行号为 P0 之后的当前值，已 grep 确认）
 
@@ -287,4 +310,34 @@ L1 核心（mediaPlayer/、framework/）不引入平台宏；零编译错误、�
 * 每次 seek 都有 `seek landing frame accepted … offsetFromTarget=±(≤1 帧)`；
 * 不再出现"落点窗口被提前关闭"（§8.4 里 `ResetSeekStatus()` 那一段被删掉就是这一条）；
 * 位置不再回退（数学单调）。
+
+### 8.6 P1-a 完成记录（纯增量，零行为变化）
+
+| 文件:行 | 改动 |
+|---|---|
+| `SuperMediaPlayer.h:111-139` | `Discontinuity` 结构体扩 5 个字段：`filterActive` / `firstFrameShown` / `clockBaseUs` / `clockBaseSteadyMs` / `acceptedFramePos`（全 atomic，语义与并发理由写在结构体内注释里） |
+| `SuperMediaPlayer.h:1785-1815` | 新增方法声明 `bool shouldDropForDiscontinuity(int64_t framePos, int64_t frameDur);`（追加在方法列表末尾） |
+| `SuperMediaPlayer.cpp:11781-11809` | `beginDiscontinuity()`：新增"复位 acceptedFramePos / firstFrameShown / clockBase*，并 `filterActive = (targetUs != INT64_MIN)`" |
+| `SuperMediaPlayer.cpp:11823-11910` | 新增 `shouldDropForDiscontinuity()` 定义（含两条 `seek landing frame accepted …` 日志） |
+| `docs/SINGLE-DECODER-REFACTOR.md` | §8.1/§8.2/§8.3 按实际实现校正 + 本节 |
+
+**删除的符号：无。** `shouldDropForDiscontinuity()` 本阶段**还没有调用点**（P1-b 才接上），
+这是设计上的"纯增量"——它不影响任何既有判据，所以构建后行为与 P0 逐字一致。
+
+自检要点：
+
+* `shouldDropForDiscontinuity` 声明（`.h:1815`）/ 定义（`.cpp:11831`）齐全；调用点 = 0（P1-a 预期）。
+* 5 个新字段全部有写入点（`beginDiscontinuity` + `shouldDropForDiscontinuity`），无"只声明未使用"。
+* 无未使用变量：`generation` 在两条日志里都被使用；`frameDur` 形参被就地修正使用。
+* 格式串与实参逐一核对：`"pts=%lld, offsetFromTarget=%+lld ms, generation=%d, afterSeekMs=%lld … target=%lld"`
+  对应 `(long long)framePos, (long long)(offset/1000), generation(int), (long long)(afterSeekMs), (long long)targetUs`。
+* C++11 合法性：`std::atomic<bool>` / `std::atomic<int64_t>` 的 NSDMI 走转换构造；`Discontinuity{}` 仍走隐式默认构造。
+* 注释内无"星号紧跟斜杠"组合。
+* 新字段都在 `Discontinuity` 结构体内部 ⇒ `SuperMediaPlayer` 的成员布局**不变**（结构体仍只有一个成员 `mDiscontinuity`），
+  所以**增量构建依然安全**；真正需要全量重编的是 P1-b（删 6 个成员）。
+* 残留计数：**不变**（仍是 1235 行 / 26 文件）。P1-a 新增的标识符
+  （`shouldDropForDiscontinuity` / `filterActive` / `firstFrameShown` / `clockBase*` / `acceptedFramePos`）
+  与残留清单里的 35 个模式**无一匹配**，且新增日志文本 `seek landing frame accepted`
+  是"seek landing"（带空格），不匹配模式 `seekLanding`。
+
 

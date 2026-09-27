@@ -107,6 +107,36 @@ namespace Cicada {
         int64_t targetUs{INT64_MIN};
         int64_t startUs{INT64_MIN};
         std::atomic<int> generation{0};
+
+        /*
+         * ---- P1：renderer 单一过滤 + 位置上报基准 ----
+         *
+         * filterActive     本次不连续点的"落点过滤"是否仍然生效。它**只**由
+         *                  "包含目标的那一帧已上屏"（shouldDropForDiscontinuity 的结束分支）
+         *                  或"下一次 seek / Reset / Prepare"（beginDiscontinuity）关闭。
+         *                  **SeekEnd / ResetSeekStatus 一律不得关它** —— 那是分片源
+         *                  "seek 永远差一个落点前缀"的根因。
+         * firstFrameShown  flush 之后的第一帧是否已经无条件出画（不等时钟、不丢）。
+         *                  每次 beginDiscontinuity 复位。
+         * clockBaseUs       位置上报基准的**媒体值**（= targetUs，即用户请求点）。
+         * clockBaseSteadyMs 写 clockBaseUs 那一刻的单调毫秒。
+         *                  position = clockBaseUs + (now - clockBaseSteadyMs) ⇒ 数学上单调，
+         *                  回弹不可能发生，因此不再需要任何"地板"兜底链。
+         * acceptedFramePos  真正被采纳为落点的那一帧的位置。只服务诊断（回答"落点到底
+         *                  采纳了哪一帧、离目标多远"），不参与任何判定。
+         *
+         * 并发：这几个字段是**跨线程发布的值** —— 写侧是 SeekTo / SwitchStream 所在的
+         * API 线程（或 Reset 所在的消息线程），读侧是内核工作线程的渲染路径与上报路径。
+         * 所以取 atomic：过滤闩读出陈旧值会多渲染或漏渲染一帧，而位置基准读出陈旧值
+         * 会**直接体现在上报的位置上**。targetUs / startUs 保持普通字段，因为 P0 已经
+         * 约定了访问顺序（任何读侧**先** generation.load() 建立与写入侧的配对关系，
+         * 再读它们；shouldDropForDiscontinuity 就是按这个顺序写的）。
+         */
+        std::atomic<bool> filterActive{false};
+        std::atomic<bool> firstFrameShown{false};
+        std::atomic<int64_t> clockBaseUs{INT64_MIN};
+        std::atomic<int64_t> clockBaseSteadyMs{0};
+        std::atomic<int64_t> acceptedFramePos{INT64_MIN};
     };
 
     class SuperMediaPlayer : public ICicadaPlayer, private CicadaPlayerPrototype {
@@ -1751,6 +1781,38 @@ namespace Cicada {
         void beginDiscontinuity(int64_t targetUs);
         void markDiscontinuityStartUs(int64_t startUs);
         int discontinuityGeneration() const;
+
+        /*
+         * ============ 【P1-a：renderer 单一过滤规则（唯一实现）】============
+         *
+         * 判据只与"目标点"本身比较，与落点远近、GOP 长度、分片长度全都无关：
+         *
+         *   framePos + frameDur <= targetUs
+         *       ⇒ 这一帧完全落在目标之前、不包含目标 ⇒ 返回 true（丢弃），
+         *         过滤继续；
+         *   否则（framePos <= targetUs < framePos + frameDur，即**包含目标**；
+         *         或 framePos > targetUs，即目标落在本段之前、没有更早的帧可选）
+         *       ⇒ 返回 false，并且**结束本次过滤**：记下 acceptedFramePos、
+         *         把位置上报基准钉在 targetUs、filterActive 置假。
+         *
+         * 不变量：
+         *   · 帧 PTS 单调前进 ⇒ 必然在有限帧内走到"包含目标"的那一帧，
+         *     所以既不需要预算、也不需要任何超时 / 看门狗兜底；
+         *   · 结束过滤**只**发生在本函数的结束分支，或下一次
+         *     beginDiscontinuity（seek / Reset / Prepare）。SeekEnd 不算 ——
+         *     这正是分片源"seek 永远差一个落点前缀"的根因所在。
+         *
+         * 关于"第一帧无条件出画"：本函数是**纯判据**，不负责那条例外。
+         * 调用方（RenderVideo）必须**无条件**先调它一次（这样"第一帧就包含目标"
+         * 时结束副作用也会正确发生），再用自己的 firstFrameShown 闩把
+         * "第一帧"的 render 决定覆盖成"出画"。
+         *
+         * 过滤未激活（targetUs 未知，或本次已经结束）⇒ 直接返回 false 且无副作用，
+         * 也就是正常播放路径上一行行为都不变。
+         *
+         * 声明追加在方法列表末尾（本文件约定），定义见 .cpp 末尾。
+         */
+        bool shouldDropForDiscontinuity(int64_t framePos, int64_t frameDur);
 
         /*
          * 不连续点本体。**追加在成员列表最末尾**：本工程增量构建不记录头文件

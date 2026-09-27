@@ -11788,6 +11788,24 @@ void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
     mDiscontinuity.generation.fetch_add(1);
     mDiscontinuity.targetUs = targetUs;
     mDiscontinuity.startUs = INT64_MIN;
+
+    /*
+     * 【P1-a】同时把"落点过滤"与"位置上报基准"一起复位：
+     *   · acceptedFramePos —— 上一次采纳的落点帧位置，只服务诊断；
+     *   · firstFrameShown  —— flush 之后的第一帧还没出画；
+     *   · clockBase*       —— 上一次的位置基准作废。基准**不在这里钉**，
+     *     而是等"包含目标的那一帧"上屏时由 shouldDropForDiscontinuity() 钉在
+     *     targetUs 上（用户要的语义是"位置等于目标、之后单调前进"）。
+     *
+     * filterActive 只在**真的有目标点**（= 一次 seek / 换档）时激活；
+     * Reset / Prepare 传 INT64_MIN，此时没有任何落点要过滤，保持不激活 ——
+     * 于是"没有在途不连续点"的正常播放路径上，过滤判据一行都不参与。
+     */
+    mDiscontinuity.acceptedFramePos = INT64_MIN;
+    mDiscontinuity.firstFrameShown = false;
+    mDiscontinuity.clockBaseUs = INT64_MIN;
+    mDiscontinuity.clockBaseSteadyMs = 0;
+    mDiscontinuity.filterActive = (targetUs != INT64_MIN);
 }
 
 void SuperMediaPlayer::markDiscontinuityStartUs(int64_t startUs)
@@ -11800,4 +11818,93 @@ void SuperMediaPlayer::markDiscontinuityStartUs(int64_t startUs)
 int SuperMediaPlayer::discontinuityGeneration() const
 {
     return mDiscontinuity.generation.load();
+}
+
+/*
+ * ============ 【P1-a：renderer 单一过滤规则】实现 ============
+ *
+ * 判据与理由见头文件里那句声明上方的完整说明。这里只强调三件事：
+ *   1. 与目标点比较，**不**与落点比较 ⇒ 精度不依赖"落点到目标有多近"；
+ *   2. 帧 PTS 单调 ⇒ 必然在有限帧内终止，不需要预算 / 超时 / 看门狗；
+ *   3. 结束过滤只发生在这里或下一次 beginDiscontinuity ⇒ SeekEnd 关不掉它。
+ */
+bool SuperMediaPlayer::shouldDropForDiscontinuity(int64_t framePos, int64_t frameDur)
+{
+    /*
+     * 先读代际（seq_cst 的 load 天然带 acquire 语义）：它与 beginDiscontinuity() 里
+     * "先 fetch_add 再写 targetUs / 各过滤字段"配成 release-acquire 对，
+     * 保证下面读到的 targetUs 一定与这个代际配对。
+     */
+    const int generation = mDiscontinuity.generation.load();
+
+    /* 过滤未激活：正常播放，或本次不连续点已经由落点帧结束掉 ⇒ 纯查询、无副作用。 */
+    if (!mDiscontinuity.filterActive.load()) {
+        return false;
+    }
+
+    const int64_t targetUs = mDiscontinuity.targetUs;
+
+    /* 目标未知（Reset 之后不该走到这里，防御性兜底）：不过滤。 */
+    if (targetUs == INT64_MIN) {
+        mDiscontinuity.filterActive = false;
+        return false;
+    }
+
+    /*
+     * 位置未知（容器不填 timePosition 且帧也没有 pts）：无法判断它在目标的哪一侧。
+     * 只能当成"已经走到目标" —— 宁可采纳也不要把画面冻住。这是旧实现
+     * "timePosition 缺失时退回帧自己的 pts"那条退回的终点。
+     */
+    if (framePos == INT64_MIN) {
+        mDiscontinuity.acceptedFramePos = INT64_MIN;
+        mDiscontinuity.clockBaseUs = targetUs;
+        mDiscontinuity.clockBaseSteadyMs = af_getsteady_ms();
+        mDiscontinuity.filterActive = false;
+
+        AF_LOGW("seek landing frame accepted: pts unknown (generation=%d, target=%lld) — accepting this "
+                "frame so the picture cannot freeze; the position base is pinned on the target\n",
+                generation, (long long) targetUs);
+        return false;
+    }
+
+    /*
+     * 帧长未知（duration 缺失）：退化成"至少 1 微秒"。这样
+     *   · framePos == targetUs  ⇒ targetUs + 1 <= targetUs 不成立 ⇒ **采纳**（正确：
+     *     帧首正好落在目标上，它就是包含目标的那一帧）；
+     *   · framePos <  targetUs  ⇒ 仍然被丢，判据照旧单调前进、必然终止。
+     * 取 1 而不是 0 是为了避免"帧首 == 目标"被误判成"完全在目标之前"而丢掉。
+     */
+    if (frameDur <= 0) {
+        frameDur = 1;
+    }
+
+    if (framePos + frameDur <= targetUs) {
+        /*
+         * 完全落在目标之前 ⇒ 不包含目标 ⇒ 丢弃，继续解到下一帧。
+         * 这里不记日志（前缀帧可能成百上千张，会淹掉真正重要的那几行）。
+         */
+        return true;
+    }
+
+    /*
+     * 包含目标（framePos <= targetUs 且还未越过帧尾），或者已经越过目标
+     * （framePos > targetUs：目标落在本段之前，没有更早的帧可选）⇒ 本帧就是落点。
+     *
+     * 记下它、把位置上报基准钉在**目标点**（用户要的是"位置 == target 且之后单调"，
+     * 不是"位置 == 落点帧的位置"），并结束本次过滤。
+     */
+    const int64_t offsetFromTargetUs = framePos - targetUs;
+    mDiscontinuity.acceptedFramePos = framePos;
+    mDiscontinuity.clockBaseUs = targetUs;
+    mDiscontinuity.clockBaseSteadyMs = af_getsteady_ms();
+    mDiscontinuity.filterActive = false;
+
+    AF_LOGW("seek landing frame accepted: pts=%lld, offsetFromTarget=%+lld ms, generation=%d, "
+            "afterSeekMs=%lld — the filter stops HERE and only here (SeekEnd never closes it); the "
+            "position base is pinned on target=%lld and is monotonic from now on\n",
+            (long long) framePos, (long long) (offsetFromTargetUs / 1000), generation,
+            (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1),
+            (long long) targetUs);
+
+    return false;
 }
