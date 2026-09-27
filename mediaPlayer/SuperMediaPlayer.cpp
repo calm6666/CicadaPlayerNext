@@ -4121,7 +4121,39 @@ void SuperMediaPlayer::doRender()
             mVideoFrameQue.empty() && videoDecoder->isRenderGateHit() &&
             mBufferController->GetPacketSize(BUFFER_TYPE_VIDEO) > 0;
 
-        if (stalledWithoutOutput) {
+        /*
+         * ============ 【修：seek 落点窗口里"还没解到关键帧"不是卡死】============
+         *
+         * 真机日志（2026-09-27 10:16，本地文件也一样）每次 seek 都是这个形状：
+         *   PFR: seek posUs=22142000
+         *   video decoder accepts no input and produced no frame
+         *     (retry rounds=100, frameQ empty, packetQ=1236, playStatus=5, seekFlag=1) — rebuilding it once
+         *   [AFActiveDecoder] wait a key frame × 100+        ← 真实原因：在等新时间轴的第一个关键帧
+         * 也就是说：**把"正常的等关键帧"误判成死锁**，于是每次 seek 都重建解码器。
+         * 而重建的代价不是几百毫秒 —— 新解码器必须重新等**下一个**关键帧（上一个已经被
+         * 读/丢走了），在本片源（IDR 间隔 4.5~11 s）上等于再等一整个 GOP；重建预算还是 2 次，
+         * 最坏一次 seek 要白等两个 GOP —— 这就是"本地视频 seek 也非常慢、有时候直接卡死"。
+         *
+         * 判据（纯状态）：只要这次 seek 的新时间轴**还没有解出第一个关键帧**
+         * （mSeekDecodeStartIsKey == false，它在 DecodeVideoPacket 里"关键帧已送进解码器"
+         * 的那一刻置真），"没收输入/没有帧"就属于**预期行为**，不许计入停滞轮次。
+         * 一旦关键帧已送进去却仍然不出帧，那才是真的卡死，照旧走重建。
+         * 与既有语义的关系：mSeekDecodeStartIsKey 本来就是"新解码器必须从关键帧起步"的闩，
+         * 这里只是把同一条状态用到停滞判据上，不引入任何新状态、不引入计时器。
+         */
+        const bool waitingFirstKeyFrameOfSeek =
+            (mSeekFlag || mSeekRenderGateUs != INT64_MIN) && !mSeekDecodeStartIsKey;
+
+        if (waitingFirstKeyFrameOfSeek && stalledWithoutOutput) {
+            /* 只是"还在等关键帧"：把停滞轮次清零（并限流打一行，方便日志确认判断正确）。 */
+            mDecodeStallIters = 0;
+
+            if (floodLogAllowed(FLOOD_DECODE_STALL, 2, "waiting for the first key frame of the seek")) {
+                AF_LOGI("decode stall check skipped: this seek has not decoded its first key frame yet "
+                        "(keyFrames are what the decoder is waiting for) — packetQ=%d, no rebuild\n",
+                        (int) mBufferController->GetPacketSize(BUFFER_TYPE_VIDEO));
+            }
+        } else if (stalledWithoutOutput) {
             if (++mDecodeStallIters >= DECODE_STALL_REBUILD_ROUNDS) {
                 /* 闩住：这次卡死只做一次，无论下面的重建成功与否，都不再重复进入
                  *（出帧时 FillVideoFrame 会把这个闩与重建预算一起复位）。 */
@@ -8178,10 +8210,33 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                      *   · 撤掉渲染闸门（mSeekRenderGateUs = INT64_MIN，之后一帧都不再挡）；
                      *   · 强制这一帧上屏（force_render + render，避免被"迟到"判据丢掉）。
                      */
-                    AF_LOGW("seek landing frame accepted: pts=%lld, %lld ms before the seek target — "
-                            "rendering it now (the master clock is anchored by the first-frame-rendered "
-                            "event, not here)\n",
+                    AF_LOGW("seek landing frame accepted: pts=%lld, offsetFromTarget=%+lld ms (negative = the "
+                            "landing frame is LATER than the target) — rendering it now (the master clock is "
+                            "anchored by the first-frame-rendered event, not here)\n",
                             (long long) frameTimePos, (long long) (beforeUs / 1000));
+
+                    /*
+                     * ============ 【修：落点比目标晚时，位置地板一起挪到落点】============
+                     *
+                     * 真机日志（2026-09-27 10:16:53，seek 到 22.142s）：
+                     *   seek landing frame accepted: pts=25025000, -2883 ms before the seek target=22142000
+                     *   seek anchor: … anchored to the first frame rendered after the seek (pts=25025000,
+                     *                 target=22142000, landingFloor=22142000, anchor=25025000)
+                     *   seek anchored by the video landing frame, audio pts=22144000 follows it
+                     * 落点比目标晚 2883 ms ⇒ 主时钟被锚到 25.025s，而位置地板仍是目标的 22.142s；
+                     * 等 seek 收尾把地板撤掉、音频时钟（22.144s）接管时，上报位置从 25.025 掉回
+                     * 22.1 —— 用户看到的就是"进度条往前跳一下，又往回弹"。
+                     *
+                     * 处置：落点晚于目标时，把位置地板与归属**一起**挪到落点。这样：
+                     *   · 上报位置（地板）与主时钟锚点落在同一个点上，不再有"先跳再弹"；
+                     *   · 语义不变 —— 地板仍然是"不低于当前位置"的下限，只是这个下限被抬到了
+                     *     真正显示出来的那一帧（本来就已经错过了目标，回不去了）；
+                     *   · 目标之前的落点（绝大多数情况）行为逐字不变（本分支只在 frame > 地板时进入）。
+                     */
+                    if (frameTimePos > mSeekPositionFloorUs) {
+                        mSeekPositionFloorUs = frameTimePos;
+                        mSeekLandingFloorOwnerUs = frameTimePos;
+                    }
                 }
                 }
             } else if (frameTimePos + SEEK_TARGET_DROP_AHEAD_US >= mSeekPositionFloorUs) {

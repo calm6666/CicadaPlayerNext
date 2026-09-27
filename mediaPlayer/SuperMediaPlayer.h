@@ -584,6 +584,7 @@ namespace Cicada {
             FLOOD_STALE_PENDING,      /* drop stale pending video packet */
             FLOOD_UNKNOWN_STREAM,     /* unknown stream */
             FLOOD_READ_AHEAD,         /* 读前闸门触发的说明行 */
+            FLOOD_DECODE_STALL,       /* "还在等 seek 的第一个关键帧"导致的停滞判据跳过 */
             FLOOD_COUNT
         };
 
