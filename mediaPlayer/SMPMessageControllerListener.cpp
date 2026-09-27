@@ -690,35 +690,33 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mMasterClock.setTime(seekPos);
 
     /*
-     * ============ 【所有 seek 入口都必须在这里设"位置地板"与"渲染闸门"】============
+     * ============ 【P1-b：所有 seek 入口都在这里开启不连续点】============
      *
      * 实测（用户日志）：
      *   seek anchor: master clock anchored to the first frame rendered after the seek
      *                (pts=83438, target=2844000, landingFloor=-9223372036854775808)
-     * 目标 2.844s 却锚到 0.083s，而且这一条 seek 的 mSeekPositionFloorUs == INT64_MIN。
+     * 目标 2.844s 却锚到 0.083s，而且那一次 seek 的"目标载体"是空的。
      *
-     * 根因：这两样只有一个来源 —— SuperMediaPlayer::SeekTo()（API 线程、putMsg 之后）。
-     * 而 seek 不止那一条入口，至少还有两条**绕过 SeekTo()** 直接派发 MSG_SEEKTO /
-     * 直接调用本函数的路径：
+     * 根因：目标点原来只有一个来源 —— SuperMediaPlayer::SeekTo()（API 线程）。而 seek
+     * 不止那一条入口，至少还有两条**绕过 SeekTo()** 直接派发 MSG_SEEKTO / 直接调用本函数的路径：
      *   · SuperMediaPlayer::playCompleted()（循环播放重开：`mSeekPos = 0` 之后直接调用
-     *     本函数，见 SuperMediaPlayer.cpp:4748 一带）；
-     *   · SMPMessageControllerListener::ProcessPrepareMsg() 的"prepare 之前 seek"分支
-     *     （只置 mSeekFlag，见本文件 :151 一带）。
-     * 那些 seek 里地板恒为 INT64_MIN ⇒ RenderVideo 的落点判据拿不到目标、锚点判据
-     * 也没有目标可比 ⇒ 旧时间轴的帧可以随时上屏并锚住主时钟。
+     *     本函数）；
+     *   · SMPMessageControllerListener::ProcessPrepareMsg() 的"prepare 之前 seek"分支。
+     * 那些 seek 里目标载体恒为空 ⇒ 落点判据拿不到目标、锚点判据也没有目标可比。
      *
-     * 这里把两样都补上（本函数是"seek 真正开始、mSeekFlag 置真"的唯一收口处）：
-     *   mSeekPositionFloorUs = seekPos   位置地板 = 本次 seek 的目标（落点判据与锚点判据
-     *                                    读的都是它，见 fetchSeekClockAnchorUs）；
-     *   mSeekRenderGateUs    = seekPos   渲染闸门 = 同一目标，落点帧被采纳时由
-     *                                    RenderVideo 立刻撤掉（之后一帧都不再挡）。
-     * 与 SeekTo() 里那两行是同一语义的重复保险（SeekTo 走的消息最终也到这里），
-     * 值完全一致，没有竞态后果。目标为 0 / 负值（循环重开、prepare 前的 seek）时
-     * 地板同样按目标写，getCurrentPosition() 的"低于目标就报目标"对 0 无副作用。
-     * ============================================================================
+     * 现在统一改成**开启一个新的不连续点**（本函数是"seek 真正开始、mSeekFlag 置真"的
+     * 唯一收口处）：它一次性完成原来那两行补丁的全部职责，而且用的是同一份架构机制 ——
+     *   · generation +1 ⇒ 所有旧代际的包/帧/待处理事件当场作废；
+     *   · targetUs = seekPos ⇒ 唯一的"用户目标点"载体（落点过滤与位置上报共用）；
+     *   · filterActive = true ⇒ 落点过滤开始生效（只由"包含目标的帧上屏"或
+     *     下一次 seek/Reset 结束，SeekEnd 关不掉它）；
+     *   · clockBase* 复位 ⇒ 位置基准等落点帧上屏时钉在 targetUs。
+     *
+     * 与 SeekTo() 里那次调用是同一语义的重复保险（SeekTo 走的消息最终也到这里），
+     * 值完全一致；代际多推一格没有副作用（它只是归属判据）。
+     * 目标为 0（循环重开）时 filterActive 同样为真，行为与旧地板对 0 的语义一致。
      */
-    mPlayer.mSeekPositionFloorUs = seekPos;
-    mPlayer.mSeekRenderGateUs = seekPos;
+    mPlayer.beginDiscontinuity(seekPos);
 
     // 暂停帧恢复的渲染门只在"恢复专用 seek"期间保持；用户自己发起的
     // seek（如暂停时拖动进度条）要关闭渲染门，恢复正常渲染

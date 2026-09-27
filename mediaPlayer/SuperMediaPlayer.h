@@ -1137,23 +1137,14 @@ namespace Cicada {
         int64_t mDropLateVideoFramesUntilMs{0};
 
         /*
-         * ============ seek 目标“地板”（2026-09-21，用户反馈“进度条跳回去再跳回来”）============
+         * 【P1-b 删除：seek 位置"地板"】
          *
-         * 精确 seek 的重启点在目标点**之前**最近的关键帧上：HLS 实测 seek 到 26.708s，
-         * tracker 落在 20.854s（一个分片之前），音频却按目标点重新锚定。于是 seek
-         * 刚结束时：
-         *   * 视频解码位置 / mCurrentPos 还停在 20.8s 附近；
-         *   * 界面收到的下一个 PositionUpdate 把进度条从 26.7 拽回 20.8，
-         *     随后画面追上来了再往前走 —— 用户看到的就是“跳过去→跳回来→再跳过去”。
-         *
-         * 这个地板就是那个“不许往回跳”的下界：seek 一发起就记下目标点，
-         * getCurrentPosition() 在管道真正走到它之前一直返回它；某帧真正到/过了
-         * 这个位置（RenderVideo 判定）就清掉，之后一切照常。
-         *
-         * ExoPlayer 的等价语义是 seek 之后的 `positionUs`：它是目标点，目标点之前
-         * 的输出缓冲一律 `FRAME_RELEASE_SKIP`（解码但不显示），位置从不回退。
+         * 这里原来有一个 int64_t 成员记"seek 目标点"，getCurrentPosition() 在管道走到它之前
+         * 一直上报它（防进度条回退）。它已随 P1-b 删除：位置上报改为
+         *   不连续点 targetUs + 单调时钟增量（见 mDiscontinuity.clockBase*），
+         * 数学上单调 ⇒ 回弹不可能发生 ⇒ 不需要任何"下界/兜底链"。
+         * 与它一起删除的还有它的归属标记与渲染闸门（见本文件里 Discontinuity 的说明）。
          */
-        int64_t mSeekPositionFloorUs{INT64_MIN};
 
         /*
          * 目标路"预滚"是否已经结束（见 PENDING_PREROLL_KEEP_US）。
@@ -1280,24 +1271,24 @@ namespace Cicada {
         bool mSeekStallDiagLogged{false};
 
         /*
-         * ============ seek 落点与"只锚一次"（见 docs/PLAN-SEEK-FAST-LANDING-CROSSPLATFORM.md K1/K2）============
+         * ============ 【P1-b 删除：seek 落点闸门 / 落点采纳闩 / 落点归属标记】============
          *
-         * 三者分工必须分清，这是本轮修 seek 的核心：
-         *   mSeekPositionFloorUs    只管"对外上报的位置"（进度条不回退），语义不变；
-         *   mSeekRenderGateUs       只管"渲染闸门"：本次 seek 的落点帧还没上屏时用它挡帧，
-         *                           落点帧一被接受立刻撤掉（之后一帧都不再挡）；
-         *   mSeekLandingFrameAccepted  本次 seek 是否已接受落点帧（纯闩锁，SeekTo 复位）。
+         * 这里原来有四个成员：一个 int64_t 的"渲染闸门"、一个"本次 seek 是否已接受落点帧"
+         * 的闩、一个与位置地板同点写入的"归属"标记（在下面另一处）、以及一个"落点是否够近
+         * 才精确"的预算闩（也在下面另一处）。它们与位置地板一起构成"十余个闩"里最核心的
+         * 一组，现已全部删除。职责改由一处承担：
+         *   · mDiscontinuity.filterActive  —— 落点过滤是否生效（唯一写点见 .cpp）；
+         *   · mDiscontinuity.targetUs      —— 唯一的"用户目标点"载体；
+         *   · shouldDropForDiscontinuity() —— 唯一的落点判据（与目标点本身比较）。
          *
-         * mSeekClockAnchored 是"一次 seek 只允许锚定一次"的闩：音频首帧与视频落点帧谁先到谁锚，
-         * 后到的那条不再改写主时钟（否则后到的帧会被新时钟判成迟到帧丢掉）。
+         * mSeekClockAnchored 是"一次 seek 只允许锚定一次"的闩（音频首帧与视频落点帧谁先到
+         * 谁锚），它属于音频锚点那套机制，保留到 P2 与音频基准重设一起收口。
          *
          * mSeekExactLanding 保留旧语义（必须精确到目标帧、目标点之前的帧一律不上屏）的开关，
          * 默认 0 = 落点即上屏；需要旧行为时由各端 setOption("seekExactLanding", "1") 打开。
          *
          * 全部追加在成员列表末尾（本文件顶部有约定：中间插入会移动偏移、破坏增量构建）。
          */
-        int64_t mSeekRenderGateUs{INT64_MIN};
-        bool mSeekLandingFrameAccepted{false};
         bool mSeekClockAnchored{false};
         bool mSeekExactLanding{false};
         /*
@@ -1380,17 +1371,13 @@ namespace Cicada {
          */
         int mAudioSilenceReason{0};
         /*
-         * 【第 2 项：有界精确落点】本次 seek 是否"值得精确到目标帧"。
-         * 事件：读到本次 seek 的第一个关键帧视频包时，若它离目标点不超过
-         *       SEEK_EXACT_LANDING_BUDGET_US，就置真（否则保持假 = 照旧立刻上屏落点帧）。
-         * 作用：RenderVideo 的落点采纳分支在该闩为真时，会把"仍比目标早超过预算"的帧
-         *       挡在门外（render=false），直到解码器走到目标附近才采纳/锚定 ——
-         *       帧 PTS 单调前进，所以必然终止，不需要任何计时器。
-         * 与用户选项 mSeekExactLanding 相互独立：那是全局策略（同一套旧语义，只在采纳
-         * 之后挡帧），这里只是"这一次 seek 的目标点离落点够近"的预算判断。
-         * 每次 SeekTo 与 Reset 都清零，绝不让上一次 seek 的判断影响下一次。
+         * 【P1-b 删除：有界精确落点的"预算闩"】
+         *
+         * 这里原来有一个"本次 seek 是否值得精确到目标帧"的闩：它靠"落点离目标不超过某预算"
+         * 来决定要不要把早于目标的帧挡在门外。那是**精度换等待** —— 精度取决于预算给不给，
+         * 而不是取决于目标本身（稀疏 IDR 片源的落点常常早 1~11 秒，于是永远拿不到精确落点）。
+         * 现在判据与目标本身比较（shouldDropForDiscontinuity），与落点距离无关，预算闩删除。
          */
-        bool mSeekExactLandingByBudget{false};
         /*
          * 【锚点事件闩，修"seek 没反应"】"本次 seek 之后第一帧真的上屏"这个事件还没被消费。
          * SeekTo 置真；doRender 里一旦 rendered 就消费它，把主时钟锚到 mPlayedVideoPts
@@ -1584,25 +1571,15 @@ namespace Cicada {
         int mAudioClockProgressLogCount{0};
 
         /*
-         * ============ 【B15】seek 之后"先出画、再精确"的事件闩 ============
+         * ============ 【P1-b 删除：B15"先出画"的独立事件闩】============
          *
-         * 语义：一次 seek 里，**第一张可解码的帧**（= 解码从关键帧起步之后解出的第一帧，
-         * 判据就是既有的 mSeekDecodeStartIsKey）在 RenderVideo 的落点块里被直接放上屏，
-         * 用来**替换掉 seek 之前那张旧画面**；此后直到"包含目标的那一帧"到达之前，
-         * 仍然按原来的规则不显示（精度判据一个字都没改）。
+         * 这里原来有一个"seek 之后是否已经先出过一张干净帧"的闩（配合"只先出一张、其余
+         * 前缀帧一律丢"的旧语义）。P1 起改为**单一过滤规则**：
+         *   · flush 之后的第一帧无条件出画（由 mDiscontinuity.firstFrameShown 承担，
+         *     且只认**干净**帧：解码未过关键帧时不上屏、也不消耗这个闩）；
+         *   · 之后完全落在目标之前的帧全部丢弃，直到"包含目标"的那一帧强制上屏并结束过滤。
+         * 所以"只先出一张"这个语义已经不存在了，本闩删除。
          *
-         * 为什么必须有这个闩：没有它，落点块里那条"早于目标 ⇒ render=false"会**每一帧**生效，
-         * 于是整段前缀解码期间屏幕停在 seek 前的旧画面上（用户看到的"seek 后画面不动"）。
-         * 有了它，最多只提前显示**一张**来自关键帧的干净帧，之后的前缀帧照旧丢掉。
-         *
-         * 复位点与 mSeekDecodeStartIsKey 完全一致（SeekTo / Reset），保证"每次 seek 只先出一次"。
-         * 只做状态判断：不引入计时器、不与时钟锚定交互（锚定仍由 fetchSeekClockAnchorUs
-         * 拒绝早于目标的帧，见那里的说明）。
-         * 新成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
-         */
-        bool mSeekFirstDecodableFrameShown{false};
-
-        /*
          * ============ 【B16】"追赶不收敛 ⇒ 一帧都不送"的连续事件计数 ============
          *
          * mVideoDiscardStreak：播放态下渲染判定**连续**给出"不上屏"的帧数，任何一次
@@ -1652,15 +1629,13 @@ namespace Cicada {
          *   显式取消（换片源/停止/Reset、用户又选别的档、错误终态）一律清闩不重装：
          *   Reset() 与 SwitchStream() 入口都会清。
          *
-         * mSeekLandingFloorOwnerUs：与 mSeekPositionFloorUs **同点**写入的"归属"标记
-         *   （SeekTo 写地板处，两处都是同一个值）。落点采纳前要求两者一致（或归属为
-         *   INT64_MIN = 未知），避免"地板被别的路径改写后，落点块还拿它当本次 seek 的目标"；
-         *   另外拒绝"比目标晚出整个精确 seek 容差（mSet->maxASeekDelta）"的帧被当成落点。
-         *   seek 结束时由 ResetSeekStatus() 把闸门/地板/归属一起关闭 ⇒ 不会留悬挂态。
+         * 【P1-b 删除：落点"归属"标记】与位置地板同点写入的那个归属标记已随地板一起删除：
+         *   它存在的理由是"地板可能被别的路径改写，落点块还拿它当本次 seek 的目标" —— 而
+         *   现在目标点只有一个载体（mDiscontinuity.targetUs，带代际），别的路径无法改写它，
+         *   所以"归属比对"这一步在结构上就不需要了。
          *
-         * 三个成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
+         * 两个成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
          */
-        int64_t mSeekLandingFloorOwnerUs{INT64_MIN};
         int mSwitchReArmStreamIndex{-1};
         bool mSwitchReArmPending{false};
 
@@ -1813,6 +1788,28 @@ namespace Cicada {
          * 声明追加在方法列表末尾（本文件约定），定义见 .cpp 末尾。
          */
         bool shouldDropForDiscontinuity(int64_t framePos, int64_t frameDur);
+
+        /*
+         * ============ 【P1-b：采纳落点帧（唯一的收尾动作）】============
+         *
+         * 两个调用者：shouldDropForDiscontinuity() 的"包含目标 / 越过目标"分支，
+         * 以及 RenderVideo() 的 **EOF 结构性终止**分支（"过滤仍激活但不会再有帧了"）。
+         *
+         * 动作（每个都是"把不连续点收敛掉"所必需的）：
+         *   · 记下 acceptedFramePos（诊断）；
+         *   · 把位置上报基准钉在 **targetUs**（不是落点帧的位置）—— 用户要的是
+         *     "位置 == target 且之后单调"，位置 = clockBaseUs + (now - clockBaseSteadyMs)；
+         *   · **主时钟也钉在 targetUs**：上报位置与渲染节拍必须同一个基准，
+         *     否则会出现"进度条和画面对不上"（seek 一发起 ProcessSeekToMsg 已经把主时钟
+         *     钉在 seekPos，所以这一步在正常路径上是幂等的）；
+     *   · filterActive = false —— 这就是"结束本次过滤"的**唯一**写点。
+         *
+         * reason 只进日志（例如 "no frame can reach the target (eof)"）。
+         * generation 由调用方**先** load 一次并传进来：它是"这一帧属于哪一次不连续"的
+         * 归属证据，同时保证调用方在读非原子的 targetUs 之前已经建立了与写入侧的配对。
+         * 声明追加在方法列表末尾（本文件约定），定义见 .cpp 末尾。
+         */
+        void acceptDiscontinuityLandingFrame(int64_t framePos, int generation, const char *reason);
 
         /*
          * 不连续点本体。**追加在成员列表最末尾**：本工程增量构建不记录头文件
