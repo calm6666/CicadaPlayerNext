@@ -186,8 +186,12 @@
  * "音频静音窗口"的**状态**编码，只用于起止各一条的日志（不参与任何管线决策）。
  * 与 framework/render/audio/Android/AudioTrackRender.cpp 里同名编码保持一致，
  * 这样一份日志就能直接判定静音是"内核在等时钟"还是"设备侧欠载/被重建"。
- *   0 = 有声；1 = seek 窗口内等主时钟追上（设计内）；2 = 设备写失败/短写；
+ *   0 = 有声；1 = （P2 起不再产生，见下）seek 窗口内等主时钟追上；2 = 设备写失败/短写；
  *   3 = 音频设备被 flush / 重建，等数据重新灌满。
+ *
+ * 【P2】编码 1 保留但不删：它与设备侧共用同一套编号（插件/日志分析按编号对齐），
+ * 而"扣住 PCM 等时钟"那道门已被整体删除（音频时钟由设备已消费量推出，不需要等谁），
+ * 所以 P2 之后内核侧不应再出现 reason=1 —— 这正是 P2 的一条验收标记。
  */
 #define AUDIO_SILENCE_NONE (0)
 #define AUDIO_SILENCE_SEEK_CLOCK (1)
@@ -229,30 +233,16 @@
 #define JOINING_STALE_FRAME_US (500 * 1000)
 
 /*
- * 【第 4 条】落点对齐期间的"音频连续性"容差（微秒）。
+ * 【P2 删除了两个宏 —— 留此说明，避免以后有人按旧形状再找回来】
  *
- * 为什么需要：1b 清掉的是**上层**已解码帧队列（mAudioFrameQue），但音频解码器
- * **内部**还压着旧时间轴的数据（ActiveDecoder 输入队列 ≤16 包 + 输出队列 ≤10 帧，
- * 约 0.5s 内容），它们会在对齐之后才被解出来、并按旧 PTS 到达 —— 只判"低于落点就丢"
- * 挡不住它们（它们的 PTS 比落点**高** 8.8~11.9s；实测落点 20.833s 却报出 29.674s，
- * 随即 TIMEPOS reSync 与约 230 帧连续丢帧；安卓上表现为音频把主时钟拽走）。
- *
- * 判据：新时间轴的音频从落点开始**连续**到达（实测包队首 = 落点 + ≤21ms），
- * 所以"高出高水位超过本容差"的帧必是旧时间轴残留。
- * 取 200ms：正常音频帧间隔（AAC 1024@48k≈21ms，2048@44.1k≈46ms）远小于它，
- * 旧时间轴的跳变（秒级）远大于它 —— 两者不可能混淆。
- * 只在对齐窗口内生效（首帧落点音频上屏即撤除），纯状态判断，无时间阈值。
+ * 这里原来有两个宏：`SEEK_AUDIO_CONTINUITY_TOLERANCE_US`（落点对齐期间的"音频连续性"
+ * 容差）与 `SEEK_AUDIO_STALE_DROP_MAX`（按帧数封顶的放行上界）。它们服务的是 C 方案
+ * 那套"把音频对齐到视频落点、再用高水位挡旧时间轴残留"的补丁。P2 之后：
+ *   · 音频与视频 seek 到**同一个目标点**（音频时钟基准直接钉在 mDiscontinuity.targetUs）；
+ *   · 旧时间轴残留由**不连续点的 flush** 作废（FlushAudioPath → flushDevice 同时 flush
+ *     音频解码器与音频设备），不再需要"高水位 + 容差 + 丢帧上限"这套推测式判据。
+ * 容差/上限这类东西一旦留下就会重新长出"第二条真相"，故整体删除。
  */
-#define SEEK_AUDIO_CONTINUITY_TOLERANCE_US (200 * 1000)
-
-/*
- * 【第 4 条的安全上界】对齐期间"高出高水位"的帧最多丢多少帧就必须放行。
- * 旧时间轴残留是可数的（解码器输入队列 ≤16 包 + 输出队列 ≤10 帧，约 26 帧），
- * 所以取 32 —— 足够清掉全部残留，又保证万一新时间轴在这段窗口里本身有一个
- * >200ms 的正常空隙（编辑列表/丢包），也绝不会把音频饿死成"对齐窗口永不关闭"。
- * 纯计数，不是时间判据，也不是周期性动作。
- */
-#define SEEK_AUDIO_STALE_DROP_MAX (32)
 
 /*
  * seek 完成时判定"主时钟是否还在目标点附近"的容忍值（微秒）。
@@ -370,7 +360,7 @@
  * 为什么"帧数"不是计时器：它是**事件计数**（连续被拒了几帧），不读墙钟、不设时间阈值。
  * 20 帧 ≈ 0.33s@60fps ≈ 0.8s@25fps，量级与 ExoPlayer 的 100ms 强制出画护栏同义。
  *
- * 为什么只在"非 seek 落点窗口"生效（mSeekRenderGateUs == INT64_MIN）：
+ * 为什么只在"落点过滤未激活"（mDiscontinuity.filterActive 为假）时生效：
  *   · seek 前缀（落点尚未采纳）期间由 B15 负责"先出画一张"，落点帧到达后照旧替换，
  *     那条路**必须**保持"前缀帧基本不上屏"，否则就成了"快进扫一遍"；
  *   · 追赶期（本阀门）与 seek 落点窗口是**互斥**状态，分开口径互不干扰。
@@ -722,39 +712,25 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
     beginDiscontinuity(seekTargetUs);
     /* 【延迟量化】记下"用户这一刻要 seek"的墙钟，供后面几行日志给出各段耗时。 */
     mSeekRequestMs = af_getsteady_ms();
-    mSeekClockAnchored = false;
     mSeekDecodeStartIsKey = false;
     /* B16：本帧连续拒帧计数与偏移采样随 seek 一起重新起算。 */
     mVideoDiscardStreak = 0;
     mVideoDiscardGapAbsUs = INT64_MIN;
     mCatchUpDiscardStreak = 0;
-    mSeekVideoAnchorDone = false;
-    mSeekAudioAlignDone = false;
     /*
-     * 【修法 2】锚点事件**不在这里置位**，只在这里清零。
+     * 【P2】这里只保留"本次 seek 的音频对齐还没做过"这一个事件闩：它服务的是
+     * "读到落点关键帧包那一刻，把音频包队列裁到目标点"这一个动作。
      *
-     * 原来在 SeekTo()（= API 线程、putMsg 之前）就置真，于是 SeekTo 到
-     * ProcessSeekToMsg 之间渲染出来的**旧时间轴帧**会把事件消费掉：
-     * 实测安卓 18:52:01.053 `seek anchor: … (pts=1751750, target=52085000)` 比
-     * 18:52:01.079 的 `PFR: seek posUs=52085000` 早 26ms —— 锚到了旧帧的 1.75s。
-     * 那一次是音频交接 + TIMEPOS reSync 把时钟救了回来；在**没有音频轨 / 音频不交接**
-     * 的场景下时钟就会停在那个旧值上（1.75s vs 目标 52s），seek 后内容被
-     * 判成"迟到"全丢。
-     *
-     * 现在置位点移到 ProcessSeekToMsg()（seek 真正开始、mSeekFlag 置真的同一处），
-     * 因此只有"seek 之后渲染的帧"才可能消费这个事件。
+     * 被删成员的复位一并消失（锚点事件闩 / 只锚一次闩 / 音频地板 / 连续性高水位 /
+     * 音频重定位事件）：它们承载的"锚点事件、音频地板、高水位、重定位"全部不再存在。
+     * 音频时钟基准不需要在这里清：seek 在途时 getAudioPlayTimeStamp() 用 mSeekFlag
+     * 判"参考暂不可用"，而本次 seek 的 FlushAudioPath() 会在设备 flush 之后
+     * 把基准重钉到 targetUs（见 FlushAudioPath 与 beginDiscontinuity 的说明）。
      */
-    mSeekAnchorPending = false;
-    /* A 方案的事件闩也必须在 putMsg 前清干净：不让上一次 seek 的定位事件影响这一次。 */
-    mSeekAudioRepositionPending = false;
-    mSeekAudioRepositionUs = INT64_MIN;
-    mSeekAudioRepositionJumpUs = INT64_MIN;
+    mSeekAudioAlignDone = false;
     mVideoDecodeRetrySeen = false;
     mDecodeStallIters = 0;
     mDecodeStallRebuildDone = false;
-    mSeekAudioFloorUs = INT64_MIN;
-    mSeekAudioContinuityUs = INT64_MIN;
-    mSeekAudioStaleDrops = 0;
     /*
      * B2：pending 解码器的"占位 Surface"身份是 pending 路由的一部分，seek 会把
      * pending 路整体丢掉重建（见 FlushVideoPath 里的 discardPendingVideoDecoder），
@@ -1420,7 +1396,7 @@ int64_t SuperMediaPlayer::GetBufferPosition()
      * 而那个函数在 seek 在途时（isSeeking()）是**直接 return 不发布**的（见那里的说明），
      * 于是整个 seek 期间这里返回的都是**上一个播放周期**写下的旧值：
      *   · 向前 seek：旧值（例如 30s）远小于 seek 目标（例如 90s），
-     *     而播放头这时已经被 mSeekPositionFloorUs 钉在 90s ——
+     *     而播放头这时已经由不连续点的目标点报在 90s ——
      *     界面拿到的是"缓冲条末端落在播放头后面"，
      *   · 分片流 seek 会把整段缓存清掉再从目标重下（见 SMPMessageControllerListener
      *     里 seek 分支的说明），旧值本来也不再代表任何真实缓冲。
@@ -2036,69 +2012,20 @@ void SuperMediaPlayer::ProcessVideoLoop()
      */
 
     /*
-     * ============ A 方案消费点：音频流重新定位到落点 —— 结论：接口不支持，安全回退 ============
+     * ============ 【P2 删除：音频流"按流重定位"的消费点】============
      *
-     * 这里是**消息线程**（ProcessVideoLoop），也是唯一允许调解复用器的地方。
-     * 事件由 renderAudioFrame() 置闩（"音频时间轴在 seek 之后前跳 > 1s"）。
-     *
-     * 逐文件核对后的 API 事实（这是"能不能按流重定位"的结论，别再猜）：
-     *   1. 单文件容器 avFormatDemuxer::Seek (framework/demuxer/avFormatDemuxer.cpp:577-588)
-     *      **完全忽略 index**：走 avformat_seek_file(mCtx, **-1**, …) —— 定位整个容器、
-     *      清空解复用包队列、暂停并重启读线程。传音频下标 = 对整个容器再 seek 一次，
-     *      视频包会被重新投递（PTS 倒退/重复）⇒ **会破坏视频读取**，红线不允许。
-     *   2. HLS/DASH 只在 index 命中**字幕流**时按流 seek
-     *      （play_list/HLSManager.cpp:465-477）；音频下标会落到 "seek all" 分支，
-     *      而那个分支 (HLSManager.cpp:497-535) 本身就是"**先 seek 视频，再用视频落地
-     *      位置去 seek 其余流**" —— 也就是说 HLS/DASH 早已把音频对齐到视频落点，
-     *      根本不需要我们再定位一次（再调一次等于又做一次整体 seek，有害无益）。
-     *   3. 因此"按流重定位"在当前接口下不可实现。要真正消除单文件容器上
-     *      "视频从关键帧起步、音频从目标附近起步"的差，必须扩展解复用 API
-     *      （新增按流 re-position），那是单独一轮的接口改动，不在本次范围。
-     *
-     * 所以这里只做一件事：把事实记成一条限频日志（每次事件一条，不是周期日志），
-     * 然后**保持既有防线**（1b 清已解码帧队列 + 重基时间轴；双侧地板 + 32 帧上限）——
-     * 它们在定位不可用时仍然把旧时间轴残留挡在设备之外。
+     * 这里原来有一个"音频时间轴在 seek 之后前跳 > 1s ⇒ 在消息线程调解复用器的
+     * SeekStream() 把音频重定位到落点"的消费点（置闩处是 renderAudioFrame 里的
+     * 前跳判据）。随 P2 的音频基准重设，它与它的三个成员一起删除，理由有两条：
+     *   · 主时钟不再读"音频时间轴的跳变"：位置 = 目标点 + 设备已消费量，
+     *     而设备已消费量在设备不前进时只会停滞、不会跳变，所以"重定位"这条补救
+     *     动作失去了触发源（也就是没有第二条真相需要被修补）；
+     *   · 逐文件核对过：单文件容器的 Seek 完全忽略流下标（会对整个容器再 seek 一次，
+     *     破坏视频读取），HLS/DASH 本来就"先 seek 视频、再用视频落点 seek 其余流"
+     *     ⇒ 这条路径本身也不可用。
+     * 现在需要音频与视频同处一个时间轴时，靠的是**不连续点 + flush**：
+     * flushDevice(DEVICE_TYPE_AUDIO) 同时 flush 音频解码器与设备，旧数据当场作废。
      */
-    if (mSeekAudioRepositionPending) {
-        const int64_t repositionLandingUs = mSeekAudioRepositionUs;
-        const int64_t repositionJumpUs = mSeekAudioRepositionJumpUs;
-        const int audioIndex = mCurrentAudioIndex;
-
-        mSeekAudioRepositionPending = false;
-        mSeekAudioRepositionUs = INT64_MIN;
-        mSeekAudioRepositionJumpUs = INT64_MIN;
-
-        /*
-         * 消息线程是唯一允许调解复用器的地方（读包/渲染路径只置闩）。
-         * 接口语义见 framework/demuxer/IDemuxer.h 的 SeekStream()：只允许"只改 index
-         * 指定流的投递位置，不动共享容器位置、不动其它流队列、不重启读线程"。
-         * 任何做不到该语义的实现都必须返回负值 —— 默认实现就是 -1，所以当前所有
-         * 解复用器（含单文件容器）都会走下面的回退分支，行为与本次改动前完全一致。
-         * flags 与既有 seek 路径一致（全部传 0，见 SMPMessageControllerListener 里的
-         * mDemuxerService->Seek(pos, 0, -1)）。
-         */
-        int repositionRet = -1;
-
-        if (repositionLandingUs > 0 && audioIndex >= 0 && mDemuxerService != nullptr &&
-            mDemuxerService->getDemuxerHandle() != nullptr) {
-            repositionRet = mDemuxerService->getDemuxerHandle()->SeekStream(repositionLandingUs, 0, audioIndex);
-        }
-
-        if (repositionRet >= 0) {
-            AF_LOGW("audio stream repositioned to landing=%lld index=%d ret=%d (the audio timeline had jumped "
-                    "%lld ms) — the audio read position now matches the video landing point\n",
-                    (long long) repositionLandingUs, audioIndex, repositionRet,
-                    (long long) (repositionJumpUs / 1000));
-        } else {
-            AF_LOGW("audio stream reposition unsupported (the demuxer interface has no per-stream "
-                    "re-position for audio: a single-file container ignores the stream index and moves the "
-                    "whole container, while playlist containers already seek the video first and put the "
-                    "other streams at that landing point) — keeping the queue-trim path "
-                    "(landing=%lld audioJumpedBy=%lld ms audioIndex=%d ret=%d)\n",
-                    (long long) repositionLandingUs, (long long) (repositionJumpUs / 1000),
-                    audioIndex, repositionRet);
-        }
-    }
 
     const bool bufferPass = DoCheckBufferPass();
     if (!bufferPass) {
@@ -2559,35 +2486,24 @@ bool SuperMediaPlayer::DoCheckBufferPass()
         //clean late audio data
         if (cur_buffer_duration > HighBufferDur && HAVE_VIDEO && HAVE_AUDIO) {
             /*
-             * 【本轮修"音频被挖掉 1.75s"】清理阈值改成"落点优先"。
+             * 【P2】阈值与音频的落点判据**同源**：不连续点仍激活（= 本次 seek 的定位阶段）
+             * 时用**目标点** mDiscontinuity.targetUs —— 这正是音频与视频共用的那一个目标点，
+             * 也是音频时钟基准（见 getAudioPlayTimeStamp()）与 RenderAudio 丢弃判据用的值；
+             * 窗口外完全回退到 mSoughtVideoPos，"正常播放时清迟到音频"的行为一字不变。
              *
-             * 本块的目的：丢掉"seek 之前留在缓冲里的迟到音频"。但原来用的阈值是
-             * mSoughtVideoPos = **用户目标点**，而一次 seek 之后真正的**内容位置是视频落点**
-             * （关键帧）：安卓实测 landing=65.065s、target=69.75s，于是 [65.4, 67.18] 这段
-             * **合法音频**被当成迟到数据丢掉 —— 日志
-             *   `clean late audio data 8 / 37 / 37 before 69750000`（共 82 包 ≈1.72s）
-             * 与紧随其后的
-             *   `audio timeline re-anchored (offset 1749339 > 1s)`（前跳 1.749s）
-             * 严格吻合，用户听到的就是"少了一段"。
-             *
-             * 现在：
-             *   · seek 窗口内（C 对齐事件已经把落点记进 mSeekAudioFloorUs）用**落点**作阈值 ——
-             *     它只会丢掉落点之前的包，与 C 的裁包（ClearPacketBeforeTimePos(AUDIO, landing)）
-             *     和双侧地板完全是**同一个阈值**，不会再出现"同一段数据被两个不同阈值处理"；
-             *   · 窗口外（mSeekAudioFloorUs == INT64_MIN）**完全回退**到原来的 mSoughtVideoPos，
-             *     正常播放的"清迟到音频"行为一字不变。
-             *
-             * mSeekAudioFloorUs 的生命周期（置位/撤除/复位三处都已核对）：
-             *   置位：DecodeVideoPacket() 的 C 对齐事件（落点已知）；
-             *   撤除：RenderAudio() 里首帧落点音频真正上设备时（mPlayedAudioPts == INT64_MIN 分支）；
-             *   复位：SeekTo() 与 Reset() 都置 INT64_MIN。
+             * 为什么不能再用别的值：原来这里优先取"音频落点地板"，而那是 C 方案
+             * （把音频对齐到视频**落点**）的一部分，已随 P2 删除。若这里仍按落点清包，
+             * 就会出现"包队列按落点裁、渲染判据按目标点丢"的两把尺子 —— 同一段数据被
+             * 两个不同阈值处理，正是本仓库反复出现的那类错位。
              */
-            const int64_t cleanBeforeUs = (mSeekAudioFloorUs != INT64_MIN) ? mSeekAudioFloorUs : mSoughtVideoPos;
+            const int64_t cleanBeforeUs =
+                    (mDiscontinuity.filterActive.load() && mDiscontinuity.targetUs != INT64_MIN)
+                    ? mDiscontinuity.targetUs : mSoughtVideoPos;
 
             if (cleanBeforeUs > 0) {
                 int64_t count = mBufferController->ClearPacketBeforeTimePos(BUFFER_TYPE_AUDIO, cleanBeforeUs);
                 if (count > 0) {
-                    AF_LOGW("clean late audio data %lld before %lld (seek-window landing-priority threshold)\n",
+                    AF_LOGW("clean late audio data %lld before %lld (seek-window target-point threshold)\n",
                             count, (long long) cleanBeforeUs);
                 }
                 int64_t pts = mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO);
@@ -3511,7 +3427,7 @@ void SuperMediaPlayer::beginQualitySwitchTracking()
          * 冻结参考时刻 = 暂停时用户看到的位置。为什么不用 mMasterClock：
          * 主时钟在暂停态是 pause() 的，但缓冲/seek 等路径都可能把它挪动，
          * 而"暂停切档"的语义要求参考点**绝对不动**。getCurrentPosition() 读的
-         * 就是用户可见的位置（并且被 mSeekPositionFloorUs 钉住），最贴近意图。
+         * 就是用户可见的位置（并且由不连续点的目标点给出），最贴近意图。
          */
         mPausedSwitchPivotUs = getCurrentPosition();
 
@@ -3873,7 +3789,7 @@ void SuperMediaPlayer::doRender()
      * （frameQ=1），画面却永远停在上一次上屏的那张，位置回调也不再更新。
      *
      * 处理：把"暂停 + seek 相关"并进同一个分支（纯状态判据，无计时器）：
-     *   `mSeekFlag`（seek 在途）、`mSeekRenderGateUs != INT64_MIN`（落点帧尚未采纳）都算在内；
+     *   `mSeekFlag`（seek 在途）、`mDiscontinuity.filterActive`（落点过滤仍然激活）都算在内；
      *   每次只交一帧，靠帧自己的 pts 去重；语义与切档那条一致 —— **不动主时钟、不发位置通知**，
      *   用户看到的位置仍是暂停时那个位置，只有画面换成落点帧。
      *   切档那条的老行为一字未变（清 mPausedSwitchRenderPending 与那条日志仍只属于它）。
@@ -3901,106 +3817,22 @@ void SuperMediaPlayer::doRender()
         mFirstBufferFlag = false;
 
         /*
-         * ============ 锚点事件（路径无关，本轮修"seek 没反应"）============
+         * ============ 【P2 删除：seek 后"第一帧上屏 ⇒ 锚主时钟"的锚点事件】============
          *
-         * 事件定义：**本次 seek 之后第一帧真的上屏的视频帧**。
-         * 为什么放在这里而不是 RenderVideo 的落点块里：那个块有前置条件
-         * （frameTimePosition >= 0 且渲染门判定），而部分容器/流的 timePosition 缺失，
-         * 于是"落点采纳"永远不发生。上一轮我把 seek 结束**强制绑定**在这个事件上，
-         * 结果就是：落点采纳不来 → mSeekFlag 永远清不掉 → seek 完全没反应、一直转圈。
-         * 这是回归，本轮改掉：锚点与 seek 结束解绑，两者都只依赖"有帧上屏"这个
-         * 在任何渲染路径上都必然发生的事件。
+         * 这里原来有一个事件闩（"本次 seek 之后第一帧真的上屏"）+ 一个"只锚一次"的闩
+         * + 一个两处共用的锚点判据（按"目标 / 不早于目标的落点帧"取值）。它们在 P2
+         * 被整体删除，因为主时钟不再需要任何"事后锚定"：
          *
-         * 只锚一次（mSeekAnchorPending 事件闩 + mSeekVideoAnchorDone），锚定值取
-         * mPlayedVideoPts —— 渲染路径刚刚把上屏帧的 PTS 写进去，正是落点/目标帧自己的 PTS。
+         *   · 有音频：主时钟的参考就是"目标点 + 设备已消费量"
+         *     （Discontinuity::audioBase*，见 getAudioPlayTimeStamp()）。它在不连续点上
+         *     就已经等于目标点，并且只随设备消费单调前进 —— 既不可能落后到需要被
+         *     "拉回来"，也不可能被某一帧的旧 pts 拉回去；
+         *   · 无音频：ProcessSeekToMsg() 与 acceptDiscontinuityLandingFrame() 已经把
+         *     主时钟钉在目标点（各自唯一的写点）。
          *
-         * ============ 消费不变式（本轮修"master 停在目标点、内容在落点"）============
-         *   · 这个事件**只允许被"锚定成功"消费**：真的把主时钟锚到 mPlayedVideoPts 之后，
-         *     立刻清 mSeekAnchorPending；
-         *   · 没有锚定就**必须留着**，等下一帧视频上屏（或下一次 SeekTo() 复位）——
-         *     不允许任何其它路径清它。
-         *
-         * 为什么必须这样：这里的前置是 `rendered`，而 rendered 为真也可能是**纯音频渲染**
-         * （render() 返回的 audioRendered 为真，见 doRender 里 `rendered |= render()`）。
-         * 那一刻 mPlayedVideoPts 还是 INT64_MIN（seek 的 FlushVideoPath() 把它清了），
-         * 旧写法无条件清闩 ⇒ 锚点被白白消费、永不发生 ⇒ 主时钟停在 seek **目标点**，
-         * 而视频落点与音频内容都在**落点**上：安卓实测 master≈69.75s、内容 65.07s（差 4.7s），
-         * 视频被判"迟到"全丢、随后还触发一次解码器停摆重建（`video decoder accepts no input
-         * and produced no frame … rebuilding it once`），用户听到的"少一段"就是这个错位的后果。
-         *
-         * 锚定值只用 mPlayedVideoPts（渲染路径、节拍判定、丢弃判定用的都是这条时间轴），
-         * 不用 frameTimePosition 那条轴。
-         * `mPlayedVideoPts != INT64_MIN` 必然是"seek 之后新渲染的视频帧"：
-         * FlushVideoPath() 无条件把它置 INT64_MIN（SuperMediaPlayer.cpp:7087 一带）。
+         * 于是"时间轴权威"只剩一个，"谁先锚、锚没锚过、锚得够不够近"这一整组闩、
+         * 容差与拒绝分支同时失去存在理由。位置上报不受影响：它由 clockBase* 给出。
          */
-        if (mSeekAnchorPending && !mSeekVideoAnchorDone && mPlayedVideoPts != INT64_MIN) {
-            /*
-             * ============ 【锚点规则收口】只允许"目标"或"不早于目标的落点帧" ============
-             *
-             * 原来这里**无条件**把主时钟设成 mPlayedVideoPts（seek 之后第一张上屏的帧）。
-             * 实测那条锚点日志：
-             *   seek anchor: master clock anchored to the first frame rendered after the seek
-             *                (pts=83438, target=2844000, landingFloor=-9223372036854775808)
-             * 帧 0.083s、目标 2.844s、地板未设 —— 时钟被钉在旧时间轴的 0.083s 上按 1x
-             * 往前走，之后整段时间轴错位（位置上报、追赶窗口、落点判据全按错轴判）。
-             *
-             * 现在判据由 fetchSeekClockAnchorUs() 统一给出（它是两处锚点共用的唯一实现）：
-             *   · 这一帧早于目标超过一个容差 ⇒ **不锚**，事件留在闩上（不清 mSeekAnchorPending、
-             *     不置 mSeekVideoAnchorDone），等 >= 目标的那一帧（含目标的那一帧）上屏再来锚；
-             *   · 这一帧在目标附近或之后 ⇒ 锚到它（落点在目标之前则锚到目标本身）。
-             * 位置上报的地板与落点判据读的都是目标，所以时间轴不会再被拉回到 seek 之前。
-             * ==========================================================================
-             */
-            const int64_t seekAnchorUs = fetchSeekClockAnchorUs(mPlayedVideoPts, "first frame rendered after the seek");
-
-            if (seekAnchorUs != INT64_MIN) {
-                /*
-                 * ============ 【修：锚点绝不允许把主时钟往回拉】============
-                 *
-                 * 真机日志（安卓 2026-09-26 20:55:38，用户 seek 到 116.273s）逐行可对：
-                 *   38.825  seek anchor refused: frame=99933167 earlier than target=116273000
-                 *   38.851  seek anchor: pts=99966533, target=-9223372036854775808,
-                 *           landingFloor=116273000, anchor=99966533
-                 *   39.033  seek anchored by the video landing frame, audio pts=116288000
-                 * 第二行里 `target=-9223372036854775808`（= INT64_MIN）说明：锚定发生时
-                 * `mSeekPositionFloorUs` 与 `mSeekPos` **都已经被清掉**（seek 结束走的
-                 * ResetSeekStatus()，见本文件 10912 / 10929），于是 fetchSeekClockAnchorUs()
-                 * 走"目标未知"兜底分支返回了这一帧自己的 pts —— 主时钟从 116.273s 被
-                 * **倒退**到 99.966s（-16.3 秒），36ms 之后又被落点帧拉回 116.288s。
-                 * 用户看到的就是"进度条先往回弹一下、然后又弹回去"；而时钟倒退的那段时间里
-                 * 所有正常帧都成了"迟到帧"被丢掉 —— 也就是"seek 后卡死半天不动"。
-                 *
-                 * 判据（纯状态、无阈值、无计时器）：**只有向前才改写主时钟**。
-                 * 目标已知时这不会改变任何行为 —— fetchSeekClockAnchorUs() 的返回值是
-                 * max(落点帧, 目标)，本来就不可能小于 seek 目标；唯一会小于当前时钟的情形，
-                 * 正是上面那种"目标已被清掉、这一帧是旧位置"的坏状态，也就是要拦的这一种。
-                 */
-                const int64_t masterBeforeUs = mMasterClock.GetTime();
-
-                if (seekAnchorUs >= masterBeforeUs) {
-                    mMasterClock.setTime(seekAnchorUs);
-                    AF_LOGW("seek anchor: master clock anchored to the first frame rendered after the seek "
-                            "(pts=%lld, target=%lld, landingFloor=%lld, anchor=%lld)\n",
-                            (long long) mPlayedVideoPts, (long long) mDiscontinuity.targetUs,
-                            (long long) mSeekAudioFloorUs, (long long) seekAnchorUs);
-                } else {
-                    AF_LOGW("seek anchor SKIPPED: anchoring on pts=%lld would move the master clock BACKWARD "
-                            "from %lld (by %lld ms) — the frame is older than the position the clock is "
-                            "already on (this is the 'progress bar bounces back' state: the seek target has "
-                            "already been cleared, so this frame carries no usable anchor)\n",
-                            (long long) seekAnchorUs, (long long) masterBeforeUs,
-                            (long long) ((masterBeforeUs - seekAnchorUs) / 1000));
-                }
-
-                /*
-                 * 事件在两种出口都消费掉：目标已经被清掉的这一帧之后，再等下一帧只会得到
-                 * 一个更晚的旧位置，锚定已经没有正确值可用 或 时钟本身就在正确位置上。
-                 */
-                mSeekClockAnchored = true;
-                mSeekVideoAnchorDone = true;
-                mSeekAnchorPending = false;
-            }
-        }
 
         //may audio already played over
         if (mEof && mAudioFrameQue.empty() && mBufferController->GetPacketSize(BUFFER_TYPE_AUDIO) == 0) {
@@ -4016,14 +3848,15 @@ void SuperMediaPlayer::doRender()
             /*
              * 【让 seek 结束回到"有帧上屏"这个充分条件（本轮修回归）】
              *
-             * 上一轮这里额外要求 mSeekLandingFrameAccepted（"落点帧被采纳"），
+             * 上一轮这里额外要求"落点帧被采纳"这个独立闩，
              * 而落点采纳块本身要求 timePosition >= 0 且能通过渲染门 —— 只要该字段缺失
              * （部分容器/流就是不给），采纳永远不发生，seek 就永远结束不了：
              * 用户看到的就是"seek 没反应、一直转圈、进度条像摆设"。
              *
              * 现在恢复为原来的充分条件（isRenderGateHit：暂停帧恢复期间由 codec 渲染门
-             * 兜住），主时钟的锚定则交给上面那个**路径无关**的"第一帧上屏"事件。
-             * 这样"锚点唯一"与"seek 一定能结束"两件事各自成立、互不绑架。
+             * 兜住）。【P2】主时钟也不再依赖任何"seek 后第一帧上屏"的锚点事件：
+             * 有音频时它是"目标点 + 设备已消费量"，无音频时由 ProcessSeekToMsg() 与
+             * 落点采纳钉住 —— 所以"seek 一定能结束"与"时间轴权威唯一"互不绑架。
              */
             if (videoDecoder == nullptr || videoDecoder->isRenderGateHit()) {
                 /*
@@ -4105,7 +3938,7 @@ void SuperMediaPlayer::doRender()
      *    APP_BACKGROUND  —— 后台不读包/不解码。
      *
      * E. **seek 在途时的唯一放宽**：正常 seek 期间“暂时没有帧上屏”是对的
-     *    （解码器要从目标点之前的关键帧解过来，而且 mSeekPositionFloorUs 会把目标点
+     *    （解码器要从目标点之前的关键帧解过来，而且落点过滤会把目标点
      *    之前的帧全丢掉），所以 4s 那个正常阈值不适用于 seek。但 seek 也可能
      *    **永远结束不了**：mSeekFlag 只由 doRender() 里“有帧上屏”那一处清掉，解码器
      *    一旦死了它就是永久真的，于是谁都救不回来 —— 正是用户实测的“seek 完直接卡死”。
@@ -5293,100 +5126,51 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
             }
 
             /*
-             * ============ C 方案：把音频也对齐到同一个落点（一次性，事件驱动）============
+             * ============ 【P2：音频与视频用同一个目标点（一次性，落点事件驱动）】============
              *
              * 事件就是"读到了本次 seek 的第一个关键帧视频包"——此刻落点 PTS 已知
-             * （= 这一包的 timePosition）。此时做三件事，全部只做一次：
-             *   1. 丢掉落点之前的音频包（保留落点及之后的）；
-             *   2. 记下"音频落点地板"mSeekAudioFloorUs：按旧起点已经解出来、还压在
-             *      mAudioFrameQue 里的音频帧，在推送给音频设备那一刻被丢掉（见 RenderAudio），
-             *      首帧落点音频真正上设备后地板清零；
-             *   3. **把整条音频时间轴对齐到落点**（1b）：清空已解码帧队列，并把
-             *      mPlayedAudioPts / mAudioTime 重置到落点。
+             * （= 这一包的 timePosition）。只做两件事，都只做一次：
+             *   1. 按**目标点**（mDiscontinuity.targetUs —— 音频与视频共用的那一个）
+             *      裁掉音频包队列里目标点之前的陈旧包；
+             *   2. 把**本进程内**的音频时间轴重基到目标点（清已解码帧队列 +
+             *      mPlayedAudioPts / mAudioTime 复位），于是"设备位置按旧时间轴报数"
+             *      再也不可能把主时钟拽走。
              *
-             * 第 3 条是必须的，而且只靠"地板"不够 —— 实测（Qt 日志）：
-             *   `seek audio aligned … landing=20833333 dropped=40 audioFront=20842667`
-             *   （音频包队列**确实**已经对齐到落点 20.843s）
-             *   186ms 后却出现
-             *   `correct audio and master clock offset is 8789339` →
-             *   `TIMEPOS reSync time 20888010 to  29674671` → 约 230 帧连续丢帧。
-             * 原因：地板只丢"**低于**落点"的帧，而 seek 前按旧时间轴解出来、**高于**落点
-             * 的那批帧（本例≈29.6s，即用户按下 seek 时的播放位置）留在了 mAudioFrameQue
-             * 里，被推给设备 → 音频参考时钟立刻报 29.674s → "音频是主"就把主时钟从落点
-             * 一步拽到 29.674s → 视频永久欠 8.8s 的债 → 丢帧风暴（安卓上同一根因表现为
-             * 落点帧被绕过、时钟停在目标点、画面冻死）。
-             * 所以这里连**已解码帧队列**一起清掉，并把音频时间轴重新落到落点。
+             * 为什么是目标点而不是视频落点：音频时钟的基准（Discontinuity::audioBase*）
+             * 钉的就是目标点，位置 = 基准 + 设备已消费量。若把 [落点, 目标) 这一段音频
+             * 推给设备，位置就会比内容**超前**（目标点 − 帧 pts），视频随即被判"迟到"全丢。
+             * 也就是说"音频从目标点开始"是音频时钟模型的前提，不是可选项。
              *
-             * 为什么**不**在这里 FlushAudioPath()：那会在 seek 窗口内对音频设备做第二次
-             * flush（第一次是 seek 开始时的那次），实测紧随其后 0.5s 就出现
-             * onAudioException -2103466313 —— 设备被清空后没有数据可播，外层状态机
-             * 判定异常。这里的做法达到同样的时间轴对齐效果，却完全不碰设备、不重置
-             * 音频解码器（音频解码是有状态的，不 flush 反而避免了解码断点杂音）。
-             * 清帧队列与重置时间轴都是本进程内的状态操作，不产生任何设备调用。
+             * 旧时间轴数据不靠"地板 / 连续性高水位"这类推测式判据挡，而靠**不连续点的
+             * flush**：seek 开始时 FlushAudioPath() → flushDevice(DEVICE_TYPE_AUDIO)
+             * 同时 flush 音频解码器与音频设备，"解码器内部还压着旧时间轴"这条路在架构上
+             * 已经不存在。所以这里不再记任何地板/高水位状态。
              *
-             * 失败安全：音频队列里没有落点及之后的数据（front 为空/异常）时**什么都不做**，
-             * 直接回落 A（音频等时钟，最多一个 GOP 静音）——绝不因此让音频永不开始或让播放停住。
-             * 只碰音频路，不碰视频路（红线里的"禁播放中 FlushVideoPath"不受影响）。
+             * 失败安全：目标点未知（极端路径）时什么都不做，按既有路径继续 ——
+             * 绝不因此让音频永不开始或让播放停住。只碰音频路，不碰视频路。
              */
             if (!mSeekAudioAlignDone && HAVE_AUDIO) {
                 const int64_t landingUs = pVideoPacket->getInfo().timePosition;
                 const int64_t audioFront = mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO);
+                const int64_t audioAnchorUs = mDiscontinuity.targetUs;
 
                 mSeekAudioAlignDone = true;
 
                 /*
-                 * ============ 【B13：音频的对齐锚点必须与时钟锚点是同一个点（目标）】============
-                 *
-                 * 实测（用户日志，暂停态 seek）：时钟被钉在**目标**（mSeekPositionFloorUs），
-                 * 而音频的裁剪/地板/时间轴重基都按**视频落点**（landingUs）来做 —— 两者相差
-                 * "落点到目标"这一段，于是出现：
-                 *   · 音频队列里保留着 [落点, 目标) 这一段的帧；
-                 *   · render() 里"pcm 队首比时钟超前就按住"那道门把它们按住；
-                 *   · 暂停态时钟是 pause 的（ProcessPauseMsg → startRendering(false) →
-                 *     mMasterClock.pause()），它**不可能"追上来"**，门就永远不开 —— 音频不流动
-                 *     ⇒ 以音频为参考的时钟也不动 ⇒ 视频落点帧的渲染门永远不满足 ⇒
-                 *     画面与进度条都不动（fps=0，实测 frameQ=1 而 master 已越过落点）。
-                 *
-                 * 这里把音频的对齐锚点统一到**时钟锚点**上：目标已知且不早于落点时，按目标
-                 * 裁剪/重基（丢掉落在目标之前的音频，包括 [落点, 目标) 那一段）。第一帧音频于是
-                 * 落在目标附近（一个音频帧的量级），上面那道门自然不成立，不需要"等时钟追上"。
-                 *
-                 * 通用性：这里只比较两个**位置值本身**，与 GOP、关键帧间距、分片长度都无关。
-                 * 精度不变：视频首帧仍由"包含目标、不晚于目标"的采纳块决定，本处只动音频。
-                 * 目标未知（INT64_MIN）或目标早于落点时，锚点退回落点 —— 与今天逐字一致。
+                 * 落点比目标早多少：只留一条对账日志（精度判据与目标本身比较，
+                 * 与"落点离目标多远"无关，所以这里不参与任何判定）。
                  */
-                const int64_t audioAnchorUs =
-                        (mDiscontinuity.targetUs != INT64_MIN && mDiscontinuity.targetUs > landingUs)
-                        ? mDiscontinuity.targetUs : landingUs;
-
-                /*
-                 * 【预算判据已删除（精准 seek 第 2 项）】
-                 *
-                 * 这里原来按"落点距目标是否在 SEEK_EXACT_LANDING_BUDGET_US 内"来**授予**
-                 * 精确落点（mSeekExactLandingByBudget = true）。那是"精度换等待"：精度取决于
-                 * 预算给不给，而不是取决于目标本身 —— 落点比目标早超过预算时就直接把落点帧
-                 * 放上屏（实测该文件早 1.0~11.2 秒），这正是 DASH/HLS/稀疏 IDR 上"seek 不精准"。
-                 *
-                 * 现在落点判据是**包含目标**（RenderVideo 的落点采纳块：帧区间
-                 * [timePosition, timePosition + 帧长) 不含目标就继续解到下一帧），与目标本身
-                 * 比较、与落点距离无关，所以不再需要"授予"这一步：
-                 * mSeekExactLandingByBudget 从此恒为假 —— 预算这条路径被彻底关掉。
-                 * 这里只留一条"落点离目标多远"的日志，便于现场核对，与精度无关。
-                 */
-                if (mDiscontinuity.targetUs != INT64_MIN && landingUs > 0 &&
-                    mDiscontinuity.targetUs > landingUs) {
+                if (audioAnchorUs != INT64_MIN && landingUs > 0 && audioAnchorUs > landingUs) {
                     AF_LOGI("seek: the landing keyframe is %lld ms before the target — decoding forward "
                             "to the frame that contains the target (exact landing, no budget)\n",
-                            (long long) ((mDiscontinuity.targetUs - landingUs) / 1000));
+                            (long long) ((audioAnchorUs - landingUs) / 1000));
                 }
 
                 /*
-                 * 【第 4 条补完】对齐动作只依赖"落点已知"，**不依赖音频包队列当时有没有数据**：
-                 * 清已解码帧队列、重基时间轴、记落点地板与连续性高水位，全都不需要读包队列。
-                 * 原来整块挂在 `audioFront != INT64_MIN` 之下 —— 一旦那一刻音频包队列还是空的
-                 * （seek 刚开始、读包还没到），对齐就整块跳过，旧时间轴的已解码帧与解码器
-                 * 内部残留就没有任何东西挡得住，等于第 4 条在最需要它的路径上失效。
-                 * 现在只有"裁包"这一步需要 audioFront（日志/丢包统计），其余照做。
+                 * 对齐动作只依赖"目标点已知"，**不依赖音频包队列当时有没有数据**：
+                 * 清已解码帧队列、重基时间轴都不需要读包队列，只有"裁包"这一步需要
+                 * audioFront（丢包统计）。原来整块挂在 `audioFront != INT64_MIN` 之下，
+                 * 一旦那一刻音频包队列还是空的就整块跳过 —— 等于对齐在最需要它的路径上失效。
                  */
                 if (audioAnchorUs > 0) {
                     int64_t dropped = 0;
@@ -5395,22 +5179,17 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                         dropped = mBufferController->ClearPacketBeforeTimePos(BUFFER_TYPE_AUDIO, audioAnchorUs);
                     }
 
-                    mSeekAudioFloorUs = audioAnchorUs;
-                    /* 第 4 条：连续性高水位从**同一个锚点**起算（详见 SEEK_AUDIO_CONTINUITY_TOLERANCE_US）。 */
-                    mSeekAudioContinuityUs = audioAnchorUs;
-                    mSeekAudioStaleDrops = 0;
-
                     /*
                      * ============ B3：seek 落点必须重建"视频原始 pts → 主时钟轴"的映射 ============
                      *
                      * 背景：这条片源的视频**原始 pts 轴**与全局 timePosition 轴差一个固定量
                      * （HLS/DASH 每一路各自算 time2ptsDelta：`timePosition = pts + time2ptsDelta`，
-                     * 见 HLSStream 与 DashStream 的包出口）。主时钟与音频走的是 timePosition 轴
-                     * （下面就把它重基到 landingUs），而视频的渲染节拍 / 丢弃 / 锚定用的是帧的 pts
-                     * （RenderVideo 的 videoLateUs、mPlayedVideoPts）。两条轴之间的映射就是
-                     * mActiveVideoPtsOffset；seek 之前它由切档预滚提供，而 FlushVideoPath 为了
-                     * 重建时间轴必须把它清零（本文件 FlushVideoPath 里那句
-                     * `mActiveVideoPtsOffset = INT64_MIN`）—— 落地之后**没有任何地方把它建回来**。
+                     * 见 HLSStream 与 DashStream 的包出口）。主时钟与音频走的是 timePosition 轴，
+                     * 而视频的渲染节拍 / 丢弃用的是帧的 pts（RenderVideo 的 videoLateUs、
+                     * mPlayedVideoPts）。两条轴之间的映射就是 mActiveVideoPtsOffset；seek 之前
+                     * 它由切档预滚提供，而 FlushVideoPath 为了重建时间轴必须把它清零
+                     * （本文件 FlushVideoPath 里那句 `mActiveVideoPtsOffset = INT64_MIN`）
+                     * —— 落地之后**没有任何地方把它建回来**。
                      *
                      * 后果（真机日志，两次 seek 的算术各自独立吻合）：落点关键帧的
                      * timePosition=40.0s，而 seek 后第一张上屏的帧 pts=52.135s
@@ -5418,20 +5197,12 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                      * 命中"早于主时钟 10ms 以上一律不渲染"那条直接 return
                      * ⇒ 帧全部堆在 mVideoFrameQue 里出不去，codec 的输出缓冲不回收、
                      * 随即不再交付输入缓冲（日志 `codec has had no input buffer` 出现在
-                     * 队首冻结之后 ⇒ 它是结果不是原因），读前闸门也按两把不同的尺子比较
-                     * （同一时刻报 front 53636917 比 master 40020000 超前 13616 ms，
-                     * 真实只有 1.5s）⇒ 整机冻结，直到时钟自己爬过那 12.1 秒。
-                     * 同一时刻的第二个后果：位置锚点被钉在 52.135s（mPlayedVideoPts），
-                     * 位置回调往前跳一次；归一化之后锚点就是落点本身，不再跳。
+                     * 队首冻结之后 ⇒ 它是结果不是原因）⇒ 整机冻结，直到时钟自己爬过那 12.1 秒。
                      *
                      * 修法：落点包自己同时带着两个值 —— timePosition（全局时间轴）与 pts（原始轴），
-                     * 两者之差正是这一路流的 time2ptsDelta，与切档预滚建立偏移的式子
-                     * （mPendingVideoPtsOffset = frameTimePosition - framePts）完全同源。
-                     * 复用**既有**成员与**既有**两个消费者：DecodeVideoPacket 给帧做 pts 归一化、
-                     * doReadPacket 的读前闸门把包 pts 折算到主时钟同一把尺子上。
-                     * 不新增任何状态，不动落点 / 目标语义（mSeekPositionFloorUs、
-                     * mSeekRenderGateUs、SEEK_EXACT_LANDING_BUDGET_US 全部不变），
-                     * 位置地板照旧保证进度条不回退。
+                     * 两者之差正是这一路流的 time2ptsDelta。复用**既有**成员与**既有**两个消费者：
+                     * DecodeVideoPacket 给帧做 pts 归一化、doReadPacket 的读前闸门把包 pts 折算到
+                     * 主时钟同一把尺子上。
                      *
                      * 保真：pts 与 timePosition 本来就一致的片源算出来是 0，这一句只在两者真的
                      * 不一样时才置位 ⇒ 那些片源的判据逐字不变（mActiveVideoPtsOffset 保持
@@ -5453,10 +5224,10 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                     }
 
                     /*
-                     * 1b：整条音频时间轴对齐到**上面的锚点**（目标优先，见 B13）。清的是
-                     * **本进程内**已解码帧队列，不动设备、不动音频解码器：下一帧音频会按锚点
-                     * 重新建立时间轴（mPlayedAudioPts == INT64_MIN 那条既有交接路径），
-                     * 因此"设备位置按旧时间轴报数"再也不可能把主时钟拽走。
+                     * 1b：把整条音频时间轴重基到**目标点**。清的是**本进程内**已解码帧队列，
+                     * 不动设备、不动音频解码器（它们已由本次不连续点的 FlushAudioPath 处理）：
+                     * 下一帧音频会按目标点重新建立时间轴（mPlayedAudioPts == INT64_MIN 那条
+                     * 既有交接路径），因此"设备位置按旧时间轴报数"再也不可能把主时钟拽走。
                      */
                     while (!mAudioFrameQue.empty()) {
                         mAudioFrameQue.pop_front();
@@ -5470,16 +5241,15 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                     /* 音频包指针也必须丢：它属于 seek 前的旧时间轴。 */
                     mAudioPacket = nullptr;
 
-                    AF_LOGI("seek audio aligned to the CLOCK anchor: landing=%lld anchor=%lld target=%lld "
-                            "dropped=%lld audioFront=%lld (audio before the anchor is dropped so the first "
-                            "audio frame sits at the target; no device flush, the decoded frames from the "
-                            "old timeline are discarded and the audio clock is rebased to the anchor)\n",
-                            (long long) landingUs, (long long) audioAnchorUs,
-                            (long long) mDiscontinuity.targetUs, (long long) dropped,
+                    AF_LOGI("seek audio aligned to the TARGET point: landing=%lld target=%lld dropped=%lld "
+                            "audioFront=%lld (audio starts at the same point the audio clock base is pinned "
+                            "on; no floor and no watermark — old-timeline data was invalidated by the "
+                            "discontinuity flush)\n",
+                            (long long) landingUs, (long long) audioAnchorUs, (long long) dropped,
                             (long long) mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO));
                 } else {
-                    AF_LOGI("seek audio align skipped (landing=%lld audioFront=%lld) — falling back to "
-                            "waiting for the clock\n",
+                    AF_LOGI("seek audio align skipped (landing=%lld target unknown audioFront=%lld) — "
+                            "the audio path continues on its existing timeline\n",
                             (long long) landingUs, (long long) audioFront);
                 }
             }
@@ -7138,7 +6908,7 @@ bool SuperMediaPlayer::render()
      * 现在的规则：**音频按自己的 PTS 与缓冲推进，与视频是否产出无关**；
      * 需要整体停顿时，由"缓冲/停顿"状态统一停时钟与全部渲染（DoCheckBufferPass），
      * 而不是靠"等 N 毫秒还没等到就动手"的兜底。
-     * 位置侧不受影响：getCurrentPosition() 仍被 mSeekPositionFloorUs 钉在目标点。
+     * 位置侧不受影响：getCurrentPosition() 仍由不连续点的目标点给出。
      */
 
     /*
@@ -7152,162 +6922,30 @@ bool SuperMediaPlayer::render()
      */
     if (mCurrentAudioIndex >= 0) {
         /*
-         * A 方案（落点关键帧语义）：seek 之后若音频第一帧还在主时钟**前面**，先别推它。
-         * 否则音频设备位置一接回主时钟就会把时钟往前拽过落点，视频随即永久欠下
-         * "目标点 − 落点"这段债；4K 解码只有约 1×，永远还不清 → 每帧都被判迟到丢掉
-         * → 画面冻住、声音继续（用户实测的那条）。
-         * 判据全是事件：主时钟（此时按系统时间从落点 1× 前进）走到队首音频帧的 PTS
-         * 就自动恢复推送。只在 seek 窗口内生效（mSeekVideoAnchorDone / reanchorPending）。
+         * ============ 【P2：音频永不"扣住 PCM 等时钟"】============
+         *
+         * 这里原来有一道"seek 窗口内音频队首超前主时钟就按住 PCM"的门，加上它的三种豁免
+         * （暂停态 / 缓冲态 / 时钟不走）与配套的静音窗口日志。它们被整体删除，理由是
+         * **循环依赖**而不是参数调不好：
+         *   · 扣住 PCM ⇒ 音频队列不出队 ⇒ 设备位置不前进 ⇒ 音频时钟永远到不了目标点
+         *     ⇒ 门永远不开。真机表现为 6.6~8.4 秒静音，并把应用侧那个"音频超时"看门狗
+         *     触发成 baseStop 停播；
+         *   · 新模型下"音频比时钟超前"从定义上不存在：音频时钟 =
+         *     目标点 + 设备已消费量（见 getAudioPlayTimeStamp），即时钟**由**设备消费量
+         *     推出来，而不是反过来要求音频等时钟。
+         *
+         * 现在的规则：音频按自己的时间轴无条件推进（要等也只等"音频数据到达"）；
+         * 需要整体停顿时由"缓冲/停顿"状态统一停时钟与全部渲染（DoCheckBufferPass），
+         * 而不是靠"按住 PCM"这种动作。判据全是状态，无计时器、无阈值、无死线。
          */
-        bool holdAudioForSeek = false;
-
-        /*
-         * ============ 判据只在 seek 窗口内生效（本轮修"正常播放偶发静音"）============
-         *
-         * 原来第二支的条件里带着 `!mSeekVideoAnchorDone`，而这个闩在**任何一次 seek
-         * 的落点帧被采纳之前恒为假** —— 于是整段正常播放（以及"某次 seek 的落点帧
-         * 始终没上屏"之后的全部时间）里这一支都是开着的：只要音频队首 PTS 比主时钟
-         * 超前 100ms 以上，音频就被按住不推。
-         * 而带 9 帧缓冲下限的音频队列（≈190ms）**天然**会让队首 PTS 超前设备播放位置
-         * 100ms 以上，于是正常播放中会反复出现"声音停一小会儿、然后自己恢复"
-         * （设备把已写入的数据播完 → 时钟追上队首 → 门自动开）。
-         *
-         * 现在的判据只用两个真正属于 seek 窗口的状态：
-         *   mSeekFlag                  —— seek 在途（落点帧上屏后清零）；
-         *   mAudioClockReanchorPending —— seek 已结束但时钟还没交给音频
-         *                                  （只在 FlushAudioPath 且 mSeekFlag 为真时置位）。
-         * 两者都为假 = 正常播放：**照推不误**，不存在任何静音门。
-         *
-         * seek 窗口内也不是无条件按住：只在"音频队首已经跑到主时钟前面"时才按 ——
-         * 否则推它等于把时钟往前拽过落点，视频随即欠下"目标点 − 落点"的债。
-         * seek 之后主时钟按 1× 自由前进（getPlayingAudioTime() 此时返回 INT64_MIN
-         * 的既有语义），所以这道门**自己会开**：时钟走到队首 PTS 就恢复推送，
-         * 最多等 A/V 落点之差（≤1 个 GOP），**不会**因为视频一帧不出而永久静音
-         * （那正是以前 mSeekNeedCatch 的老毛病，不能再引入）。
-         */
-        const bool inSeekAudioWindow = (mSeekFlag && !mSeekVideoAnchorDone) || mAudioClockReanchorPending;
-        int64_t audioSilencePts = INT64_MIN;
-        int64_t audioSilenceClock = INT64_MIN;
-
-        /*
-         * ============ 【B13：暂停态绝不按"等时钟追上"按住 PCM】============
-         *
-         * 下面这道门的前提是"时钟会自己往前走，走到队首 PTS 就开"。暂停态这个前提不成立：
-         * ProcessPauseMsg → startRendering(false) → mMasterClock.pause()，时钟冻住，
-         * "追上队首"永远不会发生 —— 于是 PCM 一直不推、以音频为参考的时钟也不动、
-         * 视频落点帧的渲染门永远不满足（实测：暂停态 seek 之后 fps=0，画面与进度条都不动，
-         * frameQ=1 而 master 已经越过落点）。
-         *
-         * 所以暂停态**不参与**这道门：音频照常走下面的 RenderAudio（它会按锚点丢掉旧时间轴的帧），
-         * 恢复播放时从锚点（目标）起算。要等也只等"音频数据到达"，**不等时钟**。
-         * 判据是纯状态（mPlayStatus），没有计时器；只影响暂停态，播放/缓冲路径逐字不变。
-         */
-        /*
-         * ============ 【本轮修：时钟不走的时候，这道门必须彻底禁用】============
-         *
-         * 真机日志（2026-09-27 10:29:12~10:29:21，本地文件）：
-         *   audio silence starts (reason=4): buffering: the clock and the audio render are paused (empty cache)
-         *   audio silence starts (reason=1 audioPts=33130667 masterClock=30080897):
-         *       seek window: the pcm head is ahead of the master clock, holding pcm until the clock catches up
-         *   audio keep-alive: reached the resource cap (120 silence writes ≈ 2400 ms)
-         *   audio silence ends (was reason=1)          ← 总共 **8.4 秒**没有任何声音
-         *
-         * 死锁形状：缓冲态把主时钟 pause 了（上面第一条，reason=4），而这道门的前提是
-         * "时钟按 1× 自己往前走、走到队首 PTS 就开"（见上面那段注释）。时钟被暂停之后
-         * "追上"永远不可能发生 ⇒ PCM 一直被扣住 ⇒ 设备侧只能写 keep-alive 静音，
-         * 用户就是"seek 之后没声音了，过一会儿才出来"。
-         *
-         * 处置：把"时钟**此刻**是不是在走"作为禁用条件（mMasterClock.isPaused()），
-         * 与暂停态、缓冲态一起并入 seekHoldDisabled。语义：
-         *   · 时钟在走（正常 seek，缓存够）⇒ 这道门照旧生效，A/V 落点之差不背债；
-         *   · 时钟停着（缓冲/暂停）⇒ 立刻放行 PCM —— 宁可让音频先走、
-         *     也不允许"永远等一个不动的时钟"这种结构性静音。
-         * 全状态判据、无计时器；不改变任何落点/精度判定。
-         */
-        const bool clockNotAdvancing = mBufferingFlag || mMasterClock.isPaused();
-        const bool seekHoldDisabled = (mPlayStatus == PLAYER_PAUSED) || clockNotAdvancing;
-
-        if (!seekHoldDisabled && inSeekAudioWindow && !mAudioFrameQue.empty() && mAudioFrameQue.front() != nullptr) {
-            audioSilencePts = mAudioFrameQue.front()->getInfo().pts;
-            audioSilenceClock = mMasterClock.GetTime();
-
-            /*
-             * ============ 【本轮修：不再真的扣住 PCM —— 它会把自己卡死】============
-             *
-             * 真机时间线（2026-09-27 10:29:24.789 开始，本地/DASH）：
-             *   24.911  seek audio aligned to the CLOCK anchor: landing=150150000 anchor=156990000 dropped=99
-             *   24.950  seek first decodable frame shown              ← 画面 161ms 出画
-             *   25.067  audio silence starts (reason=1): the pcm head is ahead of the master clock, HOLDING pcm
-             *   27.403  audio keep-alive: reached the resource cap (120 silence writes ≈ 2400 ms)
-             *   27.927  onAudioException -1003 → PlayerBase baseTimeout() → baseStop()   ← 应用侧看门狗停播
-             *   31.588  audio first frame after seek: pts=156992000   ← 音频到锚点用了 6.6 秒
-             *
-             * 死锁链条是确定的：这次 seek 要求音频**对齐到锚点**（156.99s），而音频要到锚点就必须
-             * 让已解出的音频帧不断出队前进；"扣住 PCM"恰恰把 RenderAudio 整段跳过 ⇒ 队列排不动
-             * ⇒ 音频解码器停在 152.3s ⇒ 永远到不了 156.99s ⇒ PCM 永远不放行。6.6 秒静音、以及
-             * 应用侧那个"音频超时"看门狗，都是这条死锁的表现。
-             *
-             * 处置：**不扣** —— PCM 照推（下面的 RenderAudio 照走）。代价是音频可能比主时钟早
-             * 零点几秒进入设备；但主时钟的落点锚定 + 位置地板 + 单调锚点（见 RenderVideo 的
-             * "锚点不许往回拉"）已经把这零点几秒的偏差收在可控范围内，而"结构性静音 + 被看门狗
-             * 停播"是绝对不可接受的。原判据保留在上面（audioSilencePts/Clock 照采），只把
-             * "按住"这个动作去掉，并在首次命中时打一条诊断，方便日志确认这条路径被走过。
-             */
-            if (audioSilencePts > 0 && audioSilenceClock != INT64_MIN &&
-                audioSilencePts > audioSilenceClock + 100 * 1000 &&
-                mAudioSilenceReason == AUDIO_SILENCE_NONE) {
-                AF_LOGW("seek window: the pcm head (%lld) is ahead of the master clock (%lld) by %lld ms, but pcm "
-                        "is NOT held any more — holding it stops the audio queue from draining, so the audio "
-                        "could never reach the seek anchor and the whole path deadlocked (that was the 6.6 s of "
-                        "silence + the app-side audio timeout)\n",
-                        (long long) audioSilencePts, (long long) audioSilenceClock,
-                        (long long) ((audioSilencePts - audioSilenceClock) / 1000));
-            }
-        }
-
-        /*
-         * 静音窗口起止各一条（只在状态变化时打，不是周期日志）。
-         *
-         * 【第 3 项：不再在窗口内反复打】
-         *   原来每次 render() 都按"此刻有没有按住"上报，而窗口内"按住/放行"会在
-         *   20~40ms 内交替（音频设备本身还有约 190ms 已写入的 PCM 在播），于是实测
-         *   0.6s 内打了约 40 条 start/end 往返（安卓日志 338~376 行）。
-         *   现在只在**真正跨越边界**时各打一条：
-         *     · 进入 seek 窗口且确实按住了 → 一条 start；
-         *     · 离开 seek 窗口 → 一条 end。
-         *   窗口内的开合不逐条上报（那不是"声音没了"，是设计内的短暂让位）。
-         *   另外这里只操作 reason==1 这一档：设备侧 reason=2/3 的记录不会被本处覆盖。
-         */
-        if (!inSeekAudioWindow) {
-            if (mAudioSilenceReason == AUDIO_SILENCE_SEEK_CLOCK) {
-                logAudioSilence(AUDIO_SILENCE_NONE, "left the seek window, pcm flows again",
-                                audioSilencePts, audioSilenceClock);
-            }
-        } else if (seekHoldDisabled) {
-            /*
-             * 暂停态：上面那道门被禁用，PCM 照推。若之前已经报过"被按住"，这里把它收尾
-             * （logAudioSilence 只在**状态变化**时输出，所以不是逐帧日志）。
-             */
-            if (mAudioSilenceReason == AUDIO_SILENCE_SEEK_CLOCK) {
-                logAudioSilence(AUDIO_SILENCE_NONE,
-                                "the clock is not advancing (paused/buffering), so pcm is not held any more",
-                                audioSilencePts, audioSilenceClock);
-            }
-        } else if (holdAudioForSeek && mAudioSilenceReason == AUDIO_SILENCE_NONE) {
-            logAudioSilence(AUDIO_SILENCE_SEEK_CLOCK,
-                            "seek window: the pcm head is ahead of the master clock, holding pcm "
-                            "until the clock catches up",
-                            audioSilencePts, audioSilenceClock);
-        }
-
-        if (!holdAudioForSeek) {
-        int ret;
-        do {
-            ret = RenderAudio();
-            if (RENDER_NONE != ret) {
-                audioRendered = true;
-            }
-        } while (ret == RENDER_FULL);
+        {
+            int ret;
+            do {
+                ret = RenderAudio();
+                if (RENDER_NONE != ret) {
+                    audioRendered = true;
+                }
+            } while (ret == RENDER_FULL);
         }
     }
 
@@ -7375,139 +7013,72 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
     }
 
     /*
-     * C 方案（音频落点地板）：seek 落点 PTS 已知后，任何**早于落点**的音频帧都不再
-     * 推给设备 —— 这些帧是音频解码器按 seek 前的旧起点解出来的（C 只裁了包队列，
-     * 没有 flush 设备，所以它们还在 mAudioFrameQue 里）。丢掉它们，音频就和视频
-     * 从同一个落点开始：A 的"音频等时钟"不需要（无 ≤1 个 GOP 静音），也不会把
-     * 主时钟往前拽过落点。
+     * ============ 【P2：音频与视频用同一个目标点】============
+     *
+     * 落点过滤仍然激活（= 本次 seek 的定位阶段）时，**完全落在目标点之前**的音频帧
+     * 不上设备。这与渲染侧的落点判据同源：视频同样是"完全落在目标之前的帧不上屏"，
+     * 两边读的是同一个 mDiscontinuity.targetUs。
+     *
+     * 为什么必须丢：音频时钟的基准钉在目标点（见 Discontinuity::audioBase* 与
+     * getAudioPlayTimeStamp()），位置 = 目标点 + 设备已消费量。若把这些帧推给设备，
+     * 时钟就会比内容**超前**（目标点 − 帧 pts），视频随即被判"迟到"而全丢 —— 那正是
+     * 以前"音频对齐到视频落点、时钟钉在目标点"造成的错位。
+     *
+     * 旧时间轴残留（音频解码器内部还压着旧时间轴的数据）不再需要"连续性高水位 + 容差 +
+     * 丢帧上限"这套推测式判据：本次不连续点的 FlushAudioPath() 已经把音频解码器与
+     * 音频设备一起 flush，旧代际的数据在架构上不可能到达这里。
+     *
+     * 丢帧的日志按**代际**限频（`mAudioLandingDropLoggedGen`）：一个 seek 打至多一条，
+     * 于是用户能把"音频被正确地丢到目标点"与"音频根本没来"区分开，又不会刷屏
+     * （前缀帧可能有成百帧，逐帧记只会淹掉真正重要的那几行）。判据是纯状态比较。
      *
      * 返回 RENDER_NONE（与上面 pts==INT64_MIN 的丢弃一致），**不能**返回 RENDER_FULL：
      * 后者会让 render() 把本轮当成"渲染成功"（audioRendered=true），而 doRender()
-     * 用 rendered 判定 seek 完成 —— 纯丢帧绝不能冒充"落点帧已上屏"。
-     * 地板是事件置位、事件清零（首帧落点音频上设备时），不是时间判据。
+     * 用 rendered 判定 seek 完成 —— 纯丢帧绝不能冒充"有帧上屏"。
      */
-    if (mSeekAudioFloorUs != INT64_MIN) {
-        /*
-         * C + 第 4 条：**双侧**落点地板。seek 落点 PTS 已知后：
-         *   · 低于落点的帧 —— 按旧起点解出来的（C 的原始判据）；
-         *   · 高出"连续性高水位"超过容差的帧 —— 解码器**内部**残留的旧时间轴数据
-         *     （输入队列 ≤16 包 + 输出队列 ≤10 帧），它们解出来晚、PTS 却落在 seek 之前
-         *     的位置上（实测高出落点 8.8~11.9s）。这一类只判"低于落点"是挡不住的。
-         * 两类都不是新时间轴的数据，丢掉即可；新时间轴的帧从落点连续到达（+≤21ms），
-         * 会被接受并把高水位推进。
-         *
-         * 【本轮】改成**一次调用把整段不属于新时间轴的前缀丢完**，不再每轮只丢一帧。
-         * 每轮一帧时，解码器内部那 ≤26 帧残留会以"主循环轮次"为单位拖住第一帧落点音频：
-         * 主循环 30~100Hz 下就是额外 0.3~0.9 秒静音 —— 这正是"seek 后一段时间没声音"
-         * 的第二个来源（第一个是下面出口里"声音等视频解码器"那个条件）。
-         * 丢完前缀后**继续用新的队首**走正常推送路径，所以静音只剩"本轮"。
-         *
-         * 返回 RENDER_NONE（与上面 pts==INT64_MIN 的丢弃一致），**不能**返回 RENDER_FULL：
-         * 后者会让 render() 把本轮当成"渲染成功"（audioRendered=true），而 doRender()
-         * 用 rendered 判定 seek 完成 —— 纯丢帧绝不能冒充"落点帧已上屏"。
-         */
-        int drainedOldTimeline = 0;
+    if (mDiscontinuity.filterActive.load()) {
+        const int64_t targetUs = mDiscontinuity.targetUs;
 
-        while (!mAudioFrameQue.empty() && mAudioFrameQue.front() != nullptr) {
-            const int64_t headPts = mAudioFrameQue.front()->getInfo().pts;
+        if (targetUs != INT64_MIN) {
+            int droppedBeforeTarget = 0;
+            int64_t firstDroppedUs = INT64_MIN;
 
-            if (headPts == INT64_MIN) {
-                break;
+            while (!mAudioFrameQue.empty() && mAudioFrameQue.front() != nullptr) {
+                const int64_t headPts = mAudioFrameQue.front()->getInfo().pts;
+
+                if (headPts == INT64_MIN || headPts >= targetUs) {
+                    break;
+                }
+
+                if (firstDroppedUs == INT64_MIN) {
+                    firstDroppedUs = headPts;
+                }
+
+                mAudioFrameQue.pop_front();
+                ++droppedBeforeTarget;
             }
 
-            const bool headBelowLanding = (headPts < mSeekAudioFloorUs);
-            const bool headFromOldTimeline =
-                (mSeekAudioContinuityUs != INT64_MIN &&
-                 headPts > mSeekAudioContinuityUs + SEEK_AUDIO_CONTINUITY_TOLERANCE_US &&
-                 mSeekAudioStaleDrops < SEEK_AUDIO_STALE_DROP_MAX);
-
-            if (!headBelowLanding && !headFromOldTimeline) {
-                break;
+            if (droppedBeforeTarget > 0 && mAudioLandingDropLoggedGen != mDiscontinuity.generation.load()) {
+                mAudioLandingDropLoggedGen = mDiscontinuity.generation.load();
+                AF_LOGI("audio landing drop: dropped=%d pos=%lld target=%lld generation=%d (audio starts at the "
+                        "SAME target point the video landing filter uses; the audio clock base is pinned on it, "
+                        "so frames before it are never sent to the device)\n",
+                        droppedBeforeTarget, (long long) firstDroppedUs,
+                        (long long) targetUs, mAudioLandingDropLoggedGen);
             }
 
-            if (headFromOldTimeline) {
-                ++mSeekAudioStaleDrops;
-                ++drainedOldTimeline;
+            if (mAudioFrameQue.empty()) {
+                return ret;
             }
 
-            mAudioFrameQue.pop_front();
-        }
+            /* 队首可能刚变过：重新取时间戳（后面的推送与记账都用它）。 */
+            pts = mAudioFrameQue.front()->getInfo().pts;
+            position = mAudioFrameQue.front()->getInfo().timePosition;
 
-        if (drainedOldTimeline > 0) {
-            AF_LOGW("seek audio align: drained %d frame(s) from the old timeline in one pass (watermark=%lld, "
-                    "landing=%lld)\n",
-                    drainedOldTimeline, (long long) mSeekAudioContinuityUs,
-                    (long long) mSeekAudioFloorUs);
-        }
-
-        if (mAudioFrameQue.empty()) {
-            return ret;
-        }
-
-        /* 上面可能刚丢掉了若干帧：队首变了，重新取时间戳（后面的推送与记账都用它）。 */
-        pts = mAudioFrameQue.front()->getInfo().pts;
-        position = mAudioFrameQue.front()->getInfo().timePosition;
-
-        if (pts == INT64_MIN) {
-            mAudioFrameQue.pop_front();
-            return ret;
-        }
-
-        /* 新时间轴的帧：把连续性高水位推进到它（正常帧间隔由容差覆盖）。 */
-        if (mSeekAudioContinuityUs == INT64_MIN || pts > mSeekAudioContinuityUs) {
-            mSeekAudioContinuityUs = pts;
-        }
-    }
-
-    /*
-     * ============ 修法 1：落点音频首帧**先锚定主时钟，再让它上设备** ============
-     *
-     * 事件：本次 seek 的落点音频第一帧即将上设备。
-     * 条件（全部是状态，无计时器）：
-     *   · mSeekAudioFloorUs 已知（C 对齐事件把落点记下来的窗口内）；
-     *   · 该帧就在落点附近：|pts − floor| ≤ SEEK_AUDIO_CONTINUITY_TOLERANCE_US（200ms，
-     *     与双侧地板的容差同源，避免把"跳过去"的帧误当落点帧）；
-     *   · 本次 seek 还没锚过（mSeekClockAnchored）。
-     * 动作：把主时钟设到这一帧的 pts，并置 mSeekVideoAnchorDone（让 doRender 里
-     * 那个视频锚点按既有 `!mSeekVideoAnchorDone` 条件自动不重复锚），清掉锚点事件闩。
-     *
-     * 为什么必须"先锚再推"（因果）：原来的顺序是"先推音频、后由视频锚点回拉时钟"。
-     * 安卓实测（18:52:04）：04.531 设备 flush → 04.544 音频首帧已推给设备 →
-     * 04.554 `renderer joining … (master=88590294)`（时钟还停在**目标点**）→
-     * 04.596 视频锚点才把时钟拉到落点 85.085s → 04.603 **`audio silence starts
-     * (reason=1 audioPts=85461333 masterClock=85092200)`**：音频在被回拉前已经
-     * 突发推了几帧（85.085→85.46），时钟一回到落点，音频队首就超前 ~369ms，
-     * render() 里那道"音频等时钟"的门（inSeekAudioWindow）立刻把后续音频按住，
-     * 设备没 PCM → 写静音 → 用户听到 **0.3~0.4 秒的顿挫**，并伴随一串
-     * `audio keep-alive: writing silence`。
-     * 先锚之后：时钟在音频首帧上就已经等于内容位置，那 369ms 的超前从根上不存在，
-     * A 门的第二个条件（mAudioClockReanchorPending）也在同一次调用的交接分支里
-     * 立即清零 ⇒ 门不会再被触发 ⇒ 不再有这段静音。
-     *
-     * 位置语义零改动：本处只写主时钟，不碰 mSeekPositionFloorUs / getCurrentPosition()。
-     */
-    if (!mSeekClockAnchored && mSeekAudioFloorUs != INT64_MIN && pts != INT64_MIN &&
-        llabs(pts - mSeekAudioFloorUs) <= SEEK_AUDIO_CONTINUITY_TOLERANCE_US) {
-        /*
-         * 这里同样收口到 fetchSeekClockAnchorUs()（与视频锚点共用唯一实现）：
-         * 音频首帧只有在**不早于目标**（容差内）时才允许锚主时钟。早于目标的那一帧
-         * 同样只上设备、不锚时钟 —— 否则时钟会被拉回落点，位置上报与追赶窗口一起错位
-         * （实测 0.083s vs 目标 2.844s 就是这条路径的形状）。
-         * 不满足规则时**不清** mSeekAnchorPending / mSeekVideoAnchorDone：锚点事件留给
-         * 后面真正 >= 目标的帧（音频下一帧、或视频落点帧上屏事件）。
-         */
-        const int64_t seekAudioAnchorUs = fetchSeekClockAnchorUs(pts, "audio landing first frame");
-
-        if (seekAudioAnchorUs != INT64_MIN) {
-            mMasterClock.setTime(seekAudioAnchorUs);
-            mSeekClockAnchored = true;
-            mSeekVideoAnchorDone = true;
-            mSeekAnchorPending = false;
-            AF_LOGW("seek anchor (audio landing first frame): pts=%lld floor=%lld target=%lld anchor=%lld "
-                    "afterSeekMs=%lld\n",
-                    (long long) pts, (long long) mSeekAudioFloorUs, (long long) mDiscontinuity.targetUs,
-                    (long long) seekAudioAnchorUs,
-                    (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
+            if (pts == INT64_MIN) {
+                mAudioFrameQue.pop_front();
+                return ret;
+            }
         }
     }
 
@@ -7572,82 +7143,42 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
         /*
          * 诊断（每次 seek 后第一帧音频只打一条，天然限频 —— 因为 1b 会把 mPlayedAudioPts
          * 重置为 INT64_MIN，所以这个分支每个 seek 只会走到一次）：
-         * 直接回答"1b 对齐之后音频首帧的 PTS 到底是多少"。
-         *   pts          = 落点对齐后第一帧音频自己的 PTS；
-         *   landingFloor = 1b 记下的视频落点地板（对齐目标）；
-         *   target       = 用户 seek 的目标点（位置上报仍钉在它上面）。
-         * 三者若明显不一致，就说明音频包的读取位置与视频落点不在同一处
-         * （解复用侧把音频定位到了目标点，而视频只能从关键帧起步）。
+         * 直接回答"音频首帧的 PTS 与目标点差多少"，也就是 afterSeekMs 的来源。
+         *   pts    = 音频第一帧自己的 PTS（按 RenderAudio 的丢弃判据，它必然 >= 目标点）；
+         *   target = 本次 seek 的目标点（音频时钟基准与位置上报用的都是它）。
          */
-        if (mSeekAudioFloorUs != INT64_MIN || mSeekFlag || mAudioClockReanchorPending) {
-            AF_LOGI("audio first frame after seek: pts=%lld landingFloor=%lld target=%lld afterSeekMs=%lld\n",
-                    (long long) pts, (long long) mSeekAudioFloorUs, (long long) mDiscontinuity.targetUs,
+        if (mDiscontinuity.targetUs != INT64_MIN || mSeekFlag) {
+            AF_LOGI("audio first frame after seek: pts=%lld target=%lld afterSeekMs=%lld\n",
+                    (long long) pts, (long long) mDiscontinuity.targetUs,
                     (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
         }
 
         /*
-         * 落点音频的第一帧已经交给设备（上面的 renderAudioFrame 已成功）：
-         * C + 第 4 条的落点地板/连续性高水位完成使命，一起清零。
-         * 之后进来的帧 PTS 单调递增，地板不会再命中；对齐窗口关闭后本判据不再干预
-         * （真正的时间戳跳跃/缺包由下游既有机制处理，不被这里误伤）。
+         * ============ 【P2：音频时钟基准的唯一来源在这里兜底】============
+         *
+         * 基准 = **内容位置**，同时记下"此刻设备已消费量"的快照；之后
+         *     audioPosition = 基准 + (设备已消费 - 快照)
+         * 由 getAudioPlayTimeStamp() 给出（单位微秒，与 targetUs 同一根轴）。
+         *
+         * 基准的主要写点是 FlushAudioPath()（设备 flush 后"已消费量"重新起算，
+         * 那是它唯一需要重钉的时刻）：seek 时钉**目标点**（音频与视频同一个目标点），
+         * 其它 flush 保持内容位置连续。这里只是兜底 —— 基准还没有有效值
+         * （例如首次起播、或 FlushAudioPath 时设备位置还不可用）时，用这一帧的
+         * 内容位置作为起点。
+         *
+         * 暂停态**不需要任何特殊处理**：设备暂停 ⇒ 已消费量不增长 ⇒ 位置恒定。
+         * 旧实现那套"暂停态不交接时钟 / 重锚闩 / 设备前进观察"随之整体删除。
          */
-        mSeekAudioFloorUs = INT64_MIN;
-        mSeekAudioContinuityUs = INT64_MIN;
-        mSeekAudioStaleDrops = 0;
+        if (mDiscontinuity.audioBaseUs.load() == INT64_MIN) {
+            pinAudioClockBase(pts);
+        }
 
         /*
-         * A 方案：锚点是**视频落点关键帧的 PTS**，不是音频帧的 PTS。
-         * 视频落点帧还没采纳（mSeekVideoAnchorDone=false）之前，这里**不接音频时钟**、
-         * 也不清 mAudioClockReanchorPending —— 主时钟此时按系统时间从落点 1× 前进
-         * （getPlayingAudioTime() 返回 INT64_MIN 的既有语义），音频帧被 render() 里
-         * 那道门挡着等到时钟追上。等落点帧上屏，下面的分支自然接上音频时钟；
-         * 交接时两者数值已经一致，不会再把时钟往前拽。
+         * 把主时钟的参考交给音频：这是"有音频时主时钟的唯一来源"。
+         * 无音频（或音频设备不可用）时参考为空，主时钟按落点采纳时钉在 targetUs 上
+         * 自走 —— 也就是"无音频时 = 视频落点基准"，两个来源不会同时生效。
          */
-        bool handOverToAudio = true;
-
-        /*
-         * ============ 【B13：暂停态不按音频帧改写时钟、也不把时钟交给音频】============
-         *
-         * 机制（都可静态核对）：
-         *   · af_clock::set() 在**暂停**态改的是"暂停值"（framework/utils/af_clock.cpp:55-57
-         *     `mPauseUs = us`）⇒ 暂停态调 mMasterClock.setTime(pts) 等于把**冻结的时钟**
-         *     挪到音频帧的位置上；
-         *   · SystemReferClock::GetTime() 在时钟运行起来之后会按音频参考重同步
-         *     （mediaPlayer/system_refer_clock.cpp:16-45）⇒ 一旦交接给音频，恢复播放时
-         *     时钟从**音频帧的位置**起算，而不是 seek 的目标点。
-         * 两者叠加就是用户看到的"暂停期间 master 从 0.083s 变成 3.09s、恢复后从错误时间点起播"。
-         *
-         * 处理：暂停态**时钟保持不动**（seek 时已被钉在目标上），并且**不交接**给音频；
-         * mAudioClockReanchorPending 留着不清，等恢复播放后的第一帧音频再走同一条既有交接
-         * 路径（那时时钟在跑，交接才是正确动作）。判据是纯状态（mPlayStatus），没有计时器；
-         * 这里不打日志（本函数每帧都走，暂停态又不再被上面的门挡住，逐帧打会刷屏）。
-         */
-        if (mPlayStatus == PLAYER_PAUSED && mAudioClockReanchorPending) {
-            handOverToAudio = false;
-        }
-
-        if (handOverToAudio && mAudioClockReanchorPending) {
-            if (!mSeekVideoAnchorDone) {
-                handOverToAudio = false;
-                AF_LOGI("seek: holding the clock at the video landing point until the frame lands "
-                        "(audio pts=%lld)\n", (long long) pts);
-            } else if (!mSeekClockAnchored) {
-                mMasterClock.setTime(pts);
-                mSeekClockAnchored = true;
-                AF_LOGI("audio clock re-anchored after seek at pts=%lld\n", (long long) pts);
-            } else {
-                AF_LOGI("seek anchored by the video landing frame, audio pts=%lld follows it\n",
-                        (long long) pts);
-            }
-
-            if (handOverToAudio) {
-                mAudioClockReanchorPending = false;
-            }
-        }
-
-        if (handOverToAudio) {
-            mMasterClock.setReferenceClock(getAudioPlayTimeStampCB, this);
-        }
+        mMasterClock.setReferenceClock(getAudioPlayTimeStampCB, this);
     } else {
         if (mLastAudioFrameDuration > 0) {
             if (!mAudioPtsRevert) {
@@ -7695,28 +7226,30 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
                  * （落点 20.833s 的时钟被拽到 29.674s，视频永久欠 8.8s 的债）。
                  *
                  * >1s 只可能来自"参照被换掉"（seek 后音频队列换了一批、解码器/设备重启、
-                 * 换段/换码流），这时正确的动作是**重新锚定 A/V 对**：把音频时间轴直接落到
-                 * 当前帧自己的 PTS 上，偏差不并入 deltaTime，主时钟因此不会阶跃 ——
-                 * 主时钟的锚点仍然只由"落点帧事件"决定（第 1 项）。
+                 * 换段/换码流），这时正确的动作是**只记录事实**：偏差不并入 deltaTime，
+                 * 主时钟也不被这一帧改写 —— 时间轴权威只有一个（目标点 + 设备已消费量）。
                  * 小偏差（<=1s）保持原有渐进策略：每帧最多 5ms，几十帧内收敛。
                  */
                 AF_LOGW("audio timeline re-anchored (offset %lld > 1s): audio pts=%lld, frameDuration=%lld "
-                        "— not folding it into the clock\n",
+                        "— the clock is NOT moved by this frame\n",
                         (long long) mAudioTime.deltaTimeTmp, (long long) pts,
                         (long long) mLastAudioFrameDuration);
 
                 /*
-                 * 【A 方案：置闩】音频时间轴在 seek 之后前跳 > 1s = "容器把音频放到了别处"。
-                 * 实测（安卓 14:34:51）落点 110.110s 而音频下一帧 112.512s（前跳 2026 ms），
-                 * 频道因此写不出 PCM 达 2s，被 Android 判 underrun 停轨 1.45~1.6s。
-                 * 这里**只记录事实**（置闩 + 记数值），不调解复用器：本函数在渲染/读包
-                 * 路径上，调解复用器会造成重入与跨线程占用。真正的处置在主循环里消费。
+                 * 【P2：不再置"按流重定位"事件，也不再把音频时间轴重锚到这一帧】
+                 *
+                 * 旧实现对此做了两件事，P2 都不再保留：
+                 *   · 置一个"音频重定位事件"闩，让消息线程去调解复用器。逐文件核对过该接口
+                 *     不可用（单文件容器的 Seek 完全忽略流下标、会对整个容器再 seek 一次；
+                 *     playlist 容器本来就是"先 seek 视频、再用视频落点 seek 其余流"），
+                 *     而且新模型下这条补救也没有触发源 —— 已整体删除；
+                 *   · 把音频时间轴重锚到这一帧的 pts。那正是"主时钟被音频拽走、位置回弹"
+                 *     的形状：一旦采纳，时钟就不再是"目标点 + 设备已消费量"这唯一来源。
+                 *
+                 * 现在的处理：**只记录事实**（上面那条限频日志），时间轴权威不动。
+                 * 若现场仍看到这条日志，说明容器真的把音频放到了别处 —— 那要在解复用层
+                 * 解决（P4 范围），不能靠把主时钟搬过去掩盖。
                  */
-                mSeekAudioRepositionPending = true;
-                mSeekAudioRepositionUs = (mSeekAudioFloorUs != INT64_MIN) ? mSeekAudioFloorUs
-                                                                          : mDiscontinuity.targetUs;
-                mSeekAudioRepositionJumpUs = mAudioTime.deltaTimeTmp;
-
                 mPlayedAudioPts = pts;
                 mAudioTime.startTime = pts;
                 mAudioTime.deltaTimeTmp = 0;
@@ -7873,13 +7406,13 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
      * 差 11.9s，该文件 IDR 极稀疏）。此刻 mVideoPtsRevert 被置真（40.09 < 51.99），
      * 而暂停中 mPlayedAudioPts 是**暂停前留下的旧值**、mAudioPtsRevert 恒假
      * ⇒ 这个分支永远满足"等音频倒回来"，每轮 return false 把所有帧挡在渲染之前。
-     * 而它位于 K1 落点采纳块（下面 mSeekRenderGateUs 那段）**之前**，于是落点帧
+     * 而它位于落点采纳块（下面的落点过滤判据）**之前**，于是落点帧
      * 永远采纳不了、mSeekFlag 永远清不掉 = "seek 一下就一直转圈加载"。
      * 实测日志：12:35:43.019 `seekFlag=1 playStatus=6(PAUSED) frameQ=1 packetQ(v)=3901
      * master=56351616`，同毫秒 3 行、每秒数百~上千轮，整份 1MB 日志都是它。
      *
      * 处置（小、可静态论证，无任何超时判死）：
-     *   · 有 seek 落点待采纳时（mSeekRenderGateUs 已置位且尚未采纳）**跳过这两个分支**：
+     *   · 有 seek 落点待采纳时（mDiscontinuity.filterActive 为真）**跳过这两个分支**：
      *     seek 是显式重锚，落点采纳必须优先于这条不连续启发式；
      *   · 落点被采纳时（K1 那一段）清掉两个 revert 闩 —— seek 不是时间戳不连续，
      *     启发式从新时间轴重新起算（这就是它的**事件出口**）；
@@ -8214,7 +7747,7 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
 
         /*
          * 这里**什么也不做**：seek 之后的“定位”由 seek 机制自己负责
-         * （SeekTo() + 主时钟钉在 seek 目标 + mSeekPositionFloorUs 的地板 +
+         * （SeekTo() + 主时钟钉在 seek 目标 + 不连续点的目标点基准 +
          * beginRendererJoining() 的追赶窗口 + 下面 RenderVideo() 的逐帧丢帧），
          * 在追赶窗口内（最多 JOINING_DROP_LATE_WINDOW_MS）收敛到主时钟上。
          *
@@ -8292,7 +7825,7 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
      *   · 画面至少随解码前进，不再"永不收敛 ⇒ 永远冻住"；
      *   · 节拍/追赶语义不变：上屏后计数归零，下一次仍从 0 开始累计，
      *     所以不会退化成"每帧都放行"；
-     *   · **精度零影响**：本行位于落点判据（上面的 mSeekRenderGateUs 块）之后，
+     *   · **精度零影响**：本行位于落点判据（上面的落点过滤块）之后，
      *     落点帧若已被采纳，render 早就是 true，根本走不到这里；本行也不改主时钟、
      *     不改位置上报、不动任何锚点闩 —— 被放行的帧是解码器正常输出的干净帧，
      *     不是"缺参考帧的脏帧"（脏帧在落点块里就被 mSeekDecodeStartIsKey 挡住了）。
@@ -8303,10 +7836,10 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
     /*
      * 【B16-b 补充】追赶期（dropLateVideoFrames）里的另一条出口：偏移可能只是**缓慢**收敛
      * （安卓实测 ~2~3ms/帧），"偏移不再变小"永远不成立，可画面已经冻了好几秒
-     * （`drop frame` 连续数百条，偏移从 0.76s 慢慢往下爬）。所以在**非 seek 落点窗口**
-     * （mSeekRenderGateUs == INT64_MIN）内，连续被拒帧数达到
+     * （`drop frame` 连续数百条，偏移从 0.76s 慢慢往下爬）。所以在**落点过滤未激活**
+     * （mDiscontinuity.filterActive 为假）时，连续被拒帧数达到
      * VIDEO_CATCHUP_DISCARD_STREAK_MAX 也必须放行一帧 —— 宁可极短暂慢放，不冻住。
-     * 与 seek 前缀互不干扰：前缀期间 mSeekRenderGateUs != INT64_MIN，这条不参与。
+     * 与 seek 前缀互不干扰：落点过滤激活期间本阀门不参与。
      */
     const bool catchUpValveTripped = (!mDiscontinuity.filterActive.load() && dropLateVideoFrames &&
                                       mCatchUpDiscardStreak >= VIDEO_CATCHUP_DISCARD_STREAK_MAX);
@@ -9304,7 +8837,42 @@ void SuperMediaPlayer::FlushAudioPath()
      * 内部重建也会调用本函数，但这些场景不能无条件改写正在运行的主时钟，
      * 否则会把一次短暂的音频 flush 变成新的 A/V 跳变。 */
     const bool reanchorAfterFlush = mSeekFlag;
+    /* 基准重设要用到"flush 之前的内容位置"，必须在下面把它清成 INT64_MIN 之前读。 */
+    const int64_t contentPosBeforeFlush = mPlayedAudioPts;
+
     mAVDeviceManager->flushDevice(SMPAVDeviceManager::DEVICE_TYPE_AUDIO);
+
+    /*
+     * ============ 【P2：音频时钟基准的唯一主写点】============
+     *
+     * 设备刚被 flush ⇒ "已消费量"从这一刻重新起算，所以基准必须在这里重钉，否则
+     * "基准 + 已消费量"会瞬间多算一段。**快照必须在 flush 之后取**（顺序反了快照就是
+     * 旧的大值，delta 立刻为负 —— 那正是 getAudioPlayTimeStamp() 里要自愈的坏状态）。
+     *
+     * 三种情形：
+     *   · 不连续点（seek）且目标点已知 ⇒ 基准 = **目标点**（音频与视频同一个目标点）；
+     *   · 其它 flush（缓冲恢复 / 解码器重建 / stop / 后台）⇒ **保持内容位置连续**：
+     *     取"旧基准 + 本次消费增量"，也就是"内容时间不因为一次 flush 而跳变"；
+     *   · 信息不足（首次起播，旧基准或快照还没有）⇒ 退回最后一张已渲染音频帧的
+     *     内容位置；连它都没有就让基准保持作废（RenderAudio 的首帧分支会兜底）。
+     */
+    if (reanchorAfterFlush && mDiscontinuity.targetUs != INT64_MIN) {
+        pinAudioClockBase(mDiscontinuity.targetUs);
+    } else {
+        const int64_t oldBaseUs = mDiscontinuity.audioBaseUs.load();
+        const int64_t oldConsumedUs = mDiscontinuity.audioBaseConsumedUs.load();
+        const int64_t consumedAtFlushUs = mAVDeviceManager->getAudioRenderPosition();
+        const bool consumedAtFlushValid =
+                (consumedAtFlushUs >= 0 && !af_clock_value_is_unset(consumedAtFlushUs));
+
+        if (oldBaseUs != INT64_MIN && oldConsumedUs != INT64_MIN && consumedAtFlushValid) {
+            pinAudioClockBase(oldBaseUs + (consumedAtFlushUs - oldConsumedUs));
+        } else if (contentPosBeforeFlush != INT64_MIN) {
+            pinAudioClockBase(contentPosBeforeFlush);
+        } else {
+            pinAudioClockBase(INT64_MIN);
+        }
+    }
 
     audioDecoderEOS = false;
 
@@ -9314,25 +8882,35 @@ void SuperMediaPlayer::FlushAudioPath()
     }
 
     mPlayedAudioPts = INT64_MIN;
-    mAudioClockReanchorPending = false;
     mAudioPtsRevert = false;
     mAudioTime.startTime = 0;
     mAudioTime.deltaTime = 0;
     mAudioTime.deltaTimeTmp = 0;
     mAudioPacket = nullptr;
     mAudioEOS = false;
-    // seek 后第一张音频帧重新建立音频时钟；不能沿用旧流的 PTS 修正状态。
+    // seek 后第一张音频帧重新建立音频时间轴；不能沿用旧流的 PTS 修正状态。
     mFirstAudioPts = INT64_MIN;
     mFirstSeekStartTime = 0;
     mRemovedFirstAudioPts = INT64_MIN;
-    mAudioClockReanchorPending = reanchorAfterFlush;
+}
+
+void SuperMediaPlayer::pinAudioClockBase(int64_t baseUs)
+{
     /*
-     * 【B14】音频设备刚被 flush（seek / 内部重建）：重新开始观察"设备位置有没有真的前进"。
-     * 与 mAudioClockReanchorPending 同生共死，语义绑定在一起（见 getAudioPlayTimeStamp）。
+     * 音频时钟基准 = **内容位置**（微秒，与 mDiscontinuity.targetUs 同一根轴）。
+     * 同时把"此刻设备已消费量"记成快照：之后
+     *     audioPosition = baseUs + (设备已消费 - 快照)
+     * 由 getAudioPlayTimeStamp() 读出。
+     *
+     * 快照取不到有效值时写 INT64_MIN = "快照待惰性补锚"（读侧第一次拿到有效位置时补）。
+     * 这是本工程里唯一写 audioBaseUs / audioBaseConsumedUs 的地方
+     * （另一个调用点是 RenderAudio 的首帧兜底与 getAudioPlayTimeStamp 的自愈）。
      */
-    mAudioClockProgressBaseUs = INT64_MIN;
-    mAudioClockProgressSeen = false;
-    mAudioClockProgressLogCount = 0;
+    const int64_t consumedUs = mAVDeviceManager->getAudioRenderPosition();
+
+    mDiscontinuity.audioBaseUs = baseUs;
+    mDiscontinuity.audioBaseConsumedUs =
+            (consumedUs >= 0 && !af_clock_value_is_unset(consumedUs)) ? consumedUs : INT64_MIN;
 }
 
 void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch, const char *from)
@@ -9587,7 +9165,7 @@ void SuperMediaPlayer::PostBufferPositionMsg()
         int64_t duration = getPlayerBufferDuration(false, false);
         /*
          * 当前位置：seek 在途时它等于 mSeekPos；seek 已宣告结束、管道还在从落点往目标
-         * 追赶时它被 mSeekPositionFloorUs 钉在**目标点**上（见 getCurrentPosition()）。
+         * 追赶时它由不连续点的目标点基准给出（见 getCurrentPosition()）。
          */
         const int64_t position = getCurrentPosition();
 
@@ -9601,7 +9179,7 @@ void SuperMediaPlayer::PostBufferPositionMsg()
              * 【2026-09-26 修：seek 之后"缓冲条先往回缩、再弹回来"】
              *
              * 这个分支只在"seek 已经宣告完成（isSeeking() 为假，所以上面那道闸门放行）、
-             * 但管道还没走到目标点（mSeekPositionFloorUs 还在）"这段窗口里进得来。
+             * 但管道还没走到目标点（落点过滤仍在激活）"这段窗口里进得来。
              *
              * 分片流的 seek 会把整段包缓存清空再从目标重下（见 SMPMessageControllerListener
              * 里 seek 分支的说明），此刻 getPlayerBufferDuration() 常常返回 -1（音频/视频
@@ -9903,126 +9481,105 @@ int64_t SuperMediaPlayer::getAudioPlayTimeStamp()
         return INT64_MIN;
     }
 
+    /*
+     * seek 在途 ⇒ 音频参考暂不可用（主时钟回到自走：ProcessSeekToMsg 已经把它钉在
+     * seekPos 上 1× 前进）。
+     *
+     * 为什么需要这一条：seek 的音频路会**整体重建**（FlushAudioPath：flush 解码器与
+     * 设备、清帧队列），"设备已消费量"从那之后重新起算。在重建完成之前拿旧基准去算
+     * 位置，只会得到"上一段播放的残留位置"（实测残留 ~2.5s），SystemReferClock 一旦
+     * 采纳就会把主时钟拽过目标点、把目标帧判成迟到。
+     *
+     * 注意：这条只覆盖 seek。切档（switchVideo → beginDiscontinuity）**不 flush 音频**，
+     * 音频时间轴连续，所以那时基准照常生效 —— 这正是"基准不随任何不连续点作废，
+     * 只随音频路的真正重建（seek 的 flush / Reset）失效"这条设计。
+     */
     if (mSeekFlag) {
         return INT64_MIN;
     }
 
     /*
-     * seek 之后音频路被 flush，mAudioTime.startTime 归零、而音频渲染器的位置
-     * 回调还会返回上一段播放累积的旧位置（实测残留 ~2.5s）。此时如果让
-     * SystemReferClock::GetTime() 拿这个值去 reSync，主时钟会瞬间跳到
-     * "seek 目标 + 2.5s"，追赶窗口随之丢掉目标帧（见 ProcessSeekToMsg 里的说明）。
-     * 第一张 seek 后的音频帧上屏时（renderAudioFrame 里 mAudioClockReanchorPending
-     * 分支）才会把时钟锚到真实位置，在那之前一律视为"音频时钟不可用"。
+     * ============ 【P2：主时钟的音频参考 = 目标点 + 设备已消费量】============
+     *
+     * 这是 ijkplayer（"已写字节 + set_clock(serial)"）与 ExoPlayer
+     * （AudioTrackPositionTracker.handleDiscontinuity(playbackPositionUs)）的模型：
+     * 不连续点上把**内容位置基准**钉住，之后位置 = 基准 + 设备**已消费**量。
+     *
+     *   · 基准 baseUs         —— Discontinuity::audioBaseUs。不连续点上 = targetUs
+     *                            （与视频**同一个目标点**）；非 seek 的 flush 保持内容位置连续；
+     *   · 快照 baseConsumedUs —— 写基准那一刻"设备已消费量"的快照；
+     *   · 已消费量            —— 既有接口 getAudioRenderPosition()（Android 为
+     *                            AudioTrack.getPlaybackHeadPosition() 按采样率折算成微秒，
+     *                            设备 flush 之后重新起算）。单位与 targetUs 同一根轴：**微秒**。
+     *
+     * **暂停**：设备暂停 ⇒ 已消费量不增长 ⇒ delta 不变 ⇒ 位置恒定，**不需要任何额外的
+     * 冻结判据**。这是本模型比"墙钟 + 冻结哨兵"更简单的地方，也是"暂停时位置不动"的
+     * 保证来源之一；另一处保证在 SystemReferClock（它只在 `!mClock.isPaused()` 时才取
+     * 参考时钟，所以下面这些 INT64_MIN 退回路径同样是暂停感知的）。
+     *
+     * 三个"不可用"出口（返回 INT64_MIN ⇒ 主时钟退回自走，语义与旧实现一致）：
+     *   1. 设备位置是坏值（哨兵 / 负数）—— 坏值绝不许当基准；
+     *   2. 基准还没建立（audioBaseUs == INT64_MIN）或基准快照还没建立（惰性补锚）；
+     *   3. 设备还没消费过（delta == 0）—— 位置与基准相同，交出去没有信息量。
      */
-    if (mAudioClockReanchorPending) {
+    const int64_t baseUs = mDiscontinuity.audioBaseUs.load();
+
+    if (baseUs == INT64_MIN) {
+        /*
+         * 还没有音频基准：只有两种可能 —— 还没起播（RenderAudio 的首帧分支会钉），
+         * 或刚 Reset 过（换片源 / 停止 / Prepare 把它显式作废，等首次起播的音频帧重钉）。
+         * 两种情况都按"音频时钟暂不可用"返回，主时钟退回自走。
+         */
         return INT64_MIN;
     }
 
-    /*
-     * 【B5-5】`mAudioTime.startTime` 还没被赋过值时它是哨兵值，而
-     * `startTime + deltaTime + aoutPos` 会算出一个**环绕值** —— 真机日志里
-     * `[AlivcPlayerClock] TIMEPOS reSync time 30018965 to -9223372036824759809`
-     * 的那个 referTime 就是它。
-     * 本函数的契约本来就是"音频时钟不可用时返回 INT64_MIN"（上面两条 return 同理），
-     * 所以这里补上同一条判断：让参考时钟看到"不可用"，而不是一个假时间。
-     * 这是 system_refer_clock.cpp 里那道护栏的**源头**修复，两者互为保险。
-     */
-    if (af_clock_value_is_unset(mAudioTime.startTime)) {
-        return INT64_MIN;
-    }
-
-    int64_t aoutPos;
-    aoutPos = mAVDeviceManager->getAudioRenderPosition();
+    const int64_t consumedUs = mAVDeviceManager->getAudioRenderPosition();
 
     /*
-     * ============ 【★ 坏值不许当基准 —— "没声音 / 卡死"的直接来源（Android 实测）★】============
-     *
-     * 真机日志（20:24:49 / 20:25:00 等多次出现）：
-     *   `audio clock: recorded the post-seek device-position base 9223372036854775807 us`
-     *   `audio clock: the device position advanced to 9223372036854775807 us (base=…, delta=0)`
-     * 也就是 **INT64_MAX 这个哨兵值被记成了"基准"**。此后任何真实位置都不大于它 ⇒
-     * 每一帧都走下面那条 `rejected a stale/backward` ⇒ **音频时钟永远交不出去** ⇒
-     * 主时钟失去参考、音频保持静音、画面被判"未来"而不上屏 —— 用户看到的就是
-     * "有时候没声音 / 画面不动但有声音 / 直接卡死"。
-     *
-     * 处置（比 B2 那次"整段不交时钟"窄得多，只针对**坏值**）：
-     *   哨兵值（`af_clock_value_is_unset` 判定的那类）与负值 **既不记基准、也不当进度**，
-     *   直接按"音频时钟暂不可用"返回；真实设备位置一到，走原有逻辑照常放行。
+     * 坏值不许当基准：真机出现过 INT64_MAX 哨兵被记成基准（此后任何真实位置都不大于它 ⇒
+     * 音频时钟永远交不出去 ⇒ 主时钟失去参考、音频静音、画面被判"未来"而不上屏）。
      * 纯值判据、无计时器。
-     * ======================================================================================
      */
-    if (aoutPos < 0 || af_clock_value_is_unset(aoutPos)) {
-        if (mAudioClockProgressLogCount < 8) {
-            ++mAudioClockProgressLogCount;
-            AF_LOGW("audio clock: ignored an invalid device position %lld us (sentinel/negative) — it must not "
-                    "become the progress base, otherwise every real position would be rejected as stale\n",
-                    (long long) aoutPos);
-        }
-
+    if (consumedUs < 0 || af_clock_value_is_unset(consumedUs)) {
         return INT64_MIN;
     }
 
-    /* 【② 已整体回退】这里曾加过 `af_clock_value_is_unset(aoutPos) ⇒ return INT64_MIN`
-     * 的哨兵护栏（回退点 B2）：真机出现"第一次 seek 画面不动、半天才动"——设备在 seek
-     * 窗口内本来就会瞬时经过 PAUSED→STOPPED→PLAYING，框架 baseStop 的 STOPPED 还会持续一段；
-     * 期间时钟改按墙上时间自走，音频回来时 SystemReferClock::GetTime()（:44-45）又**双向**
-     * reSync 把它拉回音频位置（可能向后跳）⇒ 视频被判"未来"继续干等。失败模式比它要治的
-     * "参考值冻结"更糟，故整体回退；详见 AudioTrackRender::device_get_position() 的说明。 */
+    int64_t baseConsumedUs = mDiscontinuity.audioBaseConsumedUs.load();
 
-    /*
-     * ============ 【B14】"设备位置真的前进过"才交出音频时钟 ============
-     *
-     * B2 那次回退是因为"整段时间都不交时钟"这条路本身更糟（回头又会被向后 reSync 拉一次）。
-     * 这里换一个**更窄、只针对坏值**的判据，语义与上面两条 return 完全一致（音频时钟暂不可用）：
-     *   1. seek 后第一帧音频重锚之后，第一次拿到的设备位置只记**基准**，先不交；
-     *   2. 只有观察到设备位置**严格超过**基准（设备真的在产数据/前进）才放行；
-     *   3. 放行之后，仍然拒绝"低于基准"的值（向后跳）—— 这正是会被 GetTime() 双向 reSync
-     *      拿去做"向后拉"的那一类值（AudioTrack 在 seek 窗口内非 PLAYING/PAUSED 时
-     *      getDevicePlayedSimples() 返回 0，位置会塌回 0）。
-     * 期间主时钟按**本地墙钟**自走（与既有 mSeekFlag 窗口内的行为一致），所以不会"卡死"；
-     * 一旦设备真的前进就立刻把音频参考交出去，A/V 仍以音频为主时钟。
-     * 全是事件判据：没有计时器、没有时间阈值；复位点与 mAudioClockReanchorPending 同步
-     * （FlushAudioPath / Reset），因此每次 seek 重新观察一遍。
-     */
-    if (mAudioClockProgressBaseUs == INT64_MIN) {
-        mAudioClockProgressBaseUs = aoutPos;
-
-        if (mAudioClockProgressLogCount < 8) {
-            ++mAudioClockProgressLogCount;
-            AF_LOGI("audio clock: recorded the post-seek device-position base %lld us — the audio reference "
-                    "stays unavailable until the device position is seen to advance\n",
-                    (long long) aoutPos);
-        }
-
+    if (baseConsumedUs == INT64_MIN) {
+        /*
+         * 惰性补锚：写基准时设备位置还不可用（设备刚 flush，或还没起播）。第一次读到
+         * 有效位置就以它为快照，本次先不交时钟（等设备真的消费过再说）。
+         */
+        mDiscontinuity.audioBaseConsumedUs = consumedUs;
         return INT64_MIN;
     }
 
-    if (aoutPos <= mAudioClockProgressBaseUs) {
-        if (mAudioClockProgressLogCount < 8) {
-            ++mAudioClockProgressLogCount;
-            AF_LOGW("audio clock: rejected a stale/backward device position %lld us (base=%lld, delta=%lld us) — "
-                    "a backward reSync here is what froze the picture right after a seek\n",
-                    (long long) aoutPos, (long long) mAudioClockProgressBaseUs,
-                    (long long) (aoutPos - mAudioClockProgressBaseUs));
-        }
+    const int64_t delta = consumedUs - baseConsumedUs;
 
+    if (delta < 0) {
+        /*
+         * ============ 结构性自愈：基准快照必须与设备 flush 配对 ============
+         *
+         * 已消费量向后跳 ⇒ 设备侧被重设过（flush）而快照没跟着重设 —— 例如某条 flush
+         * 路径没有走到 FlushAudioPath 的写点。此时若只返回 INT64_MIN，快照就**永远**
+         * 大于真实已消费量 ⇒ delta 永远为负 ⇒ 音频时钟**永久不可用**（主时钟一直退回
+         * 系统时钟，音画基准漂移）。所以这里就地重新取快照。
+         *
+         * 这不是"兜底"、也不是看门狗：它是"基准快照必须与设备 flush 配对"这条不变量
+         * 在缺少写点时的自愈，判据是纯值比较，没有计时器、没有时间阈值。下一次正常
+         * flush 仍会由 FlushAudioPath 按正常路径把**基准值**一起重钉。
+         */
+        mDiscontinuity.audioBaseConsumedUs = consumedUs;
         return INT64_MIN;
     }
 
-    if (!mAudioClockProgressSeen) {
-        mAudioClockProgressSeen = true;
-
-        if (mAudioClockProgressLogCount < 8) {
-            ++mAudioClockProgressLogCount;
-            AF_LOGI("audio clock: the device position advanced to %lld us (base=%lld, +%lld us) — the audio "
-                    "reference is released from here on\n",
-                    (long long) aoutPos, (long long) mAudioClockProgressBaseUs,
-                    (long long) (aoutPos - mAudioClockProgressBaseUs));
-        }
+    if (delta == 0) {
+        /* 刚锚定 / 设备还没消费：位置与基准相同，交出去只会让参考时钟原地不动。 */
+        return INT64_MIN;
     }
 
-    return mAudioTime.startTime + mAudioTime.deltaTime + aoutPos;
+    return baseUs + delta;
 }
 
 void SuperMediaPlayer::GetVideoResolution(int &width, int &height)
@@ -10895,11 +10452,15 @@ void SuperMediaPlayer::Reset()
     mSeekPos = INT64_MIN;
     mPlayedVideoPts = INT64_MIN;
     mPlayedAudioPts = INT64_MIN;
-    mAudioClockReanchorPending = false;
-    /* 【B14】Reset 与 FlushAudioPath 一样清掉"设备位置前进观察"的状态。 */
-    mAudioClockProgressBaseUs = INT64_MIN;
-    mAudioClockProgressSeen = false;
-    mAudioClockProgressLogCount = 0;
+    /*
+     * 【P2】Reset（换片源 / 停止 / Prepare）⇒ 音频路会被整体重建，音频时钟基准必须作废：
+     * 否则"旧基准 + 新设备的位置"会算出上一部片子的位置。作废之后由首次起播的音频帧
+     * 兜底重钉（RenderAudio 里 mPlayedAudioPts == INT64_MIN 那条分支）。
+     * 这是音频基准的**两个失效点**之一（另一个是 seek 在途，由 mSeekFlag + FlushAudioPath
+     * 的重新钉住覆盖）；切档不是失效点 —— 音频不动，见 beginDiscontinuity() 的说明。
+     */
+    mDiscontinuity.audioBaseUs = INT64_MIN;
+    mDiscontinuity.audioBaseConsumedUs = INT64_MIN;
     mSeekFlag = false;
     /* 墙钟计时跟 seek 状态一起复位，否则上一次播放留下的时间戳会让新一次
      * seek 的"音频解锁"立刻命中（见 render() 里 SEEK_CATCH_AUDIO_UNBLOCK_MS）。 */
@@ -10962,9 +10523,15 @@ void SuperMediaPlayer::Reset()
     /*
      * 落点闸门/落点采纳/先出画那三个闩已随 P1-b 删除：它们的职责全部由
      * beginDiscontinuity(INT64_MIN) 一次覆盖（落点过滤不激活、位置基准与落点诊断一起复位）。
-     * 下面余下的两个是**与 seek 落点无关**的解码器/时间戳连续性状态，照旧复位。
+     * 【P2】锚点闩群（mSeekAnchorPending / mSeekClockAnchored / mSeekVideoAnchorDone）、
+     * 音频地板与连续性高水位（mSeekAudioFloorUs / mSeekAudioContinuityUs /
+     * mSeekAudioStaleDrops）、音频重定位事件（mSeekAudioReposition*）与音频时钟的
+     * "重锚/设备前进观察"状态（mAudioClockReanchorPending / mAudioClockProgress*）
+     * 也一并删除：音频时钟基准现在只有一个载体（Discontinuity::audioBase*），
+     * 而 beginDiscontinuity(INT64_MIN) 已经把它作废（targetUs == INT64_MIN ⇒
+     * FlushAudioPath 不会再把基准钉到任何目标点上）。
+     * 下面余下的是**与锚点/音频基准无关**的解码器与时间戳连续性状态，照旧复位。
      */
-    mSeekClockAnchored = false;
     mSeekDecodeStartIsKey = false;
     /* B16：与 SeekTo 同一个复位口径。 */
     mVideoDiscardStreak = 0;
@@ -10972,19 +10539,12 @@ void SuperMediaPlayer::Reset()
     mCatchUpDiscardStreak = 0;
     mSeekCatchStartMs = 0;
     mVideoStarveIters = 0;
-    mSeekVideoAnchorDone = false;
     mSeekAudioAlignDone = false;
+    /* P2：诊断限频闩也跨片源作废（下一次 seek 的第一条落点丢弃日志要能打出来）。 */
+    mAudioLandingDropLoggedGen = -1;
     mVideoDecodeRetrySeen = false;
     mDecodeStallIters = 0;
     mDecodeStallRebuildDone = false;
-    mSeekAudioFloorUs = INT64_MIN;
-    mSeekAudioContinuityUs = INT64_MIN;
-    mSeekAudioStaleDrops = 0;
-    mSeekAnchorPending = false;
-    /* A 方案的事件闩：Reset 必须清干净，避免跨片源残留。 */
-    mSeekAudioRepositionPending = false;
-    mSeekAudioRepositionUs = INT64_MIN;
-    mSeekAudioRepositionJumpUs = INT64_MIN;
     mMainStreamId = -1;
     mRemovedFirstAudioPts = INT64_MIN;
     mFirstSeekStartTime = 0;
@@ -11186,13 +10746,17 @@ void SuperMediaPlayer::ResetSeekStatus()
     setVideoDecodeBoost(false);
 
     /*
-     * 【P1-b：不再在 seek 结束时作废锚点事件】
+     * 【P1-b / P2：seek 结束时不作废任何时间轴状态】
      *
-     * 原来这里判"落点窗口已关"就把 mSeekAnchorPending 清掉（理由是"目标载体已被清零，
-     * 锚点没有正确值可用"）。现在目标载体 mDiscontinuity.targetUs **不会**在 seek 结束时
-     * 被清零 —— 它要一直留到下一次 seek / Reset —— 所以那条例由不成立，这里整段删除。
-     * 锚点事件的生命周期与它自己的消费点（doRender 的"seek 后第一帧上屏"）保持原样，
-     * 属于 P2 一并收口的范围。
+     * P1-b 之前这里判"落点窗口已关"就把"锚点事件闩"清掉（理由是"目标载体已被清零，
+     * 锚点没有正确值可用"）。两件事都已不成立：
+     *   · P1-b 起 mDiscontinuity.targetUs **不会**在 seek 结束时被清零 —— 它一直留到
+     *     下一次 seek / Reset；
+     *   · P2 起那一整组锚点闩（事件闩 / 只锚一次闩 / 音频锚点判据 / 音频地板与高水位）
+     *     已经删除，主时钟的来源只剩"有音频=目标点+设备已消费量、无音频=落点采纳时
+     *     钉住的 targetUs"，所以这里没有任何"该清/不该清"的状态要维护。
+     * 结论：seek 结束只结束 seek 本身（mSeekPos / mSeekNeedCatch / 上屏节拍基准），
+     * 一行都不碰时间轴权威 —— 这也是"SeekEnd 关不掉落点过滤"这条设计要求的自然结果。
      */
 
     /*
@@ -11223,73 +10787,21 @@ void SuperMediaPlayer::ResetSeekStatus()
 }
 
 /*
- * ============ seek 期间主时钟锚点规则的唯一实现（声明与理由见 SuperMediaPlayer.h）============
+ * ============ 【P2 删除：seek 期间主时钟锚点规则的唯一实现】============
  *
- * 只在"一次 seek 只锚一次"（mSeekClockAnchored 为假）时才会被调用处调用；这里再
- * 复核一遍，因为它同时是"这一帧能不能当锚点"的唯一判据。
+ * 这里原来有一个 `fetchSeekClockAnchorUs(frameUs, why)`：它按"目标点优先 /
+ * 不早于目标的落点帧"给出**一次 seek 只允许锚一次**的锚点值，供"视频第一帧上屏"与
+ * "音频落点首帧上设备"两处调用。随 P2 的音频基准重设整体删除：
  *
- * 目标点取**本次不连续点的 targetUs 优先、mSeekPos 兜底**：前者是 seek 入口写下的
- * 位置地板（本次 seek 的目标），兜底那条覆盖"尚未设地板的旧路径 / 管道已经走完
- * 目标点把地板撤掉"这两种状态 —— 两种情况下 mSeekPos 都还是本次 seek 的目标。
+ *   · 有音频：主时钟的参考是 Discontinuity::audioBase*（目标点 + 设备已消费量），
+ *     在不连续点上就已经等于目标点，并且只随设备消费单调前进 —— 不需要任何
+ *     "在第一帧上屏时把时钟拉回来"的事后动作；
+ *   · 无音频：ProcessSeekToMsg() 与 acceptDiscontinuityLandingFrame() 已经把主时钟
+ *     钉在目标点（各自唯一的写点）。
  *
- * 为什么"早于目标的帧直接返回 INT64_MIN"而不是照样采纳：早于目标的帧只可能来自
- * 旧时间轴（或本次 seek 的落点关键帧，那是设计上允许**上屏**、但绝不允许**锚时钟**
- * 的那一类）。返回 INT64_MIN 让锚点事件留在闩上，等真正 >= 目标的那一帧再来锚，
- * 时间轴因此不会在 seek 期间被拉回旧位置。
- *
- * 日志里的 why 由调用处给出（视频落点帧 / 音频落点首帧），不新增限频状态：
- * 一次 seek 最多锚成功一次，所以本函数最多打一行。
+ * 于是"锚点值取哪个、够不够近、要不要留到下一帧"这一整组判据连同它的"只锚一次"闩一起
+ * 失去存在理由；时间轴权威只剩"目标点"这一个。
  */
-int64_t SuperMediaPlayer::fetchSeekClockAnchorUs(int64_t frameUs, const char *why)
-{
-    if (mSeekClockAnchored) {
-        /* 本次 seek 已经锚过：主时钟不再被任何后来的帧改写。 */
-        return INT64_MIN;
-    }
-
-    if (frameUs == INT64_MIN) {
-        return INT64_MIN;
-    }
-
-    /*
-     * 目标点：本次不连续点的 targetUs 优先，其次本次 seek 的 mSeekPos。
-     * 两者都是"位置必须等于目标"这条要求的载体，且都在微秒轴上（与帧的 pts 同轴）。
-     */
-    const int64_t effectiveTargetUs = (mDiscontinuity.targetUs != INT64_MIN)
-                                      ? mDiscontinuity.targetUs
-                                      : mSeekPos.load();
-
-    if (effectiveTargetUs != INT64_MIN &&
-        frameUs < effectiveTargetUs - SEEK_AUDIO_CONTINUITY_TOLERANCE_US) {
-        AF_LOGW("seek anchor refused (%s): frame=%lld is earlier than the target=%lld — keeping the "
-                "clock on the target instead of pulling the timeline back to a frame before the seek "
-                "(the position floor stays in charge until the landing frame reaches the target)\n",
-                why != nullptr ? why : "?", (long long) frameUs, (long long) effectiveTargetUs);
-        return INT64_MIN;
-    }
-
-    if (effectiveTargetUs == INT64_MIN) {
-        /* 极端兜底：目标点未知时，这一帧的时间位置就是唯一可用锚点。 */
-        return frameUs;
-    }
-
-    /*
-     * 【锚到目标】落点帧早于目标（稀疏 IDR / GOP 前缀的正常情况）时，时钟钉在目标上按
-     * 1x 前进、位置上报钉在目标上，用户看到的位置从松手那一刻就是目标；落点帧与它
-     * 之后的那一帧仍会被照常采纳上屏（RenderVideo 的落点判据与追赶窗口都不读时钟锚点），
-     * 所以精确性不受影响 —— 被去掉的只是"把时间轴拉回落点"这个错误动作。
-     */
-    const int64_t anchorUs = (frameUs > effectiveTargetUs) ? frameUs : effectiveTargetUs;
-
-    if (anchorUs != frameUs) {
-        AF_LOGI("seek anchor (%s): the first frame/audio packet of this seek is %lld us earlier than "
-                "the target %lld — anchoring the master clock on the TARGET (position reports and the "
-                "landing judge both use the target; the frame itself still goes to the screen)\n",
-                why != nullptr ? why : "?", (long long) frameUs, (long long) effectiveTargetUs);
-    }
-
-    return anchorUs;
-}
 
 void SuperMediaPlayer::notifySeekEndCallback()
 {
@@ -11592,6 +11104,19 @@ void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
     mDiscontinuity.acceptedFramePos = INT64_MIN;
     mDiscontinuity.clockBaseUs = INT64_MIN;
     mDiscontinuity.clockBaseSteadyMs = 0;
+    /*
+     * 【P2】音频时钟基准（Discontinuity::audioBase*）**故意不在这里作废**。
+     *
+     * 不连续点不等于"音频路断了"：切档（ProcessSwitchStreamMsg → switchVideo）也走
+     * 本函数，但音频**不动**（不 OpenStream、不 flush、时间轴连续），它的基准必须原样
+     * 活下去 —— 否则一次切档就会让音频参考时钟永久不可用（getAudioPlayTimeStamp 一直
+     * 返回 INT64_MIN），主时钟退回自走、音画基准漂移。
+     *
+     * 音频基准真正的失效点只有两处，正好对应"音频路真的被重建"的两种情形：
+     *   · seek 在途：getAudioPlayTimeStamp() 用 mSeekFlag 判"音频参考暂不可用"，
+     *     而本次 seek 的 FlushAudioPath() 会在设备 flush 之后把基准重钉到 targetUs；
+     *   · Reset()（换片源 / 停止 / Prepare）：显式把基准作废，等首次起播的音频帧兜底重钉。
+     */
     mDiscontinuity.filterActive = (targetUs != INT64_MIN);
 }
 

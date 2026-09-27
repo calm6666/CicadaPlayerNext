@@ -1202,7 +1202,7 @@ int64_t DashStream::seek(int64_t us, int flags)
      * 那道门不会被触发）。时间轴与视频包 timePosition / 播放器侧 landing 同一把尺子
      * （见本文件 :846 `timePosition = mCurSeg->fixedStartTime`）。
      *
-     * 只改这一条语义：不动请求目标、不动落点/位置上报（mSeekPositionFloorUs 等一概不碰）；
+     * 只改这一条语义：不动请求目标、不动落点/位置上报（内核上报位置由不连续点基准给出，不再有地板）；
      * 消费方安全性已核：Seek() 的返回值只被用作 `ret < 0` 错误判断
      * （SMPMessageControllerListener.cpp:733-737、SuperMediaPlayer.cpp:8837-8847，
      * 另两处直接丢弃返回值），且 DASH 多流路径的 manager 返回值恒为 0（DashManager.cpp:518）。

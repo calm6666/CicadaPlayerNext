@@ -2514,7 +2514,7 @@ namespace cicadaqt {
         m_seekInFlight = true;
         /*
          * 位置地板**不再由端侧维护**（本轮收敛到内核一处）：
-         * 内核 SuperMediaPlayer 的 mSeekPositionFloorUs 会在 seek 一发起就把上报位置
+         * 内核 SuperMediaPlayer 会在 seek 一发起就把上报位置（不连续点的目标点）
          * 钉在目标点，直到管道真的走到它 —— 端侧再挡一次是重复实现。
          * 这里只做"乐观地把目标立刻报给界面"，避免松手瞬间闪回旧位置。
          */
@@ -3456,7 +3456,7 @@ namespace cicadaqt {
     {
         /*
          * 位置地板只保留内核那一处（本轮收敛完成）：
-         * SuperMediaPlayer::getCurrentPosition() 用 mSeekPositionFloorUs 把上报位置钉在
+         * SuperMediaPlayer::getCurrentPosition() 由不连续点的目标点基准把上报位置钉在
          * seek 目标点，直到管道真的走到它为止，所以框架推过来的位置**天然不会回退**。
          * 端侧以前再挡一次（m_seekUiFloorMs）是重复实现，而且它要靠"端侧自己判断 seek
          * 结束"来撤地板 —— 那套判断正是看门狗的来源，已删。

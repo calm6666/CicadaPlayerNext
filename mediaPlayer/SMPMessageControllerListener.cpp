@@ -768,13 +768,14 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mVideoPtsRevert = false;
     mPlayer.mAudioPtsRevert = false;
     /*
-     * 【修法 2】锚点事件在这里置位（seek 真正开始时），而不是在 SeekTo() 里。
-     * SeekTo() 是 API 线程、只负责 putMsg；从 putMsg 到本函数执行之间，
-     * 主循环仍可能渲染出**旧时间轴**的帧，如果那时事件已就绪就会被它消费掉，
-     * 把主时钟锚到旧位置（安卓实测锚到了 1.75s 而目标是 52.085s）。
-     * 放在这里之后，只有 seek 开始之后渲染的帧才可能消费该事件。
+     * 【P2】这里原来置"锚点事件闩"（mSeekAnchorPending，供 doRender 在 seek 后第一帧
+     * 上屏时把主时钟锚到那一帧）。锚点闩群已随 P2 的音频基准重设整体删除：
+     *   · 有音频时主时钟的参考是"目标点 + 设备已消费量"（Discontinuity::audioBase*），
+     *     它在不连续点上就等于目标点并只随设备消费单调前进；
+     *   · 无音频时主时钟由本函数上面的 setTime(seekPos) 与落点采纳各自钉住。
+     * 也就是说"seek 真正开始"这件事现在只需要 beginDiscontinuity()（本函数上面那处），
+     * 不需要再置任何"事后要把时钟拉回来"的事件闩。
      */
-    mPlayer.mSeekAnchorPending = true;
     /* 必须在调用 DASH/HLS demuxer->Seek() 之前取消 pending representation。
      * 旧顺序先对所有 selected stream 做 Seek，再 CloseStream(pending)，网络
      * 慢时 Seek 会等待已经被用户取消的目标流，表现为 seek 直接卡死。普通本地
@@ -901,7 +902,7 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 【本轮 B15：进度条与缓冲条在"seek 受理"这一刻就到位】
      *
      * 位置：seek 目标点**就是**用户要求的播放位置，报它即"到位"，不必等管道走过去。
-     * 之后每一次位置上报都被 getCurrentPosition() 的 mSeekPositionFloorUs 地板钉在目标点，
+     * 之后每一次位置上报都由 getCurrentPosition() 从不连续点的目标点基准给出，
      * 所以这一跳只可能向前，不会被落点帧（目标之前的那个关键帧）的旧位置再拽回去。
      * 这是纯状态语义：目标点来自本次 seek 的入参，不依赖任何计时器/预测。
      *
@@ -961,19 +962,21 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
                 mPlayer.mSeekNeedCatch = false;
             } else {
                 /*
-                 * C 方案（本轮改）：这里原来会把"目标点之前的音频包"直接清掉
-                 * （ClearPacketBeforeTimePos(AUDIO, mSeekPos)），于是音频只能从**目标点**
-                 * 开始，而视频从**目标点之前的关键帧**开始 —— 两者相差 1~4 秒，
-                 * 视频相对主时钟永久迟到（4K 解码只有约 1×，还不清）→ 画面冻住。
+                 * 【P2：音频与视频用**同一个目标点**】
                  *
-                 * 现在**不动音频包**：保留缓存里"落点→目标点"这段音频。等本次 seek 的
-                 * 落点关键帧被读到（落点 PTS 已知）这个**事件**发生，再由
-                 * SuperMediaPlayer::DecodeVideoPacket 一次性把音频裁剪/对齐到落点
-                 * （见那里的 mSeekAudioAlignDone）。这样音频与视频从**同一个落点**起步：
-                 * 无债务、无静音、A/V 内容对齐。
+                 * 这里原来会把"目标点之前的音频包"直接清掉
+                 * （ClearPacketBeforeTimePos(AUDIO, mSeekPos)），随后又改成"保留落点→目标点
+                 * 这段音频、由落点事件把音频对齐到视频落点"（C 方案）。P2 之后两者都不需要：
+                 *   · 音频的对齐动作统一由 SuperMediaPlayer::DecodeVideoPacket 里那个
+                 *     一次性事件完成，阈值就是**目标点**（mDiscontinuity.targetUs），
+                 *     与 RenderAudio 的丢弃判据、以及音频时钟基准完全同一个值；
+                 *   · "音频从目标点开始"是音频时钟模型（目标点 + 设备已消费量）的前提，
+                 *     所以这里不再"保留到落点为止的音频"。
+                 * 于是本处**不动音频包**：让读包路径照常把数据发下去，由上面那条判据处理。
                  */
-                AF_LOGI("seek in cache: keeping the audio packets before the target so the audio can "
-                        "start at the video landing keyframe (aligned by the landing event)\n");
+                AF_LOGI("seek in cache: audio packets are left alone — the audio path is aligned to the "
+                        "target point by the landing event (the same point the video landing filter and the "
+                        "audio clock base use)\n");
             }
         }
 
@@ -997,7 +1000,7 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 安卓上 flushVideoRender() 的 pause/start 是真实开销（VSync 线程握手），
      * 而 seek 每次都要走这里 ⇒ 每次 seek 省一次渲染器 flush。
      *
-     * 精度不受影响：落点帧仍由 mSeekRenderGateUs 那道门挡着（只有"包含目标、不晚于
+     * 精度不受影响：落点帧仍由内核的落点过滤判据挡着（只有"包含目标、不晚于
      * 目标"的帧会被采纳，见 RenderVideo 的采纳块），本处只是不再主动清渲染器里
      * 已提交的那 1~2 帧 —— 而 seek 期间画面本来就停在上一帧，观感一致。
      * 解码帧队列（mVideoFrameQue）在 FlushVideoPath 内部无条件清空，与 flushRender 无关。
@@ -1024,7 +1027,8 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      *
      * 处置：seek 收尾处（解码器已 flush、解码帧队列已清）按"**不晚于目标点的最近关键帧**"
      * 裁剪视频包队列。语义与落点判据完全一致：落点必须从关键帧起解，更早的包永远不可能
-     * 上屏；目标点及其之后的包一个不动，音频/字幕包一个不动（音频对齐仍走上面 C 方案）。
+     * 上屏；目标点及其之后的包一个不动，音频/字幕包一个不动（音频的对齐走上面那条
+     * "同一个目标点"的判据）。
      * 纯状态判断，无计时器、不改任何精度判据；非缓存支路此时队列本来就是空的 ⇒ 幂等空操作。
      */
     {

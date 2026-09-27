@@ -89,6 +89,22 @@ QUALITY_SWITCH_TOTAL_TIMEOUT_MS 3   PENDING_VIDEO_STALL_CHECKS_MAX 4
 PENDING_PREROLL_WAIT_MAX_MS 3   DECODE_STALL_REBUILD_ROUNDS 6   SeekInCache 19
 ```
 
+**阶段归属（避免"§3 必须为 0"与 §4 的阶段划分自相矛盾 —— 本清单是 P0..P5 的**总**目标，
+各名字只在**它所属阶段结束时**必须为 0）**：
+
+* **P1 范围，已完成清零（代码引用与注释均已实测 0）**：`mSeekRenderGateUs`、`mSeekPositionFloorUs`、
+  `mSeekLandingFloorOwnerUs`、`mSeekFirstDecodableFrameShown`、`mSeekLandingFrameAccepted`、
+  `mSeekExactLandingByBudget`，以及三个宏 `SEEK_TARGET_DROP_AHEAD_US`、`SEEK_FLOOR_GIVEUP_US`、
+  `SEEK_EXACT_LANDING_BUDGET_US`。
+* **P2 范围（本阶段的清零对象）**：`mSeekAudioFloorUs`、`mSeekAudioContinuityUs`、
+  `mSeekAudioReposition*`（含 `mSeekAudioRepositionPending/Us/JumpUs` 各变体）、`mSeekAnchorPending`、
+  `mSeekClockAnchored`、`mSeekVideoAnchorDone`、`mAudioClockReanchorPending`、`holdAudioForSeek`；
+  另有 `fetchSeekClockAnchorUs()` / `fetchSeekAnchorUs()`（函数名不在 §5 的模式表里，随本阶段一并删除）。
+* **P3 范围**：全部 `mPending*` / `mRetired*` / `mWillChanged*` / `mQualitySwitch*` / `mSwitchReArm*` /
+  `mPausedSwitch*` / `mSwitchStartedWhilePaused` / `b2Placeholder` / `b2SurfaceOutput` / `b2RealSurface` /
+  `QUALITY_SWITCH_TOTAL_TIMEOUT_MS` / `PENDING_VIDEO_STALL_CHECKS_MAX` / `PENDING_PREROLL_WAIT_MAX_MS`。
+* **P4 范围**：`seekLanding`、`mSeekLandingStage`、`SeekInCache`、`DECODE_STALL_REBUILD_ROUNDS`。
+
 **保留（不得误删）**：`NotifyVideoQualitySwitch(...)` 生命周期、`isVideoDecoderMetaMatched()`、
 `rebuildVideoDecoder()`、`CreateVideoDecoder()`、`FlushVideoPath()`、`mCurrentVideoIndex`、
 ABR 接口与 `IsStreamSwitchInFlight()`、JNI/Java 接口签名、音频 keep-alive（写静音保活）。
@@ -100,6 +116,10 @@ ABR 接口与 `IsStreamSwitchInFlight()`、JNI/Java 接口签名、音频 keep-a
 | **P0** | `Discontinuity` + `generation`（先只写入、不改行为）；本验收单 | 日志新增代际字段；行为不变 |
 | **P1** | renderer 单一过滤 + 位置单调上报 | 每次 seek 都有 `seek landing frame accepted … offsetFromTarget=±(≤1 帧)`；不出现"落点窗口提前关闭"；位置不回退 |
 | **P2** | 音频基准重设 + 音视频同一目标点 | 无 `audio silence starts (reason=1/4)` 长窗口、无 `keep-alive: reached the resource cap`；`afterSeekMs(音频) ≤ 200` |
+
+> **P2 的范围以 §3 的"阶段归属"为准**：`mSeekAnchorPending` / `mSeekClockAnchored` /
+> `mSeekVideoAnchorDone` + `fetchSeekClockAnchorUs()` 是**锚点闩群**，属于 P2（音频基准重设时一起删），
+> 不属于 P1；P1 的清零对象只有 §8.2 的 6 个成员与 3 个宏。
 | **P3** | 单解码器 + 关键帧边界；删除全部 pending/占位面/死线 | `[switch] state=decoderSwitch`、`pendingPktQ/pendingFrameQ`、`pending preroll`、`placeholder surface handover`、`quality switch timed out`、`wait a key frame` 风暴、两块 4K 实例 `-1010`、`video decoder accepts no input … rebuilding it once` 全部消失；切档只有 `status=0 → status=1` |
 | **P4** | demuxer 收口 + 缓冲单一规则 | `[seekLanding]` 行消失；不出现 `activeQ` 上千、两轴差 >1s |
 | **P5** | 清零残留 + 全量验收 | `E [0.9]`、`onAudioException -1003/-1004`、`PlayerBase baseTimeout/baseStop` 连锁、两轴差 >1s 的 `drop frame` 全部消失 |
@@ -339,5 +359,267 @@ P1-b 不需要再动它。P1-b 仍要做的两件事：删掉 `mSeekDecodeStartI
   （`shouldDropForDiscontinuity` / `filterActive` / `firstFrameShown` / `clockBase*` / `acceptedFramePos`）
   与残留清单里的 35 个模式**无一匹配**，且新增日志文本 `seek landing frame accepted`
   是"seek landing"（带空格），不匹配模式 `seekLanding`。
+
+## 九、P2 施工图（音频基准重设 + 删除"扣住 PCM"与锚点闩）
+
+目标（用户原话）：**seek 后必须有声音、音视频用同一个目标点、位置不回弹、不卡顿**。
+红线不变：无墙钟死线/超时/看门狗、不"精度换流畅"、不新增配置开关、不碰 UI/QML、
+L1 核心不引平台宏、新数据成员追加类末尾、新虚函数追加 vtable 末尾、注释不含"星号紧跟斜杠"。
+
+### 9.1 新判据的完整形态 —— 音频时钟 = 目标点基准 + 设备已消费量
+
+**用的既有接口**（无需新增虚函数）：`SMPAVDeviceManager::getAudioRenderPosition()`
+→ `IAudioRender::getPosition()` → `filterAudioRender::getPosition()`
+→ `device_get_position()`，各平台实现：
+
+| 平台 | 实现 | 语义 |
+|---|---|---|
+| Android | `framework/render/audio/Android/AudioTrackRender.cpp:434` | `mOverFlowPlayedSimples + getDevicePlayedSimples() - mAudioFlushPosition`，按 `sample_rate` 折算成微秒 —— **AudioTrack.getPlaybackHeadPosition() = 设备已消费样本数**；flush 后该差值重新起算 |
+| Apple | `Apple/AFAudioUnitRender.cpp:468`、`Apple/AFAudioQueueRender.cpp:344` | 同一 `device_get_position()` 契约（设备已消费 → 微秒） |
+| SDL / OHOS / Cheater | `SdlAFAudioRender.cpp:200`、`SdlAFAudioRender2.cpp:139`、`OHOS/OhosAudioRender.cpp:117`、`CheaterAudioRender.cpp:48` | 同上 |
+
+即"设备已消费字节/采样数"这个量**本工程已有唯一接口**，P2 不再追加虚函数。
+
+**新字段**（放进 `Discontinuity`，与 P1 的 `clockBase*` 同一处；结构体是单一成员 ⇒ 私有成员偏移不变）：
+
+```cpp
+        std::atomic<int64_t> audioBaseUs{INT64_MIN};          // 音频时钟的内容位置基准
+        std::atomic<int64_t> audioBaseConsumedUs{INT64_MIN};  // 写基准那一刻"设备已消费"的快照（微秒）
+```
+
+**唯一读点** `getAudioPlayTimeStamp()`（主时钟的音频参考）：
+
+```cpp
+    if (!mAVDeviceManager->isAudioRenderValid()) return INT64_MIN;
+    const int64_t baseUs = mDiscontinuity.audioBaseUs.load();
+    if (baseUs == INT64_MIN) return INT64_MIN;               /* 本次不连续点还没有音频基准 */
+    const int64_t consumedUs = mAVDeviceManager->getAudioRenderPosition();
+    if (consumedUs < 0 || af_clock_value_is_unset(consumedUs)) return INT64_MIN;
+    int64_t baseConsumedUs = mDiscontinuity.audioBaseConsumedUs.load();
+    if (baseConsumedUs == INT64_MIN) {                        /* 建立基准时设备位置还不可用：惰性补锚 */
+        mDiscontinuity.audioBaseConsumedUs = consumedUs;
+        return INT64_MIN;
+    }
+    const int64_t delta = consumedUs - baseConsumedUs;
+    if (delta <= 0) return INT64_MIN;                         /* 设备还没消费/向后跳 ⇒ 音频时钟暂不可用 */
+    return baseUs + delta;                                    /* 单位：微秒，与 targetUs 同一根轴 */
+```
+
+**两个写点**：
+
+1. `FlushAudioPath()`（设备 flush 之后、`mPlayedAudioPts` 被清零之前）：不连续点上把基准
+   钉在 `mDiscontinuity.targetUs`（= 用户目标点，与视频同一目标点）；非 seek 的 flush 保持
+   "内容位置连续"（用旧基准 + 本次消费增量外推）。快照取 `getAudioRenderPosition()`。
+2. `getAudioPlayTimeStamp()` 里的惰性补锚（上表 `baseConsumedUs == INT64_MIN` 那支）。
+
+**暂停行为**：设备暂停 ⇒ `getPlaybackHeadPosition()` 不再增长 ⇒ `delta` 不变 ⇒ 位置恒定，
+**不需要任何额外冻结判据**（ExoPlayer 的 `AudioTrackPositionTracker` 同形）。
+主时钟只此一个来源：有音频 = 上表；无音频 = `acceptDiscontinuityLandingFrame()` 把
+`mMasterClock` 钉在 `targetUs`（P1 已有）。
+
+### 9.2 要删 / 要改的文件:行表（施工时的行号，实测后以 §10 为准）
+
+| 文件:行（施工前） | 现在写的是 | 改成 |
+|---|---|---|
+| `SuperMediaPlayer.h:523-545` | `fetchSeekClockAnchorUs()` 声明 + 锚点规则注释 | **整段删** |
+| `SuperMediaPlayer.h:897` | `mAudioClockReanchorPending` | 删 |
+| `SuperMediaPlayer.h:1282-1290` | `mSeekClockAnchored` | 删 |
+| `SuperMediaPlayer.h:1304-1309` | `mSeekVideoAnchorDone` | 删 |
+| `SuperMediaPlayer.h:1337-1341` | `mSeekAudioFloorUs` | 删 |
+| `SuperMediaPlayer.h:1342-1356` | `mSeekAudioContinuityUs` | 删 |
+| `SuperMediaPlayer.h:1357-1364` | `mSeekAudioStaleDrops` | 删（随判据一起失去全部读点） |
+| `SuperMediaPlayer.h:1379-1387` | `mSeekAnchorPending` | 删 |
+| `SuperMediaPlayer.h:1397-1409` | `mSeekAudioRepositionPending/Us/JumpUs` | 删 |
+| `SuperMediaPlayer.h:1541-1569` | `mAudioClockProgress*` | 删（新判据自带"设备已消费"基准快照，不需要第二条"进度观察"真相） |
+| `SuperMediaPlayer.h` | `Discontinuity` 末尾 | 增 `audioBaseUs` / `audioBaseConsumedUs` |
+| `SuperMediaPlayer.cpp:218-255` | `SEEK_AUDIO_CONTINUITY_TOLERANCE_US` / `SEEK_AUDIO_STALE_DROP_MAX` | 删（唯一使用者在 9.2 被删代码里） |
+| `SuperMediaPlayer.cpp:724-757` | `SeekTo()` 里被删成员的复位 | 删（`beginDiscontinuity` 覆盖）；`mSeekAudioAlignDone` 保留复位 |
+| `SuperMediaPlayer.cpp:2038-2101` | `DoCheckBufferPass` 的 reposition 消费点（`SeekStream`） | 整段删 |
+| `SuperMediaPlayer.cpp:3903-4003` | `doRender` 的视频锚点块（`mSeekAnchorPending`/`fetchSeekClockAnchorUs`） | 整段删（主时钟已由 `ProcessSeekToMsg` 与落点采纳钉在目标点） |
+| `SuperMediaPlayer.cpp:5295-5410` | C 方案音频对齐（`audioAnchorUs` / `mSeekAudioFloorUs` / 高水位 / 裁剪） | 只留 B3（`mActiveVideoPtsOffset`）与 1b（清帧队列 + 重基 `mAudioTime`），锚点改成 `mDiscontinuity.targetUs` |
+| `SuperMediaPlayer.cpp:7144-7311` | `holdAudioForSeek` / `inSeekAudioWindow` / 静音门日志 | 整段删；音频无条件推（`render()` 直接循环 `RenderAudio()`） |
+| `SuperMediaPlayer.cpp:7377-7460` | `RenderAudio` 的 `mSeekAudioFloorUs` 双侧地板 | 换成一条：落点过滤仍激活时丢掉"完全在目标点之前"的音频帧 |
+| `SuperMediaPlayer.cpp:7462-7512` | `RenderAudio` 的音频锚点块 | 整段删 |
+| `SuperMediaPlayer.cpp:7582-7646` | 首帧音频的 `mSeekVideoAnchorDone`/`mAudioClockReanchorPending` 交接 | 换成"把音频基准钉在目标点（无目标点则钉在这一帧的内容位置）+ 交参考时钟" |
+| `SuperMediaPlayer.cpp:7709-7718` | `mSeekAudioReposition*` 置闩 | 删 |
+| `SuperMediaPlayer.cpp:9301-9336` | `FlushAudioPath()` | 增"音频基准重设"（唯一写点 1） |
+| `SuperMediaPlayer.cpp:9894-10026` | `getAudioPlayTimeStamp()` | 按 9.1 重写（唯一读点） |
+| `SuperMediaPlayer.cpp:10898-10902`、`:10967-10987` | `Reset()` 里被删成员的复位 | 删（`beginDiscontinuity(INT64_MIN)` 已作废音频基准） |
+| `SuperMediaPlayer.cpp:11188-11196` | `ResetSeekStatus()` 提到 `mSeekAnchorPending` 的注释 | 改述：锚点闩群随 P2 删除 |
+| `SuperMediaPlayer.cpp:11225-11292` | `fetchSeekClockAnchorUs()` 定义 | 整段删 |
+| `SMPMessageControllerListener.cpp:770-777` | `mSeekAnchorPending = true;` | 删（不连续点已由 `beginDiscontinuity` 建立） |
+| `SMPMessageControllerListener.cpp:963-977` | 提到 `mSeekAudioAlignDone` 的 C 方案注释 | 改述为"音频与视频同一目标点" |
+
+**保留（不得误删）**：`NotifyVideoQualitySwitch` 生命周期、`isVideoDecoderMetaMatched()`、
+`rebuildVideoDecoder()`、`CreateVideoDecoder()`、`FlushVideoPath()`、`mCurrentVideoIndex`、
+ABR 接口、JNI/Java 签名、音频 keep-alive 写静音保活、`mSeekExactLanding`、`mActiveVideoPtsOffset`（B3）、
+`logAudioSilence`/`mAudioSilenceReason`（设备侧 reason=2/3/4 仍在使用）、`SEEK_AUDIO_*` 之外的宏。
+
+### 9.3 只有一根内容时间轴（两个来源、三个对齐点）
+
+**写死这条不变量**：本内核只有**一根**内容时间轴 —— 单位微秒，轴就是 `targetUs` 所在的
+`timePosition` 轴。产生"内容时间"的地方只有两处，它们必须**同源同轴**：
+
+| # | 来源 | 形态 | 基准从哪来 |
+|---|---|---|---|
+| 1 | P1 位置上报（`getCurrentPosition()`） | `clockBaseUs + (now - clockBaseSteadyMs)`，只在 `clockBaseUs != INT64_MIN` 时生效；暂停时冻结（`clockBaseSteadyMs == 0` 是冻结哨兵） | `acceptDiscontinuityLandingFrame()` 把它钉在 **targetUs** |
+| 2 | P2 音频参考时钟（`getAudioPlayTimeStamp()`） | `audioBaseUs + (设备已消费 - audioBaseConsumedUs)` | `FlushAudioPath()` 在 seek 的 flush 之后把它钉在 **targetUs** |
+
+两者**都以 `mDiscontinuity.targetUs` 为基准**，都读 `mDiscontinuity`（同一处发布的原子字段），
+所以"进度条位置"与"渲染节拍时钟"不可能各说各话。旧的第三条基准（位置地板 / 音频地板 /
+锚点值）已经全部删除，**不允许**再出现。
+
+**三个对齐点**（必须同时成立，否则会回弹或漂移）：
+
+* **(a) 轴与单位**：两处都是微秒、都走 `timePosition` 轴；音频的"已消费量"由
+  `getAudioRenderPosition()` 按采样率折算成微秒返回，本身就是媒体时间而不是墙钟时间。
+* **(b) 退回路径仍然暂停感知**：`getAudioPlayTimeStamp()` 返回 `INT64_MIN`（音频时钟暂不可用）
+  时，主时钟回到自走 —— 而 `SystemReferClock::GetTime()` **只在 `!mClock.isPaused()` 时才取
+  参考时钟**（`mediaPlayer/system_refer_clock.cpp:16`）。所以"暂停时位置绝不动"由 P1 的冻结哨兵
+  与这条共同保证，本阶段没有在退回路径上重新引入 P1-c 那类"暂停时位置被改写"的问题。
+* **(c) 快照与 flush 配对**：`FlushAudioPath()` 的基准快照必须在 **`flushDevice()` 之后**取
+  （顺序反了快照就是旧的大值，`delta` 立刻为负）；非 seek 的 flush（切档 / stop / 后台）
+  必须保持**内容位置连续**（旧基准 + 本次消费增量外推），**不要**把它也钉到某个目标点上。
+
+**音频基准的失效点只有两处**，且都对应"音频路真的被重建"：
+
+* **seek 在途**：`getAudioPlayTimeStamp()` 用 `mSeekFlag` 判"参考暂不可用"（避免拿上一段播放的
+  残留位置去 reSync）；随后本次 seek 的 `FlushAudioPath()` 把基准重钉到 `targetUs`。
+* **`Reset()`**（换片源 / 停止 / Prepare）：显式把基准作废，由首次起播的音频帧兜底重钉。
+
+**切档不是失效点**：`switchVideo()` 也调 `beginDiscontinuity()`，但音频**不动**（不 OpenStream、
+不 flush、时间轴连续）。若把切档也算成"音频基准失效"，音频参考时钟就会在每次切档后
+**永久不可用**（一直返回 `INT64_MIN`），主时钟退回自走、音画基准漂移 —— 所以
+`beginDiscontinuity()` 刻意**不碰** `audioBase*`。
+
+### 9.4 `delta < 0` 的结构性自愈（最终代码）
+
+设备已消费量向后跳 = "设备被 flush 过但基准快照没跟着重设"（例如某条 flush 路径没走到
+`FlushAudioPath` 的写点）。只 `return INT64_MIN` 会让快照**永远**大于真实已消费量 ⇒ `delta`
+永远为负 ⇒ 音频时钟永久不可用，所以必须就地重新取快照：
+
+```cpp
+    const int64_t delta = consumedUs - baseConsumedUs;
+
+    if (delta < 0) {
+        /* 设备侧被重设过 ⇒ 重新取快照，本次不可用。这不是兜底，是"基准快照必须与设备
+         * flush 配对"这条不变量缺少写点时的自愈；判据是纯值比较，无计时器、无阈值。 */
+        mDiscontinuity.audioBaseConsumedUs = consumedUs;
+        return INT64_MIN;
+    }
+
+    if (delta == 0) {
+        /* 刚锚定、设备还没消费：位置与基准相同，交出去没有信息量。 */
+        return INT64_MIN;
+    }
+
+    return baseUs + delta;
+```
+
+### 9.5 P2 验收标记
+
+* 不再出现 `audio silence starts (reason=1 …)`（那道"扣住 PCM 等时钟"的门已删除）；
+  **设备侧的 reason=2/3/4 照旧**（`logAudioSilence` 与 `mAudioSilenceReason` 保留，
+  reason=1 这个编号也保留，因为它与 `AudioTrackRender.cpp` 共用一套编号）；
+  P2 的验收就是"reason=1 不再出现、reason=2/3/4 该出现时仍出现"。
+* 不再出现 `audio keep-alive: reached the resource cap`；
+* `audio first frame after seek … afterSeekMs=` ≤ 200（seek 后立刻有声：音频的推进与
+  视频是否出帧无关，且不再被任何门扣住）；
+* 新增可对账日志（按**代际**限频，一个 seek 至多一条）：
+  `audio landing drop: dropped=… pos=… target=… generation=…`
+  —— 用来区分"音频被正确地丢到目标点"与"音频根本没来"；
+* 位置不回弹（P1 的 `clockBase*` 未被本阶段改动；音频基准与它同源同轴）。
+
+---
+
+## 十、P2 完成记录（已完成实现；构建与真机验收待用户执行）
+
+### 10.1 删除的符号（全仓代码引用 = 0，仅剩"删除说明"注释）
+
+`mSeekAudioFloorUs`、`mSeekAudioContinuityUs`、`mSeekAudioStaleDrops`、
+`mSeekAudioRepositionPending` / `mSeekAudioRepositionUs` / `mSeekAudioRepositionJumpUs`、
+`mSeekAnchorPending`、`mSeekClockAnchored`、`mSeekVideoAnchorDone`、
+`mAudioClockReanchorPending`、`mAudioClockProgressBaseUs` / `mAudioClockProgressSeen` /
+`mAudioClockProgressLogCount`、局部量 `holdAudioForSeek` / `inSeekAudioWindow` /
+`seekHoldDisabled` / `clockNotAdvancing`、函数 `fetchSeekClockAnchorUs()`、
+宏 `SEEK_AUDIO_CONTINUITY_TOLERANCE_US` / `SEEK_AUDIO_STALE_DROP_MAX`。
+
+### 10.2 新增的符号
+
+| 符号 | 位置 | 形态 |
+|---|---|---|
+| `Discontinuity::audioBaseUs` | `SuperMediaPlayer.h:152` | `std::atomic<int64_t>{INT64_MIN}` |
+| `Discontinuity::audioBaseConsumedUs` | `SuperMediaPlayer.h:153` | `std::atomic<int64_t>{INT64_MIN}` |
+| `pinAudioClockBase(int64_t)` | 声明 `SuperMediaPlayer.h:1753`，定义 `SuperMediaPlayer.cpp:8897` | 唯一写点封装 |
+| `mAudioLandingDropLoggedGen` | `SuperMediaPlayer.h:1763` | 落点丢弃日志的代际限频（纯状态） |
+
+**没有新增虚函数**：设备已消费量用既有接口 `SMPAVDeviceManager::getAudioRenderPosition()`
+→ `IAudioRender::getPosition()` → 各平台 `device_get_position()`。
+
+### 10.3 实际改动表（行号为 P2 完成后的实测值）
+
+| 文件:行 | 改动 |
+|---|---|
+| `SuperMediaPlayer.h:111-153` | `Discontinuity` 末尾增 `audioBaseUs` / `audioBaseConsumedUs` + 完整语义/并发说明 |
+| `SuperMediaPlayer.h:523-545`（删） | `fetchSeekClockAnchorUs()` 声明与锚点规则注释整段删除 |
+| `SuperMediaPlayer.h:897`、`1282-1290`、`1304-1309`、`1322-1349`、`1364-1372`、`1382-1394`、`1541-1570` | 被删成员及其说明整段删除（含 `mAudioClockProgress*` 那套"第二套观察基准"） |
+| `SuperMediaPlayer.h:1753`、`1763` | 新增 `pinAudioClockBase()` 声明与 `mAudioLandingDropLoggedGen` |
+| `SuperMediaPlayer.cpp:231-241` | 两个音频宏删除，留"为什么删"的说明 |
+| `SuperMediaPlayer.cpp:708-730`（`SeekTo()`） | 被删成员的复位删除；只留 `mSeekAudioAlignDone` 复位 + P2 说明 |
+| `SuperMediaPlayer.cpp:2011-2035`（`DoCheckBufferPass` 前） | "音频按流重定位"消费点（`SeekStream`）整段删除 |
+| `SuperMediaPlayer.cpp:3815-3840`（`doRender`） | 视频锚点块（事件闩 + 只锚一次闩 + 共用判据）整段删除 |
+| `SuperMediaPlayer.cpp:5129-5255`（`DecodeVideoPacket`） | 一次性对齐事件的锚点改为 `mDiscontinuity.targetUs`；保留 B3（`mActiveVideoPtsOffset`）与 1b 重基 |
+| `SuperMediaPlayer.cpp:2515-2530` | "清迟到音频"阈值改为"落点过滤激活时用 `targetUs`，否则 `mSoughtVideoPos`" |
+| `SuperMediaPlayer.cpp:6925-6945`（`render()`） | `holdAudioForSeek` / `inSeekAudioWindow` / 静音门日志整段删除；音频无条件推 |
+| `SuperMediaPlayer.cpp:7016-7093`（`RenderAudio`） | 双侧地板换成"同一目标点"判据 + 按代际限频的 `audio landing drop` 日志 |
+| `SuperMediaPlayer.cpp:7152-7205`（`RenderAudio`） | 音频锚点块删除；新增"基准兜底钉住 + 交参考时钟" |
+| `SuperMediaPlayer.cpp:7214-7250` | `>1s` 前跳分支：不再置重定位事件、不再重锚时间轴（只记日志） |
+| `SuperMediaPlayer.cpp:8834-8910` | `FlushAudioPath()` 增基准重设（快照在 flush 之后）+ 新增 `pinAudioClockBase()` 定义 |
+| `SuperMediaPlayer.cpp:9478-9580` | `getAudioPlayTimeStamp()` 按 9.1/9.4 重写（含 `delta<0` 自愈与 `mSeekFlag` 退回） |
+| `SuperMediaPlayer.cpp:10430-10440`（`Reset()`） | 音频基准显式作废；被删成员的复位删除 |
+| `SuperMediaPlayer.cpp:10690-10705`（`ResetSeekStatus()`） | 注释改述：seek 结束不碰任何时间轴权威 |
+| `SuperMediaPlayer.cpp:11078-11105`（`beginDiscontinuity()`） | 明确**不碰**音频基准（切档也要走它），写明两个失效点 |
+| `SuperMediaPlayer.cpp:10862-10752`（`fetchSeekClockAnchorUs` 定义） | 整段删除，留删除说明 |
+| `SMPMessageControllerListener.cpp:771-782` | `mSeekAnchorPending = true;` 删除 + P2 说明 |
+| `SMPMessageControllerListener.cpp:965-982` | "seek in cache"里的 C 方案注释改述为"同一个目标点" |
+
+### 10.4 音频时钟的新数据流（谁写 / 谁读 / 单位 / 暂停）
+
+```
+写（唯一主写点）  FlushAudioPath()                —— flushDevice() 之后取快照
+                  · seek 且有目标点 ⇒ baseUs = mDiscontinuity.targetUs
+                  · 其它 flush      ⇒ baseUs = 旧 baseUs + 本次消费增量（内容位置连续）
+                  · 信息不足        ⇒ baseUs = 最后一次已渲染音频帧的内容位置 / INT64_MIN
+                  同时写 audioBaseConsumedUs = getAudioRenderPosition()（无效则 INT64_MIN）
+写（兜底）        RenderAudio() 首帧分支：baseUs == INT64_MIN 时 pinAudioClockBase(pts)
+写（自愈）        getAudioPlayTimeStamp()：delta < 0 时就地重取快照
+作废              Reset()（换片源/停止/Prepare）。
+                  seek 在途由 getAudioPlayTimeStamp() 的 mSeekFlag 退回覆盖（见 9.3）。
+读（唯一）        getAudioPlayTimeStamp() → SystemReferClock 的参考时钟回调
+                  → 供 getCurrentPosition()/渲染节拍/落点判据使用
+单位              微秒；轴 = targetUs 所在的 timePosition 轴
+暂停行为          设备暂停 ⇒ 已消费量不再增长 ⇒ delta 不变 ⇒ 位置恒定；无需额外冻结判据
+```
+
+### 10.5 自检
+
+* 9 个 P1 名字（§5 命令的前 9 项）全仓命中 **0**（Task A 已由父代理实测确认）。
+* P2 删除的成员/函数/宏代码引用 **0**（`grep` 只剩"删除说明"注释）。
+* 每个新增符号都有写点与读点，无"只声明未使用"；新数据成员追加在类末尾；
+  **无新增虚函数**；L1 核心（`mediaPlayer/`、`framework/`）未引入平台宏；
+  注释内无"星号紧跟斜杠"的组合（`[^ \t]\*/` 的 4 处命中全部是既有的单行注释：
+  `MediaPlayerConfig.h:29`、`:36`、`SuperMediaPlayer.cpp:2854`、`:8539`）。
+* **残留计数（§5 命令的等价 grep，按匹配行数）**：`mediaPlayer 760 + framework 114 +
+  platform 0 = **≈874**`（P1-c 之后父代理实测 1124；Task A 清掉约 30 条注释命中，
+  P2 再清掉约 170 条 —— 其中 `mSeekAudioFloorUs` / `mSeekAudioContinuityUs` /
+  `mSeekAudioReposition` / `mSeekAnchorPending` / `mSeekClockAnchored` /
+  `mSeekVideoAnchorDone` / `mAudioClockReanchorPending` / `holdAudioForSeek` 同时也是
+  §5 模式表里的项）。剩余全部是 P3（双解码器/pending/占位面/切档死线）与
+  P4（demuxer 落点暂存 `seekLanding*` / `mSeekLandingStage`、
+  `SeekInCache`、`DECODE_STALL_REBUILD_ROUNDS`）的范围。**父代理的 §5 命令为准。**
+* **构建要求：本阶段必须全量重编**（与 P1-b 同理）。P2 在成员列表**中间**删除了十余个
+  成员、并新增了 `mAudioLandingDropLoggedGen` 与 `Discontinuity` 的两个字段
+  ⇒ 其后成员的偏移全部改变。请删掉 `platform/QtPlayer/build` 下各 `media_player.dir`
+  的 `.obj`（或整个 build 目录）后再构建，否则会按旧偏移访问。
 
 
