@@ -203,6 +203,11 @@ namespace Cicada {
         mNameProvider = std::move(provider);
     }
 
+    void NdkCodecBinding::setDummySurfaceProvider(DummySurfaceProvider provider)
+    {
+        mDummySurfaceProvider = std::move(provider);
+    }
+
     void NdkCodecBinding::setCodecSpecificData(
             const std::list<std::unique_ptr<CodecSpecificData>> &csds)
     {
@@ -337,15 +342,23 @@ namespace Cicada {
         }
 
         /*
-         * 占位/空 surface 走 Java 绑定：那是 B2（切档交接）里用 DummySurface 的技巧，
-         * 是 Java API 侧的能力；NDK 侧 Configure(null) 会退化成 byte-buffer 输出模式，
-         * 不是本内核要的 surface 直出。这是"平台能力"判断，不是行为开关。
+         * 无真 surface / 占位面（切档 B2）时，与 Java 路径**同样**用 1x1 DummySurface：
+         *   · 直接 Configure(null) 会退化成 byte-buffer 输出模式，而本内核的视频路以
+         *     surface 模式消费帧（getOutput 不读指针）⇒ 那样等于"帧无人消费"；
+         *   · 这块 dummy 由 Java 的 ensureDummySurface() 提供（与 Java 路径是**同一块**），
+         *     语义逐字一致；拿不到才失败，由调度器整体回落 Java 绑定。
          */
-        if (surface == nullptr || usePlaceholderSurface) {
-            AF_LOGI("[ndk-codec] video needs the Java placeholder/dummy surface path "
-                    "(surface=%p placeholder=%d) ⇒ Java 异步绑定\n", surface,
-                    (int) usePlaceholderSurface);
-            return MC_ERROR;
+        void *effectiveSurface = surface;
+
+        if (effectiveSurface == nullptr || usePlaceholderSurface) {
+            effectiveSurface = (mDummySurfaceProvider != nullptr) ? mDummySurfaceProvider() : nullptr;
+            AF_LOGI("[ndk-codec] video configure needs surface mode: requested=%p placeholder=%d "
+                    "dummy-1x1=%p\n", surface, (int) usePlaceholderSurface, effectiveSurface);
+
+            if (effectiveSurface == nullptr) {
+                AF_LOGW("[ndk-codec] no dummy surface available ⇒ fall back to java-async\n");
+                return MC_ERROR;
+            }
         }
 
         if (!mNameProvider) {
@@ -386,7 +399,7 @@ namespace Cicada {
         applyCsdToFormat(mFormat);
 
         releaseNativeWindow();
-        mWindow = toNativeWindow(surface);
+        mWindow = toNativeWindow(effectiveSurface);
 
         if (mWindow == nullptr) {
             AF_LOGE("[ndk-codec] ANativeWindow_fromSurface failed\n");
@@ -423,8 +436,8 @@ namespace Cicada {
 
         const char *formatText = AMediaFormat_toString(mFormat);
         AF_LOGI("[ndk-codec] ndk-async video configured: codec=%s %dx%d angle=%d surface=%p "
-                "csd=%zu format=%s\n", name.c_str(), width, height, angle, surface, mCsd.size(),
-                (formatText != nullptr) ? formatText : "?");
+                "csd=%zu format=%s\n", name.c_str(), width, height, angle, effectiveSurface,
+                mCsd.size(), (formatText != nullptr) ? formatText : "?");
 
         return 0;
     }
@@ -526,12 +539,22 @@ namespace Cicada {
             return MC_ERROR;
         }
 
-        if (surface == nullptr) {
-            /* 与 Java 侧一致：null = 交给 Java 的 DummySurface 语义，NDK 侧不实现。 */
-            return MC_ERROR;
+        void *effectiveSurface = surface;
+
+        if (effectiveSurface == nullptr) {
+            /*
+             * 与 Java 侧一致：null = 切到 1x1 DummySurface（codec 保持运行、画面丢弃），
+             * 而不是"传 null 给平台"（那会切到 byte-buffer 模式，本内核的视频路不消费该指针）。
+             */
+            effectiveSurface = (mDummySurfaceProvider != nullptr) ? mDummySurfaceProvider() : nullptr;
+
+            if (effectiveSurface == nullptr) {
+                AF_LOGW("[ndk-codec] setOutputSurface(null) but no dummy surface available\n");
+                return MC_ERROR;
+            }
         }
 
-        ANativeWindow *window = toNativeWindow(surface);
+        ANativeWindow *window = toNativeWindow(effectiveSurface);
 
         if (window == nullptr) {
             return MC_ERROR;

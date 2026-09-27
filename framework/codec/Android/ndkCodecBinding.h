@@ -63,6 +63,14 @@ namespace Cicada {
 
         void setCodecNameProvider(CodecNameProvider provider);
 
+        /*
+         * 控制面：1x1 DummySurface（Java 的 ensureDummySurface()）。NDK 在"无真 surface /
+         * 占位面（切档 B2）"时用它维持 surface 模式 —— 与 Java 路径的做法、乃至**同一块**
+         * dummy surface 都一致；拿不到就 configure 失败，由调度器整体回落 Java 绑定。
+         */
+        using DummySurfaceProvider = std::function<void *()>;
+        void setDummySurfaceProvider(DummySurfaceProvider provider);
+
         // ---------------- IAndroidCodecBinding ----------------
         void setCodecSpecificData(const std::list<std::unique_ptr<CodecSpecificData>> &csds) override;
 
@@ -176,6 +184,7 @@ namespace Cicada {
         int mErrorActionCode{0};
 
         CodecNameProvider mNameProvider;
+        DummySurfaceProvider mDummySurfaceProvider;
     };
 
 } // namespace Cicada

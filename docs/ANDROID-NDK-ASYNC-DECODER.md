@@ -295,9 +295,13 @@ onAsyncError: isRecoverable/isTransient 任一为真 → 交给既有的错误�
 
 **路由规则（`codecBinding.cpp` 的 `AndroidCodecBinding`，按平台能力，不是配置开关）**
 - `setDrmInfo` 成功（secure）⇒ 整实例 `java-async`（必要时把已 configure 的配置在 Java 侧重放一次）；
-- 视频 `surface == null` 或 `usePlaceholderSurface`（B2 占位面是 Java 能力）⇒ 整实例 `java-async`；
-- 其余 + API ≥ 28 ⇒ `ndk-async`；NDK configure 失败 ⇒ 进程内一次性熔断（`NdkCodecBinding::markUnavailable`）并整实例回落 `java-async`。
+- 其余 + API ≥ 28 ⇒ `ndk-async`；**无真 surface / 占位面（切档 B2）也走 `ndk-async`** ——
+  NDK 侧通过控制面取 Java 的**同一块 1x1 DummySurface**（`ensureDummySurface()`，见 `getDummySurface()`）
+  维持 surface 模式；连 dummy 都拿不到时才 configure 失败并整体回落 `java-async`；
+- NDK configure 失败 ⇒ 进程内一次性熔断（`NdkCodecBinding::markUnavailable`）并整实例回落 `java-async`。
 - 两条都是**异步**，所以"无同步轮询"在所有受支持系统上成立。
+- `setOutputSurface(nullptr)`（后台/隧道切占位面）同样切到那块 dummy，与 Java 路径语义逐字一致
+  （**此前列为已知差异的这条已消除**）。
 
 **一个实证结论（值得记住）**：`AMediaCodec_setAsyncNotifyCallback`(28) / `setParameters`(26) / `ActionCode_is*`(28) 在 `__ANDROID_API__ = 24` 的构建里**不能直接调用**，编译器会报
 `'AMediaCodec_setAsyncNotifyCallback' is unavailable: introduced in Android 28`，而自己再写
@@ -331,3 +335,39 @@ libmediandk 有没有这个符号"，比版本号更准。巧合的是 FFmpeg �
 
 > 另外：`docs/Packaging_HarmonyOS.md:109` 原写"FFmpeg 上游**没有** OHOS hwaccel"，
 > 与本仓库 FFmpeg 树（`libavcodec/ohdec.c` 存在）**矛盾**，已按本表修正。
+
+## 十一、真机验收与性能对比（用户侧执行；本环境无 Android 设备）
+
+### 11.1 先看"这次走了哪条绑定"
+```powershell
+adb logcat -c
+adb logcat -s AliFrameWork CicadaQuality | Select-String -Pattern "ndk-codec|seek landing|async input path|audio first frame after seek|onAudioException|baseTimeout|Clarity"
+```
+
+**期望（API ≥ 28、非 DRM、非占位面）**
+- `[ndk-codec] binding=ndk-async (AMediaCodec + setAsyncNotifyCallback)`
+- `[codec-select] ndk control plane: … -> X` 与 `[ndk-codec] ndk-async video configured: codec=X` **同名**
+- 每次 seek 均有 `seek landing frame accepted`
+- **不出现**：`async input path looks dead`、`onAudioException -1003/-1004`、`baseTimeout`、`baseStop`
+
+**预期走 java-async（是设计，不是故障）**
+- API 24–27：`binding=java-async (API<28: libmediandk has no setAsyncNotifyCallback)`
+- Widevine/secure：`secure content ⇒ switch this decoder instance to java-async`
+- NDK configure 失败（罕见）：`ndk configureVideo failed ⇒ fall back to java-async` +
+  `NDK async data plane disabled for this process: …`
+
+### 11.2 性能对比（阶段 A3 基线 vs 迁移后）
+```powershell
+$p = (adb shell pidof com.cicada.player.compose).Trim()
+adb shell simpleperf record -g -p $p --duration 20 -o /data/local/tmp/perf.data
+adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso,symbol | Select-Object -First 40
+```
+
+同一片源、同一动作下看三件事：
+- 解码线程上 `art::JNI*` / `NewByteArray` / `SetByteArrayRegion` 占比 —— `ndk-async` 下应 ≈ 0；
+- `art::gc::*` 与 GC 次数 —— 应下降（不再每帧分配 Java `byte[]`）；
+- 视频线程 CPU 占比、KPI fps、连续 seek 延迟 —— 不应退化。
+
+### 11.3 回退
+`git reset --hard pre-ndk-mediacodec`（tag 已推送），或
+`git revert 74ec39a5 7c6d1ce0 31a65e7c`（保留文档与设计记录）。

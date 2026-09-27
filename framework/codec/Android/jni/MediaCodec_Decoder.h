@@ -120,6 +120,14 @@ namespace Cicada {
         std::string selectCodecName(bool isVideo, const std::string &mime, int width, int height,
                                     int sampleRate, int channelCount, int isADTS);
 
+        /*
+         * 【控制面：NDK 数据面专用】取本实例的 1x1 DummySurface（Java 侧懒创建并缓存，
+         * 与 configureVideo 的占位面是同一块）。NDK 绑定在"无真 surface / 占位面"时用它
+         * 维持 surface 模式，语义与 Java 路径一致。
+         * 返回 Java Surface 的 jobject（失败 nullptr）；调用方立刻转 ANativeWindow。
+         */
+        void *getDummySurface();
+
         /**
          * surface 重建后热重绑 MediaCodec 输出 surface（隧道直通模式专用）
          */

@@ -134,6 +134,13 @@ namespace Cicada {
                                              isADTS);
             }
 
+            /* 控制面：1x1 DummySurface（NDK 在无真 surface / 占位面时用它维持 surface 模式，
+             * 与 Java 路径是同一块 dummy）。 */
+            void *getDummySurface()
+            {
+                return mJava.getDummySurface();
+            }
+
         private:
             MediaCodec_Decoder mJava;
         };
@@ -156,6 +163,10 @@ namespace Cicada {
                                                       int isADTS) -> std::string {
                         return mJava->selectCodecName(isVideo, mime, width, height, sampleRate,
                                                       channelCount, isADTS);
+                    });
+                    /* 占位面/无真 surface 时用 Java 侧那块 1x1 DummySurface 维持 surface 模式。 */
+                    mNdk->setDummySurfaceProvider([this]() -> void * {
+                        return mJava->getDummySurface();
                     });
                     mUseNdk = true;
                     AF_LOGI("[ndk-codec] binding=ndk-async (AMediaCodec + setAsyncNotifyCallback)\n");

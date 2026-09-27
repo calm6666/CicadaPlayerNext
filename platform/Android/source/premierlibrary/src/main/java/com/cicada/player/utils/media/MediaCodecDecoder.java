@@ -413,6 +413,23 @@ public class MediaCodecDecoder {
      * ByteBuffer 模式、setOutputSurface 返回 -1）。
      * 必须与 configure / setOutputSurface 在同一线程语义下调用（现有调用方式不变）。
      */
+    /**
+     * 【控制面：NDK 数据面专用】把本实例的 1x1 DummySurface 交给 native。
+     *
+     * NDK 异步绑定在"没有真 surface"或"占位面（切档 B2）"这两种情形下，需要一块 surface
+     * 才能维持 surface 模式 —— 这正是 Java 侧 configureVideo 的既有做法
+     * （`target = ensureDummySurface()`）。让 NDK 复用**同一块** dummy，语义与 Java 路径
+     * 逐字一致，也避免"NDK 退化成 ByteBuffer 模式后视频帧无人消费"这种分叉。
+     *
+     * 纯查询：懒创建并缓存（与 configureVideo 用的就是同一个 mDummySurface）；
+     * 失败返回 null，调用方回落 Java 绑定（那里也会再试同一块 dummy）。
+     * 见 docs/ANDROID-NDK-ASYNC-DECODER.md 的路由规则。
+     */
+    @NativeUsed
+    public Object getDummySurface() {
+        return ensureDummySurface();
+    }
+
     private Surface ensureDummySurface() {
         if (mDummySurface == null) {
             try {

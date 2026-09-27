@@ -39,6 +39,8 @@ static jmethodID jMediaCodec_getOutputBufferInfo = nullptr;
 static jmethodID jMediaCodec_getOutBuffer = nullptr;
 /* 【控制面】NDK 数据面用它取得"Java 侧选中的 codec 名"（见 MediaCodec_Decoder.h 的说明）。 */
 static jmethodID jMediaCodec_selectCodecName = nullptr;
+/* 【控制面】NDK 数据面用它取得 1x1 DummySurface（占位面/无真 surface 时维持 surface 模式）。 */
+static jmethodID jMediaCodec_getDummySurface = nullptr;
 
 /*
  * 【设备硬解能力查询】MediaCodecUtils 的类句柄与方法 ID。
@@ -111,6 +113,16 @@ void MediaCodec_Decoder::init(JNIEnv *env) {
             jMediaCodec_selectCodecName = nullptr;
             AF_LOGW("MediaCodecDecoder.selectCodecName not found (老版本 Java 类): "
                     "NDK 绑定将回落 Java 绑定\n");
+        }
+
+        /* 控制面：1x1 DummySurface（同样清 pending 异常）。 */
+        jMediaCodec_getDummySurface = env->GetMethodID(jMediaCodecClass, "getDummySurface",
+                                                       "()Ljava/lang/Object;");
+
+        if (JniException::clearException(env)) {
+            jMediaCodec_getDummySurface = nullptr;
+            AF_LOGW("MediaCodecDecoder.getDummySurface not found (老版本 Java 类): "
+                    "NDK 绑定遇到占位面/无 surface 时回落 Java 绑定\n");
         }
     }
 
@@ -391,6 +403,29 @@ std::string MediaCodec_Decoder::selectCodecName(bool isVideo, const std::string 
     }
 
     return result;
+}
+
+void *MediaCodec_Decoder::getDummySurface() {
+    JniEnv jniEnv{};
+
+    JNIEnv *env = jniEnv.getEnv();
+
+    if (env == nullptr || mMediaCodec == nullptr || jMediaCodec_getDummySurface == nullptr) {
+        return nullptr;
+    }
+
+    jobject surface = env->CallObjectMethod(mMediaCodec, jMediaCodec_getDummySurface);
+
+    if (JniException::clearException(env)) {
+        AF_LOGE("getDummySurface exception\n");
+        return nullptr;
+    }
+
+    /*
+     * 返回的是 Java 侧 mDummySurface 字段持有的对象（由 Java 实例保命），
+     * 调用方立刻转 ANativeWindow_fromSurface 并自持引用，这里不额外建全局引用。
+     */
+    return (void *) surface;
 }
 
 int MediaCodec_Decoder::start() {
