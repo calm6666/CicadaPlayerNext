@@ -686,6 +686,25 @@ StreamType SuperMediaPlayer::SwitchStream(int streamIndex)
 
     if (type != MSG_INVALID) {
         this->putMsg(type, param);
+        AF_LOGI("switch stream request posted: index=%d type=%d\n", streamIndex, (int) streamType);
+    } else {
+        /*
+         * 【必须留下痕迹】真机（2026-09-27 Qt，手动点清晰度）表现是"点了完全没反应"：
+         * 界面的选档回调打了日志、内核却一行都没有 —— 因为这里**静默返回**。
+         * 没有这行日志就无法区分"界面没发请求"和"内核不认识这个索引"。
+         * 顺带把内核此刻认识的流表打出来，直接对上界面的下标与内核的 streamIndex。
+         */
+        std::string knownStreams;
+
+        for (auto &it : mMediaInfo.mStreamInfoQueue) {
+            if (it != nullptr) {
+                knownStreams += std::to_string(it->streamIndex) + ":t" + std::to_string((int) it->type) + " ";
+            }
+        }
+
+        AF_LOGW("switch stream request DROPPED: index=%d is not in the kernel stream list; "
+                "known streams (index:type) = %s\n",
+                streamIndex, knownStreams.c_str());
     }
 
     return streamType;
