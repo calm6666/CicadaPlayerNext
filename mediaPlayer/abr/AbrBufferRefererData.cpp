@@ -50,7 +50,7 @@ bool AbrBufferRefererData::GetIsConnected()
         return (bool) CicadaGetPropertyLong(handle, PROPERTY_KEY_NETWORK_IS_CONNECTED);
     }
 
-    return -1;
+    return false;
 }
 
 int64_t AbrBufferRefererData::GetCurrentPacketBufferLength()

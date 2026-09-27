@@ -397,11 +397,6 @@ namespace Cicada {
         void LiveTimeSync(int64_t delayTime);
 
         int FillVideoFrame();
-        int FillPendingVideoFrame();
-        void DrainPendingVideoFrames();
-        int DecodePendingVideoPacket(std::unique_ptr<IAFPacket> &pVideoPacket);
-        int CreatePendingVideoDecoder(const Stream_meta &meta);
-        bool TryCommitPendingVideoSwitch();
 
     private:
         int SetUpAudioPath();
@@ -442,45 +437,21 @@ namespace Cicada {
         void logAudioSilence(int reason, const char *detail, int64_t audioPts, int64_t clockUs);
 
         /*
-         * flushRender=false 只清解码器、不动渲染器。
-         *
-         * 默认的 true 会走 flushDevice()，而那里面最后会 flushVideoRender()，
-         * 也就是 pause/start VSync 线程——afThread 的 pause/start 状态机本身
-         * 就有竞态（有机会把线程留在 PAUSED），seek 时用它是对的，但“原地重启
-         * 视频”这种不需要动渲染器的路径没必要冒这个险：下一帧本来就会覆盖渲染器
-         * 里缓存的旧帧。
-         */
-        /*
          * 清空视频解码/渲染路径。
-         * cancelPendingSwitch=false 用于 seek 等“原地重启视频”的场景：
-         * 目标清晰度仍然有效，只重建 pending decoder，不能把切换状态误取消。
+         * 切档是**单解码器原地换档**（见 SuperMediaPlayer::SwitchVideo）：换流、按流定位、
+         * 清解码器与解码帧队列、按新档 meta 决定是否重建同一块解码器，任何时刻只有一块。
          *
-         * from：调用者名字（传 __func__）。以前找不到“提交后 0.1 秒是谁把视频路
-         * flush 了”，因为 FlushVideoPath() 自己一行日志都不打，而它会顺手把
-         * mQualitySwitchCommitPending / mRetiredVideoStreamIndex 清掉 ——
-         * 清了以后 READY 永远不会发、旧 Representation 也就永远关不掉。
-         * 现在每次调用都留下一行（见 docs/PLAN-QUALITY-SWITCH-FIX.md W0.3）。
+         * from：调用者名字（传 __func__）。每次调用都留一行日志，方便定位"是谁把视频路 flush 了"。
          */
         void FlushVideoPath(bool flushRender = true, bool cancelPendingSwitch = true, const char *from = nullptr);
 
         /*
-         * 清晰度切换的**唯一终态出口**。
+         * 清晰度切换的**唯一终态出口**（READY / FAILED）。
          *
-         * 以前“发 READY + 关旧 stream + 释放 retired decoder + 清切换状态”这四件事
-         * 挤在 RenderVideo() 的一个分支里，门槛是“必须有一帧真的上屏”。只要目标
-         * 解码器一帧都出不来（HLS 实测就是），这四件事一件都不会做：旧流一直读到
-         * PTS 88s、每个包在 ProcessVideoPacket 里打 unknown stream、retired 硬解
-         * surface 不还、上层永远收不到终态（界面一直停在“切换中”）。
-         *
-         * 现在统一从这里出去，ready / 超时 / 被 flush 取消 三条路都走它。
+         * 前置条件只有一条：`mVideoSwitchInFlight`（有挂着的切档请求）。终态时清零它
+         * 与 `mVideoSwitchTargetIndex`，所以本函数天然幂等。
          */
         void finishQualitySwitch(bool ready, const char *reason);
-
-        /*
-         * 切换死线兜底：提交后超过 QUALITY_SWITCH_DEADLINE_MS 还没等到“新帧上屏”，
-         * 就以 FAILED 收尾。每轮主循环调一次（见 ProcessVideoLoop）。
-         */
-        void checkQualitySwitchDeadline();
 
         /*
          * 开始“渲染器追赶窗口”：在窗口内丢掉迟到的帧（并把还没解码的过时包也丢掉），
@@ -489,34 +460,6 @@ namespace Cicada {
          * JOINING_DROP_LATE_WINDOW_MS。
          */
         void beginRendererJoining(const char *why);
-
-        /*
-         * 清晰度切换状态机的每秒一行诊断（[switch] ...）。
-         * 出问题时这一行就能回答：目标流读到哪里了、active 队列头在哪、
-         * 帧队列堵了几个、状态机卡在哪个标志上。
-         */
-        void logQualitySwitchState();
-
-        /*
-         * 把**目标（pending）Representation 的 codec 参数集**（SPS/PPS/VPS，
-         * 即 demuxer meta 里的 extradata）贴到即将送入 pending 解码器的包上。
-         *
-         * 为什么需要它（马赛克根因，2026-09-24）：
-         *   预滚跳过（见 ProcessVideoPacket 里那段）会把目标流开头的一批包整批
-         *   丢掉，而"携带 extradata 的那一条"往往就在里面 —— 框架是在目标流
-         *   第一个包上 setExtraData 的。丢过之后，新解码器拿到的第一个关键帧
-         *   没有参数集，解不出来（`Error while decoding frame -1094995529 :
-         *   Invalid data found when processing input`），P 帧参考不上参考帧，
-         *   画面就是"人物糊成马赛克块"。
-         *
-         * 原来只有"等到参考点之后的关键帧"那一条分支贴了参数集，**兜底回退分支
-         * （等太久、退而接受更早的关键帧）没贴** —— 而日志里两处马赛克簇
-         * （22:51:00.790 / 22:52:09.646）正好紧跟在那条回退日志之后。所以这里
-         * 抽成公共函数，两条分支共用，语义上不可能再漏。
-         *
-         * 返回 true 表示本次确实贴上了参数集（供调用处判断要不要 log）。
-         */
-        bool attachPendingVideoCodecParams();
 
         /*
          * seek 卡死排查用的**状态翻转日志**（只在翻转时各打一行，不刷屏）。
@@ -537,103 +480,28 @@ namespace Cicada {
         void logSeekPipelineState(const char *why);
 
         /*
-         * ================= 暂停态无感切档（2026-09-24，跨平台）=================
+         * 是否有在途的清晰度切换。单解码器模型下只有**一个**判据：
+         * `mVideoSwitchInFlight`（由 switchVideoStream() 置位，由 SwitchVideo() 的失败
+         * 出口与 finishQualitySwitch() 清零）。ABR 让路、read-ahead 门、诊断行
+         * 全部读它，避免三处各写一份而漏形态。
          *
-         * 用户要求"暂停中 / 播放中都要能无感换清晰度"，而且"切档在途时暂停、
-         * 暂停时切档、seek 与切档叠加"等组合都要收敛。播放中那条路本来就能走
-         * （旧路继续出画、新路预热完 promote）；**卡死的是暂停态**，因为它有
-         * 四道门全部以"主时钟在走"为前提：
-         *
-         *   门1 渲染 doRender() 只在 PLAYER_PLAYING 调 render()；
-         *   门2 提交 TryCommitPendingVideoSwitch() 要求"帧时间 <= master + 150ms"；
-         *   门3 预滚只接受"参考点之后的关键帧"，且参考点取自主时钟；
-         *   门4 终态 checkQualitySwitchDeadline() 非 PLAYING 时无限延期。
-         * 主时钟在暂停时是冻结的，于是 1/2/3 一起把状态机钉在 decoderSwitch：
-         * 实测 [switch] 关键量 28.6 秒逐字节不变、18s 超时被拖到 33.3s，
-         * 最后是外层预编译 PlayerBase 的 baseTimeout() 把播放器 stop() 掉。
-         *
-         * 解法：切档发起时**快照**一个冻结的参考时刻（mPausedSwitchPivotUs），
-         * 所有"和 master 比"的判据在暂停态改用它；预滚起点改成"暂停点之前
-         * 最近的关键帧"（不必读空队列去够后面的关键帧）；提交后由 doRender()
-         * 在暂停态渲染**恰好一帧**到达终态。全程不动主时钟、不发位置回调。
+         * 保留这个函数名：IsStreamSwitchInFlight() 与 ABR 让路都调用它。
          */
-
-        /*
-         * 本次切档是否发起于暂停态。true 时上面那四条改走"冻结参考点"路径。
-         * 只在发起时写一次，切档终态（成功/失败/被 seek 中止）时清零。
-         * 【成员变量本身定义在类成员列表的末尾，见文件下方同名声明处的说明 ——
-         *   本工程增量构建不做头文件依赖，新成员必须追加在成员列表最后，
-         *   不能夹在方法声明中间。】
-         */
-
-        /*
-         * 暂停态切档的**冻结参考时刻**（微秒，媒体时间轴）。
-         * 取发起切档那一刻的 getCurrentPosition()，之后不再推进 —— 这正是
-         * "暂停"的语义：时间不走了，所以判据要拿一个不动的值去比。
-         */
-
-        /*
-         * 提交之后、暂停态还欠"恰好一帧上屏"。doRender() 看到它为真就反复调
-         * RenderVideo(true)，直到有一帧真的送出（或撞上墙钟死线）。
-         * 不是周期渲染：一旦有一帧上屏（或切换终态）立刻清假。
-         */
-
-        /*
-         * 提交前墙钟死线（steady ms）：**只要有任何在途切换**就必须有到点的出口。
-         *
-         * 为什么必须有：Android 侧预编译的 PlayerBase 会在 ~545ms 内就
-         * baseTimeout()+stop()，而切换在途的判据一旦依赖主时钟（暂停时不动），
-         * 就等于没有出口 —— 用户看到的是"点了清晰度之后整个播放器卡死"。
-         */
-
-        /*
-         * 是否有在途的清晰度切换（提交前或提交后）。给墙钟死线、复位点、
-         * 以及"seek 要不要中止切档"共用同一个判据，避免三处各写一份而漏形态。
-         */
-        bool isQualitySwitchInFlight() const
-        {
-            return mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 ||
-                   mQualitySwitchCommitPending;
-        }
-
-        /*
-         * 提交前的墙钟死线。由 ProcessVideoLoop 每轮调用（紧挨着原有的
-         * checkQualitySwitchDeadline），覆盖每一种"在途"状态：暂停切档在途、
-         * 播放中切档在途、seek 在途、以及它们的叠加。到点即
-         * finishQualitySwitch(false, ...) —— 必有终态。
-         */
-        void checkQualitySwitchPrerollDeadline();
-
-        /*
-         * 切档发起时的统一快照（暂停/播放都用它，保证两条路状态初始化一致）。
-         * 只记录，不动主时钟、不动位置回调。
-         */
-        void beginQualitySwitchTracking();
-
-        /*
-         * 清掉上面三个新状态。所有"切档终态"的出口都必须调它：
-         * finishQualitySwitch()、切档超时失败、FlushVideoPath()、Reset()。
-         */
-        void resetPausedSwitchState();
+        bool isQualitySwitchInFlight() const;
 
         /*
          * 洪水日志限频（W0.4）。
          *
-         * 逐帧/逐包打日志的那几个点（drop pending / hold pending / normalize pending /
-         * drop stale / stale pending / unknown stream / read-ahead gate）在一次切换里
+         * 逐帧/逐包打日志的那几个点（unknown stream / read-ahead gate）在一次切换里
          * 能刷出 4000+ 行，把真正重要的
          * 那几行淹掉，也把日志文件撑到几 MB。这里统一限成“每个窗口内最多放行
          * 若干条，其余丢弃并在窗口切换时补一行汇总”。
          */
         enum FloodLogId {
-            FLOOD_PENDING_DROP = 0,   /* drop pending frame before switch window */
-            FLOOD_PENDING_HOLD,       /* hold pending video before playback position */
-            FLOOD_PENDING_NORMALIZE,  /* normalize pending frame pts */
-            FLOOD_STALE_DROP,         /* drop stale video packet after quality switch */
-            FLOOD_STALE_PENDING,      /* drop stale pending video packet */
-            FLOOD_UNKNOWN_STREAM,     /* unknown stream */
+            FLOOD_UNKNOWN_STREAM = 0, /* unknown stream */
             FLOOD_READ_AHEAD,         /* 读前闸门触发的说明行 */
             FLOOD_DECODE_STALL,       /* "还在等 seek 的第一个关键帧"导致的停滞判据跳过 */
+            FLOOD_STALE_DROP,         /* 切档后把旧流残留包挡在解码器之外（限频，避免刷屏） */
             FLOOD_COUNT
         };
 
@@ -808,33 +676,15 @@ namespace Cicada {
         std::atomic_bool mVideoRenderInited{false};
         std::unique_ptr<demuxer_service> mDemuxerService{nullptr};
         std::queue<unique_ptr<IAFFrame>> mVideoFrameQue{};
-        std::queue<unique_ptr<IAFFrame>> mPendingVideoFrameQue{};
-        /* 目标 representation 的 packet 独立缓存，避免与 active 路混队列。 */
-        std::deque<unique_ptr<IAFPacket>> mPendingVideoPacketQue{};
-        /* 目标码流与当前主时钟存在容器时间轴偏移时，在 pending 帧提交前
-         * 统一重定位 PTS，避免 HLS 不同 rendition 以绝对时间戳输出而导致
-         * 提交条件永远等不到（例如目标首帧 133s、当前播放 82s）。 */
-        int64_t mPendingVideoPtsOffset{INT64_MIN};
         /*
-         * 本次清晰度切换要求目标 representation 从哪个媒体时间点接入。
-         * 双路播放器不会让备用解码器从 representation 的 0 点一路解码到当前
-         * 播放点，而是只保留用于初始化 codec 的首个关键包，然后直接等待目标
-         * 时间点对应的关键帧。这样可以避免切换时把几十秒的旧帧送进 pending
-         * decoder，造成“wait a key frame”、大量丢包和主循环卡死。
+         * 视频原始 pts 轴 → 主时钟（timePosition）轴 的映射偏移。
+         *
+         * 两个建立点：seek 落点（DecodeVideoPacket 里 B3 那段，由落点包自己的
+         * timePosition − pts 算出）、以及 FlushVideoPath / Reset 的清零点。
+         * 两个消费点：DecodeVideoPacket 给"不带 timePosition"的帧做 pts 归一化，
+         * doReadPacket 的读前闸门把包 pts 折算到主时钟同一把尺子上。
          */
-        int64_t mPendingVideoSwitchTimePosition{INT64_MIN};
-        int64_t mPendingVideoSwitchStartMs{0};
-        bool mPendingVideoInitPacketSent{false};
-        /* pending 提升为 active 后继续作用于该清晰度 decoder 的所有输出帧，
-         * 防止只有首帧被对齐、后续帧又回到 rendition 原始时间轴。 */
         int64_t mActiveVideoPtsOffset{INT64_MIN};
-        // decoder 槽位已经切换，但还未确认新帧完成一次实际渲染；在此期间不发 READY，
-        // 也不释放 retired decoder，保证上层清晰度与画面同步。
-        bool mQualitySwitchCommitPending{false};
-        int mQualitySwitchCommittedStreamIndex{-1};
-        /* promote 时 active 队列中尚未输出的旧帧数量。只有这些旧帧全部
-         * 消费后，RenderVideo() 才能把当前帧认定为新清晰度并发送 READY。 */
-        size_t mQualitySwitchOldFramesPending{0};
         std::deque<unique_ptr<IAFFrame>> mAudioFrameQue{};
         unique_ptr<streamMeta> mCurrentVideoMeta{};
         bool videoDecoderEOS = false;
@@ -862,10 +712,6 @@ namespace Cicada {
         int mCurrentVideoIndex{-1};
         int mCurrentAudioIndex{-1};
         int mCurrentSubtitleIndex{-1};
-        int mWillChangedVideoStreamIndex{-1};
-        int mPendingVideoStreamIndex{-1};
-        /* 切换提交前仍在输出旧画面的 stream。目标真正上屏后才关闭它。 */
-        int mRetiredVideoStreamIndex{-1};
         int mWillChangedAudioStreamIndex{-1};
         int mWillChangedSubtitleStreamIndex{-1};
         float mCATimeBase{};      // current audio stream origin pts time base
@@ -1082,31 +928,9 @@ namespace Cicada {
          */
 
         /*
-         * 本次清晰度切换需要重建视频解码器（新码流的 codec id 或分辨率跟当前
-         * 解码器不一致），但要等旧码流的缓冲放完、新码流的包真正到点时才换，
-         * 见 doDeCode() 里的注释。
-         */
-        bool mPendingVideoDecoderSwitch{false};
-
-        /*
-         * ============ 清晰度切换收尾 / 诊断（2026-09-21，见 PLAN-QUALITY-SWITCH-FIX）============
-         *
-         * mQualitySwitchCommitMs   推进到提交那一刻的单调毫秒；0 表示没有在途切换。
-         * mQualitySwitchDeadlineMs 提交 + QUALITY_SWITCH_DEADLINE_MS；只要还有“进展”
-         *                          （追赶窗口开着，或最近一个死线时长内有帧真的上屏）
-         *                          就不断往后顺延。顺延不了、到点仍未等到“新帧真的上屏”，
-         *                          就走 finishQualitySwitch(false, ...) 收尾 —— 必须有
-         *                          这个兜底，否则“提交了但一帧都出不来”会把状态机永久
-         *                          钉在 mQualitySwitchCommitPending=true 上，连带旧流不关、
-         *                          retired 解码器不还、上层收不到终态。判据见
-         *                          SuperMediaPlayer.cpp 的 checkQualitySwitchDeadline()。
-         * mQualitySwitchWarnMs     上面那次超时告警的限频时间戳。
          * mSwitchStateLogMs        [switch] 每秒一行的限频时间戳。
          * mFloodLog[]              FloodLogId 里每一项的窗口计数（W0.4）。
          */
-        int64_t mQualitySwitchCommitMs{0};
-        int64_t mQualitySwitchDeadlineMs{0};
-        int64_t mQualitySwitchWarnMs{0};
         int64_t mSwitchStateLogMs{0};
 
         struct FloodLogState {
@@ -1136,22 +960,6 @@ namespace Cicada {
          */
 
         /*
-         * 目标路"预滚"是否已经结束（见 PENDING_PREROLL_KEEP_US）。
-         * false = 还在丢弃切换窗口之前的数据（只保留遇到的关键帧）；
-         * 一旦遇到"切换窗口之前最近的关键帧"或者数据已经进入切换窗口，就置 true。
-         * 每次建立新的 pending 切换都要复位。
-         */
-        bool mPendingVideoPrerollDone{false};
-
-        /*
-         * 预滚参考点（微秒，INT64_MIN = 尚未确定）。进入预滚那一刻取
-         * max(切换请求时刻, 主时钟)，之后**不再变化**：只有稳定的参考点，
-         * "参考点之后的第一个关键帧" 才存在；如果跟着主时钟一直往前推，
-         * 刚到达的关键帧会立刻被判成"还不够靠后"，下一个又要等一整个分片。
-         */
-        int64_t mPendingVideoPrerollRefUs{INT64_MIN};
-
-        /*
          * 本次 mBufferingFlag 期间是否真的给 UI 发过 LoadingStart。
          * seek 引起的"缓冲"（缓存被 ClearPacket 清空、新 segment 还在下载）
          * 不再弹"缓冲中"提示 —— 界面已经有 NotifySeeking/NotifySeekEnd，
@@ -1160,13 +968,6 @@ namespace Cicada {
          * 所以这里记一下有没有通知过，没通知过就不要再发 end。
          */
         bool mBufferingNotified{false};
-
-        /*
-         * 清晰度切换刚提交后，还要再挡掉几帧才交给渲染器（见 SuperMediaPlayer.cpp 里
-         * 提交处那段说明）。防的是新解码器刚接手时的一瞬间马赛克/花屏：
-         * 解码照常进行，只是这几帧不上屏，画面保持上一帧（约 3 帧 ≈ 50ms）。
-         */
-        int mQualitySwitchHoldFrames{0};
 
         /*
          * ============ 解码器故障恢复（2026-09-24，错误驱动，跨平台）============
@@ -1229,25 +1030,6 @@ namespace Cicada {
          * **故意保留**：删它会移动其后成员的偏移，违反本文件的增量构建偏移契约。
          */
         int64_t mSeekNoFrameSinceMs{0};
-
-        /*
-         * pending 解码器这一轮是否已经贴过目标流的参数集（SPS/PPS）。
-         * 由 attachPendingVideoCodecParams() 维护：只在"还没贴过"时贴一次，
-         * 避免每个包都重复 setExtraData（Java 侧每帧一次 JNI 拷贝，不划算）。
-         * 每次 CreatePendingVideoDecoder / FlushVideoPath 时复位。
-         * 同样**追加在成员列表末尾**（见上面那段增量构建的说明）。
-         */
-        bool mPendingVideoCodecParamsAttached{false};
-
-        /*
-         * 暂停态切档的状态（声明与完整说明见上面那一段）。**追加在成员列表末尾**
-         * （见本文件里"增量构建不做头文件依赖、新成员一律追加在最后"那段约定）：
-         * 插在中间会移动其后成员的偏移，让旧的 friend TU 目标文件按错偏移访问。
-         */
-        bool mSwitchStartedWhilePaused{false};
-        int64_t mPausedSwitchPivotUs{INT64_MIN};
-        bool mPausedSwitchRenderPending{false};
-        int64_t mQualitySwitchPrerollDeadlineMs{0};
 
         /*
          * seek 墙钟死线触发那一刻，"输出缓冲被谁占住"的诊断只打一次用的闩。
@@ -1355,55 +1137,14 @@ namespace Cicada {
         bool mSeekDiagLastVideoDecoderValid{false};
 
         /*
-         * B2：当前 pending（切档目标）解码器是不是用"1x1 占位 Surface"配置的
-         * （= tunnel 渲染器带 FLAG_DUMMY 且 view 非空时，由 CreatePendingVideoDecoder
-         * 连同 DECFLAG_PLACEHOLDER_SURFACE 一起置真）。提交
-         * （TryCommitPendingVideoSwitch）据此走 placeholder 交接：先让旧解码器交出
-         * 真 Surface，确认新解码器接上之后才 promote 并释放旧解码器；接不上就原地回滚。
-         *
-         * SeekTo / Reset / FlushVideoPath 三处必须随 pending 状态一起复位 ——
-         * 漏一处就会跨 seek / 跨片源残留，让下一次提交误判"pending 是 surface 模式"。
-         *
-         * 追加在成员列表末尾：本文件有"增量构建不做头文件依赖、新成员一律追加在最后"
-         * 的约定，插在中间会移动其后成员的偏移，让旧的 friend TU 目标文件按错偏移访问。
-         */
-        bool mPendingDecoderUsesPlaceholderSurface{false};
-
-        /*
-         * 【纯诊断，两个值都不参与任何判定；同样追加在成员列表末尾】
-         *
-         * mPendingVideoPrerollKeyPts：预滚实际开始解码的那个关键帧的 raw pts
-         *   （在两个接受分支里记录：正常"参考点之后的第一个关键帧"与"等太久回退"）。
-         * mQualitySwitchCarriedFramePts：提交（promote）时从 pending 帧队列带进
-         *   active 队列的那一帧的 pts（每次提交先置 INT64_MIN，避免跨次残留）。
-         *
-         * 用途只有一个：RenderVideo 里交接后第一帧真的进真面时打
-         *   `post-handover first frame: pts=… prerollKeyPts=… carriedPendingPts=…`
-         * 一眼判定"交接后上屏的是 preroll 那一代（交接前就解好的帧，~百 ms 出画）
-         * 还是交接后新解出来的帧"，以及从提交到上屏的真实毫秒数。
-         * 坐标轴：mQualitySwitchCarriedFramePts 与上屏帧的 pts 同轴（都是流水线
-         * 归一化后的），可以直接比较；mPendingVideoPrerollKeyPts 是**包的原始 pts**，
-         * 与它们相差一个 mActiveVideoPtsOffset，只作"离预滚关键帧多远"的参考。
-         * 之所以要这一行：上一版在这里加了 flush，逼出 6.4s 等关键帧 + 4.2s 等时钟
-         * （实测 10.6s 静止）。有了这三个 pts，同一份日志就能当场判定走了哪条路。
-         */
-        int64_t mPendingVideoPrerollKeyPts{INT64_MIN};
-        int64_t mQualitySwitchCarriedFramePts{INT64_MIN};
-
-        /*
          * ============ B4（两条渲染路）：active 视频解码器**实际绑定的输出面** ============
          *
          * 就是 `CreateVideoDecoder()` 里算出来的那个 view：
          *   · 隧道（FLAG_DUMMY，解码器直出）：= App 的 Surface（`mSet->mView`）；
          *   · GL（GLRender）：= 渲染器 SurfaceTexture 的那块 Surface（`GLRender::getSurface()`）。
          *
-         * 唯一用途：切清晰度的"占位 Surface 交接"（B2）必须把**真面**从旧解码器交给
-         * pending 解码器。GL 路的"真面"不是 App 的 view —— 拿 `mSet->mView` 去
-         * setOutputSurface 一定失败（那块面属于 EGL，不是 codec 的输出面），
-         * 这正是"两条路要各自记住自己的真面"的原因。
-         *
-         * 生命周期：`CreateVideoDecoder()` 一开始置 null（失败即保持 null ⇒ 交接退回
-         * 纯 promote），成功后写入；解码器被销毁的路径（Reset / closeVideo）也置 null。
+         * 生命周期：`CreateVideoDecoder()` 一开始置 null（失败即保持 null），成功后写入；
+         * 解码器被销毁的路径（Reset / closeVideo）也置 null。
          * 不额外持有 JNI 引用（与 mSet->mView 同样的用法：调用方保证它活得比播放器长）。
          */
         void *mActiveVideoSurface{nullptr};
@@ -1454,25 +1195,6 @@ namespace Cicada {
          */
         std::deque<int64_t> mVideoAxisPts;
         std::deque<int64_t> mVideoAxisTimePos;
-
-        /*
-         * ============ 【B12】切换预滚"两路代价取小"的状态（2026-09-26）============
-         *
-         * 预滚起点有两条路（见 SuperMediaPlayer.cpp 里那段决策）：
-         *   · 等参考点**之后**第一个关键帧：不解码，等待 = nextKey - ref（≤ 一个关键帧间隔）；
-         *   · 从参考点**之前**最近的关键帧起解、丢前缀追上时钟：代价 = (ref - lastKey) / (rate - 1)。
-         * 在预滚入口比较两者、选小的那条。
-         *
-         * mPendingVideoDecodeRateMilli 是"目标路解码速度 / 实时"的千分比，每次提交后用它这一次
-         * 真正解掉的媒体长度 ÷ 墙钟实测更新；墙钟从**切换请求**起算（含 open/seek），因此只会
-         * 低估速率 ⇒ 偏向"等关键帧"（今天的行为），不会因为高估而选错路。
-         *
-         * mPendingVideoPrerollPathChosen 保证选路**只在预滚入口做一次**（每次切换请求处复位）：
-         * 否则包队列一前进就改主意，会和"已经丢掉的前缀"打架。
-         * 两个成员一律追加在类末尾（本文件顶部有硬约束：中间插入会让别的 TU 的偏移对不上）。
-         */
-        int mPendingVideoDecodeRateMilli{1900};
-        bool mPendingVideoPrerollPathChosen{false};
 
         /*
          * ============ 【P2 删除：音频时钟"设备位置真的前进过"的第二套观察基准】============
@@ -1528,36 +1250,6 @@ namespace Cicada {
         int mCatchUpDiscardStreak{0};
 
         /*
-         * ============ 【①②B17】切档被 seek 取消后"重新装弹" / 落点窗口"归属" ============
-         *
-         * 背景（安卓日志，2026-09-26 20:24~20:25）：
-         *   · 7/7 次手动切档都是 `status=0 started` → 紧跟一条
-         *     `FlushVideoPath from ProcessSeekToMsg (… cancelPendingSwitch=1 … pendingStream=0)`
-         *     → `status=3 canceled`，没有一次 status=1 —— 用户点过的档位意图被一次
-         *     插进来的用户 seek 整条作废；
-         *   · 同时出现 `seek landing frame accepted: pts=99933167, -97006 ms before the seek target`
-         *     这种荒谬读数（floor=2.927s 是用户 seek 目标，被采纳的帧在 99.93s），
-         *     说明"落点窗口"在被切档路径挪动过时间轴之后仍然被当成有效窗口消费。
-         *
-         * mSwitchReArmStreamIndex / mSwitchReArmPending：
-         *   seek 拆掉在途切档时（SMPMessageControllerListener 的 seek 处理里）记下用户要的档位，
-         *   并置闩；seek 结束事件（ResetSeekStatus）里**只重新发起一次** SwitchStream(该档)，
-         *   发起即清闩。区分判据见 arm 处注释：只有 MSG_SEEKTO（= 用户 SeekTo）会走到那里，
-         *   切档自己的 demuxer 级 seek 从不经过 MSG_SEEKTO ⇒ 不会 ping-pong。
-         *   显式取消（换片源/停止/Reset、用户又选别的档、错误终态）一律清闩不重装：
-         *   Reset() 与 SwitchStream() 入口都会清。
-         *
-         * 【P1-b 删除：落点"归属"标记】与位置地板同点写入的那个归属标记已随地板一起删除：
-         *   它存在的理由是"地板可能被别的路径改写，落点块还拿它当本次 seek 的目标" —— 而
-         *   现在目标点只有一个载体（mDiscontinuity.targetUs，带代际），别的路径无法改写它，
-         *   所以"归属比对"这一步在结构上就不需要了。
-         *
-         * 两个成员一律追加在类末尾（本文件顶部硬约束：中间插入会让别的 TU 的偏移对不上）。
-         */
-        int mSwitchReArmStreamIndex{-1};
-        bool mSwitchReArmPending{false};
-
-        /*
          * ============ 【B19】切档在途时不发 PFR seek，改为"推迟到切档终态" ============
          *
          * PFR（暂停帧恢复）的发起点在**内核内部**：SuperMediaPlayer::RestorePausedVideoFrame()
@@ -1567,8 +1259,8 @@ namespace Cicada {
          * 把在途切档打成 `status=3 canceled`，这就是"手动切档 100% 失败"的直接推手。
          *
          * mPauseFrameRestorePending：一次"有待补做的 PFR"的事件闩。
-         *   · 切档在途（mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0
-         *     || mSwitchReArmPending）时不发 seek，只置闩并返回；
+         *   · 切档在途（质量切换的唯一在途判据，见 qualitySwitchInFlight()）时不发 seek，
+         *     只置闩并返回；
          *   · 在切档终态出口补做一次（READY/FAILED 走 finishQualitySwitch 那处，
          *     CANCELED 走 FlushVideoPath 那处），且**只补做一次**：先清闩再补发；
          *   · 补做时仍在暂停态才真的发（PFR 只在暂停态有意义），否则丢弃闩；
@@ -1584,13 +1276,9 @@ namespace Cicada {
         bool mPauseFrameRestorePending{false};
         void runDeferredPauseFrameRestore();
         /*
-         * 【B19-b】"切档在途"的唯一判据（PFR 让路 / 用户 seek 推迟都以它为准）。
-         * 取切档状态机自己的未完成标志的**并集**：两个 pending/willChange 索引、
-         * mPendingVideoDecoderSwitch（`state=decoderSwitch`）、mQualitySwitchCommitPending
-         * 与 mQualitySwitchCommittedStreamIndex（`state=committed`）、
-         * mQualitySwitchOldFramesPending、mRetiredVideoStreamIndex、
-         * mSwitchStartedWhilePaused / mPausedSwitchRenderPending、以及 B17 的 mSwitchReArmPending。
-         * 定义与逐项理由见 SuperMediaPlayer.cpp 里那个函数的注释。
+         * "切档在途"的唯一判据（PFR 让路 / 用户 seek 推迟都以它为准）。
+         * 单解码器模型下它只有一项：`mVideoSwitchInFlight`。
+         * 定义见 SuperMediaPlayer.cpp 里那个函数的注释。
          */
         bool qualitySwitchInFlight() const;
 
@@ -1615,33 +1303,20 @@ namespace Cicada {
         void replayDeferredUserSeek();
 
         /*
-         * 【追帧加速（seek 落点前缀 / 切档预滚）】
+         * 【追帧加速（seek 落点前缀）】
          *
          * 语义：只是把"跑在更高性能点"的要求下发给解码器 —— **不丢帧、不改时间轴、
          * 不动任何精度判据**。seek 之后必须从目标之前的关键帧起解，那段前缀本来就要
          * 全部解出来（现在也全部上屏，见 RenderVideo 的落点前缀分支），本开关只是让
          * platform codec 更快地把它们吐出来（安卓 = MediaCodec operating-rate）。
          *
-         * setVideoDecodeBoost      → 当前活动视频解码器（seek 窗口）
-         * setPendingVideoDecodeBoost → 切档的 pending 解码器（预滚窗口）
+         * setVideoDecodeBoost → 当前活动视频解码器
          *
-         * 两个都是状态判据驱动：seek 真正开始置位、seek 结束/落点上屏/切档终态收回；
+         * 状态判据驱动：seek 真正开始置位、seek 结束/落点上屏收回；
          * 没有任何计时器。平台不支持时是空操作，所以核心层不需要任何平台宏。
          * 追加在类末尾，保证增量 ABI 安全。
          */
         void setVideoDecodeBoost(bool boost);
-        void setPendingVideoDecodeBoost(bool boost);
-
-        /*
-         * 【切档进度判据】待提交帧的"有效位置"上次采样值，以及"连续多少次没有前进"的计数。
-         *
-         * 用途：切换是否判失败不再看墙钟，而看**目标路有没有在前进** ——
-         * 真机日志里那次切换 lag 从 5248ms 收敛到 96ms（差一瞬间就能提交）却被时间上限
-         * 判成失败（界面"切换失败"）。纯状态、无计时器。
-         * 追加在类末尾，保证增量 ABI 安全。
-         */
-        int64_t mPendingVideoProgressUs{INT64_MIN};
-        int mPendingVideoStallChecks{0};
 
         /*
          * 【seek 延迟量化】用户那一刻（SeekTo 被调用的瞬间）的单调毫秒。
@@ -1654,7 +1329,7 @@ namespace Cicada {
         int64_t mSeekRequestMs{0};
 
         /*
-         * 【ABR 让路】"当前有切档在途"的唯一对外查询（复用 qualitySwitchInFlight() 的并集判据）。
+         * 【ABR 让路】"当前有切档在途"的唯一对外查询（复用 qualitySwitchInFlight() 的单一判据）。
          * 追加在类末尾，保证增量 ABI 安全；语义见 ICicadaPlayer::IsStreamSwitchInFlight。
          */
         bool IsStreamSwitchInFlight() const override;

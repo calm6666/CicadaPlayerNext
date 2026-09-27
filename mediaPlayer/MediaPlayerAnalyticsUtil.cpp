@@ -65,7 +65,9 @@ std::map<int64_t, int64_t> MediaPlayerAnalyticsUtil::getNetworkSpeed(int64_t tim
         std::lock_guard<std::mutex> lockGuard(utilMutex);
         for (auto &item : mNetworkSpeed) {
             if (item.first >= timeFrom && item.first < timeTo) {
-                result.insert(item);
+                /* mNetworkSpeed 的值是 float（字节/秒），对外这张表是 int64_t：显式转换，
+                 * 避免 MSVC 的 C4244（float → int64_t 可能丢数据）警告。要求零警告。 */
+                result.insert({item.first, static_cast<int64_t>(item.second)});
             }
         }
     }

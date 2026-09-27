@@ -144,14 +144,7 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     }
 
 
-    /*
-     * 【① B17 硬要求 B】换片源 / 重新 Prepare ⇒ 清掉"等 seek 结束重新装弹"的意图：
-     * 下面那个 else 分支会调用 ResetSeekStatus()（seek 结束路径），若不清，上一部片源
-     * 留下的意图会被 Prepare 当成"seek 结束"而重新发起一次切档。
-     */
-    mPlayer.mSwitchReArmPending = false;
-    mPlayer.mSwitchReArmStreamIndex = -1;
-    /* 【B19 硬要求】换片源/重新 Prepare 同样不允许跨片源补做 PFR：闩一起清掉。 */
+    /* 【B19 硬要求】换片源/重新 Prepare 不允许跨片源补做 PFR。 */
     mPlayer.mPauseFrameRestorePending = false;
     /* 【B20 硬要求 B】Prepare（换片源）⇒ 在途被推迟的用户 seek 一并作废，不跨片源重放。 */
     mPlayer.mDeferredUserSeekPending = false;
@@ -530,34 +523,28 @@ void SMPMessageControllerListener::ProcessSetViewMsg(void *view)
     if (mPlayer.mAVDeviceManager->getVideoRender() != nullptr
         && (mPlayer.mAVDeviceManager->getVideoRender()->getFlags() & IVideoRender::FLAG_DUMMY)) {
         /*
-         * 【2026-09-24 修：切档在途/提交中时，这里不许换 surface、更不许重建解码器】
+         * 【2026-09-24 修：切档在途时，这里不许换 surface、更不许重建解码器】
          *
          * 真机 native 崩溃（Fatal signal 11 SIGSEGV, fault addr 0x4,
          * tid=ApsaraPlayerService）的成因：A 方案下 SurfaceView 尺寸变化会再次
          * setSurface ⇒ 本函数在主线程走 setOutputSurface，失败后
          * RestartVideoDecoder()（invalidateDecoder + CreateVideoDecoder），而**播放线程
-         * 正在为切档创建 pending 解码器** —— 两边同时动解码器槽位/mAVDeviceManager，
+         * 正在为切档重建解码器** —— 两边同时动解码器槽位/mAVDeviceManager，
          * 且都落到 tunnel 下无意义的软解兜底，最终崩在 native。
          *
-         * 判据全部是**既有状态**（不新增成员、不看时间、没有定时器）：切档目标已定、
-         * 解码器切换已闩、或提交待收尾 ⇒ 播放线程正在接管视频槽位，这里必须让路，
-         * 只记一条日志；切档自己用既有的 finishQualitySwitch / 错误路径收尾。
+         * 判据是**既有状态**（不新增成员、不看时间、没有定时器）：切档在途
+         * ⇒ 播放线程正在接管视频槽位，这里必须让路，只记一条日志；
+         * 切档自己用既有的 finishQualitySwitch / 错误路径收尾。
          *
          * 【为什么 Qt 不受影响】整条判据包在 FLAG_DUMMY 分支内，而 Qt 永远没有
          * FLAG_DUMMY 渲染器（bEnableTunnelRender 每次播放前 reset 为 false、
          * Qt 壳不下发该选项、CicadaVideoRender 明确返回 0 而不是 FLAG_DUMMY）
          * ⇒ 恒不进入，Qt 走的还是原来那条 setOutputSurface/RestartVideoDecoder 分支。
          */
-        const bool qualitySwitchInFlight = mPlayer.mPendingVideoStreamIndex >= 0 ||
-                                           mPlayer.mPendingVideoDecoderSwitch ||
-                                           mPlayer.mQualitySwitchCommitPending;
+        const bool qualitySwitchInFlight = mPlayer.mVideoSwitchInFlight;
         if (qualitySwitchInFlight) {
-            AF_LOGW("ProcessSetViewMsg: quality switch in flight (pendingStream=%d decoderSwitch=%d "
-                    "commitPending=%d) — skipping the dummy surface swap and the decoder rebuild; "
-                    "the switch owns the video slot\n",
-                    mPlayer.mPendingVideoStreamIndex,
-                    (int) mPlayer.mPendingVideoDecoderSwitch,
-                    (int) mPlayer.mQualitySwitchCommitPending);
+            AF_LOGW("ProcessSetViewMsg: quality switch in flight — skipping the dummy surface swap and "
+                    "the decoder rebuild; the switch owns the video slot\n");
         } else {
             IDecoder *decoder = mPlayer.mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
             if (decoder != nullptr) {
@@ -630,44 +617,29 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 所以不会自锁、也不会 ping-pong。
      */
     /*
-     * 【修：只在切档"已提交、只等首帧上屏"时才推迟 seek】
+     * 【修：切档在途时推迟这次 seek，等切档终态再重放一次】
      *
      * 真机日志（2026-09-27 10:18，在线视频）把"推迟"的代价写得很清楚：
      *   user seek: DEFERRED … target=85791000            （10:18:10.081）
      *   user seek: replaying the DEFERRED seek …         （10:18:23.372）
-     * —— 预滚阶段的切档要十几秒才到终态，用户的 seek 就干等了 **13 秒**，
-     * 界面一直在"定位中"，用户描述就是"seek 后卡死"。
+     * —— 用户的 seek 干等了十几秒，界面一直在"定位中"，用户描述就是"seek 后卡死"。
      *
-     * 语义修正：用户 seek 是**更新的意图**，只有切档已经提交（decoder 已 promote、
-     * 画面已经换成新档、只差首帧上屏这一瞬间）时才值得让 seek 让路；还在预滚阶段
-     * （pending 路还没到时间线）时，seek 立刻执行 —— 在途那次切档由下面 :750 的
-     * FlushVideoPath(cancelPendingSwitch=1) 干净拆掉，并按 B17 记下用户点过的档位，
-     * seek 结束（ResetSeekStatus）后**只重发一次**。档位意图不丢，seek 也不再干等。
+     * 单解码器立即切换之后只有一种在途形态（请求生效 → 落点帧上屏的终态），
+     * 所以判据就是"有没有切档在途"；推迟的那次 seek 由切档终态（finishQualitySwitch
+     * 出口里的 replayDeferredUserSeek）**只补做一次**，后到的请求覆盖先到的，用户意图不丢。
      */
-    if (mPlayer.qualitySwitchInFlight() && mPlayer.mQualitySwitchCommitPending) {
+    if (mPlayer.mVideoSwitchInFlight) {
         mPlayer.mDeferredUserSeekUs = seekPos;
         mPlayer.mDeferredUserSeekAccurate = bAccurate;
         mPlayer.mDeferredUserSeekPending = true;
 
         mPlayer.mPNotifier->NotifySeeking(true);
 
-        AF_LOGW("user seek: DEFERRED (NOT executed now) — a quality switch has already COMMITTED and is "
-                "only waiting for its first frame; target=%lld us accurate=%d. It will be replayed ONCE at "
-                "the switch's terminal state (READY / CANCELED / FAILED); a newer seek request overwrites "
-                "this one. (A switch that is still in the preroll phase no longer blocks a seek.)\n",
+        AF_LOGW("user seek: DEFERRED (NOT executed now) — a quality switch is in flight; target=%lld us "
+                "accurate=%d. It will be replayed ONCE at the switch's terminal state (READY / FAILED); "
+                "a newer seek request overwrites this one.\n",
                 (long long) seekPos, (int) bAccurate);
         return;
-    }
-
-    if (mPlayer.qualitySwitchInFlight()) {
-        /*
-         * 预滚阶段的在途切档：用户 seek 优先。这里只留一条说明日志 —— 拆切档/记档位
-         * 由下面的 FlushVideoPath(cancelPendingSwitch=1) 与 B17 重装机制完成。
-         */
-        AF_LOGW("user seek: taking over from a quality switch that is still prerolling (target=%lld us) — "
-                "the switch is torn down cleanly here and re-issued ONCE when this seek finishes, so the "
-                "quality intent is not lost and the seek does not have to wait for the preroll\n",
-                (long long) seekPos);
     }
 
     mPlayer.mSeekNeedCatch = bAccurate;
@@ -760,12 +732,9 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mPlayedAudioPts = INT64_MIN;
     mPlayer.mSoughtVideoPos = INT64_MIN;
     mPlayer.mCurVideoPts = INT64_MIN;
-    /* 用户 seek 开始时丢弃上一次清晰度切换留下的时间轴偏移和 retired 状态；
+    /* 用户 seek 开始时丢弃上一次清晰度切换留下的时间轴偏移；
      * seek 目标是新的 A/V 同步锚点，不能继续把 rendition 偏移应用到新帧。 */
-    mPlayer.mPendingVideoPtsOffset = INT64_MIN;
     mPlayer.mActiveVideoPtsOffset = INT64_MIN;
-    mPlayer.mQualitySwitchCommitPending = false;
-    mPlayer.mQualitySwitchCommittedStreamIndex = -1;
     mPlayer.mVideoPtsRevert = false;
     mPlayer.mAudioPtsRevert = false;
     /*
@@ -777,11 +746,10 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 也就是说"seek 真正开始"这件事现在只需要 beginDiscontinuity()（本函数上面那处），
      * 不需要再置任何"事后要把时钟拉回来"的事件闩。
      */
-    /* 必须在调用 DASH/HLS demuxer->Seek() 之前取消 pending representation。
-     * 旧顺序先对所有 selected stream 做 Seek，再 CloseStream(pending)，网络
-     * 慢时 Seek 会等待已经被用户取消的目标流，表现为 seek 直接卡死。普通本地
-     * 文件没有 pending 路时保持原有 SeekInCache 行为，不额外 flush。 */
-    if (mPlayer.mPendingVideoStreamIndex >= 0 || mPlayer.mWillChangedVideoStreamIndex >= 0) {
+    /* 必须在调用 DASH/HLS demuxer->Seek() 之前拆掉在途切档（关掉它的目标流）。
+     * 否则网络慢时 Seek 会等待已经被用户放弃的目标流，表现为 seek 直接卡死。
+     * 没有在途切档时保持原有 SeekInCache 行为，不额外 flush。 */
+    if (mPlayer.mVideoSwitchInFlight) {
         /*
          * flushRender 从 true 改成 false：这里只需要"拆掉在途切档"（cancelPendingSwitch=1），
          * 不需要连渲染器一起 flush。flushRender=true 会把渲染器里的最后一帧也清掉 ⇒ 画面
@@ -790,79 +758,27 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
          */
         mPlayer.FlushVideoPath(false, true, __func__);
 
-        /*
-         * 【① B17：用户点过的档位意图不能就这么丢掉 —— 记下来，等 seek 结束重新装弹】
-         *
-         * 现场（安卓日志，7/7 次手动切档）：`status=0 started` → 本函数这条
-         * `FlushVideoPath(…, cancelPendingSwitch=1)` → `status=3 canceled`，
-         * 一次 READY 都没有。用户并没有改主意（他改的是**位置**，不是档位），
-         * 所以把档位意图记在很多地方都会用到的两个成员上，由 seek 结束事件
-         * （SuperMediaPlayer::ResetSeekStatus）**只重新发起一次**。
-         *
-         * 为什么不会 ping-pong（硬要求 A：必须区分"用户 seek"与"切档自己的 seek"）：
-         *   · 本函数只由 MSG_SEEKTO 驱动，而全仓 `putMsg(MSG_SEEKTO)` **只有一处**
-         *     （SuperMediaPlayer::SeekTo()，见那里的 putMsg）+ playCompleted 的循环重开
-         *     路径也走同一个入口；
-         *   · 切档自己的定位走的是 demuxer 级路径（日志里的
-         *     `quality switch: target stream N seeked to …`，由切档消息处理直接调 demuxer），
-         *     从不产生 MSG_SEEKTO ⇒ 切档内部 seek 永远进不到这里，也就永远不会置闩。
-         *   因此"重装 → 内部 seek → 取消 → 再重装"这条环在状态上不存在。
-         *
-         * 显式取消优先（硬要求 B）：Reset()（换片源/停止/Prepare）与 SwitchStream()
-         * （用户又选了别的档）入口都会清这两个成员；错误终态走 Reset/Stop 时同样清。
-         */
-        const int reArmIndex = (mPlayer.mWillChangedVideoStreamIndex >= 0)
-                               ? mPlayer.mWillChangedVideoStreamIndex
-                               : mPlayer.mPendingVideoStreamIndex;
-
-        if (reArmIndex >= 0) {
-            mPlayer.mSwitchReArmStreamIndex = reArmIndex;
-            mPlayer.mSwitchReArmPending = true;
-
-            AF_LOGI("quality switch: the user's switch request (stream=%d) is superseded by this seek — "
-                    "remembering it and re-issuing it ONCE when the seek finishes (the preroll position "
-                    "will be recomputed from the post-seek playback position)\n", reArmIndex);
-        }
-
-        mPlayer.mWillChangedVideoStreamIndex = -1;
         mPlayer.mVideoChangedFirstPts = INT64_MIN;
     }
 
     /*
      * ============ 矩阵第 3 格：seek 在途时必须**干净中止**在途切档（2026-09-24）============
      *
-     * 上面那个 if 只覆盖"还没提交"的 pending 路（mPendingVideoStreamIndex /
-     * mWillChangedVideoStreamIndex >= 0）。**已经提交**的切档（decoder 已经 promote，
-     * 两个索引都是 -1、只剩 mQualitySwitchCommitPending 为真）会从这里漏过去 ——
-     * 而它恰恰是最容易出事的形态：暂停态切档的 S5 渲染还欠着、S9 的提交后墙钟
-     * 死线还在倒计时，而 seek 刚刚把整个视频时间轴换掉了。两者叠加的结果就是
-     * 状态机停在"已提交但永远不会上屏"，最后由死线报一次 FAILED，期间用户看到
-     * 的是画面卡住。
+     * 上面那个 if 只做"拆掉视频路"（CancelPendingSwitch）。这里保证任何在途切档都走
+     * **唯一终态出口** —— 复用现成的 finishQualitySwitch(false, …)：它会关掉目标流、
+     * 释放退役解码器、发 FAILED 给 UI（高亮退回旧档）并清干净在途状态。否则状态机
+     * 会停在"在途但永远不会上屏"，用户看到的就是画面卡住。
      *
-     * 处理：只要还有任何在途切换（含已提交、含暂停态那三个新状态），seek 就
-     * 权威地把它收掉 —— 复用现成的 finishQualitySwitch(false, …)，它会关
-     * retired 流、释放 retired 解码器、清 commitPending/offset/计数器，以及
-     * 三个暂停态新状态（见 finishQualitySwitch 末尾的 resetPausedSwitchState）。
-     *
-     * 为什么用 finishQualitySwitch 而不是 FlushVideoPath：提交之后 decoder 已经
-     * 是 **active** 路，这里如果再来一次 FlushVideoPath(flushRender=1) 会把渲染器
-     * 一起 flush 掉，正是历史上"seek 后 read-ahead gate 永久堵住"那条事故路径。
-     * 所以只做状态收尾（不发 CANCELED，避免和真实用户操作的通知语义混淆 ——
-     * 该发的终态由 finishQualitySwitch 统一发 FAILED 给 UI，高亮退回旧档）。
+     * 为什么用 finishQualitySwitch 而不是 FlushVideoPath：这里如果再来一次
+     * FlushVideoPath(flushRender=1) 会把渲染器一起 flush 掉，正是历史上"seek 后
+     * read-ahead gate 永久堵住"那条事故路径。所以只做状态收尾，终态通知由
+     * finishQualitySwitch 统一发给 UI。
      */
-    if (mPlayer.mQualitySwitchCommitPending ||
-        mPlayer.mSwitchStartedWhilePaused ||
-        mPlayer.mPausedSwitchRenderPending) {
-        AF_LOGW("seek is taking over while a quality switch was in flight (commitPending=%d "
-                "pausedSwitch=%d renderPending=%d) — finishing the switch cleanly before repositioning, "
-                "otherwise the two in-flight state machines would wait for each other\n",
-                (int) mPlayer.mQualitySwitchCommitPending,
-                (int) mPlayer.mSwitchStartedWhilePaused,
-                (int) mPlayer.mPausedSwitchRenderPending);
+    if (mPlayer.mVideoSwitchInFlight) {
+        AF_LOGW("seek is taking over while a quality switch was in flight — finishing the switch cleanly "
+                "before repositioning, otherwise the two in-flight state machines would wait for each other\n");
 
         mPlayer.finishQualitySwitch(false, "superseded by a seek that took over the video timeline");
-        mPlayer.resetPausedSwitchState();
-        mPlayer.mQualitySwitchPrerollDeadlineMs = 0;
     }
     //flush packet queue
     mPlayer.mSeekInCache = mPlayer.SeekInCache(seekPos);
@@ -1018,7 +934,7 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 视频活动路落后主时钟（音频）**115 秒**，队列里压着约 7000 个包（≈233 秒 4K 内容），
      * 解码器只能从**队首**一包一包往前啃（实测只有 ~1.2× 实时），画面于是只剩"每丢 8 帧
      * 由防冻阀门放 1 帧"——用户看到的就是"整个卡死"。清晰度切换也一起受害：它要追的
-     * 参考点跟这堆陈旧积压完全错位，pending 路追了 37 秒（lag 5248ms→96ms）仍被判
+     * 参考点跟这堆陈旧积压完全错位，切档目标追了 37 秒（lag 5248ms→96ms）仍被判
      * `target rendition did not reach playback timeline`（界面"切换失败"）。
      *
      * 成因：seek 的 `ClearPacket(BUFFER_TYPE_ALL)` 只在 `!mSeekInCache` 那一支执行
@@ -1097,13 +1013,13 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
     }
 
     if (mPlayer.mDuration == 0) {
-        /* 直播清单同样走双 decoder 切换状态机。旧实现这里直接调用
-        * SwitchStreamAligned()，而我们已取消 manager 的 stopOnSegEnd 语义，
-         * 结果就是点击 HLS/DASH 清晰度后只记录了目标却没有启动 pending 路。
-         * 视频和混合流统一转到 switchVideoStream()，音频/字幕仍走原有路径。 */
+        /* 直播清单：VIDEO / MIXED 统一走 switchVideoStream()（单解码器立即切换）。
+         * 旧实现这里直接调用 SwitchStreamAligned()，而 manager 的 stopOnSegEnd 语义
+         * 已取消，结果就是点击 HLS/DASH 清晰度后只记录了目标却没有真正换流。
+         * 音频/字幕仍走原有路径。 */
         if (type == STREAM_TYPE_VIDEO || type == STREAM_TYPE_MIXED) {
             /* 混合流的 mediaInfo 使用复合 stream id，必须和有限时长路径
-             * 一样先编码主流 id，否则 willChangeInfo 查找不到目标档位。 */
+             * 一样先编码主流 id。 */
             switchVideoStream(type == STREAM_TYPE_MIXED ? GEN_STREAM_INDEX(index) : index, type);
             return;
         }
@@ -1119,10 +1035,6 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
             toIndex = GEN_STREAM_INDEX(index);
             mPlayer.mAudioChangedFirstPts = INT64_MAX;
             mPlayer.mEof = false;
-        } else if (type == STREAM_TYPE_VIDEO && mPlayer.mCurrentVideoIndex >= 0 && mPlayer.mCurrentVideoIndex != index) {
-            fromIndex = mPlayer.mCurrentVideoIndex;
-            mPlayer.mWillChangedVideoStreamIndex = index;
-            mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
         } else if (type == STREAM_TYPE_AUDIO && mPlayer.mCurrentAudioIndex >= 0 && mPlayer.mCurrentAudioIndex != index) {
             fromIndex = mPlayer.mCurrentAudioIndex;
             mPlayer.mWillChangedAudioStreamIndex = index;
@@ -1169,7 +1081,7 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
          *
          * "当前档位"这个判据真正有用的只有一件事 —— 点的是正在播的那一档就没必要
          * 白切一次；而"未知"（<0）绝不等于"不能切"：下面 switchVideoStream() 用的
-         * 是**目标档位的元数据** + **主时钟** 作为预滚起点（见那里的 startTime 取法），
+         * 是**目标档位的元数据** + **主时钟位置** 作为切换起点，
          * 整条路都不依赖当前档位下标。
          */
         if (mPlayer.mCurrentVideoIndex == index) {
@@ -1179,8 +1091,8 @@ void SMPMessageControllerListener::ProcessSwitchStreamMsg(int index)
 
         if (mPlayer.mCurrentVideoIndex < 0) {
             AF_LOGW("quality switch: current video index is unknown (%d) — accepting the request for stream %d "
-                    "instead of dropping it (the preroll start comes from the master clock, not from the current "
-                    "index)\n", mPlayer.mCurrentVideoIndex, index);
+                    "instead of dropping it (the switch position comes from the master clock, not from the "
+                    "current index)\n", mPlayer.mCurrentVideoIndex, index);
         }
 
         return switchVideoStream(index, type);

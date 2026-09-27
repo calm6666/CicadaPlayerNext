@@ -351,7 +351,12 @@ typedef struct {
  * It can also be accessed at any time in AVStream.attached_pic.
  */
 #ifndef AV_DISPOSITION_ATTACHED_PIC
-#define AV_DISPOSITION_ATTACHED_PIC      0x0400
+/*
+ * 与 ffmpeg 的 avformat.h 保持**逐字相同**的写法（ffmpeg 用 `(1 << 10)`）：值本来就一样，
+ * 但 MSVC 的 C4005 比较的是记号序列而不是取值，`0x0400` 与 `(1 << 10)` 会被判成
+ * "宏重定义"并报一条警告。本工程要求零警告，故这里照 ffmpeg 的写法写。
+ */
+#define AV_DISPOSITION_ATTACHED_PIC      (1 << 10)
 #endif
 
 typedef struct Source_meta {
