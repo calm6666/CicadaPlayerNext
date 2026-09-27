@@ -10,6 +10,12 @@ platform/Flutter/ios/IOS_SDK/SDK/
 platform/Flutter/.gradle/
 platform/Flutter/android/libs/
 
+# Editor/agent temporary backups. These are stale copies of source files; if they
+# get committed they pollute any "residual code" grep with code that no longer
+# compiles (e.g. an old SuperMediaPlayer.cpp still containing deleted machinery).
+*~RF*.TMP
+*.TMP
+
 # Miscellaneous
 *.class
 *.lock

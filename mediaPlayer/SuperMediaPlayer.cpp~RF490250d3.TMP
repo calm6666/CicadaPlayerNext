@@ -1,4 +1,0 @@
-2026-09-24 清理标记：这个文件是 SuperMediaPlayer.cpp 的编辑器临时副本，**不参与任何编译**
-（CMake 只收 *.cpp），留着只会污染 grep —— 它带着已经修掉的老代码文本（例如那份
-RenderVideo 预热例外、FlushVideoPath 里没清闩锁的版本），很容易被误读成现状。
-留此一行占位：能在 shell 里操作的环境请直接删掉本文件。
