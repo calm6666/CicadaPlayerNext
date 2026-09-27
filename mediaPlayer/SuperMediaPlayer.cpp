@@ -8315,8 +8315,21 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                      *   · 目标之前的落点（绝大多数情况）行为逐字不变（本分支只在 frame > 地板时进入）。
                      */
                     if (frameTimePos > mSeekPositionFloorUs) {
+                        AF_LOGW("seek landing is %lld ms LATER than the target — moving the position floor AND the "
+                                "audio floor onto the landing frame so both axes share one point (otherwise the "
+                                "position jumps to the landing, the audio clock stays on the old target and drags "
+                                "the progress bar back: that is the 'progress bar bounces back' report on "
+                                "segmented sources)\n",
+                                (long long) ((frameTimePos - mSeekPositionFloorUs) / 1000));
                         mSeekPositionFloorUs = frameTimePos;
                         mSeekLandingFloorOwnerUs = frameTimePos;
+                        /*
+                         * 音频地板同步：音频锚点/丢帧都以它为"落点"，不一起挪的话音频仍会从旧目标点
+                         * （264.475s 那类值）起播，两条轴就此错开 0.3~2.1 秒，而音频时钟接管时会把
+                         * 上报位置拉回去 —— 就是"进度条往回弹"。锚点事件（mSeekAudioReposition* /
+                         * mSeekAnchorPending）照旧由后面的音频首帧/视频首帧消费，这里只改"落点值"。
+                         */
+                        mSeekAudioFloorUs = frameTimePos;
                     }
                 }
                 }
@@ -11303,10 +11316,37 @@ void SuperMediaPlayer::ResetSeekStatus()
      * "先出画"闩一起关掉。正常路径下采纳那一刻已经关过闸门，这里是幂等兜底 ——
      * 保证 mSeekRenderGateUs / mSeekLandingFrameAccepted 不会留下"无法撤销"的悬挂态
      * （例如落点被归属判据拒绝、或落点帧始终没来）。
+     *
+     * ============ 【本轮修：落点帧**还没被采纳**时不许关窗】============
+     *
+     * 真机日志（2026-09-27 10:47:34，DASH 分片）把代价写得很清楚：
+     *   10:47:34.617  PFR: seek posUs=65413000
+     *   10:47:34.796  seek first decodable frame shown: pts=60060000 is 5353 ms before the target
+     *   （此后**没有** `seek landing frame accepted`）
+     *   10:47:35.148  audio first frame after seek: pts=65429333   ← 音频在目标点
+     * 画面停在落点前缀（60.06s）而位置/音频在目标（65.43s）：因为 seek 在**第一帧**（B15 那张
+     * 前缀帧）上就被宣告结束，本函数立刻把落点窗口关掉 ⇒ 之后真正"包含目标"的那一帧到达时，
+     * 落点判据（`mSeekRenderGateUs != INT64_MIN`）已经被跳过，永远不可能被采纳 ⇒ **分片源的
+     * seek 永远差一个落点前缀（5~9 秒）**，用户看到的就是"seek 不精准 + 画面要追半天"。
+     *
+     * 处置：seek 结束仍然照旧结束（UI/SeekEnd 不受影响），但**只要落点帧还没被采纳**，就把
+     * 闸门/地板/归属留着，让落点判据继续有效 —— 那一帧到达时照常被采纳、强制上屏、撤闸门，
+     * 之后本窗口自然关闭。位置上报在这期间被地板钉在**目标点**（用户要求的语义），而画面
+     * 由 B15/dcdfde63 的前缀出画与"包含目标就替换"保证不会冻住。
+     * 出口依旧齐全：采纳即关窗；下一次 SeekTo / Reset / Prepare / FlushVideoPath 也会清；
+     * 目标不可达时 B18-b 的两条拒绝分支会把地板重开到实际读位置并立刻出画（不会悬挂）。
      */
-    mSeekRenderGateUs = INT64_MIN;
-    mSeekPositionFloorUs = INT64_MIN;
-    mSeekLandingFloorOwnerUs = INT64_MIN;
+    if (mSeekLandingFrameAccepted) {
+        mSeekRenderGateUs = INT64_MIN;
+        mSeekPositionFloorUs = INT64_MIN;
+        mSeekLandingFloorOwnerUs = INT64_MIN;
+    } else if (mSeekRenderGateUs != INT64_MIN) {
+        AF_LOGI("seek finished while the landing window is still OPEN (the frame that CONTAINS the target has "
+                "not arrived yet) — keeping the render gate / position floor (target=%lld) so that frame can "
+                "still be accepted and replace the prefix picture (this is what makes the landing exact on "
+                "segmented sources); the position stays pinned on the target meanwhile\n",
+                (long long) mSeekPositionFloorUs);
+    }
     mSeekFirstDecodableFrameShown = false;
 
     /*
@@ -11316,9 +11356,9 @@ void SuperMediaPlayer::ResetSeekStatus()
     setVideoDecodeBoost(false);
 
     /*
-     * 【修：seek 结束 ⇒ 未消费的锚点事件一并作废（"进度条往回弹"的根因）】
+     * 【修：落点窗口已关时，未消费的锚点事件必须一并作废（"进度条往回弹"的根因）】
      *
-     * 本函数刚刚把 mSeekPos 与 mSeekPositionFloorUs（锚点的**两个目标载体**）清零，
+     * 原来的问题：本函数把 mSeekPos 与 mSeekPositionFloorUs（锚点的**两个目标载体**）清零，
      * 却把 mSeekAnchorPending 留着。于是 seek 宣告结束之后第一帧视频上屏时，锚点事件
      * 拿着"目标未知"去锚定：fetchSeekClockAnchorUs() 走兜底分支返回那一帧自己的 pts，
      * 主时钟被**倒退**到落点帧的位置。真机日志（安卓 2026-09-26 20:55:38，用户 seek
@@ -11337,8 +11377,14 @@ void SuperMediaPlayer::ResetSeekStatus()
      * "纯音频渲染把事件白白消费掉"发生在 seek 期间，与这里不是同一个时点）。
      * 应用侧的护栏见 RenderVideo 的锚点出口：即使还有别的时序绕过这里，
      * "锚点不许把主时钟往回拉"那条判据也不会让时钟倒退。
+     *
+     * 【本轮补充】只有"落点窗口已经关掉"（落点帧已采纳，或本来就没开窗）时才作废锚点事件：
+     * 窗口还开着说明目标载体仍在（上面那段刚把地板留下），此时锚点事件要**留着**，让"包含
+     * 目标的那一帧"上屏时把主时钟锚到它 —— 那正是精确落点的最后一次机会。
      */
-    mSeekAnchorPending = false;
+    if (mSeekRenderGateUs == INT64_MIN) {
+        mSeekAnchorPending = false;
+    }
 
     /*
      * 【① B17】seek 结束事件：如果这次 seek 曾把"用户点过的切档"拆掉，在这里
