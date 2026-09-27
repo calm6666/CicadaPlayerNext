@@ -717,6 +717,8 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
      * 目标点直接用入参算（不要读 mSeekPos，它在 putMsg 之后才赋值）。
      */
     mSeekRenderGateUs = (int64_t) pos * 1000;
+    /* 【延迟量化】记下"用户这一刻要 seek"的墙钟，供后面几行日志给出各段耗时。 */
+    mSeekRequestMs = af_getsteady_ms();
     mSeekLandingFrameAccepted = false;
     mSeekClockAnchored = false;
     mSeekDecodeStartIsKey = false;
@@ -7409,9 +7411,11 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
             mSeekClockAnchored = true;
             mSeekVideoAnchorDone = true;
             mSeekAnchorPending = false;
-            AF_LOGW("seek anchor (audio landing first frame): pts=%lld floor=%lld target=%lld anchor=%lld\n",
+            AF_LOGW("seek anchor (audio landing first frame): pts=%lld floor=%lld target=%lld anchor=%lld "
+                    "afterSeekMs=%lld\n",
                     (long long) pts, (long long) mSeekAudioFloorUs, (long long) mSeekPositionFloorUs,
-                    (long long) seekAudioAnchorUs);
+                    (long long) seekAudioAnchorUs,
+                    (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
         }
     }
 
@@ -7484,8 +7488,9 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
          * （解复用侧把音频定位到了目标点，而视频只能从关键帧起步）。
          */
         if (mSeekAudioFloorUs != INT64_MIN || mSeekFlag || mAudioClockReanchorPending) {
-            AF_LOGI("audio first frame after seek: pts=%lld landingFloor=%lld target=%lld\n",
-                    (long long) pts, (long long) mSeekAudioFloorUs, (long long) mSeekPositionFloorUs);
+            AF_LOGI("audio first frame after seek: pts=%lld landingFloor=%lld target=%lld afterSeekMs=%lld\n",
+                    (long long) pts, (long long) mSeekAudioFloorUs, (long long) mSeekPositionFloorUs,
+                    (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
         }
 
         /*
@@ -8112,13 +8117,14 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                         mSeekFirstDecodableFrameShown = true;
 
                         AF_LOGI("seek first decodable frame shown: pts=%lld is %lld ms before the seek "
-                                "target=%lld — replacing the previous picture now and fast-forwarding the "
-                                "remaining clean prefix frames to the target (the frame that CONTAINS the "
-                                "target will replace them at the end; the landing judge and the clock anchor "
-                                "are untouched)\n",
+                                "target=%lld (afterSeekMs=%lld) — replacing the previous picture now and "
+                                "fast-forwarding the remaining clean prefix frames to the target (the frame "
+                                "that CONTAINS the target will replace them at the end; the landing judge and "
+                                "the clock anchor are untouched)\n",
                                 (long long) frameTimePos,
                                 (long long) ((mSeekPositionFloorUs - frameTimePos) / 1000),
-                                (long long) mSeekPositionFloorUs);
+                                (long long) mSeekPositionFloorUs,
+                                (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
                     }
                 } else if (mSeekPositionFloorUs != INT64_MIN &&
                            mSeekLandingFloorOwnerUs != INT64_MIN &&
@@ -8262,9 +8268,10 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
                      *   · 强制这一帧上屏（force_render + render，避免被"迟到"判据丢掉）。
                      */
                     AF_LOGW("seek landing frame accepted: pts=%lld, offsetFromTarget=%+lld ms (negative = the "
-                            "landing frame is LATER than the target) — rendering it now (the master clock is "
-                            "anchored by the first-frame-rendered event, not here)\n",
-                            (long long) frameTimePos, (long long) (beforeUs / 1000));
+                            "landing frame is LATER than the target), afterSeekMs=%lld — rendering it now (the "
+                            "master clock is anchored by the first-frame-rendered event, not here)\n",
+                            (long long) frameTimePos, (long long) (beforeUs / 1000),
+                            (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
 
                     /*
                      * ============ 【修：落点比目标晚时，位置地板一起挪到落点】============

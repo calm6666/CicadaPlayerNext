@@ -1692,6 +1692,16 @@ namespace Cicada {
         int mPendingVideoStallChecks{0};
 
         /*
+         * 【seek 延迟量化】用户那一刻（SeekTo 被调用的瞬间）的单调毫秒。
+         *
+         * 用途：把"这次 seek 到底慢在哪一段"变成日志里可比较的数字 ——
+         *   · 画面第一帧上屏 / 落点帧被采纳 / 音频到锚点，各自打印"距 seek 请求多少毫秒"。
+         * 真机实测（2026-09-27）：画面 95~220 ms，而音频要 0.19~6.6 s ⇒ "先没声后有声"。
+         * 只服务诊断，不参与任何判据。追加在类末尾，保证增量 ABI 安全。
+         */
+        int64_t mSeekRequestMs{0};
+
+        /*
          * 【ABR 让路】"当前有切档在途"的唯一对外查询（复用 qualitySwitchInFlight() 的并集判据）。
          * 追加在类末尾，保证增量 ABI 安全；语义见 ICicadaPlayer::IsStreamSwitchInFlight。
          */
