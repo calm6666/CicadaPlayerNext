@@ -5031,7 +5031,17 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
     const bool catchUpValveTripped = (!mDiscontinuity.filterActive.load() && dropLateVideoFrames &&
                                       mCatchUpDiscardStreak >= VIDEO_CATCHUP_DISCARD_STREAK_MAX);
 
-    if (!render && mPlayStatus == PLAYER_PLAYING && !masterClockUnset &&
+    /*
+     * 【落点过滤激活时，两个阀门一律不参与】
+     * B16-b 那条（catchUpValveTripped）本来就带 !mDiscontinuity.filterActive，B16 这条原来漏了。
+     * 真机实测后果（2026-09-27 Qt，切档/seek 落点窗口）：新流分片片首那 2 秒的陈旧前缀帧
+     * （video pts=375375 / 750750 / 1126125 / … 而 master≈2.15s）被这个阀门**每 8 帧强行上屏一次**，
+     * 用户看到的就是"切换瞬间画面往回倒"—— 与 P1 的裁定（早于目标的帧绝不上屏）直接冲突。
+     * 落点过滤的终止是**结构性**的（包含/越过目标的帧、或 EOF 采纳），不需要任何阀门来"防冻"。
+     */
+    const bool landingFilterActive = mDiscontinuity.filterActive.load();
+
+    if (!render && !landingFilterActive && mPlayStatus == PLAYER_PLAYING && !masterClockUnset &&
         (mVideoDiscardStreak >= VIDEO_STUCK_DISCARD_STREAK_MAX || catchUpValveTripped)) {
         render = true;
 
@@ -5962,11 +5972,18 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
         mVideoFrameQue.pop();
     }
     /*
-     * 在途的切换必须走终态出口：单解码器模型下判据只有 mVideoSwitchInFlight，
-     * 终态固定是 FAILED（"被 seek / stop / 换源打断"是确定性错误，不是成功）。
-     * 顺序不能反：finishQualitySwitch() 自己会在里面清在途闩与目标档。
+     * 只有**外力**的 flush 才算"打断在途切档"：seek / stop / 换源 / 后台 flush 都传
+     * cancelPendingSwitch=1（见各调用点）。切档**自己**那次内部 flush
+     * （SwitchVideo 里的 "quality switch immediate"）传的是 0 —— 它是切换流程的一部分，
+     * 绝不允许在这里把自己判成 FAILED。
+     *
+     * 真机实测（2026-09-27 Qt 播放器，DASH ABR 升档）就是这个形态：
+     *   status=0 STARTED → 内部 flush 立刻 status=2 FAILED("video path flushed") →
+     *   46ms 后 "single-decoder switch applied"（切换其实成功了）→
+     *   落点帧 250ms 后正常被采纳，但 mVideoSwitchInFlight 已被清零 ⇒ 再也不发 READY；
+     *   界面把高亮退回旧档，用户手动再点新档又被判"already the playing video stream"⇒ 看起来"点了没反应"。
      */
-    if (mVideoSwitchInFlight) {
+    if (cancelPendingSwitch && mVideoSwitchInFlight) {
         finishQualitySwitch(false, "video path flushed (seek/stop/catch-up)");
     }
 
