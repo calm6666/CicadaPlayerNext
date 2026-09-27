@@ -23,6 +23,19 @@ namespace Cicada{
 
         static bool is_supported(enum AFCodecID codec);
 
+        /*
+         * 【设备硬解能力查询（Apple 平台实现）】
+         *
+         * VideoToolbox 的能力问题，用 VTIsHardwareDecodeSupported()（iOS 11+ /
+         * macOS 10.13+）回答：H.264 / H.265 / MPEG-4 三个能映射到
+         * CMVideoCodecType 的问系统，其余编码（VideoToolbox 没有对应类型，例如 AV1）
+         * 一律返回 true —— 语义是"查不到 = 视为支持"，宁可只用效率序，也不许把
+         * 一条其实解得了的流误判成解不了。
+         *
+         * 只声明，不新增虚函数：类布局与 vtable 不变。
+         */
+        static bool is_hardware_decode_supported(enum AFCodecID codec);
+
         void setEOF() override
         {
         }

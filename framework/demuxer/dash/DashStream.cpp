@@ -1084,6 +1084,22 @@ int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
         meta->height = height;
     }
 
+    /*
+     * 【这一路 Representation 的编码：清单 @codecs -> AFCodecID】
+     *
+     * MPD 里 `@codecs`（MPDParser.cpp:417-418 → Representation::addCodecs）是
+     * **每一路 rendition 各自**的编码声明，而 meta 在"这条流还没 OpenStream"时
+     * 只有清单信息（mPDemuxer 为空）：不给它填这一项，应用层拿到的每一路流
+     * 编码就都是空的，同分辨率不同编码根本没法区分。
+     *
+     * 只在底层没给出编码时才用清单的值填 —— 已开流时 mPDemuxer 的编码来自
+     * init 段/SPS 解析，是容器里的**真值**，绝不能覆盖（弱一点说：换档窗口期
+     * 底层可能只填了宽高，此时清单值正好补上）。
+     */
+    if (meta->codec == AF_CODEC_ID_NONE) {
+        meta->codec = afCodecIDFromManifestCodecs(mPTracker->getCodecsString().c_str());
+    }
+
     meta->lang = strdup(lang.c_str());
     meta->bandwidth = bandwidth;
     meta->duration = mPTracker->isLive() ? 0 : mPTracker->getDuration();

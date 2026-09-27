@@ -1439,6 +1439,22 @@ namespace Cicada {
             meta->width = width;
         }
 
+        /*
+         * 【这一路变体的编码：master playlist 的 CODECS -> AFCodecID】
+         *
+         * HlsParser::createRepresentation() 已经把 EXT-X-STREAM-INF / EXT-X-MEDIA 的
+         * CODECS 属性存进 Representation::codecs（见 HlsParser.cpp 里 addCodecs 那次调用）。
+         * 这里把它交给同一个归一化函数转成 AFCodecID。
+         *
+         * 只在底层没给出编码时才填：已开流时 mPDemuxer 的编码来自真实容器
+         * （TS 的 PMT / fmp4 的 stsd），是权威值，不覆盖。清单里没有 CODECS
+         * 属性时 getCodecsString() 返回空串，归一化返回 NONE —— 也就是"这一路
+         * 没有编码信息"，应用层拿到空短名、不显示徽标，不允许猜。
+         */
+        if (meta->codec == AF_CODEC_ID_NONE) {
+            meta->codec = afCodecIDFromManifestCodecs(mPTracker->getCodecsString().c_str());
+        }
+
         meta->lang = strdup(lang.c_str());
         meta->bandwidth = bandwidth;
         meta->duration = mPTracker->getDuration();

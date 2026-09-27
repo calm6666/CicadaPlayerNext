@@ -76,6 +76,18 @@ typedef struct _StreamInfo {
 
     //subtitle
     char *subtitleLang;
+
+    /*
+     * 视频编码的规范化短名，只有这几个取值：
+     *   "H.264" / "H.265" / "AV1" / "VP9" / "MPEG-4" / "MPEG-2"，
+     * 拿不到编码信息时是**空串**（界面据此显示"没有徽标"，不要猜）。
+     * 写入用 afCodecShortName()（framework/utils/AFMediaType.h），读的是界面层。
+     *
+     * 必须**追加在结构体末尾**：这个结构体是应用层 ABI，往前插字段会让所有
+     * 已按旧布局编译的调用方错位（本工程既定规则，参考 dec_flag_placeholder_surface
+     * 那段注释）。
+     */
+    char videoCodec[16];
 } StreamInfo;
 
 //apsara player callback define

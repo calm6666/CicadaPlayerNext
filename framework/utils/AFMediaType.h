@@ -448,6 +448,58 @@ typedef struct {
 
 } Stream_meta;
 
+/*
+ * ---- 编码短名归一化（L1 公共实现，只有这一份） ----
+ *
+ * 应用层（StreamInfo.videoCodec，见 mediaPlayer/native_cicada_player_def.h）和
+ * ABR（mediaPlayer/abr/AbrAlgoStrategy）都用下面的函数，不允许各自再解析一遍。
+ *
+ * afCodecShortName() 的两种输入形态，按此顺序取值：
+ *   1) id != AF_CODEC_ID_NONE：容器/解码器/清单映射出来的真值，最可信；
+ *   2) 否则看 rawCodecs —— 清单里的原始 codecs 字符串（DASH 的 @codecs、
+ *      HLS 的 CODECS、MediaManifest 的 "codecs" 字段），是逗号分隔的
+ *      RFC 6381 token 列表，大小写不敏感，token 两端可以有引号/空白；
+ *   3) 两者都对不上：返回空串（"没有编码信息"），绝不猜。
+ *
+ * 返回值是**静态字符串常量**，调用方不得释放，也不需要拷贝。
+ * 输出的短名只有这几个：H.264 / H.265 / AV1 / VP9 / MPEG-4 / MPEG-2；
+ * 其余（含 VP8、Dolby Vision、以及各种音频编码）一律返回空串。
+ */
+const char *afCodecShortName(enum AFCodecID id, const char *rawCodecs);
+
+/*
+ * 清单原始 codecs 字符串 -> AFCodecID。
+ * 只认视频编码：一个 token 列表里混着 "avc1.64001f,mp4a.40.2" 时，
+ * 要的是视频那个；识别不出任何视频编码时返回 AF_CODEC_ID_NONE。
+ */
+enum AFCodecID afCodecIDFromManifestCodecs(const char *rawCodecs);
+
+/*
+ * 编码的压缩率/效率等级，数值越大越省带宽：
+ *   AV1 = 5，H.265 = 4，VP9 = 3，H.264 = 2，MPEG-4 / MPEG-2 = 1，
+ *   空串/未知 = 0。
+ * ABR 的"同一分辨率内优先更省带宽的编码"用这个等级判断；等级表只有这一份。
+ */
+int afCodecEfficiencyRankByShortName(const char *shortName);
+
+/* afCodecShortName() 的便捷形式：先归一化再取等级。 */
+int afCodecEfficiencyRank(enum AFCodecID id, const char *rawCodecs);
+
+/*
+ * 短名 -> AFCodecID，afCodecShortName() 的逆映射。存在的唯一理由是：应用层拿到的
+ * 是 StreamInfo.videoCodec 这个短名字符串（见 mediaPlayer/native_cicada_player_def.h），
+ * 而"设备能不能硬解这个编码"是按 AFCodecID 问的（decoderFactory::isHardwareDecodeSupported），
+ * 两边必须用**同一张**编码表，不允许调用方自己写 if-else 串。
+ *
+ * 认不出来（含 nullptr / 空串 / 未知短名）返回 AF_CODEC_ID_NONE。
+ *
+ * 注意 MPEG-2：AFCodecID 里没有对应的枚举项（见 afCodecShortNameFromManifestCodecs()
+ * 里的说明），所以短名 "MPEG-2" 也会得到 AF_CODEC_ID_NONE。调用方**不得**据此
+ * 推断"这个编码不存在"—— AF_CODEC_ID_NONE 的语义是"编码未知"，能力查询会按
+ * "未知 = 视为都支持"处理。
+ */
+enum AFCodecID afCodecIDFromShortName(const char *shortName);
+
 
 enum color_space {
     COLOR_SPACE_UNSPECIFIED = 0,

@@ -7,15 +7,25 @@
 #include "SuperMediaPlayer.h"
 #include "media_player_error_def.h"
 #include <cinttypes>
+#include <cstdio>
 #include <render/video/IVideoRender.h>
 #include <cassert>
 #include <climits>
 #include <data_source/dataSourcePrototype.h>
+#include <utils/AFMediaType.h>
 #include <utils/CicadaUtils.h>
 #include <utils/UrlUtils.h>
 #include <utils/af_string.h>
 #include <utils/file/FileUtils.h>
 #include <utils/timer.h>
+#include <vector>
+/*
+ * 起播档的"硬解优先"判据：设备能不能硬解这个编码。这是 L1 的无平台宏接口，
+ * 平台实现关在 framework/codec/decoderFactory.cpp 里（Android 走 MediaCodecList、
+ * Apple 走 VTIsHardwareDecodeSupported、桌面走 FFmpeg 的 hwaccel 配置），
+ * 结果在那边缓存，这里可以放心直接问。
+ */
+#include <codec/decoderFactory.h>
 
 #define HAVE_VIDEO (mPlayer.mCurrentVideoIndex >= 0)
 #define HAVE_AUDIO (mPlayer.mCurrentAudioIndex >= 0)
@@ -216,6 +226,23 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
     int mDefaultBandWidth = mPlayer.mSet->mDefaultBandWidth;
     int videoStreamCount = 0;
 
+    /*
+     * 视频档位快照，只用于下面那次"起播档同分辨率编码偏好"的收尾。
+     * codecRank 就是 afCodecEfficiencyRank() 的结果（AV1 5 / H.265 4 / VP9 3 /
+     * H.264 2 / MPEG-4、MPEG-2 1 / 未知 0）；
+     * hwDecodeSupported 是"这台设备能不能硬解这一路"（decoderFactory，未知时视为支持）。
+     */
+    struct StartUpVideoVariant {
+        int index;
+        int width;
+        int height;
+        int bandwidth;
+        int codecRank;
+        std::string codec;
+        bool hwDecodeSupported;
+    };
+    std::vector<StartUpVideoVariant> videoVariants;
+
     for (int i = 0; i < nbStream; ++i) {
         mPlayer.mDemuxerService->GetStreamMeta(pMeta, i, false);
         auto *meta = (Stream_meta *) (pMeta.get());
@@ -235,6 +262,128 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
             if (abs(mDefaultBandWidth - metaBandWidth) < minBandWidthDelta) {
                 bandWidthNearStreamIndex = i;
                 minBandWidthDelta = abs(mDefaultBandWidth - metaBandWidth);
+            }
+
+            StartUpVideoVariant variant;
+            variant.index = i;
+            variant.width = meta->width;
+            variant.height = meta->height;
+            variant.bandwidth = metaBandWidth;
+            variant.codecRank = afCodecEfficiencyRank(meta->codec, nullptr);
+            variant.codec = afCodecShortName(meta->codec, nullptr);
+            /*
+             * 硬解能力直接拿 Stream_meta.codec（这里就是 AFCodecID）去问，不用绕短名。
+             * AF_CODEC_ID_NONE（清单里没有编码信息）会得到 true —— "编码未知 =
+             * 能力未知 = 视为支持"，不会因为认不出编码就把这一路排到最后。
+             */
+            variant.hwDecodeSupported = decoderFactory::isHardwareDecodeSupported(meta->codec);
+            videoVariants.push_back(variant);
+        }
+    }
+
+    /*
+     * 【起播档的同分辨率编码偏好：硬解第一约束，压缩效率第二偏好】
+     *
+     * 上面那轮选起播档只看"离 mDefaultBandWidth 最近的码率"。当同一清晰度同时有
+     * H.264 / H.265 / AV1 多路时（用户片单里的实际情况），它可能落到**白花带宽**、
+     * 甚至**设备根本解不了**的那一路上。这里做一次收尾，规则与 ABR 侧**完全一致**
+     * （AbrAlgoStrategy::FindSameResolutionEfficientCodec）：
+     *
+     *   1) 候选集 = 与已选档**宽高完全相同**的流（宽高不是都 > 0 就不做收尾）；
+     *   2) 候选里只要存在能硬解的变体，就只在能硬解的变体里挑；一个能硬解的都没有
+     *      才允许软解变体 —— 绝不选一条"硬解不了、又不比别的更优"的编码；
+     *   3) 在筛出来的集合里按压缩效率序取最高者（AV1 > H.265 > VP9 > H.264 >
+     *      MPEG-4/MPEG-2），同级取带宽最低者，仍相同则取下标小者（结果确定，
+     *      不依赖遍历顺序）；
+     *   4) 收益判据：候选要么能带来**硬解**（已选档解不了、它解得了，此时不要求
+     *      更省带宽），要么**效率等级更高且带宽严格更低**；既不更能解、也不更省的
+     *      一律不动（不会因为"另一路带宽更低"就换到压缩效率更差的编码上）。
+     *
+     * 绝不跨分辨率替换（不为了省带宽降低起播清晰度）。这里没有任何计时器/开关，
+     * 只是把"选哪一路"的判据补全。
+     */
+    if (bandWidthNearStreamIndex >= 0) {
+        const StartUpVideoVariant *chosen = nullptr;
+
+        for (size_t v = 0; v < videoVariants.size(); v++) {
+            if (videoVariants[v].index == bandWidthNearStreamIndex) {
+                chosen = &videoVariants[v];
+                break;
+            }
+        }
+
+        if (chosen != nullptr && chosen->width > 0 && chosen->height > 0) {
+            /*
+             * 这一清晰度上有没有能硬解的变体（chosen 自己也在候选集里，所以它解不了
+             * 时这里只要为 true，下面就一定能找到同一清晰度上能硬解的那一路）。
+             * 硬解能力是第一约束：有能硬解的变体时，候选集收缩到能硬解的那些。
+             */
+            bool hasHardwareVariant = false;
+
+            for (size_t v = 0; v < videoVariants.size(); v++) {
+                const StartUpVideoVariant &cand = videoVariants[v];
+
+                if (cand.width == chosen->width && cand.height == chosen->height && cand.hwDecodeSupported) {
+                    hasHardwareVariant = true;
+                    break;
+                }
+            }
+
+            /*
+             * 排序键依次是：编码效率等级（高者胜）-> 带宽（低者胜）-> 下标（小者胜）。
+             * 最后一个键让结果与遍历顺序无关。
+             */
+            const StartUpVideoVariant *best = nullptr;
+
+            for (size_t v = 0; v < videoVariants.size(); v++) {
+                const StartUpVideoVariant &cand = videoVariants[v];
+
+                if (cand.width != chosen->width || cand.height != chosen->height) {
+                    continue;
+                }
+
+                /* 硬解优先：有能硬解的变体时，软解变体直接出局。 */
+                if (hasHardwareVariant && !cand.hwDecodeSupported) {
+                    continue;
+                }
+
+                if (best == nullptr) {
+                    best = &cand;
+                    continue;
+                }
+
+                if (cand.codecRank > best->codecRank) {
+                    best = &cand;
+                } else if (cand.codecRank == best->codecRank) {
+                    if (cand.bandwidth < best->bandwidth ||
+                        (cand.bandwidth == best->bandwidth && cand.index < best->index)) {
+                        best = &cand;
+                    }
+                }
+            }
+
+            if (best != nullptr && best->index != chosen->index) {
+                /*
+                 * 收益判据：候选要么能带来**硬解**（已选档解不了、它解得了 —— 这时
+                 * 不要求更省带宽），要么**效率等级更高且带宽严格更低**。既不更能解、
+                 * 也不更省的一律不动 —— 特别地，不会因为"另一路带宽更低"就换到压缩
+                 * 效率更差的编码上（那是降画质，不是省带宽）。
+                 */
+                const bool hardwareGain = best->hwDecodeSupported && !chosen->hwDecodeSupported;
+                const bool efficiencyGain = (best->codecRank > chosen->codecRank) &&
+                                            (best->bandwidth < chosen->bandwidth);
+
+                if (hardwareGain || efficiencyGain) {
+                    AF_LOGI("startup video stream %d -> %d: same %dx%d resolution, codec %s -> %s, "
+                            "hw %d -> %d, bandwidth %d -> %d (%s)\n",
+                            chosen->index, best->index, chosen->width, chosen->height,
+                            chosen->codec.empty() ? "(unknown)" : chosen->codec.c_str(),
+                            best->codec.empty() ? "(unknown)" : best->codec.c_str(),
+                            (int) chosen->hwDecodeSupported, (int) best->hwDecodeSupported,
+                            chosen->bandwidth, best->bandwidth,
+                            hardwareGain ? "hardware decode" : "more efficient codec, less bandwidth");
+                    bandWidthNearStreamIndex = best->index;
+                }
             }
         }
     }
@@ -278,6 +427,13 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
             info->videoWidth = meta->width;
             info->videoHeight = meta->height;
             info->videoBandwidth = (int) meta->bandwidth;
+            /*
+             * 编码短名：清单/容器给出的编码经**同一个**归一化函数转成应用层可显示的
+             * 短名（"H.264"/"H.265"/"AV1"/"VP9"/"MPEG-4"/"MPEG-2"）。拿不到编码
+             * 信息时是空串，界面据此不显示徽标 —— 这里不许猜。
+             */
+            snprintf(info->videoCodec, sizeof(info->videoCodec), "%s",
+                     afCodecShortName(meta->codec, nullptr));
             info->HDRType = VideoHDRType_SDR;
             if (meta->pixel_fmt == AF_PIX_FMT_YUV420P10BE || meta->pixel_fmt == AF_PIX_FMT_YUV420P10LE) {
                 info->HDRType = VideoHDRType_HDR10;
@@ -352,6 +508,10 @@ void SMPMessageControllerListener::ProcessPrepareMsg()
             info->videoBandwidth = (int) meta->bandwidth;
             info->videoWidth = meta->width;
             info->videoHeight = meta->height;
+            /* 与上面的视频分支同一份归一化实现（muxed 流的编码同样来自
+             * 清单/容器，拿不到就是空串）。 */
+            snprintf(info->videoCodec, sizeof(info->videoCodec), "%s",
+                     afCodecShortName(meta->codec, nullptr));
             AF_LOGD("STREAM_TYPE_MIXED bandwidth is %llu", meta->bandwidth);
 
             if (mPlayer.mMainStreamId >= 0) {

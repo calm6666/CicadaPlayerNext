@@ -347,6 +347,15 @@ int DashSegmentTracker::getStreamInfo(int *width, int *height, uint64_t *bandwid
     return mRep->getStreamInfo(width, height, bandwidth, language);
 }
 
+std::string DashSegmentTracker::getCodecsString()
+{
+    std::unique_lock<std::recursive_mutex> locker(mMutex);
+    if (mRep == nullptr) {
+        return "";
+    }
+    return mRep->getCodecsString();
+}
+
 std::string DashSegmentTracker::getDescriptionInfo()
 {
     std::unique_lock<std::recursive_mutex> locker(mMutex);

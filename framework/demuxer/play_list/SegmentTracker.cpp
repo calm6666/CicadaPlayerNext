@@ -606,6 +606,15 @@ namespace Cicada {
         return mRep->getStreamInfo(width, height, bandwidth, language);
     }
 
+    std::string SegmentTracker::getCodecsString()
+    {
+        if (mRep == nullptr) {
+            return "";
+        }
+
+        return mRep->getCodecsString();
+    }
+
     string SegmentTracker::getDescriptionInfo()
     {
         return mRep->getAdaptationSet()->getDescription();

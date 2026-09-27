@@ -287,13 +287,21 @@ namespace cicadaqt {
         Q_PROPERTY(QString manifestHint READ manifestHint WRITE setManifestHint NOTIFY streamingChanged)
         /*
          * 清晰度列表（只读）。每项是一个 map：
-         *   { streamIndex, width, height, bandwidth, bitrate, description, label }
+         *   { streamIndex, width, height, bandwidth, bitrate, description, label,
+         *     codec, codecLabel }
          * 数据来自框架的 MediaInfoGet 回调（见 .cpp 里 notifyQualities 的说明），
          * 按带宽从高到低排好序，界面直接照着渲染就行。
          *
-         * **一行 = 一档清晰度**：同一分辨率挂多条流时（DASH 里常见的 H.264 + H.265 各一条）
-         * 在 .cpp 里已按分辨率合并，`streamIndex` 是这一档的代表流（带宽最大的那条）；
-         * 切档用的就是它（selectQuality）。同一档的其它流对界面不可见。
+         * `label`      —— 档位名（4K / 2K / 1080P / …，见 .cpp 里那套换算）。
+         * `codec`      —— 框架归一化后的编码短名（"H.264"/"H.265"/"AV1"/…）。
+         * `codecLabel` —— 给徽标直接显示的文本，内容就是 codec；**认不出来时是空串**，
+         *                 界面此时不渲染徽标（不显示"未知"、也不去猜）。
+         *
+         * **一行 = 一个分辨率 + 一套编码**：同一分辨率挂着多条流时（DASH 里常见的
+         * H.264 + H.265 各一条），同分辨率**不同编码**在 .cpp 里是**两条独立条目**
+         * （各自带 codecLabel、各自有自己的 streamIndex，各切各的流）；同分辨率**同编码**
+         * 若仍有多条，才合并成一条，`streamIndex` 取该组带宽最大的那条当代表，
+         * 切档用的就是它。同一组的其它流对界面不可见。
          *
          * 非流媒体片源（本地文件、单码率 URL）这里是空列表。
          */
@@ -690,9 +698,12 @@ namespace cicadaqt {
         /*
          * 一次切流/切轨完成（StreamSwitchSuc 回调）。
          * 参数：框架的流类型（0=视频 1=音频 2=字幕，见 StreamType）、该流的 streamIndex、
-         * 以及视频流的宽/高/带宽（非视频流这几个是 0）。
+         * 视频流的宽/高/带宽，以及该流的编码短名（内核归一化后的，认不出来就是空串）
+         * ——非视频流这几个是 0 / 空串。编码只用于"同分辨率、不同编码分列"后的认行
+         * （见 .cpp 里 sameQualityRow），**不改变任何对外信号**。
          */
-        void notifyStreamSwitched(int streamType, int streamIndex, int width, int height, int bandwidth);
+        void notifyStreamSwitched(int streamType, int streamIndex, int width, int height,
+                                  int bandwidth, const QString &codec);
         void notifyQualitySwitchStatus(int status, int streamIndex, const QString &description);
 
     signals:

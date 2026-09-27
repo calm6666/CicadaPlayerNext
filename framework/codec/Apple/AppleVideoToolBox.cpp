@@ -72,6 +72,53 @@ namespace Cicada {
         return true;
     }
 
+    bool AFVTBDecoder::is_hardware_decode_supported(enum AFCodecID codec)
+    {
+        /*
+         * VideoToolbox 侧的能力问题用 VTIsHardwareDecodeSupported() 回答
+         * （iOS 11.0+ / macOS 10.13+，与 is_supported() 用的是同一个 API；
+         * 这里**不**像 is_supported() 那样只在 NDEBUG 未定义时检查 —— 那个
+         * #ifndef NDEBUG 是历史遗留，真实能力查询不能只在 debug 构建里生效）。
+         */
+        if (codec == AF_CODEC_ID_H264) {
+            /* H.264 硬解是 VideoToolbox 的基础能力，系统版本再低也有。 */
+            return true;
+        }
+
+        if (codec == AF_CODEC_ID_HEVC) {
+#if TARGET_OS_IPHONE
+            if (__builtin_available(iOS 11.0, *))
+#else
+            if (__builtin_available(macOS 10.13, *))
+#endif
+            {
+                return VTIsHardwareDecodeSupported(kCMVideoCodecType_HEVC) != 0;
+            } else {
+                return false;
+            }
+        }
+
+        if (codec == AF_CODEC_ID_MPEG4) {
+#if TARGET_OS_IPHONE
+            if (__builtin_available(iOS 11.0, *))
+#else
+            if (__builtin_available(macOS 10.13, *))
+#endif
+            {
+                return VTIsHardwareDecodeSupported(kCMVideoCodecType_MPEG4Video) != 0;
+            } else {
+                return false;
+            }
+        }
+
+        /*
+         * 其余编码（AV1 / VP9 / ...）：VideoToolbox 没有对应的 CMVideoCodecType，
+         * 内核侧查不到 —— 按约定返回 true（"查不到 = 视为支持"）：这时只按压缩效率
+         * 序排，绝不因为一次查不到就把整条流降级。
+         */
+        return true;
+    }
+
     int AFVTBDecoder::init_decoder_internal()
     {
         mInputCount = 0;

@@ -76,19 +76,56 @@ private fun PanelTitle(text: String) {
     )
 }
 
+/**
+ * 一行面板条目（所有面板共用）。
+ *
+ * [badge] 是行尾那个**小圆角徽标**的文本（当前只有清晰度面板用它显示编码，例如 "H.265"）：
+ *   * 非空 → 在文字右边的行尾画一个小标签（半透明白底 + 次要文字色，风格跟面板一致）；
+ *   * 空串 / null（默认）→ **整个徽标不渲染**，这一行的排版和以前完全一样。
+ * 默认值让既有调用方（倍速/字幕/镜像/色觉…）一行都不用改。
+ */
 @Composable
-fun PanelRow(text: String, selected: Boolean, onClick: () -> Unit) {
-    Text(
-        text = text,
-        color = if (selected) PlayerTheme.accent else PlayerTheme.panelText,
-        fontSize = 13.sp,
-        fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-        maxLines = 1,
+fun PanelRow(
+    text: String,
+    selected: Boolean,
+    badge: String? = null,
+    onClick: () -> Unit,
+) {
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
             .padding(horizontal = 20.dp, vertical = 4.dp),
-    )
+    ) {
+        Text(
+            text = text,
+            color = if (selected) PlayerTheme.accent else PlayerTheme.panelText,
+            fontSize = 13.sp,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
+            maxLines = 1,
+            /* fill = false：文字只占自己那么宽，剩下的空间留给行尾的徽标 */
+            modifier = Modifier.weight(1f, fill = false),
+        )
+
+        if (!badge.isNullOrEmpty()) {
+            Box(
+                modifier = Modifier
+                    .padding(start = 6.dp)
+                    .clip(RoundedCornerShape(3.dp))
+                    .background(Color.White.copy(alpha = 0.12f))
+                    .padding(horizontal = 4.dp, vertical = 1.dp),
+                contentAlignment = Alignment.Center,
+            ) {
+                Text(
+                    text = badge,
+                    color = PlayerTheme.panelSubText,
+                    fontSize = 9.sp,
+                    maxLines = 1,
+                )
+            }
+        }
+    }
 }
 
 /**
@@ -200,7 +237,13 @@ fun PlayerQualityPanel(
                 modifier = Modifier.padding(horizontal = 20.dp, vertical = 4.dp),
             )
         } else {
-            qualities.forEach { q -> PanelRow(q.label, q.selected) { onPick(q) } }
+            /*
+             * 每一档一行，行尾带一个**编码徽标**（`QualityOption.codec`，来自内核
+             * `TrackInfo.getVideoCodec()`）：同分辨率不同编码现在是两行（buildQualities 按
+             * "分辨率 + 编码"分组），徽标就是用来区分它们的（`1080P [H.264]` / `1080P [H.265]`）。
+             * codec 为空串时 PanelRow 不渲染徽标 —— 内核认不出编码就不显示，不猜。
+             */
+            qualities.forEach { q -> PanelRow(q.label, q.selected, q.codec) { onPick(q) } }
         }
         /* 用户要求：只有一档时只显示"自动"（buildQualities 已处理） */
     }

@@ -159,7 +159,16 @@ public class PlayerTrackFragment extends BaseFragment {
                     if(trackInfo.getVideoBitrate() > 0){
                         RadioButton videoBtn = createRadioButton();
                         videoBtn.setTag(trackInfo);
-                        videoBtn.setText(trackInfo.getVideoBitrate() + "");
+                        /*
+                         * 码率行后面带上**编码短名**（内核归一化后给的，例如 "H.264"/"H.265"；
+                         * 内核认不出来时是空串）。这里每一路视频流本来就是一行、不做任何合并，
+                         * 但同一个码率/同一分辨率下的 H.264 与 H.265 两行文字完全一样，用户分不出
+                         * 哪行是哪套编码 —— 所以把编码缀在码率后面。
+                         * 空串就只显示码率，不写"未知"、也不猜。
+                         */
+                        String codec = trackInfo.getVideoCodec();
+                        videoBtn.setText(trackInfo.getVideoBitrate() + ""
+                                + (TextUtils.isEmpty(codec) ? "" : "  " + codec));
                         mBitrateRadioGroup.addView(videoBtn);
                     }
                 }

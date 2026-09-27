@@ -135,6 +135,26 @@ namespace Cicada {
         }
     }
 
+    std::string Representation::getCodecsString() const
+    {
+        std::string ret;
+        std::list<std::string>::const_iterator it;
+
+        for (it = codecs.begin(); it != codecs.end(); ++it) {
+            if (it->empty()) {
+                continue;
+            }
+
+            if (!ret.empty()) {
+                ret += ",";
+            }
+
+            ret += *it;
+        }
+
+        return ret;
+    }
+
     std::string Representation::contextualize(size_t number, const std::string &component, const Dash::SegmentTemplate *templ) const
     {
         std::string str(component);

@@ -133,6 +133,25 @@ namespace Cicada{
 
         static bool is_supported(enum AFCodecID codec);
 
+        /*
+         * 【设备硬解能力查询（Windows / Linux / Apple 的 FFmpeg 后端实现）】
+         *
+         * 只回答"**这一份 FFmpeg 构建**里这个编码有没有本平台的硬解配置"
+         * （avcodec_get_hw_config 匹配 CICADA_HW_DEVICE_TYPE / CICADA_HW_PIX_FMT，
+         * 与 initHwDecoder() 用的是同一个 hasHwConfig()），**不创建设备**。
+         *
+         * 因此返回值只有两种含义：
+         *   true  = 构建里有该编码的硬解配置（设备是否真的能解，交给创建时的
+         *           hw->sw 回退兜底，这里不猜）；
+         *   false = 构建里明确没有该编码的硬解配置，硬件解码不可能发生。
+         * 非视频编码、以及本平台没有硬解后端（未定义 CICADA_HW_DEVICE_TYPE）时返回 false。
+         * 编码未知（AF_CODEC_ID_NONE）时不在这里处理，由
+         * decoderFactory::isHardwareDecodeSupported() 统一按"视为支持"返回 true。
+         *
+         * 只声明，不新增虚函数：类布局与 vtable 不变。
+         */
+        static bool is_hardware_decode_supported(enum AFCodecID codec);
+
         void setEOF() override
         {
         }

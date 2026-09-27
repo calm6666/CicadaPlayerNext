@@ -366,33 +366,45 @@ namespace cicadaqt {
     /*
      * "这一路视频流属于菜单里的哪一行？"
      *
-     * 先比 streamIndex（同名即同一行）；比不到再比**分辨率**。
+     * 先比 streamIndex（同名即同一行）；比不到再比**分辨率**，同分辨率下再用**编码**细分
+     * （菜单里一行 = 分辨率 + 编码，见 onMediaInfoGetCb 的分组说明）。
      *
      * 【为什么还要比分辨率】菜单里一行 = 一档清晰度，而一档在清单里可能对应**多条流**
-     * （同一分辨率的不同编码，见 onMediaInfoGetCb 的合并说明）。菜单留的是其中一条当代表，
-     * 但 ABR 自动挡/框架切流完全可能停在同一分辨率的另一条上 —— 那时 streamIndex 对不上，
+     * （同一分辨率、同一编码的多条流，见 onMediaInfoGetCb 的合并说明）。菜单留的是其中一条
+     * 当代表，但 ABR 自动挡/框架切流完全可能停在同一档的另一条上 —— 那时 streamIndex 对不上，
      * 只按 streamIndex 认就会"当前清晰度"高亮丢掉（错显示成未知/自动）。
-     * 分辨率对得上就是同一档，界面认知和用户看到的一致。
+     *
+     * 【编码那一层是"有信息才收紧"】调用方拿得到 StreamInfo::videoCodec 就传进来：同一分辨率
+     * 挂着 H.264 与 H.265 两条流、而框架报的正好是没进菜单的那条时，只按分辨率会认到**另一套
+     * 编码**那一行；带上编码才能认回自己这一行。任何一边编码为空（内核没解析出来）就退回
+     * "只看分辨率"，和上一版行为完全一样 —— 界面不猜编码。
      *
      * 两边都没有分辨率信息时（width/height 都是 0）退回纯 streamIndex 比较，
      * 和合并前的老行为完全一样。
      */
-    static bool sameQualityRow(const QVariantMap &row, int streamIndex, int width, int height)
+    static bool sameQualityRow(const QVariantMap &row, int streamIndex, int width, int height,
+                               const QString &codec = QString())
     {
         if (row.value(QStringLiteral("streamIndex")).toInt() == streamIndex) {
             return true;
         }
 
         /*
-         * 兜底判据必须和 onMediaInfoGetCb 的分组键**同一口径**：那里优先按高度分档
-         * （界面档位名就是高度），所以这里也先比高度；高度缺失才退到宽度。
+         * 分辨率判据优先高度（界面档位名就是高度，和分组键同一口径），高度缺失才退到宽度；
          * 两边都缺就只剩 streamIndex 比较，和合并前的老行为一样。
          */
-        if (height > 0) {
-            return row.value(QStringLiteral("height")).toInt() == height;
+        const bool sameResolution = (height > 0)
+                                    ? row.value(QStringLiteral("height")).toInt() == height
+                                    : (width > 0
+                                       && row.value(QStringLiteral("width")).toInt() == width);
+
+        if (!sameResolution) {
+            return false;
         }
 
-        return width > 0 && row.value(QStringLiteral("width")).toInt() == width;
+        const QString rowCodec = row.value(QStringLiteral("codec")).toString();
+
+        return codec.isEmpty() || rowCodec.isEmpty() || rowCodec == codec;
     }
 
     /*
@@ -435,6 +447,19 @@ namespace cicadaqt {
                 entry.insert(QStringLiteral("description"),
                              si->description != nullptr ? QString::fromUtf8(si->description) : QString());
                 /*
+                 * codec / codecLabel：这一路流的**编码短名**，框架从清单里解析后归一化好放在
+                 * StreamInfo::videoCodec 里（"H.264" / "H.265" / "AV1" / "VP9" / "MPEG-4" …）。
+                 *
+                 *   * codec      —— 合并分组用（同一分辨率下按它区分 H.264 / H.265 两条流）；
+                 *   * codecLabel —— 界面直接显示的徽标文本，就是同一个短名。
+                 *
+                 * **认不出来时框架给的是空串**，这里原样保留空串：界面按"空串 = 不渲染徽标"
+                 * 处理，不做任何猜测（既不显示"未知"，也不按分辨率/码率反推编码）。
+                 */
+                const QString codec = QString::fromUtf8(si->videoCodec).trimmed();
+                entry.insert(QStringLiteral("codec"), codec);
+                entry.insert(QStringLiteral("codecLabel"), codec);
+                /*
                  * label：界面直接显示的文字。
                  *
                  * 参考实现里 HLS 用 "1080p"、DASH 用 "1920x1080"（两边不一致，见 hili-player 的
@@ -469,7 +494,7 @@ namespace cicadaqt {
         }
 
         /*
-         * 【同一档清晰度只留一条流】
+         * 【一行 = 一个分辨率 + 一套编码】
          *
          * 清单里同一个分辨率常常挂着**多条**流：用户的 output.mpd 就是每个分辨率各一条
          * H.264 + 一条 H.265（8 条 AdaptationSet → 8 条流，见 DashManager::init()：
@@ -477,17 +502,22 @@ namespace cicadaqt {
          * "4K / 4K / 1080P / 1080P / 720P / 720P / 480P / 480P" ——
          * 用户实测报的就是这个（"dash 下，清晰度里面每个清晰度都有两个，重复了"）。
          *
-         * 【为什么只能按分辨率合并，不能写成"4K (H.265)"】
-         * 框架这一层**拿不到编解码器**：DASH 按 mimeType == "video/mp4" 认流
-         * （DashManager::FindSuitableAdaptationSets，framework/demuxer/dash/DashManager.cpp:680），
-         * Representation/StreamInfo 里也都没有 codec 字段（framework/demuxer/dash/ 下的 *.h 无 codecs
-         * 相关成员），所以界面无从区分同分辨率的两条流 —— 只能视作同一档。
+         * 【本轮口径：同分辨率的不同编码**分开列**，不再合并】
+         * 框架现在会把编解码器解析出来、归一化成短名报上来（StreamInfo::videoCodec，
+         * 见上面算 codec/codecLabel 那一段），所以分组键 = **分辨率 + 编码**
+         * （例如 "h1080|H.265"）：
+         *   * 同分辨率 + 不同编码 → **两条独立条目**（1080P [H.264] / 1080P [H.265]），
+         *     各自带自己的 codecLabel，也各自保留自己那一路的 streamIndex（各切各的流）；
+         *   * 同分辨率 + 同编码若仍有多条（同一套编码挂多条流）→ 仍合成一条，
+         *     取**带宽更大**的当代表（规则不变，只是现在的"同一组"更细了）；
+         *   * 编码为空串（框架没解析出来）→ 分组键的编码部分为空，于是**退回按分辨率合并**，
+         *     和上一版行为完全一样 —— 拿不到编码就不假装能区分。
          *
-         * 【合并规则】同分辨率取**带宽更大**的那条当代表：菜单本来就是"从清晰到模糊"排的
-         * （下面的 sort），同分辨率下带宽大的那档画质更好。其余同分辨率的流仍留在框架的流
-         * 列表里，**没有被动过** —— ABR 自动挡照旧在所有档之间切；万一它切到同分辨率的
-         * "孪生流"，界面靠分辨率（而不是 streamIndex）认回同一行，高亮不会丢
-         * （见 sameQualityRow / notifyStreamSwitched / notifyQualities）。
+         * 【合并规则】组内取**带宽更大**的那条当代表：菜单本来就是"从清晰到模糊"排的
+         * （下面的 sort），同一组里带宽大的那档画质更好。组内其余的流仍留在框架的流
+         * 列表里，**没有被动过** —— ABR 自动挡照旧在所有流之间切；万一它切到同组里的
+         * "孪生流"，界面靠分辨率（能拿到编码就再加上编码）而不是 streamIndex 认回同一行，
+         * 高亮不会丢（见 sameQualityRow / notifyStreamSwitched / notifyQualities）。
          */
         QVariantList merged;
         QHash<QString, int> rowOfGroup;
@@ -496,23 +526,28 @@ namespace cicadaqt {
             const QVariantMap entry = variant.toMap();
             const int width = entry.value(QStringLiteral("width")).toInt();
             const int height = entry.value(QStringLiteral("height")).toInt();
+            const QString codec = entry.value(QStringLiteral("codec")).toString();
             /*
-             * 分组键：**优先高度**，没有高度才退回宽度，两个都没有就用 streamIndex
-             * （等于不参与合并）。
+             * 分组键 = 分辨率 + 编码，两半各沿用各自的老口径：
              *
-             * 【为什么不是"宽x高"】界面给用户看的档位名本来就是按高度定的
+             * 【分辨率那半：优先高度】界面给用户看的档位名本来就是按高度定的
              * （2160→4K、1440→2K、其余 "%1P"，见上面 label 那段），所以"同名即同档"
              * 才是和界面一致的口径。而宽度可能缺值（换档窗口期解码器只填了高度 ——
              * 见 framework/demuxer/dash/DashStream.cpp 里"宽高各自补齐"那处修复），
              * 用 "宽x高" 当键会把 `0x2160` 和 `3840x2160` 分成两档，
-             * 用户看到的就是"同一个清晰度有两个"。
+             * 用户看到的就是"同一个清晰度有两个"。高度、宽度都没有时用 streamIndex
+             * 兜底（等于不参与合并）。
+             *
+             * 【编码那半】直接用归一化短名。空串 = 未知，此时键的编码部分为空
+             * （"h1080|"），同分辨率的未知编码流仍旧并成一条 —— 老行为。
              */
-            const QString group = (height > 0)
-                                  ? QStringLiteral("h%1").arg(height)
-                                  : (width > 0
-                                     ? QStringLiteral("w%1").arg(width)
-                                     : QStringLiteral("#%1").arg(
-                                               entry.value(QStringLiteral("streamIndex")).toInt()));
+            const QString resolutionKey = (height > 0)
+                                          ? QStringLiteral("h%1").arg(height)
+                                          : (width > 0
+                                             ? QStringLiteral("w%1").arg(width)
+                                             : QStringLiteral("#%1").arg(
+                                                       entry.value(QStringLiteral("streamIndex")).toInt()));
+            const QString group = resolutionKey + QStringLiteral("|") + codec;
 
             const auto found = rowOfGroup.constFind(group);
 
@@ -562,16 +597,19 @@ namespace cicadaqt {
         int width = 0;
         int height = 0;
         int bandwidth = 0;
+        QString codec;
 
         if (const auto *si = static_cast<const StreamInfo *>(info)) {
             streamIndex = si->streamIndex;
             width = si->videoWidth;
             height = si->videoHeight;
             bandwidth = si->videoBandwidth;
+            /* 编码短名：内核没解析出来时是空串，认行时按"未知"处理（不猜）。 */
+            codec = QString::fromUtf8(si->videoCodec).trimmed();
         }
 
-        QMetaObject::invokeMethod(item, [item, streamType, streamIndex, width, height, bandwidth]() {
-            item->notifyStreamSwitched(streamType, streamIndex, width, height, bandwidth);
+        QMetaObject::invokeMethod(item, [item, streamType, streamIndex, width, height, bandwidth, codec]() {
+            item->notifyStreamSwitched(streamType, streamIndex, width, height, bandwidth, codec);
         }, Qt::QueuedConnection);
     }
 
@@ -2427,9 +2465,11 @@ namespace cicadaqt {
         if (m_player != nullptr) {
             if (const StreamInfo *current = m_player->GetCurrentStreamInfo(ST_TYPE_VIDEO)) {
                 for (int i = 0; i < m_qualities.size(); ++i) {
-                    /* 认行按"streamIndex 或分辨率"（见 sameQualityRow：同一档可能有多条流）。 */
+                    /* 认行按"streamIndex 或（分辨率 + 编码）"（见 sameQualityRow：
+                     * 同一档可能挂着多条流，同分辨率不同编码则是不同的行）。 */
                     if (sameQualityRow(m_qualities.at(i).toMap(), current->streamIndex,
-                                       current->videoWidth, current->videoHeight)) {
+                                       current->videoWidth, current->videoHeight,
+                                       QString::fromUtf8(current->videoCodec).trimmed())) {
                         m_qualityIndex = i;
                         break;
                     }
@@ -2466,7 +2506,8 @@ namespace cicadaqt {
     }
 
     void CicadaPlayerItem::notifyStreamSwitched(int streamType, int streamIndex,
-                                                int width, int height, int bandwidth)
+                                                int width, int height, int bandwidth,
+                                                const QString &codec)
     {
         if (streamType != ST_TYPE_VIDEO) {
             /* 音轨/字幕轨的切换先只记日志，清晰度界面不受影响。 */
@@ -2475,15 +2516,21 @@ namespace cicadaqt {
         }
 
         for (int i = 0; i < m_qualities.size(); ++i) {
-            /* 同上：ABR 切到同分辨率的孪生流（另一套编码）也算停在这一档。 */
-            if (sameQualityRow(m_qualities.at(i).toMap(), streamIndex, width, height)) {
+            /*
+             * 认行：streamIndex 优先；对不上再按"分辨率 + 编码"（编码为空就看分辨率）。
+             * 同分辨率、同编码的多条流算同一行（ABR 在它们之间切时高亮不该丢）；
+             * 同分辨率、不同编码是**两行**，所以要把编码带上才不会认到另一套编码那行。
+             */
+            if (sameQualityRow(m_qualities.at(i).toMap(), streamIndex, width, height, codec)) {
                 m_qualityIndex = i;
                 break;
             }
         }
 
-        AF_LOGI("stream switched: video index=%d %dx%d %dkbps (auto=%d)\n",
-                streamIndex, width, height, bandwidth / 1000, m_autoQuality ? 1 : 0);
+        AF_LOGI("stream switched: video index=%d %dx%d %dkbps codec=%s (auto=%d)\n",
+                streamIndex, width, height, bandwidth / 1000,
+                codec.isEmpty() ? "(unknown)" : codec.toUtf8().constData(),
+                m_autoQuality ? 1 : 0);
 
         emit qualityChanged();
         /*

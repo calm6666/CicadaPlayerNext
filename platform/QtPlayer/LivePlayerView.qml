@@ -99,6 +99,9 @@ Item {
                     "height": q.height,
                     "videoBitrate": q.bandwidth,
                     "streamIndex": q.streamIndex,
+                    /* 编码短名（内核归一化后给的；认不出来是空串）：菜单用它画徽标，
+                       没有徽标时 LiveMenu 不渲染那一块 —— 不猜、不写"未知"。 */
+                    "codecLabel": q.codecLabel,
                     "url": ""
                 })
             }

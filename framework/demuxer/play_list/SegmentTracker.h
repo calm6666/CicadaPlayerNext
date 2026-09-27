@@ -37,6 +37,14 @@ namespace Cicada {
 
         int getStreamInfo(int *width, int *height, uint64_t *bandwidth, std::string &language);
 
+        /*
+         * 这一路流（当前 Representation）的清单原始 codecs 字符串，
+         * 例如 "avc1.64001f,mp4a.40.2"；没有就是空串。
+         * 供 HLSStream::GetStreamMeta() 填 Stream_meta.codec 用。
+         * 非虚函数，不动 vtable 布局。
+         */
+        std::string getCodecsString();
+
         string getDescriptionInfo();
 
         bool getSegmentNumberByTime(uint64_t &time, uint64_t &num);

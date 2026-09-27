@@ -70,6 +70,12 @@ data class QualityOption(
     val index: Int,
     val label: String,
     val selected: Boolean,
+    /*
+     * 这一档的**编码短名**（`TrackInfo.getVideoCodec()`，内核归一化后的 "H.264"/"H.265"/"AV1"…），
+     * 只用来在档位行右侧画一个小徽标。**内核认不出来时是空串**，界面此时不渲染徽标
+     * （不写"未知"、也不按分辨率/码率反推）。默认空串：只改文案的调用方不必关心它。
+     */
+    val codec: String = "",
 )
 
 /** 字幕一档（来自 `TrackInfo` 的字幕轨） */
@@ -111,14 +117,18 @@ fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int, autoQuality: Boolea
 
     /*
      * ============ 照 Qt 的 onMediaInfoGetCb 逐条移植 ============
-     * 标杆：platform/QtPlayer/src/CicadaPlayerItem.cpp:492-537（合并 + 排序）、:446-466（文案）。
+     * 标杆：platform/QtPlayer/src/CicadaPlayerItem.cpp:522-580（合并 + 排序）、:470-491（文案）。
      *
-     * ① 同分辨率合并：按**高度**分组（Qt 特意用高度而不是"宽x高"，见它 :499-508 的说明），
-     *    每组留**带宽最大**的那一条。
-     *    为什么必须要：DASH 下同一分辨率会同时存在 h264 与 h265 两条编码，内核 Java 侧
-     *    是原样把全部视频流都给出来的（cicadaplayer/.../jni/player/JavaTrackInfo.cpp:195-209），
-     *    不合并列表里就会出现"1080P / 1080P"这种重复项 —— 这正是现在列表不行的主因。
-     * ② 合并后按**带宽降序**排（Qt :534-537）。
+     * ① 分组键 = **分辨率 + 编码**（qualityGroupKey，Qt :535-550 的 "h1080|H.265" 同一口径）：
+     *    · 同分辨率**不同编码**（DASH 下同一分辨率常同时有 H.264 与 H.265）→ **两行独立条目**，
+     *      各带自己的编码徽标、各切各的流 —— 这正是用户要的"不要再合并成一条"；
+     *    · 同分辨率**同编码**若仍有多条（同一套编码挂多条流）→ 合成一条，取带宽最大者当代表；
+     *    · 编码为空串（内核没解析出来）→ 分组键的编码部分为空，退回"只按分辨率合并"，
+     *      和上一版行为一样（拿不到编码就不假装能区分）。
+     *    为什么必须要分组：内核 Java 侧是原样把全部视频流都给出来的
+     *    （cicadaplayer/.../jni/player/JavaTrackInfo.cpp:195-209），同一编码的多条流不合并，
+     *    列表里就会出现"1080P / 1080P"这种真重复项。
+     * ② 合并后按**带宽降序**排（Qt :558-561）。
      * ③ "自动"追加到**末尾**（Qt 控制栏是各档在前、自动在最后：RightControls.qml:1784-1790），
      *    而不是像以前那样放在第一行。
      */
@@ -144,21 +154,41 @@ fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int, autoQuality: Boolea
             index = t.getIndex(),
             label = qualityLabelOf(t),
             selected = !autoQuality && t.getIndex() == currentIndex,
+            codec = codecLabelOf(t),
         )
     } + auto
 }
 
-/** 合并分组的键：优先高度，其次宽度，都没有就按各自 index 单独成组（Qt 同兜底）。 */
-private fun qualityGroupKey(track: TrackInfo): Int {
+/**
+ * 合并分组的键：**分辨率 + 编码**（例如 `"h1080|H.265"`，与 Qt 的分组键同一口径）。
+ *
+ * 分辨率那半优先高度，其次宽度，都没有就按各自 index 单独成组（Qt 同兜底）；
+ * 编码那半取归一化短名，**空串就是"未知"** —— 此时同分辨率的未知编码流仍旧并成一条，
+ * 等于回到上一版"只按分辨率合并"的行为。两组之间用 `"|"` 分隔，避免和短名里的字符混淆。
+ */
+private fun qualityGroupKey(track: TrackInfo): String {
     val h = track.getVideoHeight()
-    if (h > 0) return h
     val w = track.getVideoWidth()
-    if (w > 0) return w
-    return -1 - track.getIndex()
+    val resolution = when {
+        h > 0 -> "h$h"
+        w > 0 -> "w$w"
+        else -> "#${track.getIndex()}"
+    }
+    return "$resolution|${codecLabelOf(track)}"
 }
 
 /**
- * 一档视频轨的显示名 —— 与 Qt 完全一致的写法（`CicadaPlayerItem.cpp:446-466`）：
+ * 一档视频轨的**编码短名**（徽标文本）—— 直接取内核归一化后的名字（`TrackInfo.getVideoCodec()`）。
+ *
+ * **认不出来时内核给空串**，这里原样返回空串（界面按"空串 = 不渲染徽标"处理）：
+ * 不做任何映射/猜测，既不显示"未知"，也不按分辨率/码率反推编码。
+ * 用显式 getter（TrackInfo 同时有公有字段与 getter，Kotlin 属性语法可能歧义）。
+ */
+fun codecLabelOf(track: TrackInfo): String =
+    (track.getVideoCodec() ?: "").trim()
+
+/**
+ * 一档视频轨的显示名 —— 与 Qt 完全一致的写法（`CicadaPlayerItem.cpp:470-491`）：
  *   2160 及以上 → `4K`；1440 及以上 → `2K`；有高度 → `1080P`；
  *   没高度 → `宽 x 高`；连宽高都没有 → `kbps`；都没有 → `未知`。
  * 清晰度列表、切换提示、按钮文案共用这一套。

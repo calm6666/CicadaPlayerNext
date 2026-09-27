@@ -726,6 +726,39 @@ namespace Cicada {
         return false;
     }
 
+    bool avcodecDecoder::is_hardware_decode_supported(enum AFCodecID codec)
+    {
+#if defined(CICADA_HW_DEVICE_TYPE)
+        /*
+         * 与 initHwDecoder() 用**同一个** hasHwConfig() 判据（同一个
+         * CICADA_HW_DEVICE_TYPE / CICADA_HW_PIX_FMT、同样拒绝 Windows 上只有
+         * AV_PIX_FMT_D3D11VA_VLD 的 legacy hwaccel），所以这里说"有硬解配置"
+         * 和真正打开解码器时说"能硬解"永远是同一个答案，不会各说各话。
+         *
+         * 只查配置，**不调 av_hwdevice_ctx_create()**：建 D3D11/VAAPI 设备有成本，
+         * 而且会为一个不一定真正解码的编码白占 GPU 资源。"构建里有配置、设备实际
+         * 解不了"由解码器创建时的 hw->sw 回退兜底（见 SuperMediaPlayer.cpp）。
+         *
+         * 只有视频编码会带本平台的硬解配置，音频/字幕编码自然返回 false。
+         */
+        const AVCodec *avCodec = avcodec_find_decoder(CodecID2AVCodecID(codec));
+
+        if (avCodec == nullptr) {
+            return false;
+        }
+
+        enum AVPixelFormat hwPixFmt = AV_PIX_FMT_NONE;
+        const bool supported = hasHwConfig(avCodec, &hwPixFmt);
+        /* 这里只要"有没有"，不关心是哪个像素格式；显式收掉避免"设了没用"的告警。 */
+        (void) hwPixFmt;
+        return supported;
+#else
+        /* 本平台没有 FFmpeg 硬解后端（未定义 CICADA_HW_DEVICE_TYPE）。 */
+        (void) codec;
+        return false;
+#endif
+    }
+
     void avcodecDecoder::flush_decoder()
     {
 #if defined(CICADA_HW_DEVICE_TYPE)

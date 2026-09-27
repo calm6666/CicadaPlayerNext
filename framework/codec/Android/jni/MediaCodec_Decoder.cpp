@@ -4,6 +4,7 @@
 
 #include <utils/Android/FindClass.h>
 #include <utils/Android/JniEnv.h>
+#include <utils/Android/JniException.h>
 #include <utils/Android/NewStringUTF.h>
 #include <utils/Android/GetStringUTFChars.h>
 #include <utils/Android/JniUtils.h>
@@ -36,6 +37,14 @@ static jmethodID jMediaCodec_queueSecureInputBuffer = nullptr;
 static jmethodID jMediaCodec_dequeueOutputBufferIndex = nullptr;
 static jmethodID jMediaCodec_getOutputBufferInfo = nullptr;
 static jmethodID jMediaCodec_getOutBuffer = nullptr;
+
+/*
+ * 【设备硬解能力查询】MediaCodecUtils 的类句柄与方法 ID。
+ * 与上面那批一样，在 init()（JNI_OnLoad，Java 线程）里缓存；查询发生在内核线程上，
+ * 那时再 FindClass 是找不到应用侧的类的。方法不存在（旧版 AAR）时保持 nullptr。
+ */
+static jclass jMediaCodecUtilsClass = nullptr;
+static jmethodID jMediaCodecUtils_isHardwareDecodeSupported = nullptr;
 
 void MediaCodec_Decoder::init(JNIEnv *env) {
     if (env == nullptr) {
@@ -90,6 +99,34 @@ void MediaCodec_Decoder::init(JNIEnv *env) {
                                                     "(I)Ljava/lang/Object;");
     }
 
+    /*
+     * 【设备硬解能力查询】提前把 MediaCodecUtils 缓存下来。
+     *
+     * 放在 init() 里的理由：init() 是 JNI_OnLoad 从 Java 线程调用的，FindClass 那时
+     * 才找得到应用侧的类；真正查询硬解能力的是内核线程（mediaPlayer / ABR），那里
+     * 的 FindClass 走系统类加载器，找不到 AAR 里的类。
+     *
+     * 找不到类或方法（极老的 AAR）就保持 nullptr：查询方按"未知 = 视为支持"处理，
+     * 只是一次优化退化成"只用效率序"，不影响播放。
+     */
+    if (jMediaCodecUtilsClass == nullptr) {
+        FindClass jUtilsClass(env, "com/cicada/player/utils/media/MediaCodecUtils");
+        jclass utilsClass = jUtilsClass.getClass();
+
+        if (utilsClass != nullptr) {
+            jMediaCodecUtilsClass = static_cast<jclass>(env->NewGlobalRef(utilsClass));
+            jMediaCodecUtils_isHardwareDecodeSupported =
+                    env->GetStaticMethodID(jMediaCodecUtilsClass, "isHardwareDecodeSupported",
+                                           "(Ljava/lang/String;)Z");
+
+            if (env->ExceptionCheck()) {
+                /* GetStaticMethodID 失败会挂起 pending 异常，不清掉会污染后面所有 JNI 调用。 */
+                env->ExceptionClear();
+                jMediaCodecUtils_isHardwareDecodeSupported = nullptr;
+            }
+        }
+    }
+
 
 }
 
@@ -101,6 +138,56 @@ void MediaCodec_Decoder::unInit(JNIEnv *env) {
         env->DeleteGlobalRef(jMediaCodecClass);
         jMediaCodecClass = nullptr;
     }
+
+    if (jMediaCodecUtilsClass != nullptr) {
+        env->DeleteGlobalRef(jMediaCodecUtilsClass);
+        jMediaCodecUtilsClass = nullptr;
+        jMediaCodecUtils_isHardwareDecodeSupported = nullptr;
+    }
+}
+
+/*
+ * 【设备硬解能力查询】把 mime 交给 Java 侧只认**硬件**解码器的枚举
+ * （MediaCodecUtils.isHardwareDecodeSupported）。
+ *
+ * Java 侧明确回答 true 才是 true；以下"查不到"的情形统统返回 true（未知 = 视为支持）：
+ *   * init() 时没缓存到类或方法（旧版 AAR）；
+ *   * 拿不到 JNIEnv（线程没挂上）；
+ *   * Java 侧抛了异常。
+ * 这样即使新 .so 配了旧 AAR，也只会退化成"只用压缩效率序"，不会把能解的编码误判成解不了。
+ */
+bool MediaCodec_Decoder::isHardwareDecodeSupported(const char *mime) {
+    if (mime == nullptr) {
+        return true;
+    }
+
+    if (jMediaCodecUtilsClass == nullptr || jMediaCodecUtils_isHardwareDecodeSupported == nullptr) {
+        return true;
+    }
+
+    JniEnv jniEnv{};
+    JNIEnv *env = jniEnv.getEnv();
+
+    if (env == nullptr) {
+        return true;
+    }
+
+    NewStringUTF jMime(env, mime);
+    jstring mimeString = jMime.getString();
+
+    if (mimeString == nullptr) {
+        return true;
+    }
+
+    jboolean supported = env->CallStaticBooleanMethod(jMediaCodecUtilsClass,
+                                                      jMediaCodecUtils_isHardwareDecodeSupported,
+                                                      mimeString);
+
+    if (JniException::clearException(env)) {
+        return true;
+    }
+
+    return supported == JNI_TRUE;
 }
 
 

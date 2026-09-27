@@ -132,6 +132,21 @@ namespace Cicada {
 
         int releaseOutputBuffer(int index, bool render);
 
+        /*
+         * 【设备硬解能力查询】把"这台设备有没有这个 mime 的**硬件**解码器"问回 Java 侧
+         * （com.cicada.player.utils.media.MediaCodecUtils.isHardwareDecodeSupported）。
+         *
+         * 类句柄与方法 ID 在 init() 里就缓存好 —— init() 是 JNI_OnLoad 从 **Java 线程**
+         * 调用的，那时 FindClass 找得到应用侧的类；这是本文件里所有 Java 类的既有做法。
+         * 绝不能等到查询时再 FindClass：能力查询发生在内核线程上，那里的 FindClass 走
+         * 系统类加载器，找不到应用侧的类，会静默失败（本次改动在 Android 上就等于没生效）。
+         *
+         * 只回答"有/没有"：Java 侧明确返回 true 才是 true；所有"查不到"的情形
+         * （旧版 Java 没有这个方法、拿不到 JNIEnv、Java 侧抛异常、查询结果拿不到）
+         * 也返回 true，由调用方统一按"未知 = 视为支持"处理。
+         */
+        static bool isHardwareDecodeSupported(const char *mime);
+
     private:
         jobject mMediaCodec{nullptr};
 

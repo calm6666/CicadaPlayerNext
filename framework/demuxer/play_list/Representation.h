@@ -54,6 +54,15 @@ namespace Cicada{
 
         void addCodecs(const std::string &codecs);
 
+        /*
+         * 把这一路 Representation 的 codecs 列表拼成清单原始形态
+         * （逗号分隔，例如 "hvc1.1.6.L93.B0" 或 "avc1.64001f,mp4a.40.2"），
+         * 交给 afCodecShortName()/afCodecIDFromManifestCodecs() 归一化。
+         * 没有任何 codecs 时返回空串。
+         * 非虚函数，不动 vtable 布局。
+         */
+        std::string getCodecsString() const;
+
         std::string contextualize(size_t number, const std::string &component, const Dash::SegmentTemplate *templ) const;
 
         int64_t getScaledTimeBySegmentNumber(uint64_t index, const Dash::SegmentTemplate *templ) const;

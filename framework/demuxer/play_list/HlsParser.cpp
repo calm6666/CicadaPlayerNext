@@ -116,6 +116,24 @@ namespace Cicada {
 
         if (codecAttr) {
             AF_LOGD("codec is %s\n", codecAttr->value.c_str());
+            /*
+             * 【把 CODECS 存进 Representation，供应用层区分同分辨率的不同编码】
+             *
+             * CODECS 是 quoted-string 属性（RFC 8216 4.3.4.2），而
+             * AttributesTag::parseAttributes() 会把两端的双引号**一起**放进
+             * Attribute::value（见 HlsTags.cpp:194 起）。归一化函数能容忍引号，
+             * 但这里先剥掉，让 Representation::codecs 里存的是干净的 token
+             * （"avc1.64001f"、"mp4a.40.2" 这种）。
+             * 只在两头真的是引号时用 quotedString()：它对未加引号的值会切掉
+             * 首尾字符，不能无条件用。
+             */
+            if (codecAttr->value.size() >= 2 && codecAttr->value.front() == '"' &&
+                codecAttr->value.back() == '"') {
+                rep->addCodecs(codecAttr->quotedString());
+            } else {
+                rep->addCodecs(codecAttr->value);
+            }
+
             bool mixedVideo = false;
             bool mixedAudio = false;
 

@@ -1152,6 +1152,14 @@ namespace Cicada {
         for (auto si : mediaInfo->mStreamInfoQueue) {
             if (si->type == ST_TYPE_VIDEO) {
                 player->mAbrAlgo->AddStreamInfo(si->streamIndex, si->videoBandwidth);
+                /*
+                 * AddStreamInfo() 只带 index + 码率，判不了"同一分辨率 / 哪个编码
+                 * 更省带宽"。紧接着把这一路流的编码短名（StreamInfo.videoCodec，
+                 * 已由 afCodecShortName() 归一化，拿不到编码时是空串）和分辨率
+                 * 一起喂进去 —— 策略里同分辨率优先更省带宽的编码就靠这两项。
+                 */
+                player->mAbrAlgo->SetStreamExtraInfo(si->streamIndex, si->videoCodec,
+                                                     si->videoWidth, si->videoHeight);
             }
         }
 

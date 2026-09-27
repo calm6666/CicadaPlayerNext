@@ -33,6 +33,23 @@ namespace Cicada{
 
         ~mediaCodecDecoder() override;
 
+        /*
+         * 【设备硬解能力查询（Android 平台实现）】
+         *
+         * 问 MediaCodecList：设备上有没有**硬件**解码器能解这个编码。只认硬件
+         * （API 29+ 用 MediaCodecInfo.isHardwareAccelerated()，更老的用编解码器名
+         * 前缀排除 OMX.google. / c2.android. 这类纯软解），软件解码器一律不算。
+         *
+         * 语义（与 decoderFactory::isHardwareDecodeSupported 的约定一致）：
+         *   true  = 明确有硬件解码器，**或** 查询本身失败（JNI 拿不到类/方法、
+         *           异常、Java 侧还是老版本没有这个方法）—— 查不到就当支持；
+         *   false = 明确回答"没有"。
+         *
+         * 实现见 mediaCodecDecoder.cpp；这里只声明，不引入任何新虚函数，
+         * 类的布局与 vtable 一个字节都不变。
+         */
+        static bool isHardwareDecodeSupported(enum AFCodecID codec);
+
     private:
 
         int init_decoder(const Stream_meta *meta, void *wnd, uint64_t flags, const DrmInfo *drmInfo) override;

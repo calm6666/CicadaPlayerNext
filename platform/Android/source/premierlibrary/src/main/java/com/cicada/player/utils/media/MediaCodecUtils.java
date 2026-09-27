@@ -143,6 +143,55 @@ public class MediaCodecUtils {
         return true;
     }
 
+    /**
+     * 设备上有没有<b>硬件</b>解码器能解这个 mime 的编码。
+     *
+     * <p>只认硬件解码器：API 29+ 用 {@link MediaCodecInfo#isHardwareAccelerated()}；
+     * 更老的系统用编解码器名前缀排除纯软解实现（OMX.google. / c2.android. /
+     * OMX.android.，与 ExoPlayer 的 MediaCodecUtil 是同一套判据）。软件解码器一律
+     * 不算 —— 内核侧的"同分辨率优先硬解"要靠这个答案把解不了的编码让开。
+     *
+     * <p>复用已经缓存的 allDecoders 列表，不会重复枚举 MediaCodecList。
+     *
+     * @param mime 例如 "video/avc"、"video/hevc"、"video/av01"、"video/x-vnd.on2.vp9"
+     * @return 有硬件解码器 = true；确定没有 = false
+     */
+    public static synchronized boolean isHardwareDecodeSupported(String mime) {
+        if (mime == null) {
+            return false;
+        }
+
+        if (allDecoders == null) {
+            allDecoders = getDeviceDecodecs();
+        }
+
+        for (MediaCodecInfo mediaCodecInfo : allDecoders) {
+            if (getCodecMimeType(mediaCodecInfo, mime) == null) {
+                continue;
+            }
+
+            if (isHardwareCodec(mediaCodecInfo)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static boolean isHardwareCodec(MediaCodecInfo info) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            return info.isHardwareAccelerated();
+        }
+
+        String name = info.getName();
+        if (name == null) {
+            return false;
+        }
+
+        return !name.startsWith("OMX.google.") && !name.startsWith("c2.android.")
+                && !name.startsWith("OMX.android.");
+    }
+
 
     private static List<MediaCodecInfo> allDecoders;
 

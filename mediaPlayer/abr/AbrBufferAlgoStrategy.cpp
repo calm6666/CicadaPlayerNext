@@ -347,7 +347,14 @@ int AbrBufferAlgoStrategy::BestIndexForBudget(double budgetBps, int maxIndex) co
     return -1;
 }
 
-void AbrBufferAlgoStrategy::RequestSwitch(int index, bool up, const char *why)
+int AbrBufferAlgoStrategy::PreferEfficientCodecAtSameResolution(int index, int maxBitrate) const
+{
+    const int better = FindSameResolutionEfficientCodec(index, maxBitrate);
+
+    return (better >= 0) ? better : index;
+}
+
+void AbrBufferAlgoStrategy::RequestSwitch(int index, bool up, bool banUp, const char *why)
 {
     if (index < 0 || index >= (int) mBitRates.size()) {
         return;
@@ -381,7 +388,7 @@ void AbrBufferAlgoStrategy::RequestSwitch(int index, bool up, const char *why)
     mSwitchingSinceMs = nowMs;
     mLastSwitchTimeMS = nowMs;
 
-    if (!up) {
+    if (!up && banUp) {
         /* dash.js 在放弃一次下载后 10 秒内禁止上切。这里无法区分"放弃"和
          * 普通降档，所以对所有降档都套同一条（更保守）。 */
         mUpSwitchBannedUntilMs = nowMs + ABR_UP_BAN_AFTER_DOWN_MS;
@@ -484,7 +491,11 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
 
         AF_LOGW("ABR panic down-switch: buffer=%lld ms < %d ms, keeping the stream alive\n",
                 (long long) bufferMs, (int) ABR_PANIC_BUFFER_MS);
-        RequestSwitch(target >= 0 ? target : 0, false, "buffer about to run out");
+        /* 见底时**不做**同分辨率换编码：换编码要重建解码器，来不及，先降档保命。
+         * 这里也**不**为"硬解"做同分辨率替换 —— 同一个理由：缓冲只剩不到 4 秒的时候，
+         * 一次解码器重建本身就足以造成可见卡顿，保不断流优先于换编码。
+         * （正常降档路径见下面第 4 条，它带着码率上限做同分辨率编码收敛。） */
+        RequestSwitch(target >= 0 ? target : 0, false, true, "buffer about to run out");
         return;
     }
 
@@ -493,8 +504,32 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
         return;
     }
 
-    const int upCandidate = BestIndexForBudget(ABR_UP_BANDWIDTH_FACTOR * throughput, count - 1);
-    const int downCandidate = BestIndexForBudget(ABR_DOWN_BANDWIDTH_FACTOR * throughput, currentIndex);
+    /*
+     * 候选档的同分辨率编码收敛。BestIndexForBudget() 只按码率选档，同一个清晰度上
+     * 同时有 H.264 / H.265 / AV1 时它可能落到"白花带宽"的那一路上（也可能落到设备
+     * 根本解不了的那一路上）。FindSameResolutionEfficientCodec() 负责在**同一分辨率**
+     * 内部把它收敛成该清晰度上更该选的那一档：硬解优先，其次压缩效率（AV1 > H.265 >
+     * VP9 > H.264 > MPEG-4/2），分辨率不会变。
+     *
+     * 两条路径的码率上限刻意不同：
+     *   * 上切/稳态（upCandidate）：**不限**码率。硬解是第一约束 —— 当预算挑中的那一档
+     *     设备解不了、而同一清晰度上能硬解的那一档略贵时，宁可换成能硬解的那一档
+     *     （分辨率/画质不变，只多花一点带宽），也不要留下一条软解的流。万一这次替换
+     *     真的超出了吞吐能力，下一轮降档判定会把它收回来。
+     *   * 降清晰度（downCandidate）：上限 = 该目标档自己的码率。缓冲已经不够了，
+     *     这时换到一个**更贵**的编码等于把这次降档白做（很可能立刻又掉进紧急降档），
+     *     所以这一路只接受"同分辨率里更省带宽的编码"（用户第 2 条），不允许抬码率。
+     */
+    int upCandidate = BestIndexForBudget(ABR_UP_BANDWIDTH_FACTOR * throughput, count - 1);
+    int downCandidate = BestIndexForBudget(ABR_DOWN_BANDWIDTH_FACTOR * throughput, currentIndex);
+
+    if (upCandidate >= 0) {
+        upCandidate = PreferEfficientCodecAtSameResolution(upCandidate, 0);
+    }
+
+    if (downCandidate >= 0) {
+        downCandidate = PreferEfficientCodecAtSameResolution(downCandidate, mBitRates[downCandidate]);
+    }
 
     /* ---- 3) 上切：缓冲够厚（ExoPlayer 的 >= 10s，这里用"高水位"更保守）+ 带宽有余量 ---- */
     if (upCandidate > currentIndex) {
@@ -511,8 +546,32 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
             return;
         }
 
-        RequestSwitch(upCandidate, true, "throughput headroom");
+        RequestSwitch(upCandidate, true, false, "throughput headroom");
         return;
+    }
+
+    /*
+     * ---- 3.5) 同一清晰度内换编码：当前档所在的分辨率上有更该选的那一档 ----
+     *
+     * 两个诉求都靠这条落地：
+     *   * 手动/起播落到了 H.264 那条，而同一清晰度还有更省带宽的 H.265/AV1 时，
+     *     自动档主动搬到省带宽的那一路；
+     *   * **设备解不了当前这一路**（例如只支持 H.264 却起播在 AV1 上）时，搬到同一
+     *     清晰度上设备能硬解的那一路 —— 这时即便那一档码率更高也换（硬解第一约束，
+     *     与上面 upCandidate 用"不限码率"是同一个理由）。
+     *
+     * 门限刻意和"上切"一样保守（缓冲 >= ABR_MIN_BUFFER_FOR_UP_MS、不在换档宽限期）：
+     * 换编码要把新 Representation 从 0 重新攒缓冲 + 重建解码器，是**最贵**的一次
+     * 切换，缓冲薄的时候绝不能做（那时该走下面的降档）。
+     * 用 banUp=false：这不是降清晰度，不该吃"降档后 10 秒禁上切"。
+     */
+    if (!inPostSwitchGrace && bufferMs >= ABR_MIN_BUFFER_FOR_UP_MS) {
+        const int lateral = FindSameResolutionEfficientCodec(currentIndex, 0);
+
+        if (lateral >= 0) {
+            RequestSwitch(lateral, false, false, "same resolution, better codec (hw first, then efficiency)");
+            return;
+        }
     }
 
     /*
@@ -522,6 +581,11 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
      * （吞吐瞬间掉到档位之下）不该换档，缓冲还厚就照常播 —— 缓冲被吃薄了自然
      * 会走到下面这条。dash.js 的 BolaRule 就是这么做的（码率由缓冲水位决定，
      * 吞吐只作为上限），ExoPlayer 也有"缓冲 >= 25s 时推迟降档"的同一条。
+     *
+     * downCandidate 已经在上面的"候选档同分辨率编码收敛"里处理过（带码率上限），
+     * 所以这里落地的就是用户第 2 条要的那一档：**目标清晰度内**优先能硬解的编码、
+     * 其次压缩效率更高的编码，且永远不会比 BestIndexForBudget() 选出的那一档更贵。
+     * 清晰度档位只降不升 —— 换编码绝不跨分辨率。
      */
     if (bufferMs < ABR_LOW_BUFFER_MS && mLowBufferTicks >= ABR_LOW_BUFFER_TICKS && !inPostSwitchGrace) {
         if (downCandidate < currentIndex) {
@@ -529,7 +593,7 @@ void AbrBufferAlgoStrategy::ProcessAbrAlgo()
                     "(buffer=%lld ms, throughput=%.0f kbps)\n",
                     (int) ABR_LOW_BUFFER_MS, (int) mLowBufferTicks,
                     (long long) bufferMs, throughput / 1024.0);
-            RequestSwitch(downCandidate >= 0 ? downCandidate : 0, false, "buffer too low");
+            RequestSwitch(downCandidate >= 0 ? downCandidate : 0, false, true, "buffer too low");
             return;
         }
     }

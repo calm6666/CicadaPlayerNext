@@ -1777,28 +1777,101 @@ import QtPlayer
                         }
                     }
 
-                    contentItem: Column {
-                        id: qualityColumn
+                    /*
+                     * 内容区改成**可滚动**的 Flickable（和"选集"菜单同一套写法，见 eplistMenu）。
+                     *
+                     * 【为什么本轮必须加】档位从 4 档变成 8~9 档之后（同分辨率的不同编码分开列），
+                     * 菜单高度 = 档位数 x 36，小窗口/非全屏下会顶出窗口上沿、最高档点不到 ——
+                     * 这是本轮 UI 改动的直接后果，所以在这里收口（不改任何其它交互）。
+                     *
+                     * 【滚轮不需要额外的 MouseArea】行里的 MouseArea 不收滚轮，事件会冒到
+                     * 这里的 Flickable（eplistMenu 那段注释里已核实过同一件事）。
+                     * 只有"内容超过可视区"时才 interactive，档位少的片源和以前一模一样。
+                     */
+                    contentItem: Flickable {
+                        id: qualityScroll
+
+                        /* 内容自然高度：上面的 height 表达式仍是"它和上限取小" */
+                        implicitHeight: qualityColumn.implicitHeight
+                        contentHeight: qualityColumn.implicitHeight
+                        clip: true
+                        boundsBehavior: Flickable.StopAtBounds
+                        interactive: contentHeight > height
 
                         /*
-                         * 【顺序：各档清晰度在前，**「自动」放最下面**（用户要求）】
-                         *
-                         * 参考默认也是"手动档在上、自动在最后一项"（用户给的 DOM 里
-                         * `.bpx-player-ctrl-quality-menu-item` 列表末尾才是自动）。
-                         * hoverIndex 的语义跟着变：0..n-1 = qualities[i]，n = 自动。
+                         * 滚动条：只有内容超出可视区时才出现，样式跟选集/字幕/弹幕那几条一致
+                         * （3px 宽、#e5e7ef、贴视口右边缘、圆角 1.5；鼠标在面板上时亮一点）。
+                         * x/y 必须加上 contentX/contentY 把滚动量抵消掉，才固定在视口上 ——
+                         * 原因见 eplistScrollBar 的注释（Flickable 的子项都在内容坐标系里）。
                          */
-                        Repeater {
-                            model: bar.player ? bar.player.qualities : []
+                        Rectangle {
+                            id: qualityScrollBar
+
+                            visible: qualityScroll.contentHeight > qualityScroll.height
+                            width: 3
+                            radius: 1.5
+                            color: "#e5e7ef"
+                            opacity: qualityMenu.pointerIn ? 0.45 : 0.25
+                            z: 50
+                            x: qualityScroll.contentX + qualityScroll.width - width
+                            y: qualityScroll.contentY
+                               + qualityScroll.visibleArea.yPosition * qualityScroll.height
+                            height: Math.max(16, qualityScroll.visibleArea.heightRatio * qualityScroll.height)
+
+                            Behavior on opacity {
+                                NumberAnimation { duration: 200 }
+                            }
+                        }
+
+                        Column {
+                            id: qualityColumn
+
+                            width: qualityScroll.width
+
+                            /*
+                             * 【顺序：各档清晰度在前，**「自动」放最下面**（用户要求）】
+                             *
+                             * 参考默认也是"手动档在上、自动在最后一项"（用户给的 DOM 里
+                             * `.bpx-player-ctrl-quality-menu-item` 列表末尾才是自动）。
+                             * hoverIndex 的语义跟着变：0..n-1 = qualities[i]，n = 自动。
+                             */
+                            Repeater {
+                                model: bar.player ? bar.player.qualities : []
 
                             Rectangle {
+                                id: qualityRow
+
                                 required property var modelData
                                 required property int index
+
+                                /*
+                                 * 这一档的**编码徽标文本**：框架归一化后的编码短名
+                                 * （qualities[i].codecLabel，例如 "H.264" / "H.265" / "AV1"）。
+                                 *
+                                 * 【空串就不渲染徽标】内核认不出编码时给的是空串（不猜、不写"未知"），
+                                 * 这时下面那颗 codecBadge 整个不显示，档位行还是老样子。
+                                 *
+                                 * 【同分辨率不同编码是两行】1080P 的 H.264 与 H.265 在
+                                 * CicadaPlayerItem.cpp 的 onMediaInfoGetCb 里已按"分辨率 + 编码"
+                                 * 分成两条独立条目，所以这里会出现两行 1080P、各带自己的徽标
+                                 * （`1080P [H.264]` / `1080P [H.265]`）—— 这是预期效果，不是重复。
+                                 */
+                                readonly property string codecLabel: {
+                                    if (modelData === undefined || modelData === null)
+                                        return ""
+
+                                    var c = modelData.codecLabel
+
+                                    return (c === undefined || c === null) ? "" : ("" + c).trim()
+                                }
 
                                 width: QtPlayerTheme.qualityItemWidth
                                 height: QtPlayerTheme.qualityItemHeight
                                 color: qualityMenu.hoverIndex === index ? QtPlayerTheme.menuHoverBg : "transparent"
 
                                 Text {
+                                    id: qualityRowLabel
+
                                     anchors {
                                         verticalCenter: parent.verticalCenter
                                         left: parent.left
@@ -1809,6 +1882,42 @@ import QtPlayer
                                            ? QtPlayerTheme.qualityActiveText : QtPlayerTheme.menuText
                                     font.pixelSize: QtPlayerTheme.ctrlTimeFontSize
                                     text: modelData.label
+                                }
+
+                                /*
+                                 * 编码徽标：紧跟在档位名右边的那个小圆角标签（`1080P [H.265]`）。
+                                 * 样式沿用"自动"角标那一套（半透明白底 + 1px 描边 + 次要白字，
+                                 * 见上面 autoBadge 的说明），只是字号更小、位置贴在档位名右侧。
+                                 * 只做展示，不接收鼠标 —— 整行的点击仍然由下面的 MouseArea 负责。
+                                 */
+                                Rectangle {
+                                    id: codecBadge
+
+                                    visible: qualityRow.codecLabel !== ""
+                                    anchors {
+                                        left: qualityRowLabel.right
+                                        leftMargin: 6
+                                        verticalCenter: parent.verticalCenter
+                                    }
+                                    width: codecBadgeText.implicitWidth + 8   /* padding: 0 4px */
+                                    height: 14
+                                    radius: 3
+                                    color: Qt.rgba(1, 1, 1, 0.12)
+                                    border.width: 1
+                                    border.color: Qt.rgba(1, 1, 1, 0.3)
+
+                                    Text {
+                                        id: codecBadgeText
+
+                                        anchors.centerIn: parent
+                                        color: Qt.rgba(1, 1, 1, 0.55)
+                                        /* 次要信息：比档位名（ctrlTimeFontSize）小一档 */
+                                        font.pixelSize: 9
+                                        font.weight: Font.Normal
+                                        /* line-height: 1 —— 单行不让默认行距把字推下去（同 autoBadge） */
+                                        lineHeight: 1.0
+                                        text: qualityRow.codecLabel
+                                    }
                                 }
 
                                 MouseArea {
@@ -1892,3 +2001,4 @@ import QtPlayer
                 }
             }
         }
+}

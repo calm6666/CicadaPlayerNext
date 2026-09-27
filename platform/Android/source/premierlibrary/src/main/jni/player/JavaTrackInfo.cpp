@@ -22,6 +22,8 @@ jfieldID gj_TrackInfo_Description = nullptr;
 jfieldID gj_TrackInfo_VideoBitrate = nullptr;
 jfieldID gj_TrackInfo_VideoWidth = nullptr;
 jfieldID gj_TrackInfo_VideoHeight = nullptr;
+/* 视频编码短名（Java String，本轮新增；只给清晰度菜单的编码徽标与"同分辨率分列"用） */
+jfieldID gj_TrackInfo_VideoCodec = nullptr;
 
 jfieldID gj_TrackInfo_AudioLang = nullptr;
 jfieldID gj_TrackInfo_AudioChannels = nullptr;
@@ -52,6 +54,8 @@ void JavaTrackInfo::init(JNIEnv *env) {
         gj_TrackInfo_VideoBitrate = env->GetFieldID(gj_TrackInfoClass, "videoBitrate", "I");
         gj_TrackInfo_VideoWidth = env->GetFieldID(gj_TrackInfoClass, "videoWidth", "I");
         gj_TrackInfo_VideoHeight = env->GetFieldID(gj_TrackInfoClass, "videoHeight", "I");
+        gj_TrackInfo_VideoCodec = env->GetFieldID(gj_TrackInfoClass, "videoCodec",
+                                                  "Ljava/lang/String;");
         gj_TrackInfo_AudioLang = env->GetFieldID(gj_TrackInfoClass, "audioLang",
                                                  "Ljava/lang/String;");
         gj_TrackInfo_AudioChannels = env->GetFieldID(gj_TrackInfoClass, "audioChannels", "I");
@@ -84,6 +88,16 @@ jobject JavaTrackInfo::getTrackInfo(JNIEnv *mEnv, const StreamInfo &streamInfo) 
             mEnv->SetIntField(jStreamInfo, gj_TrackInfo_VideoHeight, streamInfo.videoHeight);
             mEnv->SetIntField(jStreamInfo, gj_TrackInfo_VideoWidth, streamInfo.videoWidth);
             mEnv->CallVoidMethod(jStreamInfo, gj_TrackInfo_setVideoHDRType, (int) streamInfo.HDRType);
+            /*
+             * 编码短名：**总是送**。内核认不出来时 videoCodec 是空串，Java 侧拿到的就是空串
+             * （界面按"空串 = 不显示徽标"处理）—— 不做任何猜测/映射，也让界面不必区分
+             * null 与空串这两种"没有编码"的写法。
+             */
+            {
+                NewStringUTF tmpcodec(mEnv, streamInfo.videoCodec);
+                jstring codec = tmpcodec.getString();
+                mEnv->SetObjectField(jStreamInfo, gj_TrackInfo_VideoCodec, codec);
+            }
             break;
         case ST_TYPE_AUDIO:
             mEnv->SetIntField(jStreamInfo, gj_TrackInfo_AudioChannels, streamInfo.nChannels);
@@ -142,6 +156,18 @@ StreamInfo *JavaTrackInfo::getStreamInfo(JNIEnv *mEnv, jobject trackInfo) {
         info->videoBandwidth = mEnv->GetIntField(trackInfo, gj_TrackInfo_VideoBitrate);
         info->videoWidth = mEnv->GetIntField(trackInfo, gj_TrackInfo_VideoWidth);
         info->videoHeight = mEnv->GetIntField(trackInfo, gj_TrackInfo_VideoHeight);
+        /*
+         * 编码短名（Java → 内核这条回读路）。StreamInfo::videoCodec 是定长 char[16]
+         * 且本函数开头已 memset 过整个结构，所以按 C 字符串拷进来、留一个终止符即可；
+         * 拷贝长度压到数组容量 - 1，避免越界。
+         */
+        jstring jVideoCodec = static_cast<jstring>(mEnv->GetObjectField(trackInfo,
+                                                                       gj_TrackInfo_VideoCodec));
+        GetStringUTFChars tmpCodec(mEnv, jVideoCodec);
+        char *codecChars = tmpCodec.getChars();
+        if (codecChars != nullptr) {
+            strncpy(info->videoCodec, codecChars, sizeof(info->videoCodec) - 1);
+        }
     }
     if (info->type == StreamType::ST_TYPE_AUDIO) {
         jstring jAudioLang = static_cast<jstring>(mEnv->GetObjectField(trackInfo,

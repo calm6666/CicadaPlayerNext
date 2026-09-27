@@ -23,6 +23,18 @@ public class TrackInfo {
     public int videoWidth;
     public int videoHeight;
     public VideoHDRType videoHDRType;
+    /*
+     * 【本轮新增字段（浏览器/内核契约）：视频编码短名】
+     *
+     * 内核 StreamInfo::videoCodec 归一化后的名字（"H.264"/"H.265"/"AV1"/"VP9"/"MPEG-4"…），
+     * JNI 侧（JavaTrackInfo）在视频轨上填进来；**内核认不出来时是空串**（不是 null 语义、
+     * 也不代表"未知编码"以外的任何意思）。界面只拿它做两件事：
+     *   ① 清晰度菜单里画一个小徽标（空串 = 不画）；
+     *   ② 把"同分辨率、不同编码"的两条流分成两行显示。
+     *
+     * 【追加字段，不动既有字段】本字段是新增的，既有字段的名字/类型/声明顺序一个都没改。
+     */
+    public String videoCodec;
 
     //audio
     public String audioLang;
@@ -245,5 +257,23 @@ public class TrackInfo {
      */
     public String getDescription() {
         return description;
+    }
+
+    /**
+     * 获取视频流编码短名（内核归一化后的，例如 "H.264"/"H.265"/"AV1"）。
+     * 注意：只有在{@link #getType()} = {@link Type#TYPE_VIDEO} 时值才是正确的。
+     * **内核认不出来时是空串**（界面此时不显示编码徽标，也不去猜）。
+     *
+     * @return 视频流编码短名（可能是空串）
+     */
+    /****
+     * Query the short codec name of the video stream (normalized by the core, e.g. "H.264"/"H.265").
+     * Note: Only when {@link #getType()} = {@link Type#TYPE_VIDEO}, this value is valid.
+     * It is an empty string when the core could not determine the codec.
+     *
+     * @return The short codec name of the video stream (could be empty).
+     */
+    public String getVideoCodec() {
+        return videoCodec;
     }
 }

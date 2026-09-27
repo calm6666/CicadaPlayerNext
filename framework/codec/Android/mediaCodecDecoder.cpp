@@ -117,6 +117,63 @@ namespace Cicada {
         return true;
     }
 
+    /*
+     * 【设备硬解能力查询】编码 -> MediaCodec MIME。
+     *
+     * 与 init_decoder() 里那份 mMime 映射**必须一致**（video/avc、video/hevc、
+     * video/mp4v-es、video/x-vnd.on2.vp8、video/x-vnd.on2.vp9、video/av01）；
+     * 这里单独抽一个小函数，是因为能力查询要在**没有 Stream_meta**的情况下按编码问。
+     * 认不出来的编码返回 nullptr = "MediaCodec 不管这个编码"。
+     */
+    static const char *mimeForHardwareProbe(enum AFCodecID codec) {
+        switch (codec) {
+            case AF_CODEC_ID_H264:
+                return "video/avc";
+            case AF_CODEC_ID_HEVC:
+                return "video/hevc";
+            case AF_CODEC_ID_MPEG4:
+                return "video/mp4v-es";
+            case AF_CODEC_ID_VP8:
+                return "video/x-vnd.on2.vp8";
+            case AF_CODEC_ID_VP9:
+                return "video/x-vnd.on2.vp9";
+            case AF_CODEC_ID_AV1:
+                return "video/av01";
+            default:
+                return nullptr;
+        }
+    }
+
+    /*
+     * 【设备硬解能力查询】问 MediaCodecList：设备上有没有**硬件**解码器能解这个编码。
+     *
+     * 真正的探测在 Java 侧（com.cicada.player.utils.media.MediaCodecUtils
+     * .isHardwareDecodeSupported(String mime)）：它复用已经缓存的
+     * getDeviceDecodecs() 列表，只认硬件解码器 —— API 29+ 用
+     * MediaCodecInfo.isHardwareAccelerated()，更老的 API 用编解码器名前缀排除
+     * OMX.google. / c2.android. / OMX.android. 这些纯软解实现。
+     *
+     * JNI 那一层放在 MediaCodec_Decoder::isHardwareDecodeSupported()（类句柄和方法 ID
+     * 在 JNI_OnLoad 里缓存好，见该函数的说明；内核线程上现查类会失败）。
+     *
+     * 语义（与 decoderFactory::isHardwareDecodeSupported 的约定一致）：
+     *   true  = Java 侧明确回答"有硬件解码器"，**或**查询本身失败/不可用（查不到就当支持）；
+     *   false = Java 侧明确回答"没有"。
+     * 编码不在 MediaCodec 的 MIME 表里时也返回 true（查不到）。
+     *
+     * 探测结果由 decoderFactory::isHardwareDecodeSupported() 缓存，本函数每次调用
+     * 都会真的跨一次 JNI，不要直接高频调用它。
+     */
+    bool mediaCodecDecoder::isHardwareDecodeSupported(enum AFCodecID codec) {
+        const char *mime = mimeForHardwareProbe(codec);
+
+        if (mime == nullptr) {
+            return true;
+        }
+
+        return MediaCodec_Decoder::isHardwareDecodeSupported(mime);
+    }
+
     int mediaCodecDecoder::init_decoder(const Stream_meta *meta, void *voutObsr, uint64_t flags,
                                         const DrmInfo *drmInfo) {
         if (meta->pixel_fmt == AF_PIX_FMT_YUV422P || meta->pixel_fmt == AF_PIX_FMT_YUVJ422P) {
