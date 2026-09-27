@@ -1449,6 +1449,13 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     if (startTime < 0) {
         startTime = 0;
     }
+    /*
+     * 【P0】切档也是一次不连续点：在真正动流之前推进代际，目标点 = 这次切档要求
+     * 新流接入的媒体位置（与下面 SwitchVideo 的起点同源）。这样"上一次切档/seek
+     * 留下的包、帧、待处理事件"都带着旧代际，任何按代际比对的消费者都能当场作废
+     * 它们，不再需要 mWillChangedVideoStreamIndex 这类归属标记做手工防线。
+     */
+    mPlayer.beginDiscontinuity(startTime);
     mPlayer.SwitchVideo(startTime);
 }
 

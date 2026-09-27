@@ -2,6 +2,7 @@
 #define CICADA_PLAYER_SERVICE_H
 
 #include <string>
+#include <atomic>
 
 using namespace std;
 
@@ -79,6 +80,34 @@ namespace Cicada {
 
     const static float MIN_SPEED = 0.5;
     const static float MAX_SPEED = 5;
+
+    /*
+     * ============ 【不连续点模型（本次重构的时间轴唯一权威）】============
+     *
+     * 旧实现把一个"不连续点"拆成了十几个互不相识的闩（落点闸门、位置地板、
+     * 锚点事件、音频地板、连续性高水位、追赶窗口……），每个闩各自有置位点、
+     * 消费点和"忘了清"的悬挂形态，于是出现了"落点窗口被 seek 结束提前关掉"
+     * "位置回弹""音频扣住 PCM 等时钟"这一整类问题。根因是：**没有一个东西
+     * 能回答"这条包/帧/时钟事件属于哪一次 seek"**，只能靠手工清零来防陈旧写入。
+     *
+     * 现在改成主流的做法：一个不连续点 = 一个三元组，代际（generation）是
+     * 唯一的归属判据。
+     *
+     *   targetUs   用户请求点。只服务两件事：对外位置上报、渲染器输出过滤。
+     *   startUs    实际起播点（demuxer 落点，可早可晚，通常是关键帧）。
+     *   generation 每次 seek / 换档 +1。任何异步事件（包、帧、时钟基准、
+     *              待处理请求）都带着它去比对；代际不符 = 陈旧 = 当场作废，
+     *              不再需要"归属标记/闩"这种手工防线。
+     *
+     * generation 用 atomic：写入点在 API 线程（SeekTo / SwitchStream），
+     * 读取点在内核工作线程（读包 / 解码 / 渲染）。字段名与三元组的形状
+     * 与设计一致，只是把并发语义显式化。
+     */
+    struct Discontinuity {
+        int64_t targetUs{INT64_MIN};
+        int64_t startUs{INT64_MIN};
+        std::atomic<int> generation{0};
+    };
 
     class SuperMediaPlayer : public ICicadaPlayer, private CicadaPlayerPrototype {
 
@@ -1706,6 +1735,29 @@ namespace Cicada {
          * 追加在类末尾，保证增量 ABI 安全；语义见 ICicadaPlayer::IsStreamSwitchInFlight。
          */
         bool IsStreamSwitchInFlight() const override;
+
+        /*
+         * ============ 【P0：不连续点与代际机制（只写入，暂不改行为）】============
+         *
+         * beginDiscontinuity() —— 开启一个新代际：generation +1，targetUs = 参数，
+         *   startUs 复位为"未知"。所有"新的一次 seek / 换档"都必须经它，
+         *   这样后面每一处异步事件都能拿一个单调递增的代际号判断归属。
+         * markDiscontinuityStartUs() —— 记下 demuxer 的真实落点（seek 后第一个包的位置）。
+         *   INT64_MIN 表示尚未观测到落点。
+         * discontinuityGeneration() —— 当前代际，只读。
+         *
+         * 声明追加在方法列表末尾（本文件约定），定义见 .cpp 末尾。
+         */
+        void beginDiscontinuity(int64_t targetUs);
+        void markDiscontinuityStartUs(int64_t startUs);
+        int discontinuityGeneration() const;
+
+        /*
+         * 不连续点本体。**追加在成员列表最末尾**：本工程增量构建不记录头文件
+         * 依赖，插在中间会移动其后成员的偏移，让旧的 friend TU 目标文件按错
+         * 偏移访问（见本文件里"以下这些成员必须留在成员列表的最末尾"那段）。
+         */
+        Discontinuity mDiscontinuity{};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

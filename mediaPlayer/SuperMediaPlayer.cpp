@@ -716,7 +716,14 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
      * ProcessSeekToMsg，晚置会出现"闸门还是上一次 seek 的值"的竞态。
      * 目标点直接用入参算（不要读 mSeekPos，它在 putMsg 之后才赋值）。
      */
-    mSeekRenderGateUs = (int64_t) pos * 1000;
+    const int64_t seekTargetUs = (int64_t) pos * 1000;
+    mSeekRenderGateUs = seekTargetUs;
+    /*
+     * 【P0】立刻开启新代际。必须在 putMsg 之前 —— 内核工作线程一旦被唤醒就可能
+     * 读到 mDiscontinuity，它看到的新代际就是"这一次 seek"，晚置会让这一小段
+     * 时间窗内的包/帧被算到上一次代际上。
+     */
+    beginDiscontinuity(seekTargetUs);
     /* 【延迟量化】记下"用户这一刻要 seek"的墙钟，供后面几行日志给出各段耗时。 */
     mSeekRequestMs = af_getsteady_ms();
     mSeekLandingFrameAccepted = false;
@@ -5218,6 +5225,13 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
          * 否则继续等下一个关键帧 —— 最多等一个 GOP，绝不把脏帧显示出去。
          */
         if (!mSeekLandingFrameAccepted && pVideoPacket->getInfo().flags != 0) {
+            /*
+             * 【P0】demuxer 落点 = seek 之后第一个关键帧包的位置。这就是
+             * Discontinuity::startUs：它可能早于也可能晚于 targetUs（稀疏 IDR 时早，
+             * 目标落在分片之前时晚），渲染器的过滤规则只关心"包含目标的帧"，
+             * 不要求它等于目标 —— 所以这里照实记录，不做任何夹取。
+             */
+            markDiscontinuityStartUs(pVideoPacket->getInfo().timePosition);
             if (!mSeekDecodeStartIsKey) {
                 AF_LOGI("seek decode starts at a keyframe: pts=%lld flags=%d\n",
                         (long long) pVideoPacket->getInfo().timePosition, pVideoPacket->getInfo().flags);
@@ -11098,6 +11112,12 @@ void SuperMediaPlayer::Reset()
     /* 【② B18】地板作废时归属一起作废，避免"地板 = INT64_MIN、归属还是旧目标"的组合。 */
     mSeekLandingFloorOwnerUs = INT64_MIN;
     /*
+     * 【P0】Reset（换片源 / 停止 / Prepare 的公共出口）本身也是一次不连续：
+     * 推进代际并清空目标/落点，于是所有还在飞的旧代际事件（包、帧、待处理请求）
+     * 都会因为代际不符而作废 —— 这正是"跨片源残留"在架构上被消灭的地方。
+     */
+    beginDiscontinuity(INT64_MIN);
+    /*
      * 【① B17 硬要求 B】Reset = 换片源/停止/Prepare 的终态 ⇒ 之前记下的"等 seek 结束
      * 重新装弹"的意图必须作废（不重装）。
      */
@@ -11749,4 +11769,35 @@ bool SuperMediaPlayer::ApsaraVideoProcessTextureCallback::push(std::unique_ptr<I
 bool SuperMediaPlayer::ApsaraVideoProcessTextureCallback::pull(std::unique_ptr<IAFFrame> &textureFrame)
 {
     return mPlayer.pull(AF_PIX_FMT_CICADA_TEXTURE, textureFrame);
+}
+
+/*
+ * ============ 【P0：不连续点与代际机制】实现 ============
+ *
+ * 这一阶段只做"写入 + 并存"：代际号被正确地推进、落点被正确地记下，
+ * 但还没有任何判据读它，所以行为与改动前逐字一致。
+ * 从 P1/P2 开始，渲染过滤、位置上报、音频基准、切档边界全部改为读它。
+ */
+void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
+{
+    /*
+     * 先推进代际、再写目标：读侧（内核工作线程）看到新代际时，
+     * targetUs 一定已经就绪；反过来若先写 targetUs，读侧可能拿新目标
+     * 配上旧代际，把一次旧 seek 的目标当成本次的。
+     */
+    mDiscontinuity.generation.fetch_add(1);
+    mDiscontinuity.targetUs = targetUs;
+    mDiscontinuity.startUs = INT64_MIN;
+}
+
+void SuperMediaPlayer::markDiscontinuityStartUs(int64_t startUs)
+{
+    if (startUs > INT64_MIN) {
+        mDiscontinuity.startUs = startUs;
+    }
+}
+
+int SuperMediaPlayer::discontinuityGeneration() const
+{
+    return mDiscontinuity.generation.load();
 }
