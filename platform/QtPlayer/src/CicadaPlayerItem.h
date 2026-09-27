@@ -351,6 +351,21 @@ namespace cicadaqt {
         /* true 表示 pending decoder 尚未提交，QML 可据此显示切换中的提示。 */
         Q_PROPERTY(bool qualitySwitching READ qualitySwitching NOTIFY qualitySwitchStatusChanged)
         /*
+         * 正在切**到哪一路**（目标视频流的 streamIndex；不在切换时 -1）。
+         *
+         * 【为什么要有它】qualitySwitching 只说"正在切"，说不清"切去哪一档"；清晰度菜单要在
+         * **目标那一行**上标"切换中"，就必须知道目标 streamIndex。取值口径和菜单行完全一致：
+         * 行里的 `streamIndex` 就是它（**不是**数组下标，见 .cpp 的 selectQuality）。
+         *
+         * 生命周期（与 qualitySwitching 同一个数据源、同一个 NOTIFY 信号，所以两者同生共死）：
+         *   STARTED(0) → 记下内核给的目标 streamIndex；
+         *   READY(1) / FAILED(2) / CANCELED(3) → 复位 -1。
+         *
+         * ⚠ 实测单解码器切档只要 30~90ms（真机日志 30/40/42/44/50ms），这个状态**只闪一下**；
+         * 界面**不许**加计时器人为延长它（提示的真实行为见 .cpp 的 notifyQualitySwitchStatus）。
+         */
+        Q_PROPERTY(int qualitySwitchingStreamIndex READ qualitySwitchingStreamIndex NOTIFY qualitySwitchStatusChanged)
+        /*
          * 最近一张快照的**版本号**：每收到一张新快照 +1，还没有快照时是 0。
          *
          * 【为什么暴露版本号而不是 QImage 本身】
@@ -580,6 +595,11 @@ namespace cicadaqt {
         bool qualitySwitching() const
         {
             return m_qualitySwitching;
+        }
+        /* 正在切到的目标 streamIndex（不在切换时 -1）。见上面 Q_PROPERTY 的说明。 */
+        int qualitySwitchingStreamIndex() const
+        {
+            return m_qualitySwitchingStreamIndex;
         }
         /* 最近一张快照的版本号（0 = 还没有快照）。见上面 Q_PROPERTY 的说明。 */
         int snapshotRevision() const
@@ -1195,6 +1215,16 @@ namespace cicadaqt {
          * 已有偏移量对不上。只在 GUI 线程读写（refreshDecodeMethod() 由统计那一拍调用）。
          */
         QString m_decodeDiagSignature;
+
+        /*
+         * 正在切到的**目标 streamIndex**（不在切换时为 -1），见 Q_PROPERTY
+         * qualitySwitchingStreamIndex。取值与 m_qualitySwitching 同生共死，两者都在
+         * notifyQualitySwitchStatus() 里一起改（同一个 NOTIFY 信号）。
+         *
+         * 【成员一律加在最后】理由同上：QML 引擎按 sizeof 分配本对象，
+         * 中间插成员会和已有偏移量对不上。
+         */
+        int m_qualitySwitchingStreamIndex = -1;
     };
 
 }// namespace cicadaqt

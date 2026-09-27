@@ -2572,18 +2572,41 @@ namespace cicadaqt {
             return;
         }
 
-        /* 切换中再次点击时允许“最新请求覆盖旧请求”。核心会取消旧 pending
-         * decoder、保留 active decoder 和当前画面，不会让多个目标同时进入渲染链路。 */
+        /* 切换中再次点击时允许“最新请求覆盖旧请求”：单解码器切档是同步完成的，
+         * 入口自己就是“最新请求生效”，不会让多个目标同时进入渲染链路。 */
 
         /*
-         * 参数既接受 qualities 里真正的 streamIndex，也接受**数组下标**（界面通常手里
-         * 就只有下标）——所以先按下标查一遍：命中了就用它的 streamIndex。
+         * 【入参语义：**只**是 streamIndex，不是数组下标】
+         *
+         * 这里原来有一段“入参既当 streamIndex、又当数组下标”的兼容代码：
+         *     if (streamIndex >= 0 && streamIndex < m_qualities.size())
+         *         target = m_qualities.at(streamIndex).value("streamIndex", streamIndex).toInt();
+         * 它在“清晰度菜单按 分辨率+编码 分列”之后变成了**点 A 播 B** 的元凶：
+         * 用户点的那一行 streamIndex 恰好也落在 [0, size) 区间里时，这个值会被**再解释一次**
+         * 成数组下标，于是查到的是**另一路**流。
+         * 真机实测（2026-09-27 Qt）：日志 `selectQuality: index=3 (streamIndex=4)` ——
+         * 用户点的 streamIndex=3，内核却切到了 stream 4（点 1080P 跳到 720P）。
+         *
+         * 现在所有调用点（controls/RightControls.qml 两处、LivePlayerView.qml 一处）传的都是
+         * **streamIndex**（`qualities[i].streamIndex` / `modelData.streamIndex` / `item.streamIndex`），
+         * 所以这里直接用入参，不再做任何下标解释。若传进来的值不在 qualities 里，只记一条日志
+         * 以便排查（不静默、不再猜）。
          */
-        int target = streamIndex;
+        const int target = streamIndex;
 
-        if (streamIndex >= 0 && streamIndex < m_qualities.size()) {
-            target = m_qualities.at(streamIndex).toMap().value(QStringLiteral("streamIndex"),
-                                                               streamIndex).toInt();
+        bool found = false;
+
+        for (const QVariant &variant : m_qualities) {
+            if (variant.toMap().value(QStringLiteral("streamIndex")).toInt() == target) {
+                found = true;
+                break;
+            }
+        }
+
+        if (!found) {
+            AF_LOGW("selectQuality: streamIndex=%d is not in the quality list (%d entries) — "
+                    "passing it to the framework anyway (it will be rejected there if unknown)\n",
+                    target, static_cast<int>(m_qualities.size()));
         }
 
         /*
@@ -2598,8 +2621,7 @@ namespace cicadaqt {
          * notifyStreamSwitched() 才更新它并发出 qualityChanged。 */
         m_autoQuality = false;
 
-        AF_LOGI("selectQuality: index=%d (streamIndex=%d)，ABR 已由框架关闭\n",
-                streamIndex, target);
+        AF_LOGI("selectQuality: streamIndex=%d\n", target);
     }
 
     void CicadaPlayerItem::useAutoQuality()
@@ -2720,11 +2742,28 @@ namespace cicadaqt {
 
     void CicadaPlayerItem::notifyQualitySwitchStatus(int status, int streamIndex, const QString &description)
     {
-        m_qualitySwitching = (status == PLAYER_QUALITY_SWITCH_STARTED);
+        const bool switching = (status == PLAYER_QUALITY_SWITCH_STARTED);
+
+        m_qualitySwitching = switching;
+        /*
+         * 目标 streamIndex 与 switching **同生共死**（见 Q_PROPERTY qualitySwitchingStreamIndex）：
+         * STARTED 记下内核给的目标、其余状态（READY/FAILED/CANCELED）复位 -1。
+         * 界面据此在清晰度菜单的**目标那一行**标"切换中"，READY 后立刻撤掉；
+         * 控制栏那颗按钮的提示用的也是这一份数据（不加任何计时器：状态完全由内核事件驱动）。
+         *
+         * 【用户可感知的真实行为】单解码器切档实测 30~90ms（真机日志 30/40/42/44/50ms），
+         * 所以这个提示**只会闪一下**；"切完了"的反馈其实是另两处（都在同一拍内到）：
+         *   * notifyStreamSwitched() 更新 m_qualityIndex → qualityChanged → 控制栏档位文案
+         *     与菜单行高亮立刻换成新档；
+         *   * 新档首帧同时上屏（内核的 READY driver 就是"这一帧真的进了渲染器"）。
+         * 不为了让提示"看得见"而延长它 —— 那是把真实的 30ms 演成假的 1s。
+         */
+        m_qualitySwitchingStreamIndex = switching ? streamIndex : -1;
+
         AF_LOGI("quality switch status=%d stream=%d: %s\n", status, streamIndex,
                 description.toUtf8().constData());
         emit qualitySwitchStatusChanged(status, streamIndex, description);
-        if (status != PLAYER_QUALITY_SWITCH_STARTED) {
+        if (!switching) {
             /* 失败/取消也要让控制栏恢复可点击；当前清晰度保持旧值。 */
             emit qualityChanged();
         }

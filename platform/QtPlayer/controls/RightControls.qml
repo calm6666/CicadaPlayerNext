@@ -1586,6 +1586,15 @@ import QtPlayer
                 }
 
                 readonly property bool autoMode: bar.player ? bar.player.autoQuality : true
+                /*
+                 * 正在切档（内核 STARTED → READY/FAILED/CANCELED）。数据源就是
+                 * `player.qualitySwitching`（与 qualitySwitchingStreamIndex 同一个 NOTIFY 信号），
+                 * 所以这里**不需要**任何计时器：点完立刻出现，READY/失败/取消立刻消失。
+                 *
+                 * 【现实提醒】单解码器切档实测 30~90ms，所以下面那颗角标**只闪一下**；
+                 * "切完了"的可感反馈是档位文案/高亮在同一拍内换成新档（见 currentLabel）。
+                 */
+                readonly property bool switching: bar.player ? bar.player.qualitySwitching : false
 
                 Text {
                     id: qualityText
@@ -1627,7 +1636,12 @@ import QtPlayer
                 Rectangle {
                     id: autoBadge
 
-                    visible: qualityButton.autoMode
+                    /*
+                     * 「切换中」角标与它**共用同一个位置**（都在按钮上方那一小块空白区，
+                     * 见上面那段坐标说明），所以两者互斥：正在切档时先让位给"切换中"
+                     * （切档实测只 30~90ms，切完立刻回到原样）。
+                     */
+                    visible: qualityButton.autoMode && !qualityButton.switching
                     readonly property bool big: bar.fullscreen
                     x: qualityText.width - (big ? 14 : 12)
                     y: -10 + (bar.btnLineHeight - height) / 2
@@ -1649,6 +1663,46 @@ import QtPlayer
                         /* line-height: 1 —— 单行不让 QML 的默认行距把字推下去 */
                         lineHeight: 1.0
                         text: qsTr("自动")
+                    }
+                }
+
+                /*
+                 * 「切换中」角标（**只在切档那 30~90ms 出现**）。
+                 *
+                 * 【为什么要它】用户报"为什么没有切换中的 UI 提示"：`qualitySwitching` 这个属性
+                 * 以前 QML 一处都没用，所以提示不是"太快看不见"，而是**从来没接**。
+                 *
+                 * 样式照搬上面的 autoBadge（同一套小圆角标签：半透明白底 + 1px 描边 + 7/8px 字），
+                 * 只是**文字用主题强调色**（QtPlayerTheme.qualityActiveText / playerAccent）——
+                 * 不新增任何主题常量，也和"选中档位"的高亮色是同一个色。
+                 *
+                 * 位置、尺寸表达式与 autoBadge 完全一致（共用按钮上方那块空白区，两者互斥），
+                 * 所以**不会挤动按钮宽度**：按钮宽度只由 qualityText.implicitWidth 决定，
+                 * 这颗角标不参与布局（否则控制栏整条会跟着抖一下）。
+                 */
+                Rectangle {
+                    id: switchingBadge
+
+                    visible: qualityButton.switching
+                    readonly property bool big: bar.fullscreen
+                    x: qualityText.width - (big ? 14 : 12)
+                    y: -10 + (bar.btnLineHeight - height) / 2
+                    width: switchingBadgeText.implicitWidth + (big ? 6 : 4)
+                    height: big ? 13 : 11
+                    radius: 3
+                    color: Qt.rgba(1, 1, 1, 0.12)
+                    border.width: 1
+                    border.color: QtPlayerTheme.qualityActiveText
+
+                    Text {
+                        id: switchingBadgeText
+
+                        anchors.centerIn: parent
+                        color: QtPlayerTheme.qualityActiveText
+                        font.pixelSize: switchingBadge.big ? 8 : 7
+                        font.weight: Font.Normal
+                        lineHeight: 1.0
+                        text: qsTr("切换中")
                     }
                 }
 
@@ -2034,6 +2088,30 @@ import QtPlayer
                                     return (c === undefined || c === null) ? "" : ("" + c).trim()
                                 }
 
+                                /*
+                                 * 【这一行是不是"正在切过去"的目标】
+                                 *
+                                 * 判据完全按 **streamIndex**（不是数组下标）：
+                                 *     player.qualitySwitching && player.qualitySwitchingStreamIndex === 行的 streamIndex
+                                 * 两者都来自同一个 NOTIFY 信号（qualitySwitchStatusChanged），
+                                 * 所以 STARTED 那一刻两者同时就绪、READY/FAILED/CANCELED 同时撤掉，
+                                 * 不存在"亮着但不知道该标哪行"的中间态。
+                                 *
+                                 * ⚠ 菜单在点击后**立刻关闭**（行的 onClicked → qualityMenu.close()），
+                                 * 而切档实测只 30~90ms ⇒ 这颗角标通常来不及被看到；它是"菜单恰好开着
+                                 * 时也能标对行"的完整实现（例如菜单开着时 ABR 自己切档）。
+                                 * 真正给人看的是控制栏那颗按钮上的同名角标（见 switchingBadge）。
+                                 */
+                                readonly property bool switching: {
+                                    if (modelData === undefined || modelData === null)
+                                        return false
+
+                                    if (!bar.player || !bar.player.qualitySwitching)
+                                        return false
+
+                                    return bar.player.qualitySwitchingStreamIndex === modelData.streamIndex
+                                }
+
                                 width: QtPlayerTheme.qualityItemWidth
                                 height: QtPlayerTheme.qualityItemHeight
                                 color: qualityMenu.hoverIndex === index ? QtPlayerTheme.menuHoverBg : "transparent"
@@ -2063,7 +2141,13 @@ import QtPlayer
                                 Rectangle {
                                     id: codecBadge
 
-                                    visible: qualityRow.codecLabel !== ""
+                                    /*
+                                     * 【切换中的那一行让位】"切换中"角标锚在行的**右边缘**，
+                                     * 而这颗编码徽标跟在档位名右边；档位名偏长 + 编码偏长
+                                     * （例如 `2160P [MPEG-4]`）时两者会叠在一起。切档只有
+                                     * 30~90ms，所以切换期间让编码徽标先不画，切完立刻回来。
+                                     */
+                                    visible: qualityRow.codecLabel !== "" && !qualityRow.switching
                                     anchors {
                                         left: qualityRowLabel.right
                                         leftMargin: 6
@@ -2087,6 +2171,45 @@ import QtPlayer
                                         /* line-height: 1 —— 单行不让默认行距把字推下去（同 autoBadge） */
                                         lineHeight: 1.0
                                         text: qualityRow.codecLabel
+                                    }
+                                }
+
+                                /*
+                                 * 「切换中」角标（只画在**正在切过去的那一行**上）。
+                                 *
+                                 * 样式沿用同一套小圆角标签（半透明白底 + 1px 描边 + 9px 字，同 codecBadge），
+                                 * 但**描边与文字用主题强调色**（QtPlayerTheme.qualityActiveText）——
+                                 * 不新增主题常量，也和"当前档选中"的高亮是同一种色，一眼能认出来。
+                                 *
+                                 * 位置：锚在行的**右边缘**（内边距同 qualityItemPaddingH），与左侧的
+                                 * 档位名 / 编码徽标互不干扰；编码徽标在切换期间让位（见上）。
+                                 * 只做展示，不接收鼠标 —— 点击仍旧由下面整行的 MouseArea 负责。
+                                 */
+                                Rectangle {
+                                    id: switchingBadge
+
+                                    visible: qualityRow.switching
+                                    anchors {
+                                        right: parent.right
+                                        rightMargin: QtPlayerTheme.qualityItemPaddingH
+                                        verticalCenter: parent.verticalCenter
+                                    }
+                                    width: switchingBadgeText.implicitWidth + 8
+                                    height: 14
+                                    radius: 3
+                                    color: Qt.rgba(1, 1, 1, 0.12)
+                                    border.width: 1
+                                    border.color: QtPlayerTheme.qualityActiveText
+
+                                    Text {
+                                        id: switchingBadgeText
+
+                                        anchors.centerIn: parent
+                                        color: QtPlayerTheme.qualityActiveText
+                                        font.pixelSize: 9
+                                        font.weight: Font.Normal
+                                        lineHeight: 1.0
+                                        text: qsTr("切换中")
                                     }
                                 }
 
