@@ -602,7 +602,13 @@ class CicadaPlayerController(context: Context) {
         player.setColorMatrix(matrix)
     }
 
-    /** 清晰度/字幕切档：内核按 index 选流（`TrackInfo.AUTO_SELECT_INDEX = -1` 表示自动切码率） */
+    /**
+     * 清晰度/字幕切档：内核按 **streamIndex** 选流
+     * （`TrackInfo.AUTO_SELECT_INDEX = -1` 表示自动切码率）。
+     *
+     * ⚠ 入参是 `TrackInfo.getIndex()` 那个流号，**不是**任何列表下标
+     * （见 [selectQuality] 的说明与 QualityOption.index）。
+     */
     fun selectTrack(index: Int) = player.selectTrack(index)
 
     /** 当前选中的视频轨 / 字幕轨下标（-1 = 自动；来自内核回调，不猜） */
@@ -688,12 +694,45 @@ class CicadaPlayerController(context: Context) {
     var snapshotSerial by mutableIntStateOf(0)
         private set
 
-    /** 清晰度切档：index 传 `TrackInfo.AUTO_SELECT_INDEX` 就是"自动"（见 [selectAutoQuality]） */
+    /**
+     * 清晰度切档。
+     *
+     * 【入参语义：**只**是 streamIndex，不是列表下标】入参就是 `QualityOption.index`，
+     * 也就是内核的 `TrackInfo.getIndex()`（JNI 侧 `JavaTrackInfo.cpp:80` 把
+     * `StreamInfo::streamIndex` 原样写进 Java 的 `index` 字段），`-1` 表示"自动"。
+     * 本函数**原样**把它交给 `CicadaPlayer.selectTrack()`，中间不做任何查表/换算 ——
+     * 尤其**不许**拿它去当清晰度列表的下标：那个列表按"分辨率 + 编码"分组、再按带宽降序，
+     * 顺序与 streamIndex 毫无关系。Qt 侧就是因为把入参又当数组下标解释了一次，
+     * 才出现"点 1080P 跳到 720P"（platform/QtPlayer/src/CicadaPlayerItem.cpp:2578-2595）。
+     *
+     * @param index 内核 streamIndex；传 `TrackInfo.AUTO_SELECT_INDEX`(-1) = 自动
+     *              （见 [selectAutoQuality]）
+     */
     fun selectQuality(index: Int) {
         if (index == TrackInfo.AUTO_SELECT_INDEX) {
             selectAutoQuality()
             return
         }
+
+        /*
+         * 【只记日志、不改行为】请求的 streamIndex 不在当前 mediaInfo 的视频流里时打一条
+         * warning：真机上"点了某一行没反应 / 切错档"时，这条日志能立刻把
+         * "点击传错了值" 与 "内核没收" 分开（配合上面那条 `selectQuality: streamIndex=` 与
+         * 回调里的 `quality switch status=… stream=…`，三段一起看）。
+         * 仍然**原样**下发给内核（与 Qt 同一行为：内核自己会拒绝未知流号），
+         * 这里不猜一个"最接近"的档替换掉用户的点击。
+         */
+        val known = mediaInfo?.trackInfos?.any {
+            it.getType() == TrackInfo.Type.TYPE_VIDEO && it.getIndex() == index
+        } ?: false
+        if (!known) {
+            Log.w(
+                TAG_QUALITY_SWITCH,
+                "selectQuality: streamIndex=$index is not a video stream in the current mediaInfo" +
+                    " — passing it to the core anyway (an unknown index is rejected there)"
+            )
+        }
+
         /* 手动选档 = 退出自动（内核在手动切流时自己会把 ABR 关掉，
          * MediaPlayer::SelectTrack 对视频流调 mAbrManager->EnableAbr(false)） */
         autoQuality = false
@@ -709,6 +748,7 @@ class CicadaPlayerController(context: Context) {
          *
          * 【回退方法】把 `currentVideoIndex = index` 这一行加回来即可恢复旧行为。
          */
+        Log.i(TAG_QUALITY_SWITCH, "selectQuality: streamIndex=$index")
         player.selectTrack(index)
     }
 
@@ -742,14 +782,30 @@ class CicadaPlayerController(context: Context) {
     /**
      * 关闭字幕。
      *
-     * 【如实说明】内核 Java 接口里**没有**"关闭嵌入字幕轨"的独立方法（只有外挂字幕的
-     * `selectExtSubtitle(trackIndex, false)`）。这里按外挂字幕的语义调用
-     * `selectExtSubtitle(currentSubtitleIndex, false)`；内核若不支持，行为由内核决定 ——
-     * **不在这里伪造"已关闭"以外的效果**（UI 的选中态只反映用户的选择）。
+     * 【如实说明·这一行在**内嵌字幕**上注定不生效（本轮把机制查实了）】
+     * 内核 Java 接口里**没有**"关闭嵌入字幕轨"的独立方法，只有外挂字幕的
+     * `selectExtSubtitle(index, select)`。而内核那个 index 是**外挂流的流号**：
+     * `SuperMediaPlayer::selectExtSubtitle()` 第一件事就是
+     * `if (!(index & EXT_STREAM_BASE)) { AF_LOGE("select ext subtitle error"); …; return -1; }`
+     * （mediaPlayer/SuperMediaPlayer.cpp:7876-7882）—— 内嵌字幕轨的 streamIndex
+     * **不带** EXT_STREAM_BASE 位，所以这里必然被内核拒掉（返回 -1 并发一条
+     * SUBTITLE_SELECT_ERROR 事件）。而且本 App 从不调用 `addExtSubtitle()`，
+     * 所以根本没有外挂字幕可关。
+     *
+     * 【为什么仍然发这一枪 + UI 只反映用户选择】这是"如实说明"而不是修好：
+     * 真正的修法要内核提供"关闭内嵌字幕轨"的接口（属内核侧，本环境也不能改）。
+     * 所以这里**不伪造**播放行为，只把用户的选择反映到界面；同时打一条日志，
+     * 让真机上一眼能看出"这一枪内核拒了"（而不是"界面点了没反应"）。
+     * 过滤 `adb logcat -s CicadaTrack`。
      */
     fun closeSubtitle() {
         subtitlesEnabled = false
         if (currentSubtitleIndex >= 0) {
+            Log.i(
+                TAG_TRACK_CHANGE,
+                "closeSubtitle: selectExtSubtitle(index=$currentSubtitleIndex, false) — " +
+                    "embedded subtitle index, the core requires EXT_STREAM_BASE and will reject it"
+            )
             runCatching { player.selectExtSubtitle(currentSubtitleIndex, false) }
         }
     }

@@ -1477,20 +1477,67 @@ public interface CicadaPlayer {
     abstract public void setDrmCallback(DrmCallback callback);
 
     /**
-     * 取当前"设备硬解能力 + 编码效率偏好"（JSON，内核 CicadaGetVideoCodecSupport 的 Java 落点）。
+     * 清晰度切换状态通知。
+     *
+     * 与 Qt 端一一对应：platform/QtPlayer/src/CicadaPlayerItem.cpp 的
+     * onVideoQualitySwitchCb / notifyQualitySwitchStatus —— 内核在"开始拉取目标流"时发
+     * STARTED，在"目标档位的首帧真的上屏"时发 READY，目标解码器失败或超过内核死线发
+     * FAILED，期间发生 seek / stop / 又切了别的档则发 CANCELED。
+     *
+     * 【只用事件驱动，不要加超时兜底】状态机在内核里已经收敛：每个 STARTED 都必然以
+     * READY / FAILED / CANCELED 之一收尾，界面据此显示/收起提示即可，端侧不需要定时器。
+     */
+    public interface OnVideoQualitySwitchListener {
+        /** 开始切换（目标流已开始拉取） */
+        int STATUS_STARTED = 0;
+        /** 切换完成（目标档位首帧已上屏） */
+        int STATUS_READY = 1;
+        /** 切换失败（目标解码器失败或超过内核死线） */
+        int STATUS_FAILED = 2;
+        /** 切换被取消（seek / stop / 又切了别的档），当前档位保持不变 */
+        int STATUS_CANCELED = 3;
+
+        /**
+         * @param status      见上面的 STATUS_*，取值与内核 player_quality_switch_status 相同
+         * @param streamIndex 目标视频流下标（与 MediaInfo 里 TrackInfo.getIndex() 同一套编号）
+         * @param description 内核给的说明文字，可能为 null
+         */
+        void onVideoQualitySwitch(int status, int streamIndex, String description);
+    }
+
+    /**
+     * 设置清晰度切换状态通知
+     *
+     * @param l 清晰度切换状态通知
+     */
+    abstract public void setOnVideoQualitySwitchListener(OnVideoQualitySwitchListener l);
+
+    /**
+     * 取当前"设备硬解能力 + 编码效率偏好 + 手动指定的默认视频格式"（JSON，
+     * 内核 CicadaGetVideoCodecSupport 的 Java 落点）。
      *
      * 返回（字段名固定，见内核 media_player_api.h）：
      * <pre>
      * {"source":"app"|"kernel",
      *  "hwDecode":["H.265","H.264"],
-     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"]}
+     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"],
+     *  "preferred":"H.265"}
      * </pre>
      * 语义：
      * <ul>
      *   <li>{@code source} = "kernel"：这份是**内核探测本设备**得到的；
      *       "app"：是应用侧通过 {@link #setVideoCodecSupport} 传进去、正在生效的那份；</li>
      *   <li>{@code hwDecode}：本设备**能硬解**的编码短名集合，顺序无关；</li>
-     *   <li>{@code preference}：从高到低的编码效率偏好序。</li>
+     *   <li>{@code preference}：从高到低的编码效率偏好序；</li>
+     *   <li>{@code preferred}：**手动指定**的"默认视频格式"（应用侧「设置默认视频格式」
+     *       就是它，见 {@link #setVideoCodecSupport}）。取值是那 6 个规范短名之一
+     *       （H.264 / H.265 / AV1 / VP9 / MPEG-4 / MPEG-2）；<b>没指定时是空串</b>
+     *       （本字段**总是**出现在返回里）。指定之后：<b>下一次</b>等级选择（起播默认档、
+     *       ABR 下一次决策、ABR 触发的切档）优先用该编码 —— 目标分辨率下有它的流、
+     *       且内核解得了它（硬解或软解任一可用）就用它，<b>压过自动的效率序与硬解偏好</b>；
+     *       两种情况回退到自动规则：该分辨率下没有该编码的流、或内核根本解不了它。
+     *       设置 preferred <b>本身不发起任何立即切换</b>（用户要的是"下一次切换清晰度生效"），
+     *       而且始终只在<b>同一分辨率内</b>换编码，绝不为了它跨分辨率。</li>
      * </ul>
      * 拿不到时返回 null（没有播放器 / 内核失败）。
      *
@@ -1499,14 +1546,30 @@ public interface CicadaPlayer {
     abstract public String getVideoCodecSupport();
 
     /**
-     * 传入应用侧的"设备硬解能力 + 编码效率偏好"（JSON，契约与上面 get 的同一份）。
+     * 传入应用侧的"设备硬解能力 + 编码效率偏好（+ 默认视频格式）"
+     * （JSON，契约与上面 get 的同一份）。
      *
      * <p><b>一旦传进去，内核就不再探测设备</b>：ABR 选档与起播默认档都按这份集合/偏好来。
      * 应用侧可以自己持久化它，以便下次起播直接传，省掉一次设备探测。</p>
      *
-     * <p>传 {@code null} 或空串 = 清除，恢复内核自己探测。</p>
+     * <p><b>应用侧「设置默认视频格式」用的就是同一份 JSON 里的 {@code "preferred"}
+     * 字段，不需要新接口</b> —— 例如把默认视频格式设成 HEVC：</p>
+     * <pre>
+     * {"source":"kernel",
+     *  "hwDecode":["H.265","H.264"],
+     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"],
+     *  "preferred":"H.265"}
+     * </pre>
+     * <p>语义（下一级选择才生效、无该编码的流则回退）见 {@link #getVideoCodecSupport()}
+     * 里 {@code preferred} 那一条。要点：设置它<b>不会立刻切流</b>，
+     * 空串 {@code ""} 或不带这个字段都表示"不指定"（恢复全自动）。</p>
      *
-     * <p>畸形/不合契约的 JSON 由内核拒绝（当前状态不变、内核打日志），本方法不抛异常。</p>
+     * <p>传 {@code null} 或空串 = 清除<b>整份</b>数据，恢复内核自己探测。</p>
+     *
+     * <p>畸形/不合契约的 JSON 由内核拒绝（当前状态不变、内核打日志），本方法不抛异常。
+     * 具体地：{@code preferred} <b>不是字符串</b>属于结构畸形（整份拒绝）；
+     * 是字符串但不在那 6 个短名里<b>不算</b>畸形（等价于不指定）。
+     * 其它字段忽略，两个数组里的未知项忽略。</p>
      *
      * @param json 见上；null / 空串表示清除
      */

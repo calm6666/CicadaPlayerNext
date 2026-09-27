@@ -1557,58 +1557,106 @@ public interface CicadaPlayer {
     abstract public void setOnVideoQualitySwitchListener(OnVideoQualitySwitchListener l);
 
     /**
-     * 取当前"设备硬解能力 + 编码效率偏好"（JSON，内核 CicadaGetVideoCodecSupport 的 Java 落点）。
+     * 取当前"设备硬解能力 + 编码效率偏好 + 手动指定的默认视频格式"（JSON，
+     * 内核 CicadaGetVideoCodecSupport 的 Java 落点）。
      *
      * 返回（字段名固定，见内核 media_player_api.h）：
      * <pre>
      * {"source":"app"|"kernel",
      *  "hwDecode":["H.265","H.264"],
-     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"]}
+     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"],
+     *  "preferred":"H.265"}
      * </pre>
      * 语义：
      * <ul>
      *   <li>{@code source} = "kernel"：这份是**内核探测本设备**得到的；
      *       "app"：是应用侧通过 {@link #setVideoCodecSupport} 传进去、正在生效的那份；</li>
      *   <li>{@code hwDecode}：本设备**能硬解**的编码短名集合，顺序无关；</li>
-     *   <li>{@code preference}：从高到低的编码效率偏好序。</li>
+     *   <li>{@code preference}：从高到低的编码效率偏好序；</li>
+     *   <li>{@code preferred}：**手动指定**的"默认视频格式"（应用侧「设置默认视频格式」
+     *       就是它，见 {@link #setVideoCodecSupport}）。取值是那 6 个规范短名之一
+     *       （H.264 / H.265 / AV1 / VP9 / MPEG-4 / MPEG-2）；<b>没指定时是空串</b>
+     *       （本字段**总是**出现在返回里）。指定之后：<b>下一次</b>等级选择（起播默认档、
+     *       ABR 下一次决策、ABR 触发的切档）优先用该编码 —— 目标分辨率下有它的流、
+     *       且内核解得了它（硬解或软解任一可用）就用它，<b>压过自动的效率序与硬解偏好</b>；
+     *       两种情况回退到自动规则：该分辨率下没有该编码的流、或内核根本解不了它。
+     *       设置 preferred <b>本身不发起任何立即切换</b>（用户要的是"下一次切换清晰度生效"），
+     *       而且始终只在<b>同一分辨率内</b>换编码，绝不为了它跨分辨率。</li>
      * </ul>
      * 拿不到时返回 null（没有播放器 / 内核失败）。
      *
      * @return 上面那份 JSON；取不到时 null
      */
     /****
-     * Current "device hardware-decode capability + codec efficiency preference" as JSON
-     * (Java landing point of the core's CicadaGetVideoCodecSupport).
+     * Current "device hardware-decode capability + codec efficiency preference + manually
+     * chosen default video format" as JSON (Java landing point of the core's
+     * CicadaGetVideoCodecSupport).
      *
      * <p>Fields are fixed: {@code source} ("app" when the value was supplied by the app and is
      * in effect, "kernel" when the core probed the device), {@code hwDecode} (short names of the
-     * codecs this device can decode in hardware, order does not matter) and {@code preference}
-     * (codec efficiency order, best first). Returns null when the player is not available.
+     * codecs this device can decode in hardware, order does not matter), {@code preference}
+     * (codec efficiency order, best first) and {@code preferred} (the app's manually chosen
+     * default video format, one of the six canonical short names H.264 / H.265 / AV1 / VP9 /
+     * MPEG-4 / MPEG-2; it is always present in the reply and is an empty string when nothing was
+     * chosen). A non-empty {@code preferred} only affects the <b>next</b> level selection
+     * (initial rendition, the next ABR decision, ABR-triggered switches): a stream of that codec
+     * at the same resolution is preferred when the core can decode it (hardware or software),
+     * overriding the automatic efficiency order and the hardware preference; it falls back to the
+     * automatic rules when that resolution has no such stream or the core cannot decode it.
+     * Setting it never triggers an immediate switch, and it never changes the resolution.
+     * Returns null when the player is not available.
      *
      * @return the JSON above, or null when it cannot be obtained
      */
     abstract public String getVideoCodecSupport();
 
     /**
-     * 传入应用侧的"设备硬解能力 + 编码效率偏好"（JSON，契约与上面 get 的同一份）。
+     * 传入应用侧的"设备硬解能力 + 编码效率偏好（+ 默认视频格式）"
+     * （JSON，契约与上面 get 的同一份）。
      *
      * <p><b>一旦传进去，内核就不再探测设备</b>：ABR 选档与起播默认档都按这份集合/偏好来。
      * 应用侧可以自己持久化它，以便下次起播直接传，省掉一次设备探测。</p>
      *
-     * <p>传 {@code null} 或空串 = 清除，恢复内核自己探测。</p>
+     * <p><b>应用侧「设置默认视频格式」用的就是同一份 JSON 里的 {@code "preferred"}
+     * 字段，不需要新接口</b> —— 例如把默认视频格式设成 HEVC：</p>
+     * <pre>
+     * {"source":"kernel",
+     *  "hwDecode":["H.265","H.264"],
+     *  "preference":["AV1","H.265","VP9","H.264","MPEG-4","MPEG-2"],
+     *  "preferred":"H.265"}
+     * </pre>
+     * <p>语义（下一级选择才生效、无该编码的流则回退）见 {@link #getVideoCodecSupport()}
+     * 里 {@code preferred} 那一条。要点：设置它<b>不会立刻切流</b>，
+     * 空串 {@code ""} 或不带这个字段都表示"不指定"（恢复全自动）。</p>
      *
-     * <p>畸形/不合契约的 JSON 由内核拒绝（当前状态不变、内核打日志），本方法不抛异常。</p>
+     * <p>传 {@code null} 或空串 = 清除<b>整份</b>数据，恢复内核自己探测。</p>
+     *
+     * <p>畸形/不合契约的 JSON 由内核拒绝（当前状态不变、内核打日志），本方法不抛异常。
+     * 具体地：{@code preferred} <b>不是字符串</b>属于结构畸形（整份拒绝）；
+     * 是字符串但不在那 6 个短名里<b>不算</b>畸形（等价于不指定）。
+     * 其它字段忽略，两个数组里的未知项忽略。</p>
      *
      * @param json 见上；null / 空串表示清除
      */
     /****
-     * Supply the app side's "device hardware-decode capability + codec efficiency preference"
-     * (same JSON contract as {@link #getVideoCodecSupport()}).
+     * Supply the app side's "device hardware-decode capability + codec efficiency preference
+     * (+ default video format)" (same JSON contract as {@link #getVideoCodecSupport()}).
      *
      * <p>Once supplied the core stops probing the device and both ABR and the initial rendition
-     * follow this data, so an app may persist it and pass it again to skip probing.
-     * Passing null or an empty string clears it and restores core probing. Malformed JSON is
-     * rejected by the core (state unchanged, logged); this method does not throw.</p>
+     * follow this data, so an app may persist it and pass it again to skip probing.</p>
+     *
+     * <p>The app's "default video format" setting is just the {@code "preferred"} member of this
+     * same JSON — no new API is needed, e.g. {@code {"source":"kernel",
+     * "hwDecode":["H.265","H.264"],"preference":[...],"preferred":"H.265"}}. It only affects the
+     * <b>next</b> level selection and never switches immediately; an empty string or an absent
+     * field means "not specified" (fully automatic). Its semantics are documented on
+     * {@link #getVideoCodecSupport()}.</p>
+     *
+     * <p>Passing null or an empty string clears the whole payload and restores core probing.
+     * Malformed JSON is rejected by the core (state unchanged, logged); this method does not
+     * throw. A {@code preferred} that is not a string counts as malformed (the whole payload is
+     * rejected), while a string outside the six short names is not malformed (it just means
+     * "not specified"). Unknown array items and unknown top-level fields are ignored.</p>
      *
      * @param json see above; null / empty clears it
      */

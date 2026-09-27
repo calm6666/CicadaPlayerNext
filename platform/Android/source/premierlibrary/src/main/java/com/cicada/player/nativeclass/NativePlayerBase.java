@@ -491,17 +491,23 @@ public class NativePlayerBase {
     }
 
     /*
-     * ---- 设备硬解能力 / 编码效率偏好 ----
+     * ---- 设备硬解能力 / 编码效率偏好 / 手动指定的默认视频格式 ----
      *
      * JNI 落点：nGetVideoCodecSupport() / nSetVideoCodecSupport(String)。
      * native 侧（jni/player/NativeBase.cpp）把这两个调用转成内核的新 C API
      *     CicadaGetVideoCodecSupport(player) / CicadaSetVideoCodecSupport(player, json)
      * 返回的 JSON 契约、以及"传进去之后内核就不再探测设备"的语义，见
      * CicadaPlayer.getVideoCodecSupport() / setVideoCodecSupport(String) 的 javadoc。
+     *
+     * 同一份 JSON 里的 "preferred" 就是应用侧的「设置默认视频格式」（取值是那 6 个规范短名之一，
+     * 没指定时空串）—— **不需要任何新方法**，原样塞进这个字符串即可；它只在**下一次**等级
+     * 选择时生效，设置它本身不切流（语义细节在内核，本层对它没有任何加工）。
      */
 
     /**
-     * 取当前生效的"硬解能力 + 偏好" JSON；取不到时 null。
+     * 取当前生效的"硬解能力 + 偏好 + 默认视频格式" JSON；取不到时 null。
+     *
+     * 返回里的 {@code preferred} **总是**出现：指定过就是那个短名，没指定就是空串。
      */
     public String getVideoCodecSupport() {
         String json = nGetVideoCodecSupport();
@@ -510,7 +516,10 @@ public class NativePlayerBase {
     }
 
     /**
-     * 传入应用侧的"硬解能力 + 偏好" JSON；null / 空串 = 清除（恢复内核自己探测）。
+     * 传入应用侧的"硬解能力 + 偏好 + 默认视频格式" JSON；null / 空串 = 清除（恢复内核自己探测）。
+     *
+     * 例：{@code {"hwDecode":["H.265","H.264"],"preferred":"H.265"}} —— 最后那个成员就是
+     * 「设置默认视频格式」，下次切档生效（该分辨率下没有该编码的流则回退自动规则）。
      */
     public void setVideoCodecSupport(String json) {
         Logger.v(TAG, "setVideoCodecSupport = " + json);
@@ -689,6 +698,7 @@ public class NativePlayerBase {
     private CicadaPlayer.OnErrorListener mOnErrorListener = null;
     private CicadaPlayer.OnRenderingStartListener mOnRenderingStartListener = null;
     private CicadaPlayer.OnTrackChangedListener mOnTrackChangedListener = null;
+    private CicadaPlayer.OnVideoQualitySwitchListener mOnVideoQualitySwitchListener = null;
     private CicadaPlayer.OnLoadingStatusListener mOnLoadingStatusListener = null;
     private CicadaPlayer.OnSeekCompleteListener mOnSeekCompleteListener = null;
     private CicadaPlayer.OnSubtitleDisplayListener mOnSubtitleDisplayListener = null;
@@ -752,6 +762,11 @@ public class NativePlayerBase {
     public void setOnTrackSelectRetListener(CicadaPlayer.OnTrackChangedListener l) {
         Logger.v(TAG, "setOnSwitchStreamResultListener = " + l);
         mOnTrackChangedListener = l;
+    }
+
+    public void setOnVideoQualitySwitchListener(CicadaPlayer.OnVideoQualitySwitchListener l) {
+        Logger.v(TAG, "setOnVideoQualitySwitchListener = " + l);
+        mOnVideoQualitySwitchListener = l;
     }
 
 
@@ -993,6 +1008,27 @@ public class NativePlayerBase {
                     errorInfo.setCode(finalErrorCode);
                     errorInfo.setMsg(code + ":" + msg);
                     mOnTrackChangedListener.onChangedFail(targetInfo, errorInfo);
+                }
+            }
+        });
+    }
+
+    /**
+     * 清晰度切换状态（JNI 直接调用，见 jni/player/NativeBase.cpp 的
+     * jni_onVideoQualitySwitch）。和别的回调一样切回主线程 handler 再往上抛：
+     * 内核是在自己的事件线程上回调的，界面状态必须在主线程改。
+     *
+     * @param status      0=STARTED / 1=READY / 2=FAILED / 3=CANCELED
+     * @param streamIndex 目标视频流下标
+     * @param description 内核给的说明，可能为 null
+     */
+    protected void onVideoQualitySwitch(final int status, final int streamIndex, final String description) {
+        Logger.v(TAG, "onVideoQualitySwitch = " + status + " , stream = " + streamIndex + " , " + description);
+        mCurrentThreadHandler.post(new Runnable() {
+            @Override
+            public void run() {
+                if (mOnVideoQualitySwitchListener != null) {
+                    mOnVideoQualitySwitchListener.onVideoQualitySwitch(status, streamIndex, description);
                 }
             }
         });

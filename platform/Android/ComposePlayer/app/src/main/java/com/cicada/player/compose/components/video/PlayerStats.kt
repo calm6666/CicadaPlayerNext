@@ -147,6 +147,20 @@ data class PlayerStats(
 
 /** 清晰度一档（来自 `TrackInfo` 的视频轨） */
 data class QualityOption(
+    /**
+     * 这一档的**内核 streamIndex**（= `TrackInfo.getIndex()`；`TrackInfo.AUTO_SELECT_INDEX = -1`
+     * 是"自动"那一行）。
+     *
+     * ⚠ **它不是本列表里的下标**：列表要"按 分辨率+编码 分组 + 按带宽降序"，
+     * 第 0 行完全可能是 streamIndex=7 的那一路。点击时必须**原样**交给
+     * `CicadaPlayer.selectTrack(index)`（内核语义就是 streamIndex，
+     * 见 CicadaPlayer.selectTrack 的 javadoc "See TrackInfo.getIndex()"）。
+     * 任何一层再拿它当数组下标解释一次，就会变成"点 A 播 B" ——
+     * Qt 侧真机踩过这个坑（platform/QtPlayer/src/CicadaPlayerItem.cpp:2578-2595：
+     * `selectQuality: index=3 (streamIndex=4)`，点 1080P 跳到 720P）。
+     * 安卓这条链（buildQualities → controller.selectQuality → selectTrack → JNI）全程只传
+     * streamIndex，**没有**二次解释，改这里时务必保持。
+     */
     val index: Int,
     val label: String,
     val selected: Boolean,
@@ -178,6 +192,11 @@ data class SubtitleOption(
  * currentIndex 高亮的话，"自动"这一行会在 ABR 运行时失去高亮、而某一档具体清晰度被点亮
  * —— 那正是"只有标签、实际手动"的界面来源。Qt 端同样是两个属性
  * （CicadaPlayerItem.h:302 qualityIndex / :311 autoQuality）。
+ *
+ * **[currentIndex] 是内核的 streamIndex**（`TrackInfo.getIndex()`，见 JavaTrackInfo.cpp:80），
+ * **不是列表下标**：本列表要分组 + 按带宽降序，顺序与 streamIndex 毫无关系。
+ * 返回的每一项 `QualityOption.index` 也是 streamIndex —— 点击时原样回传给内核
+ * （见 [QualityOption.index] 与 ④ 的说明）。
  */
 fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int, autoQuality: Boolean): List<QualityOption> {
     /* 用显式 getter：TrackInfo 同时有公有字段与 getter，Kotlin 属性语法可能歧义 */
@@ -207,34 +226,59 @@ fun buildQualities(mediaInfo: MediaInfo?, currentIndex: Int, autoQuality: Boolea
      *    · 编码为空串（内核没解析出来）→ 分组键的编码部分为空，退回"只按分辨率合并"，
      *      和上一版行为一样（拿不到编码就不假装能区分）。
      *    为什么必须要分组：内核 Java 侧是原样把全部视频流都给出来的
-     *    （cicadaplayer/.../jni/player/JavaTrackInfo.cpp:195-209），同一编码的多条流不合并，
+     *     （cicadaplayer/.../jni/player/JavaTrackInfo.cpp:195-209），同一编码的多条流不合并，
      *    列表里就会出现"1080P / 1080P"这种真重复项。
      * ② 合并后按**带宽降序**排（Qt :558-561）。
      * ③ "自动"追加到**末尾**（Qt 控制栏是各档在前、自动在最后：RightControls.qml:1784-1790），
      *    而不是像以前那样放在第一行。
+     * ④ **行的身份 = 内核 streamIndex，绝不是列表下标**（见 QualityOption.index 的说明）：
+     *    本列表经过"分组 + 带宽降序"，**顺序与 streamIndex 毫无关系**（第 0 行可能是
+     *    streamIndex=7 的那一路）。所以这里 `index = 代表流的 getIndex()`，点击时原样把
+     *    它交给 `CicadaPlayer.selectTrack()` —— 全链路上任何一层都**不许**再把它当数组下标解释。
+     *
+     * 分组成 `groups`（每组按带宽降序，`group.first()` = 该组的代表，
+     * 文案与行的身份都用它，见 ④）；再按代表带宽降序排各组（Qt :558-561）。
      */
-    val merged = videos
+    val groups = videos
         .groupBy { qualityGroupKey(it) }
-        .map { (_, group) -> group.maxByOrNull { it.getVideoBitrate() } ?: group.first() }
-        .sortedByDescending { it.getVideoBitrate() }
+        .map { (_, group) -> group.sortedByDescending { it.getVideoBitrate() } }
+        .sortedByDescending { it.first().getVideoBitrate() }
 
     /*
      * 自动档在 ABR 已经选出实际档位之后带上括号显示它 —— 与 Qt 控制栏的
      * "自动（实际清晰度）"同一个意思（RightControls.qml 的自动档那一行）。
      * 这样用户不用去翻日志就能看出"自动"是不是真的在动（这正是 ① 的验收点）。
+     *
+     * 【认行按"是不是本组任一成员"，不只是代表】分组后**保留全部成员**就是为了这里：
+     * 内核报回来的 `currentIndex` 是 streamIndex，而同一档（同分辨率同编码）在清单里
+     * 可能挂着**多条流**，ABR 完全可能停在其中**非代表**的那一条上。只拿代表比
+     * （`merged.firstOrNull { it.getIndex() == currentIndex }`）会让"自动（实际清晰度）"
+     * 与下面的档位高亮凭空丢掉，错显示成"只有自动、看不出实际是哪一档"。
+     * 这与 Qt 的 sameQualityRow（platform/QtPlayer/src/CicadaPlayerItem.cpp:414-437）同一个
+     * 目的：Qt 是"先比 streamIndex、比不到再用分辨率+编码收紧"（它的 m_qualities 只留了
+     * 代表，只能靠分辨率+编码认回去）；安卓这边 `MediaInfo` 里**每一路流都在**
+     * （JavaTrackInfo.cpp:205-227 逐条给），所以直接按**成员是否命中 streamIndex** 判，
+     * 比 Qt 那个回退更准，也不会把"同分辨率不同编码"的两行认混。
      */
-    val actual = if (autoQuality) merged.firstOrNull { it.getIndex() == currentIndex } else null
+    val actual = if (autoQuality) {
+        groups.firstOrNull { group -> group.any { it.getIndex() == currentIndex } }?.first()
+    } else {
+        null
+    }
     val auto = QualityOption(
         index = TrackInfo.AUTO_SELECT_INDEX,
         label = if (actual != null) "自动（${qualityLabelOf(actual)}）" else "自动",
         selected = autoQuality,
     )
 
-    return merged.map { t ->
+    return groups.map { group ->
+        val t = group.first()
         QualityOption(
+            /* 行的身份 = 内核 streamIndex（**不是**列表下标，见 ④） */
             index = t.getIndex(),
             label = qualityLabelOf(t),
-            selected = !autoQuality && t.getIndex() == currentIndex,
+            /* 当前档高亮：`currentIndex`（内核回报的 streamIndex）落在本组**任一成员**上即点亮 */
+            selected = !autoQuality && group.any { it.getIndex() == currentIndex },
             /* 徽标是**显示**，所以走短名→显示名映射（H.265 → HEVC）；见 codecDisplayNameOf。 */
             codec = codecDisplayNameOf(codecLabelOf(t)),
         )

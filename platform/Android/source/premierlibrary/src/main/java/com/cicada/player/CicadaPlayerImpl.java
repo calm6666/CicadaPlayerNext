@@ -393,6 +393,37 @@ import java.lang.ref.WeakReference;
         }
     }
 
+    /*
+     * 清晰度切换状态：内核 PLAYER_QUALITY_SWITCH_* 事件（STARTED / READY / FAILED /
+     * CANCELED）经 NativePlayerBase 转发到上层。与 Qt 端同一套语义，见
+     * platform/QtPlayer/src/CicadaPlayerItem.cpp 的 notifyQualitySwitchStatus()。
+     */
+    private OnVideoQualitySwitchListener mOutOnVideoQualitySwitchListener = null;
+    private OnVideoQualitySwitchListener mInnerOnVideoQualitySwitchListener =
+            new InnerVideoQualitySwitchListener(this);
+
+    private static class InnerVideoQualitySwitchListener implements OnVideoQualitySwitchListener {
+        private WeakReference<CicadaPlayerImpl> cicadaPlayerImplWR;
+
+        InnerVideoQualitySwitchListener(CicadaPlayerImpl cicadaPlayerImpl) {
+            cicadaPlayerImplWR = new WeakReference<CicadaPlayerImpl>(cicadaPlayerImpl);
+        }
+
+        @Override
+        public void onVideoQualitySwitch(int status, int streamIndex, String description) {
+            CicadaPlayerImpl cicadaPlayerImpl = cicadaPlayerImplWR.get();
+            if (cicadaPlayerImpl != null) {
+                cicadaPlayerImpl.onVideoQualitySwitch(status, streamIndex, description);
+            }
+        }
+    }
+
+    private void onVideoQualitySwitch(int status, int streamIndex, String description) {
+        if (mOutOnVideoQualitySwitchListener != null) {
+            mOutOnVideoQualitySwitchListener.onVideoQualitySwitch(status, streamIndex, description);
+        }
+    }
+
 //    private OnThumbnailListener mOutOnThumbnailListener = null;
 //    private OnThumbnailListener mInnerOnThumbnailGetListener = new OnThumbnailListener() {
 //        @Override
@@ -540,6 +571,7 @@ import java.lang.ref.WeakReference;
         mCorePlayer.setOnVideoSizeChangedListener(mInnerOnVideoSizeChangedListener);
         mCorePlayer.setOnTrackInfoGetListener(mInnerOnTrackReadyListener);
         mCorePlayer.setOnTrackSelectRetListener(mInnerOnTrackChangedListener);
+        mCorePlayer.setOnVideoQualitySwitchListener(mInnerOnVideoQualitySwitchListener);
         mCorePlayer.setOnSnapShotListener(mInnerOnSnapShotListener);
 //        mCorePlayer.setOnPcmDataListener(mInnerOnPcmDataListener);
     }
@@ -638,6 +670,7 @@ import java.lang.ref.WeakReference;
         mOutOnSubtitleDisplayListener = null;
 //        mOutOnThumbnailListener = null;
         mOutOnTrackChangedListener = null;
+        mOutOnVideoQualitySwitchListener = null;
         mOutOnTrackReadyListener = null;
         mOutOnVideoSizeChangedListener = null;
     }
@@ -1005,6 +1038,12 @@ import java.lang.ref.WeakReference;
     @Override
     public void setOnTrackChangedListener(OnTrackChangedListener l) {
         mOutOnTrackChangedListener = l;
+    }
+
+
+    @Override
+    public void setOnVideoQualitySwitchListener(OnVideoQualitySwitchListener l) {
+        mOutOnVideoQualitySwitchListener = l;
     }
 
 
