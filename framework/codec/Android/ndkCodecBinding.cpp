@@ -474,9 +474,12 @@ namespace Cicada {
         AMediaFormat_setInt32(mFormat, AMEDIAFORMAT_KEY_SAMPLE_RATE, sampleRate);
         AMediaFormat_setInt32(mFormat, AMEDIAFORMAT_KEY_CHANNEL_COUNT, channelCount);
 
-        if (isADTS != 0) {
-            AMediaFormat_setInt32(mFormat, AMEDIAFORMAT_KEY_IS_ADTS, 1);
-        }
+        /*
+         * 【与 Java 侧逐字对齐】Java 的 configureAudio 是**无条件**设
+         * audioFormat.setInteger(KEY_IS_ADTS, isADTS)（0/1 都设）。这里保持同样行为：
+         * "显式 0"与"根本不设"在某些 codec 上并不等价（与 configure 字段逐项对齐是本阶段的验收项）。
+         */
+        AMediaFormat_setInt32(mFormat, AMEDIAFORMAT_KEY_IS_ADTS, isADTS ? 1 : 0);
 
         applyCsdToFormat(mFormat);
 
@@ -983,6 +986,18 @@ namespace Cicada {
             channels = 0;
         }
 
+        /*
+         * 音频输出编码：Java 侧同一处读的是 "pcm-encoding"
+         * （MediaCodecDecoder.getOutputBufferInfo → info.audioFormat = getFormatInteger(format,
+         * "pcm-encoding")），内核按 2=S16 / 3=U8 / 4=S32 映射。读不到就保持 S16（=2），
+         * 与 Java 侧"缺省即走 S16"同义。
+         */
+        int32_t pcmEncoding = 2;
+
+        if (!AMediaFormat_getInt32(format, "pcm-encoding", &pcmEncoding)) {
+            pcmEncoding = 2;
+        }
+
         {
             std::lock_guard<std::mutex> lock(self->mQueueMutex);
             self->mOutWidth = width;
@@ -998,6 +1013,11 @@ namespace Cicada {
 
             if (channels > 0) {
                 self->mOutChannels = channels;
+            }
+
+            if (!self->mVideo) {
+                /* 音频：把输出编码一并交给内核（视频不读这个字段）。 */
+                self->mOutAudioFormat = pcmEncoding;
             }
 
             self->mFormatChangedPending = true;
