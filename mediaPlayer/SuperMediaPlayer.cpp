@@ -7137,9 +7137,37 @@ bool SuperMediaPlayer::render()
             audioSilencePts = mAudioFrameQue.front()->getInfo().pts;
             audioSilenceClock = mMasterClock.GetTime();
 
+            /*
+             * ============ 【本轮修：不再真的扣住 PCM —— 它会把自己卡死】============
+             *
+             * 真机时间线（2026-09-27 10:29:24.789 开始，本地/DASH）：
+             *   24.911  seek audio aligned to the CLOCK anchor: landing=150150000 anchor=156990000 dropped=99
+             *   24.950  seek first decodable frame shown              ← 画面 161ms 出画
+             *   25.067  audio silence starts (reason=1): the pcm head is ahead of the master clock, HOLDING pcm
+             *   27.403  audio keep-alive: reached the resource cap (120 silence writes ≈ 2400 ms)
+             *   27.927  onAudioException -1003 → PlayerBase baseTimeout() → baseStop()   ← 应用侧看门狗停播
+             *   31.588  audio first frame after seek: pts=156992000   ← 音频到锚点用了 6.6 秒
+             *
+             * 死锁链条是确定的：这次 seek 要求音频**对齐到锚点**（156.99s），而音频要到锚点就必须
+             * 让已解出的音频帧不断出队前进；"扣住 PCM"恰恰把 RenderAudio 整段跳过 ⇒ 队列排不动
+             * ⇒ 音频解码器停在 152.3s ⇒ 永远到不了 156.99s ⇒ PCM 永远不放行。6.6 秒静音、以及
+             * 应用侧那个"音频超时"看门狗，都是这条死锁的表现。
+             *
+             * 处置：**不扣** —— PCM 照推（下面的 RenderAudio 照走）。代价是音频可能比主时钟早
+             * 零点几秒进入设备；但主时钟的落点锚定 + 位置地板 + 单调锚点（见 RenderVideo 的
+             * "锚点不许往回拉"）已经把这零点几秒的偏差收在可控范围内，而"结构性静音 + 被看门狗
+             * 停播"是绝对不可接受的。原判据保留在上面（audioSilencePts/Clock 照采），只把
+             * "按住"这个动作去掉，并在首次命中时打一条诊断，方便日志确认这条路径被走过。
+             */
             if (audioSilencePts > 0 && audioSilenceClock != INT64_MIN &&
-                audioSilencePts > audioSilenceClock + 100 * 1000) {
-                holdAudioForSeek = true;
+                audioSilencePts > audioSilenceClock + 100 * 1000 &&
+                mAudioSilenceReason == AUDIO_SILENCE_NONE) {
+                AF_LOGW("seek window: the pcm head (%lld) is ahead of the master clock (%lld) by %lld ms, but pcm "
+                        "is NOT held any more — holding it stops the audio queue from draining, so the audio "
+                        "could never reach the seek anchor and the whole path deadlocked (that was the 6.6 s of "
+                        "silence + the app-side audio timeout)\n",
+                        (long long) audioSilencePts, (long long) audioSilenceClock,
+                        (long long) ((audioSilencePts - audioSilenceClock) / 1000));
             }
         }
 
