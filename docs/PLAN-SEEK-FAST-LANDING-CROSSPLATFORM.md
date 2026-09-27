@@ -507,10 +507,29 @@ if (pVideoPacket->getInfo().pts != INT64_MIN && pVideoPacket->getInfo().pts != l
    本轮的偏移是落点一次性建立，若某片源跨段时该常量真的变了，会在段边界错一个"变化量"。
    扩展点：在 `DecodeVideoPacket` 里对 `seamlessPoint` 的包按"无切档在途"（`mPendingVideoStreamIndex < 0`）
    刷新一次 —— 属于新增状态/新判据，等出现证据再做。
-2. **Java 侧 `no-input-callback-after-flush` 的立即自愈**（`MediaCodecDecoder.java` 现在只置
-   `sAsyncBroken`，只对下一个解码器生效）：本轮日志没有该判据 ⇒ 未做。
-   健康态 seek 日志若显示"队首正常推进、frameQ 为空、回调停摆是首因"，再按
-   "判据命中 → 返回可识别码 → native 映射到既有错误驱动重建"落地。
+2. ~~**Java 侧 `no-input-callback-after-flush` 的立即自愈**……本轮日志没有该判据 ⇒ 未做。~~
+   **【2026-09-27 结案：本条此前判断有误，已修，不是"未做"】**
+   - **判据确实命中过**，而且是两次：`21:54:27.200`（本地文件 seek）与
+     `21:55:28.920`（DASH 切档后 seek），两条都是
+     `async input path looks dead (criterion=no-input-callback-after-flush,
+     waitedMs=1003/1029, mInputWaitCount=31/30, noOutputHeld=true)`。
+     现象：解码器再也拿不到输入缓冲 ⇒ 无帧上屏 ⇒ **画面永久卡死**（同窗口
+     `KPI total fps 0.9 / 1.0`），随后音频保活撞上界 → `onAudioException -1003` →
+     `baseTimeout/baseStop`，整机看起来"彻底死了"。
+   - **根因不是"需要立即自愈"，而是少了一次契约要求的调用**。AOSP `MediaCodec.flush()`
+     原文：flush 返回后所有 index 作废、缓冲全部归 codec 所有，**异步模式下必须再调
+     `start()` 才会恢复，否则 codec 不会请求输入缓冲**。原实现 `flush()` 之后从不 `start()`
+     （C++ `flush_decoder()` 也只调 Java `flush()`）⇒ 输入侧必然永久空转。
+   - **修法**（commit `99cfd107`，两份 SDK 同步）：在 Java `flush()` 里**先**清
+     `mInputIndices` / `mOutputIndices`（旧 index 全部作废，契约如此）、**再**调平台的
+     `mMediaCodec.start()` 恢复；顺序不可颠倒。只对异步模式调（同步模式按契约自行恢复）。
+     没有任何计时器，补的是状态迁移 `Executing → Flushed → start() → Executing`。
+   - **后续方向**：这条依赖 Java 回调做节拍的形态本身违反 `ARCH-REDESIGN.md:120` 的红线，
+     因此数据面迁到 NDK `AMediaCodec` 异步回调（`setAsyncNotifyCallback`，API 28+，
+     弱符号兼容 minSdk 24），设计见 **`ANDROID-NDK-ASYNC-DECODER.md`**；
+     迁移后本判据所依赖的 `sAsyncBroken`（"下个实例降级轮询"）随之删除。
+   - 复现/验收标记：健康态日志里**不应再出现** `async input path looks dead`；
+     每次 seek 都应有 `seek landing frame accepted`。
 
 ## 9. B4：两条渲染路 + 按内容自动选（2026-09-25）
 

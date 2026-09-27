@@ -109,7 +109,7 @@ mpv 原文：`#define SEEK_HR (1 << 5) // hr-seek (this is a weak hint only)`、
 
 | 能力 | Android（轻量优先） | Qt（macOS/Linux/Windows） | HarmonyOS | iOS |
 |---|---|---|---|---|
-| 视频解码 | MediaCodec（硬解优先，`Surface` 直出） | 平台硬解（VideoToolbox / D3D11VA / VAAPI）+ FFmpeg 软解兜底 | OH AVC/HEVC 硬解 + 软解 | VideoToolbox |
+| 视频解码 | MediaCodec（硬解优先，`Surface` 直出）；**数据面目标 = NDK `AMediaCodec` + `setAsyncNotifyCallback` 异步回调**（JNI 只留创建/能力/OEM/Surface，见 `ANDROID-NDK-ASYNC-DECODER.md`） | 平台硬解（VideoToolbox / D3D11VA / VAAPI）+ FFmpeg 软解兜底 | OH AVC/HEVC 硬解 + 软解 | VideoToolbox |
 | 视频输出 | `Surface`/`ANativeWindow`（零拷贝优先） | Qt RHI 纹理（Metal/D3D11/GL）+ 平台零拷贝路径 | OH NativeWindow | `CVPixelBuffer` + Metal/GL |
 | 音频输出 | `AudioTrack`（含低延迟/属性配置） | CoreAudio / WASAPI / ALSA·PulseAudio | OH AudioRenderer | AudioUnit |
 | 时钟 | `steady_clock` 单调钟 | 同 | 同 | `mach_absolute_time`/`steady_clock` |
@@ -118,6 +118,13 @@ mpv 原文：`#define SEEK_HR (1 << 5) // hr-seek (this is a weak hint only)`、
 | 端侧只允许 | UI/事件、Surface 生命周期、音频会话配置、权限 | 同 | 同 | 同 |
 
 > Android 轻量红线：内核不得依赖 Java 侧回调做节拍；JNI 调用只用于"创建/配置/写入"这类必须项。
+>
+> **现状差距与收敛方案（2026-09-27）**：当前 Android 解码**每帧数据面**仍跨 JNI 到 Java
+> `MediaCodec`，并且**节拍确实依赖 Java 的 `onInputBufferAvailable` 回调** —— 违反上面这条红线。
+> 收敛路径已定：数据面迁到 NDK `AMediaCodec` 的异步回调（`setAsyncNotifyCallback`，API 28+，
+> 用 `__attribute__((weak_import))` 兼容 minSdk 24；API 24–27 走现有 Java 异步实现，**不引入同步轮询**），
+> 只用 NDK r25c，不升级 r28。完整设计、API 级别核实表、线程模型与验收标记见
+> **`ANDROID-NDK-ASYNC-DECODER.md`**。
 
 **平台宏用在哪一层（对应 R8）**：`__ANDROID__` / `TARGET_OS_IPHONE` / `OHOS` / `_WIN32` / `__APPLE__` 以及 `ENABLE_*` 构建开关，**只允许**出现在上表的 **L0 实现文件**（视频解码、视频输出、音频输出、时钟、线程/原子包装、平台能力探测）与构建系统里。**L1 核心 / L2 控制层不得出现任何平台宏**：核心只调用 L0 的接口（虚函数 + 能力查询）。平台特殊行为要么在该平台后端内部消化，要么在接口上增加"能力查询 + 可选实现"，绝不写成核心里的 `if (平台)`。确有无法抽象的极小范围时，唯一例外是集中在**一个明确的适配文件**里用宏，并在注释里写清抽象不了的原因。
 

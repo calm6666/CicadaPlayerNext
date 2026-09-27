@@ -938,3 +938,26 @@ ffmpeg 的 `(1 << 10)` —— MSVC 比较的是记号序列而非取值）、`C4
 （seek 落点 `offsetFromTarget`、位置单调、暂停/缓冲时位置恒定、音频 `afterSeekMs ≤ 200` 与 `audio landing drop` 的
 `target` 与视频落点一致、切档只有 `status=0 → 1` 且不再出现 pending/占位面/死线日志）。**行为结论只能由这些日志判定**，
 父代理能给出的只是"编译与静态规则的证据"。
+
+---
+
+## 十五、Android 解码数据面迁移（新任务，独立排期）
+
+本重构（P0–P5）解决的是**时间轴/落点/切档**的语义问题。Android 侧**每帧数据面仍在 Java `MediaCodec` 上跨 JNI**，
+且**节拍依赖 Java 的 `onInputBufferAvailable` 回调** —— 这与 `ARCH-REDESIGN.md:120` 的红线
+（"内核不得依赖 Java 侧回调做节拍"）冲突，是另一条独立战线。
+
+- **已修（commit `99cfd107`）**：异步模式下 `flush()` 之后**必须再调 `start()`**（AOSP 契约原文：
+  flush 后所有 index 作废、缓冲归 codec，异步模式不调 start 则 codec 不会请求输入缓冲）。
+  否则回调永久停摆 ⇒ 解码器拿不到落点关键帧 ⇒ **画面永久卡死**
+  （真机 `async input path looks dead / no-input-callback-after-flush`，两次命中）。
+  两份 SDK 同步修，顺序为"先作废旧 index，再 `start()`"。记录见
+  `PLAN-SEEK-FAST-LANDING-CROSSPLATFORM.md` §8.5 第 2 条。
+- **待做**：数据面迁到 NDK `AMediaCodec` 异步回调（`setAsyncNotifyCallback`，API 28+；
+  `__attribute__((weak_import))` 兼容 minSdk 24；API 24–27 保留现有 Java 异步实现；
+  **不引入同步轮询**；固定 NDK r25c，不升级 r28）。设计、API 级别核实表、线程模型、
+  分阶段验收与回退判定见 **`ANDROID-NDK-ASYNC-DECODER.md`**。
+
+**对本重构的影响：无。** 迁移只替换 L0 实现与平台绑定：`IDecoder` 接口、单解码器模型、
+落点过滤、`Discontinuity` 成员与 §5 验收命令全部不变。迁移完成后，`sAsyncBroken`
+（"下个实例降级轮询"）作为轮询路径的一部分一并删除。
