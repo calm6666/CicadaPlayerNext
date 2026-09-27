@@ -629,19 +629,45 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 切档自己的 demuxer 级 seek 不进本函数（全仓 putMsg(MSG_SEEKTO) 只有 SeekTo() 一处），
      * 所以不会自锁、也不会 ping-pong。
      */
-    if (mPlayer.qualitySwitchInFlight()) {
+    /*
+     * 【修：只在切档"已提交、只等首帧上屏"时才推迟 seek】
+     *
+     * 真机日志（2026-09-27 10:18，在线视频）把"推迟"的代价写得很清楚：
+     *   user seek: DEFERRED … target=85791000            （10:18:10.081）
+     *   user seek: replaying the DEFERRED seek …         （10:18:23.372）
+     * —— 预滚阶段的切档要十几秒才到终态，用户的 seek 就干等了 **13 秒**，
+     * 界面一直在"定位中"，用户描述就是"seek 后卡死"。
+     *
+     * 语义修正：用户 seek 是**更新的意图**，只有切档已经提交（decoder 已 promote、
+     * 画面已经换成新档、只差首帧上屏这一瞬间）时才值得让 seek 让路；还在预滚阶段
+     * （pending 路还没到时间线）时，seek 立刻执行 —— 在途那次切档由下面 :750 的
+     * FlushVideoPath(cancelPendingSwitch=1) 干净拆掉，并按 B17 记下用户点过的档位，
+     * seek 结束（ResetSeekStatus）后**只重发一次**。档位意图不丢，seek 也不再干等。
+     */
+    if (mPlayer.qualitySwitchInFlight() && mPlayer.mQualitySwitchCommitPending) {
         mPlayer.mDeferredUserSeekUs = seekPos;
         mPlayer.mDeferredUserSeekAccurate = bAccurate;
         mPlayer.mDeferredUserSeekPending = true;
 
         mPlayer.mPNotifier->NotifySeeking(true);
 
-        AF_LOGW("user seek: DEFERRED (NOT executed now) — a quality switch is still in flight; "
-                "target=%lld us accurate=%d. It will be replayed ONCE at the switch's terminal state "
-                "(READY / CANCELED / FAILED); a newer seek request overwrites this one, and the "
-                "deferred seek no longer cancels the switch\n",
+        AF_LOGW("user seek: DEFERRED (NOT executed now) — a quality switch has already COMMITTED and is "
+                "only waiting for its first frame; target=%lld us accurate=%d. It will be replayed ONCE at "
+                "the switch's terminal state (READY / CANCELED / FAILED); a newer seek request overwrites "
+                "this one. (A switch that is still in the preroll phase no longer blocks a seek.)\n",
                 (long long) seekPos, (int) bAccurate);
         return;
+    }
+
+    if (mPlayer.qualitySwitchInFlight()) {
+        /*
+         * 预滚阶段的在途切档：用户 seek 优先。这里只留一条说明日志 —— 拆切档/记档位
+         * 由下面的 FlushVideoPath(cancelPendingSwitch=1) 与 B17 重装机制完成。
+         */
+        AF_LOGW("user seek: taking over from a quality switch that is still prerolling (target=%lld us) — "
+                "the switch is torn down cleanly here and re-issued ONCE when this seek finishes, so the "
+                "quality intent is not lost and the seek does not have to wait for the preroll\n",
+                (long long) seekPos);
     }
 
     mPlayer.mSeekNeedCatch = bAccurate;
@@ -756,7 +782,13 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 慢时 Seek 会等待已经被用户取消的目标流，表现为 seek 直接卡死。普通本地
      * 文件没有 pending 路时保持原有 SeekInCache 行为，不额外 flush。 */
     if (mPlayer.mPendingVideoStreamIndex >= 0 || mPlayer.mWillChangedVideoStreamIndex >= 0) {
-        mPlayer.FlushVideoPath(true, true, __func__);
+        /*
+         * flushRender 从 true 改成 false：这里只需要"拆掉在途切档"（cancelPendingSwitch=1），
+         * 不需要连渲染器一起 flush。flushRender=true 会把渲染器里的最后一帧也清掉 ⇒ 画面
+         * 黑一下再出画（而本函数后面 :1000 一带的 seek 自身 flush 早就改成 flushRender=false
+         * 以避免碰渲染器）。改成 false 之后：画面停在旧帧上，凑齐落点帧再替换。
+         */
+        mPlayer.FlushVideoPath(false, true, __func__);
 
         /*
          * 【① B17：用户点过的档位意图不能就这么丢掉 —— 记下来，等 seek 结束重新装弹】
