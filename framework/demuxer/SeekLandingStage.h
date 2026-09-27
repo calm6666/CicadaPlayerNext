@@ -118,11 +118,31 @@ namespace Cicada {
         /* 复位整条线，目标一起清。 */
         void reset();
 
-        /*
-         * 只丢"已收下还没交出"的包，**保留 seek 目标**（stop/start 会在同一个分片上重开，
-         * 目标依然有效）。目标过期的情况由 filter 的"第一包 pos > 目标 就放弃"兜住，不会误丢数据。
-         */
+        /* 只丢"已收下还没交出"的包，**保留 seek 目标**（stop/start 会在同一个分片上重开，
+         * 目标依然有效）。目标过期的情况由 filter 的"第一包 pos > 目标 就放弃"兜住，不会误丢数据。 */
         void dropStage();
+
+        /*
+         * ============ 【宿主"重开分片"收口处的两个入口：区分 seek 所有 / 非 seek】============
+         *
+         * 背景（真机实测，2026-09-27 安卓 DASH：`DASH armed` 14 次而 `ENGAGE` 大量缺失）：
+         * seek 的流程是"seek() 里 arm(target) 并置 mReopen" → **读线程**发现 mReopen 后先在本片
+         * 收口处 `flush()`/`reset()`（那时还没有读到任何包）→ 再 `updateSegment()` 打开**包含目标的
+         * 那个分片**。旧代码在这两处无条件把目标一起清掉（flush/reset 都会清 mTargetUs），于是
+         * 目标在"目标分片的第一个包"到达**之前**就没了 ⇒ filter() 从第一包起就在
+         * `mTargetUs == INT64_MIN` 处静默放行 ⇒ 延迟线装了弹却从不接管，解码器只能从分片片首起解。
+         *
+         * 处置：arm() 成功时装一个**一次性标记**（mReopenBelongsToSeek），表示"接下来那次宿主
+         * 重开收口属于本次 seek"。两个入口见到它就**保留目标**（只丢/只交出 stage），否则维持
+         * 原来的"连目标一起清"——那条语义是给**切档交接 / SetCurSegNum** 这类"按分片号重设读位置"
+         * 用的：那时确实没有时间目标，陈旧目标必须清掉，绝不能丢新分片的前缀。
+         *
+         * 标记只被这两个入口消费一次；下一次 arm() 会覆盖它。若某次 arm() 之后宿主始终没有重开
+         * 收口，陈旧目标也是安全的：filter() 在"第一包 pos > 目标"处会立刻自行放弃
+         * （RELEASE without candidate），不会丢任何数据。
+         */
+        void flushOnHostReopen();
+        void dropStageOnHostReopen();
 
         /*
          * 攒前缀时"上一轮有没有真的取到包"这个进度事实（取一次就清）：宿主读线程用它决定这一轮
@@ -156,6 +176,12 @@ namespace Cicada {
         int mDropped{0};
         /* "换更近的落点"这类日志每轮装弹的硬上限（防极端 GOP 刷屏；其余状态各只打一条） */
         int mLogCount{0};
+        /*
+         * 【一次性标记】"接下来那次宿主重开分片的收口属于本次 seek"（arm() 成功时置真，
+         * flushOnHostReopen() / dropStageOnHostReopen() 各消费一次）。语义与理由见上面那两个
+         * 入口的说明。追加在末尾（新增成员只追加，不动既有布局）。
+         */
+        bool mReopenBelongsToSeek{false};
     };
 }// namespace Cicada
 

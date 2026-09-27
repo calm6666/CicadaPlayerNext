@@ -820,8 +820,16 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
          * 【seek 落点延迟线】本分片读完（把 demuxer 读到 EOS）时，延迟线里攒着的正是本片最后
          * 那一段：这属于"目标落在本片最后一个 GOP"的情形，等不到"timePosition > 目标"的包，
          * 判据只能在这里收口。整体按序交出，绝不能跟着分片一起丢掉。
+         *
+         * 【本轮修：这里曾经把 seek 的目标一起清掉】读完本片时 mReopen 往往正是 **seek() 自己**
+         * 置的那个（seek() 只置 mReopen + arm(target)，真正的重开分片由本线程在下面
+         * updateSegment() 里做）。旧代码无条件走 flush()（内部 reset() ⇒ 连 mTargetUs 一起清），
+         * 于是目标在"含目标分片的第一个包"到达**之前**就没了：filter() 之后每包都在
+         * mTargetUs == INT64_MIN 处静默放行 ⇒ 延迟线装了弹却从不 ENGAGE，解码器退回分片片首。
+         * 现在按"这次收口是否属于刚 arm 的 seek"分流：属于 ⇒ 交包但保留目标；不属于（切档交接 /
+         * SetCurSegNum / 普通换片）⇒ 维持旧的"连目标一起清"。
          */
-        mSeekLanding.flush();
+        mSeekLanding.flushOnHostReopen();
 
         ret = updateSegment();
 
@@ -1409,8 +1417,14 @@ int DashStream::reopenSegment(uint64_t num, OpenType openType)
      * 【seek 落点延迟线】reopenSegment 是"按分片号/分片位置重设读位置"（切档交接、SetCurSegNum 等），
      * 它**没有时间目标**：上一次 seek 留下的目标到这里已经不能代表现在要读的位置，必须连目标一起清。
      * 否则一个陈旧的、恰好落在前方的目标会让延迟线丢掉这个分片的前缀。
+     *
+     * 【本轮修】这里保留上面的语义，但要与"seek 自己的收口"区分开：seek() 是**只置 mReopen +
+     * arm(target)**、由读线程完成重开的（见本文件 read 路径里那个 flushOnHostReopen 调用），
+     * 因此本函数在正常 seek 里不会被走到。万一被走到而 arm() 的一次性标记还在（= 这次重开仍属于
+     * 本次 seek），dropStageOnHostReopen() 会只丢 stage、保留目标；否则按原语义 reset()。
+     * 两种情形都只消费一次标记，行为对非 seek 调用者逐字不变。
      */
-    mSeekLanding.reset();
+    mSeekLanding.dropStageOnHostReopen();
     resetSource();
 
     if (mIsOpened_internal) {

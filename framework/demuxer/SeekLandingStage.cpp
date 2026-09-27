@@ -28,6 +28,13 @@ namespace Cicada {
         /* 装弹前的目标：还能看到"同一条 seek 里第二路把目标改掉"这种最值得警惕的情况。 */
         const int64_t prevTarget = mTargetUs;
 
+        /*
+         * 先清掉上一次的一次性标记：arm() 被拒绝（负值 / 非视频 / 直播）时不能把这个标记留给
+         * 后面某次**与本 seek 无关**的宿主重开收口，否则那次收口会保留一个陈旧目标。
+         * 标记只在下面走到"真的装弹成功"时重新置真。
+         */
+        mReopenBelongsToSeek = false;
+
         reset();
 
         if (targetUs < 0) {
@@ -69,6 +76,60 @@ namespace Cicada {
         AF_LOGI("[seekLanding] %s armed: stream=%d reqUs=%lld (landing will be the last keyframe <= reqUs inside "
                 "the segment that is opened next; the prefix before it is dropped)\n",
                 mWhat, streamType, (long long) targetUs);
+
+        /*
+         * 【关键】装弹成功 ⇒ 接下来那次宿主"重开分片"的收口属于本次 seek：目标必须活到
+         * "包含目标的那个分片"的第一个包上，否则延迟线装了弹却从不接管（真机实测形态）。
+         * 语义、为什么不能无条件保留（切档交接 / SetCurSegNum 必须清）、以及"标记始终没被消费"
+         * 时为什么安全，都写在头文件那两个入口的说明里。
+         */
+        mReopenBelongsToSeek = true;
+    }
+
+    void SeekLandingStage::flushOnHostReopen()
+    {
+        const bool seekOwned = mReopenBelongsToSeek;
+        mReopenBelongsToSeek = false;
+
+        if (!seekOwned) {
+            /* 非 seek 的重开（切档交接 / SetCurSegNum / 普通换片）：维持旧语义，连目标一起清。 */
+            flush();
+            return;
+        }
+
+        /*
+         * 本次 seek 自己的重开收口：**保留目标**。
+         * flush() 会把 stage 按原序交回宿主队列（此刻它通常是空的：还没读到任何包），
+         * 但它同时会 reset()（连目标清），所以这里把目标与流类型装回去 —— 装回去之后的状态
+         * 正好是"已装弹、还没见过任何包"，接着 updateSegment() 打开的那个含目标分片的第一包
+         * 就能被 filter() 正常接管。
+         */
+        const int64_t keepTarget = mTargetUs;
+        const int keepStreamType = mStreamType;
+        flush();
+        mTargetUs = keepTarget;
+        mStreamType = keepStreamType;
+
+        AF_LOGI("[seekLanding] %s host reopen of the SEEK at the segment boundary: target=%lld KEPT "
+                "(the segment opened next is the one that contains the target; clearing it here is exactly "
+                "why the stage used to stay un-engaged and the decoder restarted at the segment head)\n",
+                mWhat, (long long) keepTarget);
+    }
+
+    void SeekLandingStage::dropStageOnHostReopen()
+    {
+        const bool seekOwned = mReopenBelongsToSeek;
+        mReopenBelongsToSeek = false;
+
+        if (seekOwned) {
+            /* 本次 seek 自己的重开：只丢 stage，保留目标（数据语义与 reset() 的"丢弃"一致）。 */
+            dropStage();
+            AF_LOGI("[seekLanding] %s host reopen of the SEEK: staged packets dropped, target=%lld KEPT\n",
+                    mWhat, (long long) mTargetUs);
+        } else {
+            /* 非 seek 的重开：没有时间目标，连目标一起清（防止陈旧目标吃掉新分片的前缀）。 */
+            reset();
+        }
     }
 
     void SeekLandingStage::dropStage()
