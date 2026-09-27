@@ -63,6 +63,9 @@ target_link_libraries(CicadaPlayer
         EGL
         OpenSLES
         android
+        # 【NDK 解码数据面】AMediaCodec 系列在 libmediandk.so（与 ComposePlayer 那份同步）。
+        # 见 docs/ANDROID-NDK-ASYNC-DECODER.md。
+        mediandk
         z
         ${log-lib}
         )

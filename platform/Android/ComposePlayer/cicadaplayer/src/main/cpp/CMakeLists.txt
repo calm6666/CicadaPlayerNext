@@ -118,6 +118,10 @@ target_link_libraries(CicadaPlayer
         EGL
         OpenSLES
         android
+        # 【NDK 解码数据面】AMediaCodec 系列（<media/NdkMediaCodec.h>）在 libmediandk.so。
+        # 见 docs/ANDROID-NDK-ASYNC-DECODER.md：视频/音频数据面改用 NDK 异步回调，
+        # 控制面（能力查询/选 codec/OEM 钩子/Surface）仍走 JNI。
+        mediandk
         z
         ${log-lib}
         )

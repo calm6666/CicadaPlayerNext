@@ -30,6 +30,13 @@ if (ANDROID AND ENABLE_MEDIA_CODEC_DECODER)
             Android/mediaCodecDecoder.h
             Android/mediaCodecDecoder.cpp
 
+            # 绑定抽象 + 工厂（按平台能力选 ndk-async / java-async，两者都是异步）
+            Android/codecBinding.h
+            Android/codecBinding.cpp
+            # NDK 异步数据面（AMediaCodec + setAsyncNotifyCallback，API 28+ 弱符号）
+            Android/ndkCodecBinding.h
+            Android/ndkCodecBinding.cpp
+
             Android/jni/MediaCodec_Decoder.h
             Android/jni/MediaCodec_Decoder.cpp
             Android/jni/OutputBufferInfo.h
