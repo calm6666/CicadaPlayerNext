@@ -109,31 +109,31 @@ namespace Cicada {
         std::atomic<int> generation{0};
 
         /*
-         * ---- P1：renderer 单一过滤 + 位置上报基准 ----
+         * ---- P1/P2.1：renderer 单一过滤 + 唯一的"内容时间"来源 ----
          *
          * filterActive     本次不连续点的"落点过滤"是否仍然生效。它**只**由
          *                  "包含目标的那一帧已上屏"（shouldDropForDiscontinuity 的结束分支，
          *                  含 EOF 兜底那条）或"下一次 seek / Reset / Prepare"
          *                  （beginDiscontinuity）关闭。**SeekEnd / ResetSeekStatus 一律不得
          *                  关它** —— 那是分片源"seek 永远差一个落点前缀"的根因。
-         * clockBaseUs       位置上报基准的**媒体值**（= targetUs，即用户请求点）。
-         * clockBaseSteadyMs 写 clockBaseUs 那一刻的单调毫秒；**0 表示"基准已冻结、不再前进"**
-         *                  （暂停态：位置必须绝对不动，见 getCurrentPosition()）。
-         *                  position = clockBaseUs + (now - clockBaseSteadyMs) ⇒ 数学上单调，
-         *                  回弹不可能发生，因此不再需要任何"地板"兜底链。
          * acceptedFramePos  真正被采纳为落点的那一帧的位置。只服务诊断（回答"落点到底
          *                  采纳了哪一帧、离目标多远"），不参与任何判定。
          *
-         * 并发：这几个字段是**跨线程发布的值** —— 写侧是 SeekTo / SwitchStream 所在的
-         * API 线程（或 Reset 所在的消息线程），读侧是内核工作线程的渲染路径与上报路径。
-         * 所以取 atomic：过滤闩读出陈旧值会多渲染或漏渲染一帧，而位置基准读出陈旧值
-         * 会**直接体现在上报的位置上**。targetUs / startUs 保持普通字段，因为 P0 已经
-         * 约定了访问顺序（任何读侧**先** generation.load() 建立与写入侧的配对关系，
-         * 再读它们；shouldDropForDiscontinuity 就是按这个顺序写的）。
+         * 【P2.1 删除：P1-b 那对"墙钟位置基准"字段】这里原来还有一对字段（一个媒体值基准 +
+         * 一个单调毫秒），实现的是"位置 = 不连续点基准 + **墙钟**增量"。于是上报位置与
+         * 渲染/音频参考各走一根轴：seek（或切档）之后只要发生一次缓冲停顿，墙钟照走而设备
+         * 没消费 ⇒ 进度条跑到画面与声音前面，而当时的"回收"分支只能处理墙钟**落后**。
+         * 现在只有一个来源 —— mMasterClock.GetTime()（有音频 = 目标点 + 设备已消费量；
+         * 无音频 = 暂停感知的自走时钟，单位微秒、与 targetUs 同轴），见 getCurrentPosition()
+         * 的长注释。字段减少 = 机制减少，不再需要冻结哨兵与回收分支。
+         *
+         * 并发：filterActive / acceptedFramePos 是**跨线程发布的值** —— 写侧是 SeekTo /
+         * SwitchStream 所在的 API 线程（或 Reset 所在的消息线程），读侧是内核工作线程的
+         * 渲染路径与上报路径，所以取 atomic。targetUs / startUs 保持普通字段，因为 P0
+         * 已经约定了访问顺序（任何读侧**先** generation.load() 建立与写入侧的配对关系，
+         * 再读它们；shouldDropForDiscontinuity 与 getCurrentPosition 都是按这个顺序写的）。
          */
         std::atomic<bool> filterActive{false};
-        std::atomic<int64_t> clockBaseUs{INT64_MIN};
-        std::atomic<int64_t> clockBaseSteadyMs{0};
         std::atomic<int64_t> acceptedFramePos{INT64_MIN};
 
         /*
@@ -1128,9 +1128,10 @@ namespace Cicada {
          * 【P1-b 删除：seek 位置"地板"】
          *
          * 这里原来有一个 int64_t 成员记"seek 目标点"，getCurrentPosition() 在管道走到它之前
-         * 一直上报它（防进度条回退）。它已随 P1-b 删除：位置上报改为
-         *   不连续点 targetUs + 单调时钟增量（见 mDiscontinuity.clockBase*），
-         * 数学上单调 ⇒ 回弹不可能发生 ⇒ 不需要任何"下界/兜底链"。
+         * 一直上报它（防进度条回退）。它已随 P1-b 删除，P2.1 起位置上报读的是**唯一那根内容
+         * 时间轴**（mMasterClock.GetTime()：有音频 = 目标点 + 设备已消费量，无音频 = 自走
+         * 且暂停感知，见 getCurrentPosition()）—— 设备不消费就不前进 ⇒ 数学上不回弹、
+         * 停顿与暂停都自然停住 ⇒ 不需要任何"下界/兜底链"，也不需要冻结哨兵与回收分支。
          * 与它一起删除的还有它的归属标记与渲染闸门（见本文件里 Discontinuity 的说明）。
          */
 
@@ -1477,7 +1478,7 @@ namespace Cicada {
          * ============ 【P2 删除：音频时钟"设备位置真的前进过"的第二套观察基准】============
          *
          * 这里原有三个成员（一个"设备位置基准"、一个"是否见过前进"的闩、一个限频计数），
-         * 与本轮删除的 mAudioClockReanchorPending 同生共死。它们的职责已经被
+         * 与本轮删除的"音频重锚"状态同生共死。它们的职责已经被
          * Discontinuity::audioBaseUs / audioBaseConsumedUs 完整吸收，而且是**同一个量**：
          *   · 旧方案的基准 = "seek 重锚之后第一次读到的设备位置"，语义是"设备从哪儿开始算"；
          *   · 新方案的基准 = 写内容位置那一刻的设备已消费量快照，语义完全相同，
@@ -1685,7 +1686,7 @@ namespace Cicada {
          *   否则（framePos <= targetUs < framePos + frameDur，即**包含目标**；
          *         或 framePos > targetUs，即目标落在本段之前、没有更早的帧可选）
          *       ⇒ 返回 false，并且**结束本次过滤**：记下 acceptedFramePos、
-         *         把位置上报基准钉在 targetUs、filterActive 置假。
+         *         把内容时间轴（mMasterClock）钉在 targetUs、filterActive 置假。
          *
          * 不变量：
          *   · 帧 PTS 单调前进 ⇒ 必然在有限帧内走到"包含目标"的那一帧，
@@ -1724,12 +1725,12 @@ namespace Cicada {
          *
          * 动作（每个都是"把不连续点收敛掉"所必需的）：
          *   · 记下 acceptedFramePos（诊断）；
-         *   · 把位置上报基准钉在 **targetUs**（不是落点帧的位置）—— 用户要的是
-         *     "位置 == target 且之后单调"，位置 = clockBaseUs + (now - clockBaseSteadyMs)；
-         *   · **主时钟也钉在 targetUs**：上报位置与渲染节拍必须同一个基准，
-         *     否则会出现"进度条和画面对不上"（seek 一发起 ProcessSeekToMsg 已经把主时钟
-         *     钉在 seekPos，所以这一步在正常路径上是幂等的）；
-     *   · filterActive = false —— 这就是"结束本次过滤"的**唯一**写点。
+         *   · **把内容时间轴钉在 targetUs**（不是落点帧的位置）—— 用户要的是
+         *     "位置 == target 且之后单调"：mMasterClock.GetTime() 就是那根轴（有音频时由
+         *     设备已消费量驱动，无音频时自走），位置上报与渲染节拍共用它，见
+         *     getCurrentPosition() 的说明；seek 一发起 ProcessSeekToMsg 已经把主时钟钉在
+         *     seekPos，所以这一步在正常路径上是幂等的；
+         *   · filterActive = false —— 这就是"结束本次过滤"的**唯一**写点。
          *
          * reason 只进日志（例如 "no frame can reach the target (eof)"）。
          * generation 由调用方**先** load 一次并传进来：它是"这一帧属于哪一次不连续"的

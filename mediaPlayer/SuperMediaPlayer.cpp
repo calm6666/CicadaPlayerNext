@@ -749,10 +749,10 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
     mSeekNeedCatch = bAccurate;
     /*
      * 【位置上报在这里不做任何事，这是对的】
-     * 位置基准由 acceptDiscontinuityLandingFrame() 在落点帧上屏时钉在 targetUs，
-     * 之后 position = targetUs + 单调时钟增量（暂停时冻结，见 getCurrentPosition()）——
-     * 数学上单调，回弹不可能发生。所以既不需要"下界"，也不需要"归属标记"，
-     * 更不需要在 seek 入口预置任何位置类状态；上面那次 beginDiscontinuity() 已经够了。
+     * 位置上报与渲染节拍共用**唯一那根内容时间轴**（mMasterClock.GetTime()）：seek 一发起
+     * ProcessSeekToMsg() 就把它钉在 seekPos，落点帧被采纳时 acceptDiscontinuityLandingFrame()
+     * 再钉一次 targetUs。所以既不需要"下界"，也不需要"归属标记"，更不需要在 seek 入口
+     * 预置任何位置类状态；上面那次 beginDiscontinuity() 已经够了。
      */
 }
 
@@ -1216,87 +1216,61 @@ int64_t SuperMediaPlayer::getCurrentPosition()
     }
 
     /*
-     * ============ 【P1-b：位置上报 = 不连续点目标 + 单调时钟增量】============
+     * ============ 【P2.1：位置上报与音频时钟是**同一根内容时间轴**】============
      *
-     * 旧实现（P1 之前）在这里挂了一条"地板"兜底链加一条"离目标差太多就放弃"的例外，
-     * 本质是"管道还没走到目标之前，先把上报值钉在目标上"。
-     * 那是**打补丁**：它要求管道位置与目标点这两条轴永远可比，于是又派生出一堆
-     * "谁改写了地板/归属/是否过期"的判断，而回弹依然会发生（音频时钟接管时把上报拽回去）。
-     * 那些成员与判据已随 P1 整体删除，这里不再有它们的任何读点。
+     * P1-b 起位置上报用的是"不连续点基准 + **墙钟**增量"（基准值 + 单调毫秒差）。
+     * 它把"位置"和"渲染节拍"变成了两根轴：
+     *   · 渲染节拍 / 音频参考走的是 mMasterClock（有音频时由设备已消费量驱动）；
+     *   · 上报位置走墙钟。
+     * 后果就在用户那里：seek 之后（以及每次切档之后）只要发生一次缓冲停顿，**墙钟照走**
+     * 而设备没有消费 ⇒ 进度条跑到画面与声音前面；而当时的"回收"分支只处理
+     * 墙钟**落后**于管道位置的情形，对"墙钟超前"无能为力 —— 用户反复报的
+     * "进度条不准 / 回弹"就有这一类。暂停冻结那套（冻结哨兵 + 恢复重锚 + 回收）本质是
+     * 在墙钟模型上补洞。
      *
-     * 现在改成主流做法：不连续点上把基准钉在 targetUs，之后
-     *     position = clockBaseUs + (now - clockBaseSteadyMs)
-     * 位置在数学上随时间单调前进，**回弹不可能发生**，所以不需要任何兜底链。
+     * 现在改成**只有一个来源**：mMasterClock.GetTime()，也就是渲染侧与音频参考用的那根
+     * 内容时间轴（单位：微秒，与 targetUs / 音频基准同轴）。它的语义由代码事实决定：
+     *   · SystemReferClock::GetTime() = af_scalable_clock::get()
+     *     = mSetTime + af_clock::get() * scale（framework/utils/af_clock.cpp:133-136），
+     *     而 af_clock::get() 的两个来源都是**微秒**：af_gettime_relative() 是
+     *     steady_clock 的微秒值（framework/utils/timer.cpp:25-28），暂停时返回冻结的
+     *     mPauseUs（af_clock.cpp:60-75）⇒ 单位正确、暂停不前进；
+     *   · 有音频时它被 SystemReferClock 拉到音频参考（getAudioPlayTimeStamp()：
+     *     目标点 + 设备已消费量）⇒ 设备不消费就不前进 ⇒ **缓冲停顿与暂停都自然停住**；
+     *   · 无音频时它就是那个暂停感知的自走时钟（system_refer_clock.cpp:16 只在
+     *     `!mClock.isPaused()` 时才取参考）；
+     *   · seek 时 ProcessSeekToMsg() 已经把它钉在 seekPos，落点帧被采纳时
+     *     acceptDiscontinuityLandingFrame() 再钉一次 targetUs ⇒ "seek 后位置 == 目标"。
+     * 所以"seek 后等于目标 / 单调 / 暂停不动 / 停顿不走"四条同时成立，**不需要墙钟、
+     * 不需要冻结哨兵、不需要回收分支** —— 这一轮是删机制，不是加机制
+     * （P1-b 那对墙钟字段一并删除，见头文件 Discontinuity 里那段"P2.1 删除"的说明）。
      *
-     * 只在**不连续点已建立基准**时走这条路（clockBaseUs != INT64_MIN）。
-     * 正常播放（没有 seek 过、或 Reset 之后）clockBaseUs 恒为 INT64_MIN ⇒
-     * 原样走既有逻辑，行为逐字不变 —— 这一条很重要：绝不把正常播放的位置变成墙钟。
+     * 只在**曾经建立过不连续点**时走这条路（targetUs != INT64_MIN）：
+     * 从未 seek 过（或 Reset 之后）的普通播放逐字走下面的 mCurrentPos，行为不变。
      *
-     * 管道位置反超时（缓冲/变速/长暂停之后音频主时钟重新接管）把基准**回收**到管道值：
-     *   · 上报值跟着管道走（不落后于真实画面）；
-     *   · 基准与主时钟重新对齐，"位置与主时钟同一个基准"这条不变量恢复；
-     *   · 回收只抬不降（byClock >= 管道值时才不回收），所以单调性不破。
+     * 访问顺序沿用 P2 的约定：先 generation.load()（seq_cst，天然 acquire）与
+     * beginDiscontinuity() 的 fetch_add 配成 release-acquire 对，再读非原子的 targetUs
+     * —— 与 shouldDropForDiscontinuity() 完全同一个读取顺序。
      */
-    const int64_t clockBaseUs = mDiscontinuity.clockBaseUs.load();
+    (void) mDiscontinuity.generation.load();
+    const int64_t discontinuityTargetUs = mDiscontinuity.targetUs;
 
-    if (clockBaseUs != INT64_MIN) {
+    if (discontinuityTargetUs != INT64_MIN) {
+        int64_t contentUs = mMasterClock.GetTime();
+
         /*
-         * 【暂停：位置绝不能自己往前走】
-         *
-         * 上面那条"基准 + 墙钟增量"隐含一个前提：**媒体时间在走**。而暂停时它不走 ——
-         * 唯一的暂停开关是 startRendering(bool)（SuperMediaPlayer.cpp:11354-11368）：
-         *     if (start) mMasterClock.start(); else mMasterClock.pause();
-         * 它同时把音频渲染 pause 掉（`pauseAudioRender(!start)`）。SystemReferClock::pause()
-         * → af_scalable_clock::pause()（system_refer_clock.cpp:79-89），
-         * 而 SystemReferClock::GetTime() 只在 `!mClock.isPaused()` 时才去取参考时钟
-         * （system_refer_clock.cpp:16）—— 也就是说"暂停 = 时间不前进"是这块时钟的既定语义。
-         * 旧路径返回的 mCurrentPos 之所以在暂停时恒定，是因为它的每一个写入者都在
-         * "有帧真的流过"的路径上（RenderCallback / DecodeVideoPacket / RenderAudio /
-         * doRender 的 mPlayedVideoPts），暂停时那些路径不再推进。
-         *
-         * 所以这里必须显式把基准**冻住**：发现暂停就把"已经走过的量"折算进基准值，
-         * 并把 clockBaseSteadyMs 置 0（= 冻结哨兵），之后 byClock 恒等于基准值；
-         * 恢复播放时再从 0 重新起算（`if (baseSteadyMs == 0) baseSteadyMs = now;`）。
-         * 全程只用这两个既有字段，不加成员、不加计时器、不读播放状态以外的任何东西。
-         * 效果：暂停态 seek（PFR）表现为"位置 == 目标且冻住"，直到恢复播放才继续前进。
+         * 坏值（未初始化 / 环绕 / 负值）不许上报：退回 mCurrentPos（帧驱动的管道位置）。
+         * 与 getAudioPlayTimeStamp() 里"哨兵值不当基准"同一条口径（纯值判据）。
          */
-        const bool clockPaused = mMasterClock.isPaused();
-        int64_t baseSteadyMs = mDiscontinuity.clockBaseSteadyMs.load();
-        int64_t byClock = clockBaseUs;
-
-        if (clockPaused) {
-            if (baseSteadyMs > 0) {
-                /* 刚发现暂停：把已走过的一段折算进基准，然后冻结。 */
-                byClock = clockBaseUs + (af_getsteady_ms() - baseSteadyMs) * 1000;
-                mDiscontinuity.clockBaseUs = byClock;
-                mDiscontinuity.clockBaseSteadyMs = 0;
-            }
-            /* baseSteadyMs == 0 ⇒ 已经冻住，byClock 就是基准值本身，不动。 */
-        } else {
-            if (baseSteadyMs == 0) {
-                /* 从暂停恢复（或基准刚建立）：以"现在"为新起点继续前进。 */
-                baseSteadyMs = af_getsteady_ms();
-                mDiscontinuity.clockBaseSteadyMs = baseSteadyMs;
-            }
-
-            byClock = clockBaseUs + (af_getsteady_ms() - baseSteadyMs) * 1000;
+        if (contentUs < 0 || af_clock_value_is_unset(contentUs)) {
+            contentUs = mCurrentPos.load();
         }
 
-        if (byClock < mCurrentPos.load()) {
-            /*
-             * 管道已经走到时钟估算值之前 ⇒ 把基准回收过来（保持单调、与主时钟恢复同基准）。
-             * 暂停时保持冻结（steadyMs 仍为 0），否则以"现在"为新起点。
-             */
-            mDiscontinuity.clockBaseUs = mCurrentPos.load();
-            mDiscontinuity.clockBaseSteadyMs = clockPaused ? 0 : af_getsteady_ms();
-            byClock = mCurrentPos.load();
+        if (mDuration > 0 && contentUs > mDuration) {
+            contentUs = mDuration;
         }
 
-        if (mDuration > 0 && byClock > mDuration) {
-            byClock = mDuration;
-        }
-
-        return byClock;
+        return contentUs;
     }
 
     return mCurrentPos;
@@ -1404,10 +1378,10 @@ int64_t SuperMediaPlayer::GetBufferPosition()
      * 先拿到旧的小值（缩），等 seek 结束、真实缓冲时长能测出来以后再跳出去（弹）。
      *
      * 这里给上报值加一条**纯状态**下限：缓冲条末端不可能早于播放头。
-     * seek 期间 getCurrentPosition() 返回的就是 seek 目标（地板钉住的），
-     * 所以这条下限正好等价于"seek 窗口内缓冲位置以目标为下限"。
-     * getCurrentPosition() 自己带地板过期自愈（循环播放/重开源的场景），
-     * 所以这里不会用一个已经过期的目标点把缓冲条顶到旧位置上去。
+     * seek 期间 getCurrentPosition() 返回的就是 seek 目标（不连续点把内容时间轴钉在
+     * seekPos / targetUs），所以这条下限正好等价于"seek 窗口内缓冲位置以目标为下限"。
+     * getCurrentPosition() 在非 seek 窗口读的就是同一根内容时间轴（帧驱动的管道位置只在
+     * 从未 seek 过时使用），所以这里不会用一个已经过期的目标点把缓冲条顶到旧位置上去。
      * 无计时器、不新增成员、不在 seek 之外改变任何取值（非 seek 时
      * mBufferPosition 恒不小于当前位置，这一条是空操作）。
      */
@@ -3831,7 +3805,8 @@ void SuperMediaPlayer::doRender()
          *     主时钟钉在目标点（各自唯一的写点）。
          *
          * 于是"时间轴权威"只剩一个，"谁先锚、锚没锚过、锚得够不够近"这一整组闩、
-         * 容差与拒绝分支同时失去存在理由。位置上报不受影响：它由 clockBase* 给出。
+         * 容差与拒绝分支同时失去存在理由。位置上报不受影响：它与渲染节拍读的是同一根
+         * 内容时间轴（mMasterClock.GetTime()，见 getCurrentPosition()）。
          */
 
         //may audio already played over
@@ -10498,10 +10473,11 @@ void SuperMediaPlayer::Reset()
     mInited = false;
     mSeekNeedCatch = false;
     /*
-     * 【P0/P1-b】Reset（换片源 / 停止 / Prepare 的公共出口）本身也是一次不连续：
+     * 【P0/P1-b/P2.1】Reset（换片源 / 停止 / Prepare 的公共出口）本身也是一次不连续：
      * 推进代际、清空目标/落点，并把落点过滤**关闭**（targetUs == INT64_MIN ⇒ 不激活），
-     * 于是所有还在飞的旧代际事件（包、帧、待处理请求）都会因代际不符而作废，
-     * 位置基准也一起作废 —— 这正是"跨片源残留"在架构上被消灭的地方。
+     * 于是所有还在飞的旧代际事件（包、帧、待处理请求）都会因代际不符而作废 ——
+     * 这正是"跨片源残留"在架构上被消灭的地方。位置上报也随之回到"从未 seek 过"的
+     * 普通路径（getCurrentPosition() 在 targetUs == INT64_MIN 时逐字走 mCurrentPos）。
      * 旧实现这里要手工清 6 个闩（位置地板/归属/闸门/落点采纳/先出画/预算），现在一处就够。
      */
     beginDiscontinuity(INT64_MIN);
@@ -10522,11 +10498,10 @@ void SuperMediaPlayer::Reset()
     mPendingVideoStallChecks = 0;
     /*
      * 落点闸门/落点采纳/先出画那三个闩已随 P1-b 删除：它们的职责全部由
-     * beginDiscontinuity(INT64_MIN) 一次覆盖（落点过滤不激活、位置基准与落点诊断一起复位）。
-     * 【P2】锚点闩群（mSeekAnchorPending / mSeekClockAnchored / mSeekVideoAnchorDone）、
-     * 音频地板与连续性高水位（mSeekAudioFloorUs / mSeekAudioContinuityUs /
-     * mSeekAudioStaleDrops）、音频重定位事件（mSeekAudioReposition*）与音频时钟的
-     * "重锚/设备前进观察"状态（mAudioClockReanchorPending / mAudioClockProgress*）
+     * beginDiscontinuity(INT64_MIN) 一次覆盖（落点过滤不激活、落点诊断一起复位，
+     * 位置上报则在 targetUs 为空时走普通路径 —— 见 getCurrentPosition()）。
+     * 【P2】锚点闩群（"seek 后第一帧上屏"的事件闩 / "只锚一次"的闩 / 音频锚点判据）、
+     * 音频地板与连续性高水位、音频重定位事件、以及音频时钟的"重锚 / 设备前进观察"状态
      * 也一并删除：音频时钟基准现在只有一个载体（Discontinuity::audioBase*），
      * 而 beginDiscontinuity(INT64_MIN) 已经把它作废（targetUs == INT64_MIN ⇒
      * FlushAudioPath 不会再把基准钉到任何目标点上）。
@@ -10733,10 +10708,11 @@ void SuperMediaPlayer::ResetSeekStatus()
      *   · acceptDiscontinuityLandingFrame()（包含目标 / 越过目标 / EOF 兜底）；
      *   · beginDiscontinuity()（下一次 SeekTo / Reset / Prepare）。
      * ResetSeekStatus() 只做它本来该做的事：结束 seek 本身（mSeekPos / mSeekNeedCatch /
-     * 重建上屏节拍基准）。**不再触碰任何落点状态** —— 落点过滤、位置基准与代际都留着。
+     * 重建上屏节拍基准）。**不再触碰任何落点状态** —— 落点过滤、内容时间轴与代际都留着。
      *
-     * 位置上报不受影响：落点帧上屏时基准已经钉在 targetUs，getCurrentPosition() 由
-     * "targetUs + 单调时钟增量"给出，数学单调；这一窗口里它不会因为 seek 结束而改变。
+     * 位置上报不受影响：落点帧上屏时 acceptDiscontinuityLandingFrame() 已经把内容时间轴
+     * （mMasterClock，也就是 getCurrentPosition() 唯一读的那根轴）钉在 targetUs；
+     * 这一窗口里它不会因为 seek 结束而改变。
      */
 
     /*
@@ -10789,7 +10765,7 @@ void SuperMediaPlayer::ResetSeekStatus()
 /*
  * ============ 【P2 删除：seek 期间主时钟锚点规则的唯一实现】============
  *
- * 这里原来有一个 `fetchSeekClockAnchorUs(frameUs, why)`：它按"目标点优先 /
+ * 这里原来有一个"seek 期间主时钟锚点"的判据函数：它按"目标点优先 /
  * 不早于目标的落点帧"给出**一次 seek 只允许锚一次**的锚点值，供"视频第一帧上屏"与
  * "音频落点首帧上设备"两处调用。随 P2 的音频基准重设整体删除：
  *
@@ -11091,19 +11067,16 @@ void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
     mDiscontinuity.startUs = INT64_MIN;
 
     /*
-     * 【P1-a/P1-c】同时把"落点过滤"与"位置上报基准"一起复位：
-     *   · acceptedFramePos —— 上一次采纳的落点帧位置，只服务诊断；
-     *   · clockBase*       —— 上一次的位置基准作废。基准**不在这里钉**，
-     *     而是等"包含目标的那一帧"上屏时由 acceptDiscontinuityLandingFrame() 钉在
-     *     targetUs 上（用户要的语义是"位置等于目标、之后单调前进"）。
+     * 【P1-a/P1-c/P2.1】复位落点诊断：acceptedFramePos —— 上一次采纳的落点帧位置，
+     * 只服务诊断。位置上报与渲染节拍现在**共用同一根内容时间轴**（mMasterClock.GetTime()），
+     * 它的钉住点由 ProcessSeekToMsg()（seekPos）与 acceptDiscontinuityLandingFrame()
+     * （targetUs）负责，所以这里没有任何"位置基准"要复位（clockBase* 已随 P2.1 删除）。
      *
      * filterActive 只在**真的有目标点**（= 一次 seek / 换档）时激活；
      * Reset / Prepare 传 INT64_MIN，此时没有任何落点要过滤，保持不激活 ——
      * 于是"没有在途不连续点"的正常播放路径上，过滤判据一行都不参与。
      */
     mDiscontinuity.acceptedFramePos = INT64_MIN;
-    mDiscontinuity.clockBaseUs = INT64_MIN;
-    mDiscontinuity.clockBaseSteadyMs = 0;
     /*
      * 【P2】音频时钟基准（Discontinuity::audioBase*）**故意不在这里作废**。
      *
@@ -11199,7 +11172,7 @@ bool SuperMediaPlayer::shouldDropForDiscontinuity(int64_t framePos, int64_t fram
     /*
      * 包含目标（framePos <= targetUs 且还未越过帧尾），或者已经越过目标
      * （framePos > targetUs：目标落在本段之前，没有更早的帧可选）⇒ 本帧就是落点。
-     * 收尾动作（记落点、钉位置基准与主时钟、结束过滤）统一在
+     * 收尾动作（记落点、把内容时间轴钉在目标点、结束过滤）统一在
      * acceptDiscontinuityLandingFrame() 里，EOF 那条结构性终止走的是同一个出口。
      */
     acceptDiscontinuityLandingFrame(framePos, generation, "the frame contains or passes the target");
@@ -11219,15 +11192,19 @@ void SuperMediaPlayer::acceptDiscontinuityLandingFrame(int64_t framePos, int gen
             (framePos == INT64_MIN || targetUs == INT64_MIN) ? 0 : (framePos - targetUs);
 
     mDiscontinuity.acceptedFramePos = framePos;
-    mDiscontinuity.clockBaseUs = targetUs;
-    mDiscontinuity.clockBaseSteadyMs = af_getsteady_ms();
     /* 这就是"结束本次过滤"的唯一写点（另一个出口是 beginDiscontinuity）。 */
     mDiscontinuity.filterActive = false;
 
     /*
-     * 位置与主时钟必须**同一个基准**：上报位置由 clockBase* 算，渲染节拍由 mMasterClock 算，
-     * 两者不同源就会出现"进度条和画面对不上"。seek 一发起 ProcessSeekToMsg() 已经把主时钟
-     * 钉在 seekPos，所以这一步在正常路径上幂等；它只在"别的路径把时钟挪走过"时起作用。
+     * 【P2.1】把**内容时间轴**（唯一的那一根）钉在 targetUs。
+     *
+     * 位置上报（getCurrentPosition()）与渲染节拍（RenderVideo 的迟到判定）读的都是
+     * mMasterClock.GetTime()，所以这一步同时满足两件事："seek 后位置 == 目标"与
+     * "进度条与画面同一个基准"。有音频时它随后由音频参考（目标点 + 设备已消费量）接管并
+     * 随设备消费前进；无音频时它就是那个暂停感知的自走时钟。
+     *
+     * seek 一发起 ProcessSeekToMsg() 已经把主时钟钉在 seekPos，所以这一步在正常路径上
+     * 幂等；它只在"别的路径把时钟挪走过"时起作用。
      */
     if (targetUs != INT64_MIN) {
         mMasterClock.setTime(targetUs);

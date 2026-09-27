@@ -611,9 +611,9 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     /*
      * 【③ B20：切档在途时**不执行**这次 seek，推迟到切档终态再重放】
      *
-     * 为什么必须在最前面拦：本函数后面会（a）把主时钟钉到目标、（b）重设位置地板/渲染闸门、
-     * （c）在 :699 那一带用 `FlushVideoPath(true, true, __func__)` 把在途切档拆掉
-     * —— 一旦走到那里，切档就已经被判 CANCELED 了，之后再"补"也来不及。
+     * 为什么必须在最前面拦：本函数后面会（a）把内容时间轴（mMasterClock）钉到目标、
+     * （b）开启新的不连续点（落点过滤 + 代际）、（c）用 `FlushVideoPath(true, true, __func__)`
+     * 把在途切档拆掉 —— 一旦走到那里，切档就已经被判 CANCELED 了，之后再"补"也来不及。
      *
      * 为什么两套 seek 会互相覆盖（本条的动机）：切档自己的定位是 demuxer 级 seek，目标是
      * "当前播放位置"；用户 seek 也重定位同一条读链路，谁后执行谁生效。日志实证：
@@ -710,7 +710,8 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      *   · targetUs = seekPos ⇒ 唯一的"用户目标点"载体（落点过滤与位置上报共用）；
      *   · filterActive = true ⇒ 落点过滤开始生效（只由"包含目标的帧上屏"或
      *     下一次 seek/Reset 结束，SeekEnd 关不掉它）；
-     *   · clockBase* 复位 ⇒ 位置基准等落点帧上屏时钉在 targetUs。
+     *   · 内容时间轴（mMasterClock）在下面 setTime(seekPos) 钉在目标点 ⇒ 位置上报与渲染
+     *     节拍共用同一根轴，等落点帧上屏时再被 acceptDiscontinuityLandingFrame() 钉一次。
      *
      * 与 SeekTo() 里那次调用是同一语义的重复保险（SeekTo 走的消息最终也到这里），
      * 值完全一致；代际多推一格没有副作用（它只是归属判据）。
@@ -768,7 +769,7 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
     mPlayer.mVideoPtsRevert = false;
     mPlayer.mAudioPtsRevert = false;
     /*
-     * 【P2】这里原来置"锚点事件闩"（mSeekAnchorPending，供 doRender 在 seek 后第一帧
+     * 【P2】这里原来置一个"seek 之后第一帧上屏"的锚点事件闩（供 doRender 在 seek 后第一帧
      * 上屏时把主时钟锚到那一帧）。锚点闩群已随 P2 的音频基准重设整体删除：
      *   · 有音频时主时钟的参考是"目标点 + 设备已消费量"（Discontinuity::audioBase*），
      *     它在不连续点上就等于目标点并只随设备消费单调前进；
@@ -902,7 +903,8 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 【本轮 B15：进度条与缓冲条在"seek 受理"这一刻就到位】
      *
      * 位置：seek 目标点**就是**用户要求的播放位置，报它即"到位"，不必等管道走过去。
-     * 之后每一次位置上报都由 getCurrentPosition() 从不连续点的目标点基准给出，
+     * 之后每一次位置上报都由 getCurrentPosition() 从**同一根内容时间轴**给出
+     * （P2.1：那根轴就是 mMasterClock，seek 时已被钉在目标点，之后由设备已消费量推进），
      * 所以这一跳只可能向前，不会被落点帧（目标之前的那个关键帧）的旧位置再拽回去。
      * 这是纯状态语义：目标点来自本次 seek 的入参，不依赖任何计时器/预测。
      *

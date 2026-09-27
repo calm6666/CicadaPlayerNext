@@ -211,6 +211,12 @@ L1 核心（mediaPlayer/、framework/）不引入平台宏；零编译错误、�
 **任何读侧先 `generation.load()`**（seq_cst ⇒ acquire）建立与写入侧的配对，再读它们；
 `shouldDropForDiscontinuity()` 就是按这个顺序写的。
 
+> **【P2.1 已改】** 上面这两个"墙钟基准"字段（以及这一节对它们的说明）已被 P2.1 删除：
+> 位置上报不再自己造一根轴，而是直接读**唯一那根内容时间轴** `mMasterClock.GetTime()`
+> （有音频 = 目标点 + 设备已消费量；无音频 = 暂停感知的自走时钟），细节见 §9.3 与 §11。
+> 本节保留为 P1-a 的历史记录；`filterActive` / `acceptedFramePos` 仍然有效
+> （`firstFrameShown` 已在 P1-c 删除）。
+
 ### 8.2 要删的 6 个成员（`SuperMediaPlayer.h`）
 
 > **行号已按 P1-a 之后校正**：P1-a 把 `Discontinuity` 结构体从 5 行扩到 34 行，
@@ -335,9 +341,9 @@ P1-b 不需要再动它。P1-b 仍要做的两件事：删掉 `mSeekDecodeStartI
 
 | 文件:行 | 改动 |
 |---|---|
-| `SuperMediaPlayer.h:111-139` | `Discontinuity` 结构体扩 5 个字段：`filterActive` / `firstFrameShown` / `clockBaseUs` / `clockBaseSteadyMs` / `acceptedFramePos`（全 atomic，语义与并发理由写在结构体内注释里） |
+| `SuperMediaPlayer.h:111-139` | `Discontinuity` 结构体扩 5 个字段：`filterActive` / `firstFrameShown` / `clockBaseUs` / `clockBaseSteadyMs` / `acceptedFramePos`（全 atomic，语义与并发理由写在结构体内注释里）**——其中 `firstFrameShown` 已在 P1-c 删除，后两个"墙钟"字段已在 P2.1 删除（见 §11）** |
 | `SuperMediaPlayer.h:1785-1815` | 新增方法声明 `bool shouldDropForDiscontinuity(int64_t framePos, int64_t frameDur);`（追加在方法列表末尾） |
-| `SuperMediaPlayer.cpp:11781-11809` | `beginDiscontinuity()`：新增"复位 acceptedFramePos / firstFrameShown / clockBase*，并 `filterActive = (targetUs != INT64_MIN)`" |
+| `SuperMediaPlayer.cpp:11781-11809` | `beginDiscontinuity()`：新增"复位 acceptedFramePos / firstFrameShown / clockBase*，并 `filterActive = (targetUs != INT64_MIN)`"（**`firstFrameShown` 与 `clockBase*` 的复位已分别随 P1-c / P2.1 删除**） |
 | `SuperMediaPlayer.cpp:11823-11910` | 新增 `shouldDropForDiscontinuity()` 定义（含两条 `seek landing frame accepted …` 日志） |
 | `docs/SINGLE-DECODER-REFACTOR.md` | §8.1/§8.2/§8.3 按实际实现校正 + 本节 |
 
@@ -455,31 +461,47 @@ L1 核心不引平台宏、新数据成员追加类末尾、新虚函数追加 v
 ABR 接口、JNI/Java 签名、音频 keep-alive 写静音保活、`mSeekExactLanding`、`mActiveVideoPtsOffset`（B3）、
 `logAudioSilence`/`mAudioSilenceReason`（设备侧 reason=2/3/4 仍在使用）、`SEEK_AUDIO_*` 之外的宏。
 
-### 9.3 只有一根内容时间轴（两个来源、三个对齐点）
+### 9.3 只有一根内容时间轴（P2.1 起：位置上报**读的就是**它）
 
 **写死这条不变量**：本内核只有**一根**内容时间轴 —— 单位微秒，轴就是 `targetUs` 所在的
-`timePosition` 轴。产生"内容时间"的地方只有两处，它们必须**同源同轴**：
+`timePosition` 轴；它的**唯一取值口**是 `mMasterClock.GetTime()`
+（`SystemReferClock::GetTime()`）。P2 时位置上报还在用它自己的一根墙钟轴（上表 #1），
+P2.1 已把两者合并 —— 现在**没有第二个产生"内容时间"的地方**：
 
-| # | 来源 | 形态 | 基准从哪来 |
+| # | 消费者 | 形态 | 内容时间从哪来 |
 |---|---|---|---|
-| 1 | P1 位置上报（`getCurrentPosition()`） | `clockBaseUs + (now - clockBaseSteadyMs)`，只在 `clockBaseUs != INT64_MIN` 时生效；暂停时冻结（`clockBaseSteadyMs == 0` 是冻结哨兵） | `acceptDiscontinuityLandingFrame()` 把它钉在 **targetUs** |
-| 2 | P2 音频参考时钟（`getAudioPlayTimeStamp()`） | `audioBaseUs + (设备已消费 - audioBaseConsumedUs)` | `FlushAudioPath()` 在 seek 的 flush 之后把它钉在 **targetUs** |
+| 1 | 位置上报（`getCurrentPosition()`） | `mMasterClock.GetTime()`（`targetUs != INT64_MIN` 时；否则逐字用 `mCurrentPos`） | 见下表的"谁写" |
+| 2 | 渲染节拍 / 音频参考 | `mMasterClock.GetTime()`（同一个口） | 同上 |
+| 3 | 音频参考本身（`getAudioPlayTimeStamp()`） | `audioBaseUs + (设备已消费 - audioBaseConsumedUs)` | `FlushAudioPath()` 在 seek 的 flush 之后把它钉在 **targetUs** |
 
-两者**都以 `mDiscontinuity.targetUs` 为基准**，都读 `mDiscontinuity`（同一处发布的原子字段），
-所以"进度条位置"与"渲染节拍时钟"不可能各说各话。旧的第三条基准（位置地板 / 音频地板 /
-锚点值）已经全部删除，**不允许**再出现。
+**这根轴谁写（全部是 pin，不产生第二条轴）**：
 
-**三个对齐点**（必须同时成立，否则会回弹或漂移）：
+| 写点 | 值 | 位置 |
+|---|---|---|
+| `ProcessSeekToMsg()` | `seekPos`（钳位后的目标点） | `SMPMessageControllerListener.cpp:690`、`:1066` |
+| `acceptDiscontinuityLandingFrame()` | `targetUs`（落点被采纳时再钉一次，幂等） | `SuperMediaPlayer.cpp:11210` |
+| `SystemReferClock` 的 reSync | 音频参考（`getAudioPlayTimeStamp()`），**只有偏差 > 100ms 才采纳** | `system_refer_clock.cpp:44-45` |
+| 纯视频片源首帧 / 无有效参考时 | 该帧 pts（既有 guard：`!mSeekFlag && !mPausedSwitchRenderPending`） | `SuperMediaPlayer.cpp:7522`、`:7926` |
 
-* **(a) 轴与单位**：两处都是微秒、都走 `timePosition` 轴；音频的"已消费量"由
-  `getAudioRenderPosition()` 按采样率折算成微秒返回，本身就是媒体时间而不是墙钟时间。
-* **(b) 退回路径仍然暂停感知**：`getAudioPlayTimeStamp()` 返回 `INT64_MIN`（音频时钟暂不可用）
-  时，主时钟回到自走 —— 而 `SystemReferClock::GetTime()` **只在 `!mClock.isPaused()` 时才取
-  参考时钟**（`mediaPlayer/system_refer_clock.cpp:16`）。所以"暂停时位置绝不动"由 P1 的冻结哨兵
-  与这条共同保证，本阶段没有在退回路径上重新引入 P1-c 那类"暂停时位置被改写"的问题。
-* **(c) 快照与 flush 配对**：`FlushAudioPath()` 的基准快照必须在 **`flushDevice()` 之后**取
-  （顺序反了快照就是旧的大值，`delta` 立刻为负）；非 seek 的 flush（切档 / stop / 后台）
-  必须保持**内容位置连续**（旧基准 + 本次消费增量外推），**不要**把它也钉到某个目标点上。
+**单位是微秒，代码证据**（P2.1 核对）：
+`SystemReferClock::GetTime()` = `af_scalable_clock::get()`
+= `mSetTime + af_clock::get() * scale`（`framework/utils/af_clock.cpp:133-136`），
+而 `af_clock::get()` 的两个来源都是微秒 —— `af_gettime_relative()` 是 `steady_clock` 的
+**微秒**值（`framework/utils/timer.cpp:25-28`），暂停时返回冻结的 `mPauseUs`
+（`af_clock.cpp:60-75`）。`mSetTime` 由 `setTime()` 写入，写入的就是 `seekPos` / `targetUs`
+（微秒，与 `timePosition` 同轴）。
+
+**暂停 / 缓冲停顿行为**（P2.1 的核心收益）：这根轴不吃墙钟 ——
+· **暂停**：`startRendering(false)` → `mMasterClock.pause()` → `af_clock::get()` 返回冻结值；
+  即使音频参考可用，`SystemReferClock::GetTime()` 也只在 `!mClock.isPaused()` 时才去取它
+  （`system_refer_clock.cpp:16`）⇒ 位置恒定。
+· **缓冲停顿**（时钟被 pause、设备没有消费）：有音频时内容时间由设备已消费量驱动 ⇒ 不前进；
+  时钟被 pause 时同理。⇒ `NotifyPosition` **不再跑到画面/声音前面**（这正是 P2.1 要修的
+  用户可见问题：seek 或切档后一次缓冲停顿，旧实现的墙钟照走，而"回收"只处理墙钟落后）。
+· **恢复播放**：时钟 `start()` 后按 1×（或 `scale`）继续前进，位置随之继续前进。
+· **坏值**：`GetTime()` 返回负值/哨兵（`af_clock_value_is_unset`）时退回 `mCurrentPos`。
+
+**旧的第三条基准（位置地板 / 音频地板 / 锚点值）与两个墙钟字段已全部删除，不允许再出现。**
 
 **音频基准的失效点只有两处**，且都对应"音频路真的被重建"：
 
@@ -491,6 +513,14 @@ ABR 接口、JNI/Java 签名、音频 keep-alive 写静音保活、`mSeekExactLa
 不 flush、时间轴连续）。若把切档也算成"音频基准失效"，音频参考时钟就会在每次切档后
 **永久不可用**（一直返回 `INT64_MIN`），主时钟退回自走、音画基准漂移 —— 所以
 `beginDiscontinuity()` 刻意**不碰** `audioBase*`。
+
+**音频侧的两个对齐点**（必须同时成立，否则会回弹或漂移）：
+
+* **(a) 轴与单位**：音频的"已消费量"由 `getAudioRenderPosition()` 按采样率折算成微秒返回
+  （媒体时间，不是墙钟时间），加上同样微秒的基准 ⇒ 与 `targetUs` 同一根轴。
+* **(b) 快照与 flush 配对**：`FlushAudioPath()` 的基准快照必须在 **`flushDevice()` 之后**取
+  （顺序反了快照就是旧的大值，`delta` 立刻为负）；非 seek 的 flush（切档 / stop / 后台）
+  必须保持**内容位置连续**（旧基准 + 本次消费增量外推），**不要**把它也钉到某个目标点上。
 
 ### 9.4 `delta < 0` 的结构性自愈（最终代码）
 
@@ -528,7 +558,18 @@ ABR 接口、JNI/Java 签名、音频 keep-alive 写静音保活、`mSeekExactLa
 * 新增可对账日志（按**代际**限频，一个 seek 至多一条）：
   `audio landing drop: dropped=… pos=… target=… generation=…`
   —— 用来区分"音频被正确地丢到目标点"与"音频根本没来"；
-* 位置不回弹（P1 的 `clockBase*` 未被本阶段改动；音频基准与它同源同轴）。
+* 位置不回弹（P2.1 起位置上报与渲染节拍读的是同一根内容时间轴；音频基准与它同轴同基准）。
+
+### 9.6 P2.1 验收标记（位置上报与音频时钟合并成同一来源）
+
+* seek 之后（以及每次切档之后）**若发生缓冲停顿**，`NotifyPosition` **不得**继续前进
+  （与画面/声音一致）；缓冲出口恢复后继续前进 —— 这是旧墙钟模型做不到、P2.1 要修的那一条。
+* 暂停时位置恒定（沿用 P1-c 已确立的性质）。
+* 位置单调不回退（除用户主动 seek 造成的跳变）。
+* seek 后位置 == 目标点（`ProcessSeekToMsg()` 钉 `seekPos` + 落点采纳再钉 `targetUs`）。
+* `getCurrentPosition()` 与渲染节拍**不存在第二根轴**：代码里不再有"基准 + 墙钟增量"的位置
+  计算（§5 之外的自查 grep：`grep clockBase` 在 `mediaPlayer/framework/platform` 的
+  `*.h/*.cpp/*.mm` 里为 0）。
 
 ---
 
@@ -621,5 +662,88 @@ ABR 接口、JNI/Java 签名、音频 keep-alive 写静音保活、`mSeekExactLa
   成员、并新增了 `mAudioLandingDropLoggedGen` 与 `Discontinuity` 的两个字段
   ⇒ 其后成员的偏移全部改变。请删掉 `platform/QtPlayer/build` 下各 `media_player.dir`
   的 `.obj`（或整个 build 目录）后再构建，否则会按旧偏移访问。
+
+> **上面 §10.5 里的残留计数 ≈874 已被父代理用 §5 命令实测修正为 992（P1-c 后 1124 → 992）。**
+> 我的等价 grep 少了一批 `mQualitySwitch*` / `mSwitch*` / `b2*` 等模式，**以后一律以 §5 命令为准，
+> 不用简化 pattern 估数**。以下 P2.1 的改动只删除两个字段与一段墙钟逻辑（不含 §5 模式），
+> 所以 P2.1 之后的 §5 计数应与 992 基本持平（少 0~1 条）。
+
+---
+
+## 十一、P2.1 完成记录（位置上报与音频时钟合并成同一来源）
+
+### 11.1 为什么必须合并（用户可见的故障）
+
+P1-b 的位置上报是"不连续点基准 + **墙钟**增量"，P2 的音频参考时钟是"目标点 + **设备已消费量**"
+—— 两个机制、两根轴。后果：seek（或每次切档）之后只要发生一次缓冲停顿，墙钟照走而设备没有
+消费 ⇒ **进度条跑到画面与声音前面**；当时的"回收"分支只处理 `byClock < mCurrentPos`（墙钟落后），
+对"墙钟超前"无能为力。暂停冻结那套（冻结哨兵 + 恢复重锚 + 回收）本质是在墙钟模型上补洞。
+
+### 11.2 做法（删机制，不是加机制）
+
+`getCurrentPosition()` 改成从**唯一那根内容时间**读出：
+
+```cpp
+    if (isSeeking()) return mSeekPos;                 /* 保留：seek 在途返回钳位后的目标 */
+    归一化 mCurrentPos（0..duration）                  /* 保留 */
+    if (mDiscontinuity.targetUs != INT64_MIN) {       /* 曾经建立过不连续点 */
+        int64_t contentUs = mMasterClock.GetTime();   /* 唯一内容时间：微秒 */
+        if (contentUs < 0 || af_clock_value_is_unset(contentUs)) contentUs = mCurrentPos.load();
+        if (mDuration > 0 && contentUs > mDuration) contentUs = mDuration;
+        return contentUs;
+    }
+    return mCurrentPos;                               /* 从未 seek 过：逐字不变 */
+```
+
+### 11.3 删除的符号（`grep clockBaseUs|clockBaseSteadyMs` 在 `mediaPlayer/framework/platform`
+的 `*.h/*.cpp/*.mm` 里 = **0**，连注释也不再有这两个名字）
+
+`Discontinuity::clockBaseUs`、`Discontinuity::clockBaseSteadyMs`
+（以及 `getCurrentPosition()` 里那整段"墙钟 + 暂停冻结 + 回收"代码、
+`acceptDiscontinuityLandingFrame()` 与 `beginDiscontinuity()` 里对它们的写入）。
+
+### 11.4 唯一内容时间轴：谁写 / 谁读 / 单位 / 暂停与停顿
+
+| 项 | 内容 |
+|---|---|
+| **载体** | `mMasterClock`（`SystemReferClock` → `af_scalable_clock`），唯一取值口 `mMasterClock.GetTime()` |
+| **写** | ① `ProcessSeekToMsg()` → `setTime(seekPos)`（`SMPMessageControllerListener.cpp:690`、`:1066`）；② `acceptDiscontinuityLandingFrame()` → `setTime(targetUs)`（`SuperMediaPlayer.cpp:11210`，幂等）；③ `SystemReferClock` reSync 到音频参考（仅偏差 > 100ms，`system_refer_clock.cpp:44-45`）；④ 纯视频/无有效参考时首帧 pts（`SuperMediaPlayer.cpp:7522`、`:7926`，既有 guard `!mSeekFlag && !mPausedSwitchRenderPending`） |
+| **读** | ① `getCurrentPosition()`（位置上报，`SuperMediaPlayer.cpp:1206`）；② `RenderVideo` 的迟到判定等渲染节拍路径；③ 音频参考本身由 `getAudioPlayTimeStamp()` 给出（`audioBaseUs + 设备已消费 - 快照`） |
+| **单位** | **微秒**；轴 = `targetUs` 所在的 `timePosition` 轴。证据：`af_scalable_clock::get() = mSetTime + af_clock::get()*scale`（`framework/utils/af_clock.cpp:133-136`），`af_clock::get()` 用 `af_gettime_relative()`（`framework/utils/timer.cpp:25-28`，steady_clock **微秒**），暂停时返回冻结的 `mPauseUs`（`af_clock.cpp:60-75`） |
+| **暂停** | `startRendering(false)` → `mMasterClock.pause()` ⇒ `get()` 返回冻结值；且 `SystemReferClock::GetTime()` 只在 `!mClock.isPaused()` 时才取音频参考（`system_refer_clock.cpp:16`）⇒ 位置恒定 |
+| **缓冲停顿** | 有音频 ⇒ 内容时间由设备已消费量驱动，设备不消费就不前进；时钟被 pause 时同理 ⇒ `NotifyPosition` 不再前进（恢复播放后继续） |
+| **坏值** | `GetTime()` 返回负值/哨兵（`af_clock_value_is_unset`）⇒ 退回 `mCurrentPos`（帧驱动的管道位置） |
+| **从未 seek 过** | `targetUs == INT64_MIN`（Reset / Prepare 之后）⇒ 逐字走旧的 `mCurrentPos` 路径，行为不变 |
+
+### 11.5 实际改动表
+
+| 文件:行 | 改动 |
+|---|---|
+| `SuperMediaPlayer.cpp:1206-1277`（`getCurrentPosition()`） | 整段重写：删墙钟 + 暂停冻结 + 回收分支，改用 `mMasterClock.GetTime()`（含坏值退回与 duration 钳位） |
+| `SuperMediaPlayer.h:111-134`（`Discontinuity`） | 删两个墙钟字段及其说明，留"P2.1 删除"记录；`filterActive` / `acceptedFramePos` 保留 |
+| `SuperMediaPlayer.h:1719-1739`（`acceptDiscontinuityLandingFrame` 声明注释） | 改述为"把内容时间轴钉在 targetUs" |
+| `SuperMediaPlayer.h:1127-1135`（"seek 位置地板"历史说明） | 改述为指向唯一内容时间轴 |
+| `SuperMediaPlayer.cpp:11061-11082`（`beginDiscontinuity()`） | 删两个字段的复位，改述；`audioBase*` 仍**不**在这里作废 |
+| `SuperMediaPlayer.cpp:11188-11211`（`acceptDiscontinuityLandingFrame()`） | 删两个字段的写入，保留 `mMasterClock.setTime(targetUs)` |
+| `SuperMediaPlayer.cpp:750-756`、`:10473-10480`、`:10496-10498`、`:10708-10715`、`:11172-11176` | 位置相关注释全部改述（seek 入口 / Reset / ResetSeekStatus / 落点收尾） |
+| `SMPMessageControllerListener.cpp:707-713` | `beginDiscontinuity` 的职责说明改述（不再是 `clockBase*` 复位） |
+| `docs/SINGLE-DECODER-REFACTOR.md` §9.3 / §9.6 / §11 | 不变量改写成"位置上报读的就是唯一内容时间轴"；新增 P2.1 验收标记与完成记录 |
+
+### 11.6 自检
+
+* `clockBaseUs|clockBaseSteadyMs`：`mediaPlayer/framework/platform` 的 `*.h/*.cpp/*.mm` 命中 **0**
+  （注释也改述完毕）。
+* 顺着这条口径，P2 的"删除说明"注释里仍然**点名**的 6 行也一并改成不点名的描述
+  （`mSeekAudioFloorUs` / `mSeekAudioContinuityUs` / `mSeekAnchorPending` /
+  `mSeekClockAnchored` / `mSeekVideoAnchorDone` / `mAudioClockReanchorPending` —— 这 6 个名字同时
+  也在 §5 的模式表里）。现在**P0/P1/P2/P2.1 删除的全部符号在全仓（含注释）命中 0**：
+  `grep 'mSeekRenderGateUs|…|clockBaseUs|clockBaseSteadyMs|mAudioClockProgress|mSeekAudioStaleDrops'`
+  → No matches。P2.1 之后 §5 计数预计在父代理实测的 992 基础上下调约 6。
+* 未新增/删除任何虚函数，未新增数据成员（P2.1 只删字段）；未引平台宏；未加配置开关；
+  未引入任何超时/看门狗；注释无"星号紧跟斜杠"。
+* `getCurrentPosition()` 的访问顺序沿用 P2 约定：先 `mDiscontinuity.generation.load()`
+  （seq_cst，acquire）与 `beginDiscontinuity()` 的 `fetch_add` 配对，再读非原子的 `targetUs`
+  —— 与 `shouldDropForDiscontinuity()` 完全一致。
+* **构建要求：仍需全量重编**（`Discontinuity` 结构体尺寸再次变化）。
 
 
