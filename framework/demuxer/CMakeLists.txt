@@ -20,6 +20,8 @@ target_sources(demuxer PRIVATE
         DemuxerMeta.h
         IDemuxer.h
         IDemuxer.cpp
+        SeekLandingStage.cpp
+        SeekLandingStage.h
         avFormatDemuxer.cpp
         avFormatDemuxer.h
         AVBSF.cpp

@@ -8,6 +8,7 @@
 #include "AbstractStream.h"
 #include "SegmentTracker.h"
 #include "demuxer/DemuxerMetaInfo.h"
+#include "demuxer/SeekLandingStage.h"
 #include "demuxer/demuxer_service.h"
 #include "demuxer/play_list/segment_decrypt/ISegDecrypter.h"
 #include "demuxer/sample_decrypt/HLSSampleAesDecrypter.h"
@@ -277,35 +278,17 @@ namespace Cicada {
         /*
          * ============ seek 落点延迟线（只对点播视频路生效）============
          *
-         * 与 DashStream 里那一套**同形**：完整说明见 HLSStream::seekLandingFilter 上面的长注释。
+         * 唯一一份实现在 demuxer/SeekLandingStage.h（原来 HLSStream 与 DashStream 各有一份同形
+         * 拷贝，已删除、收敛成那一份）。完整说明 —— 含"精度权威在 renderer 的单一落点过滤，
+         * 这里只是降低解码前推距离的尽力优化、失败只慢不错"这句定性 —— 见那里的类注释。
          * 一句话：HLS 也只能把 seek 定位到"包含目标的那一片"（10 秒一个独立文件），落点因此是
-         * 分片片首；所以在**包**这一层把落点挪到"不晚于目标的最后一个关键帧"——它之前的包整体
+         * 分片片首；延迟线在**包**这一层把落点挪到"不晚于目标的最后一个关键帧"——它之前的包整体
          * 丢掉，之后的包按序交出。精度语义（包含目标、不晚于目标）一个字节不改。
          *
-         * 全部状态迁移由包自带的事件驱动（timePosition 单调 + AF_PKT_FLAG_KEY），没有计时器、
-         * 没有预算。本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
+         * 三个引用是"放行时把包按原序交回 mQueue"需要的（锁与唤醒方式和 read_thread 推包一致）。
+         * 本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
          */
-        int64_t mSeekLandingTargetUs{INT64_MIN};
-        bool mSeekLandingStarted{false};
-        bool mSeekLandingHaveKey{false};
-        bool mSeekLandingProgress{false};
-        std::deque<unique_ptr<IAFPacket>> mSeekLandingStage{};
-        std::vector<uint8_t> mSeekLandingExtraData{};
-        /* 已经丢掉的"落点之前"的包数（只用于日志，证明延迟线真的接管了这次 seek） */
-        int mSeekLandingDropped{0};
-        /* "换更近的落点"这类日志每轮装弹的硬上限（防极端 GOP 刷屏；其余状态各只打一条） */
-        int mSeekLandingLogCount{0};
-
-        void seekLandingArm(int64_t targetUs);
-
-        bool seekLandingFilter(std::unique_ptr<IAFPacket> &packet);
-
-        void seekLandingFlush();
-
-        void seekLandingReset();
-
-        /* 只丢"已收下还没交出"的包，保留 seek 目标（stop/start 会重开同一个分片，目标仍有效） */
-        void seekLandingDropStage();
+        SeekLandingStage mSeekLanding{mQueue, mDataMutex, mWaitCond};
     };
 }
 
