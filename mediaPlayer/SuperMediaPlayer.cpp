@@ -4461,9 +4461,13 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
          *   target = 本次 seek 的目标点（音频时钟基准与位置上报用的都是它）。
          */
         if (mDiscontinuity.targetUs != INT64_MIN || mSeekFlag) {
-            AF_LOGI("audio first frame after seek: pts=%lld target=%lld afterSeekMs=%lld\n",
+            AF_LOGI("audio first frame after seek: pts=%lld target=%lld afterSeekMs=%lld "
+                    "master=%lld audioBase=%lld consumed=%lld\n",
                     (long long) pts, (long long) mDiscontinuity.targetUs,
-                    (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1));
+                    (long long) (mSeekRequestMs > 0 ? af_getsteady_ms() - mSeekRequestMs : -1),
+                    (long long) mMasterClock.GetTime(),
+                    (long long) mDiscontinuity.audioBaseUs.load(),
+                    (long long) (mAVDeviceManager != nullptr ? mAVDeviceManager->getAudioRenderPosition() : INT64_MIN));
         }
 
         /*
@@ -4905,10 +4909,17 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
         int64_t seekFrameDurUs = videoFrame->getInfo().duration;
 
         if (seekFrameDurUs <= 0) {
-            const int seekFps = (mCurrentVideoMeta != nullptr)
-                                ? std::max(1, (int) (mCurrentVideoMeta->operator Stream_meta *()->avg_fps))
-                                : 25;
-            seekFrameDurUs = 1000000 / seekFps;
+            /*
+             * 帧自带时长为空时用**标称帧率**折算。必须用浮点：DASH 的 frameRate 是
+             * "24000/1001"（= 23.976），按整型截断会变成 23 ⇒ 帧长算成 43478us，
+             * 比真实的 41708us 大 4.2%（日志 `seek landing filter: ... dur=43478` 就是这么来的）。
+             * 判据 "framePos + 帧长 <= target ⇒ 还在目标之前" 直接用这个值，帧长偏大就会
+             * 在离帧边界 1.8ms 以内的极端情况下把上一帧当成"包含目标"（落点早一帧）。
+             */
+            const double seekFps = (mCurrentVideoMeta != nullptr)
+                                   ? std::max(1.0, (double) (mCurrentVideoMeta->operator Stream_meta *()->avg_fps))
+                                   : 25.0;
+            seekFrameDurUs = (int64_t) (1000000.0 / seekFps + 0.5);
         }
 
         /*
@@ -5964,14 +5975,38 @@ void SuperMediaPlayer::FlushAudioPath()
     /* 基准重设要用到"flush 之前的内容位置"，必须在下面把它清成 INT64_MIN 之前读。 */
     const int64_t contentPosBeforeFlush = mPlayedAudioPts;
 
+    /*
+     * 【2026-09-27 修：这个"已消费量"必须在 flush **之前**读】
+     *
+     * 设备被 flush 之后 getAudioRenderPosition() 会**从 0 重新起算**（这正是下面
+     * "快照必须在 flush 之后取"的理由）。于是若在 flush 之后才去读它、再拿它减旧快照
+     * 当作"本次消费增量"，得到的必然是 **-(排队中尚未播出的音频时长)**（约一个渲染
+     * 缓冲深度），基准就被往回拖这么多 —— 内容时间会倒退，甚至变成负数。
+     *
+     * 真机证据（2026-09-27 21:55:27 DASH 切档后那一帧）：
+     *   audio first frame after seek: pts=1685333 target=874666 master=930537
+     *                                 audioBase=-21333 consumed=960000
+     *   反推：oldBase(874666) + (consumedAtFlush - oldConsumed) = -21333
+     *        ⇒ consumedAtFlush - oldConsumed = -895999（= 当时还压在设备里没播的音频）
+     *   注意 -21333us 恰好是一个 AAC 帧（1024/48000 s = 21333us）的时长，
+     *   而更早那份日志里的 `master=-21300` 与它同源：都是"位置被拖回一个排队量"。
+     *
+     * 正确配对：**增量用 flush 之前读到的值**（到 flush 那一刻真实播出了多少）；
+     * **新快照仍由 pinAudioClockBase() 在 flush 之后取**（设备的新零点）。
+     * 两者一起才有 位置 = 新基准 + (设备当前位置 - 新零点) 的连续性。
+     */
+    const int64_t consumedBeforeFlushUs = mAVDeviceManager->getAudioRenderPosition();
+
     mAVDeviceManager->flushDevice(SMPAVDeviceManager::DEVICE_TYPE_AUDIO);
 
     /*
      * ============ 【P2：音频时钟基准的唯一主写点】============
      *
      * 设备刚被 flush ⇒ "已消费量"从这一刻重新起算，所以基准必须在这里重钉，否则
-     * "基准 + 已消费量"会瞬间多算一段。**快照必须在 flush 之后取**（顺序反了快照就是
-     * 旧的大值，delta 立刻为负 —— 那正是 getAudioPlayTimeStamp() 里要自愈的坏状态）。
+     * "基准 + 已消费量"会瞬间多算一段。**快照（audioBaseConsumedUs）必须在 flush
+     * 之后取**（顺序反了快照就是旧的大值，delta 立刻为负 —— 那正是
+     * getAudioPlayTimeStamp() 里要自愈的坏状态）；而上面那条"消费增量"必须用
+     * flush **之前**读到的值，两者不是同一个量，不要合并。
      *
      * 三种情形：
      *   · 不连续点（seek）且目标点已知 ⇒ 基准 = **目标点**（音频与视频同一个目标点）；
@@ -5985,12 +6020,11 @@ void SuperMediaPlayer::FlushAudioPath()
     } else {
         const int64_t oldBaseUs = mDiscontinuity.audioBaseUs.load();
         const int64_t oldConsumedUs = mDiscontinuity.audioBaseConsumedUs.load();
-        const int64_t consumedAtFlushUs = mAVDeviceManager->getAudioRenderPosition();
-        const bool consumedAtFlushValid =
-                (consumedAtFlushUs >= 0 && !af_clock_value_is_unset(consumedAtFlushUs));
+        const bool consumedBeforeFlushValid =
+                (consumedBeforeFlushUs >= 0 && !af_clock_value_is_unset(consumedBeforeFlushUs));
 
-        if (oldBaseUs != INT64_MIN && oldConsumedUs != INT64_MIN && consumedAtFlushValid) {
-            pinAudioClockBase(oldBaseUs + (consumedAtFlushUs - oldConsumedUs));
+        if (oldBaseUs != INT64_MIN && oldConsumedUs != INT64_MIN && consumedBeforeFlushValid) {
+            pinAudioClockBase(oldBaseUs + (consumedBeforeFlushUs - oldConsumedUs));
         } else if (contentPosBeforeFlush != INT64_MIN) {
             pinAudioClockBase(contentPosBeforeFlush);
         } else {

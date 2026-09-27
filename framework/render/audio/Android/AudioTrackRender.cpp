@@ -376,6 +376,39 @@ void AudioTrackRender::flush_device_inner(bool clearFrameQueue)
      */
     logSilence(3, "the audio device was flushed, waiting for pcm to refill");
 
+    /*
+     * ============ 保活回合随本次 flush 结束 ============
+     *
+     * 保活上界（AUDIO_KEEP_ALIVE_MAX_WRITES）的语义是"只约束**一轮**连续无数据"，
+     * 那么一轮的结束条件就必须包含"设备被 flush"——此前只写了"真实 PCM 写成功"
+     * 这一个结束条件，于是跨过 flush 的那次 seek 会**继承**上一轮已经用尽的上界。
+     *
+     * 真机日志（Android / DASH VOD 253.6s，EOS 之后用户 seek 回 20.127s）：
+     *   20:14:58.051  audio keep-alive: writing silence                     ← 上一轮从 EOS 开始
+     *   20:15:00.212  audio silence starts (reason=3)（seek 把设备 flush 了）
+     *   20:15:00.410  audio keep-alive: reached the resource cap（计数仍是旧回合的 120）
+     *   20:15:00.936  onAudioException -1003 → baseTimeout/baseStop
+     *   20:15:01.336  restartIfDisabled ... due to previous underrun, restarting
+     *   20:15:01.325  audio first frame after seek ... afterSeekMs=1183
+     * 即：seek 期间设备本来就是空的、最需要保活，而 writeKeepAliveSilence() 因为
+     * mKeepAliveCapped 直接返回 false ⇒ 音轨被框架判 underrun 并停掉，随后才被重启，
+     * 这一停一启就是那 1.18 秒硬静音；同一段时间渲染器要等音频对齐，画面跟着冻住
+     * 约 1 秒（日志同一时刻 KPI total fps:1.0），用户感受就是"seek 之后卡一下"。
+     *
+     * flush 是明确的状态事件：flush 之后设备里一个样本都不剩，接下来必然是
+     * "从零开始等 PCM"的**新回合**。在这里复位 = "上界只在同一回合内累计"，
+     * 既没有放宽上界（一轮仍然是 120 × 20ms），也没有引入任何计时器/墙钟判据。
+     */
+    if (mKeepAliveActive || mKeepAliveSilenceWrites > 0 || mKeepAliveCapped) {
+        AF_LOGW("audio keep-alive: episode ends with the device flush after %d silence write(s)%s — "
+                "the next starvation episode starts from zero (the cap is per episode, not permanent)\n",
+                mKeepAliveSilenceWrites,
+                mKeepAliveCapped ? " (the resource cap had been reached)" : "");
+        mKeepAliveActive = false;
+        mKeepAliveSilenceWrites = 0;
+        mKeepAliveCapped = false;
+    }
+
     mSendSimples = 0;
 
     if (clearFrameQueue) {

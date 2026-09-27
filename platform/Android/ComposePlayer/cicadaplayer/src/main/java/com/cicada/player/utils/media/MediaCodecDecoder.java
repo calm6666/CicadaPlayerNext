@@ -927,6 +927,50 @@ public class MediaCodecDecoder {
                 mOutputIndices.clear();
                 mOutputBufferInfos.clear();
             }
+
+            /*
+             * ============ 【2026-09-27 修：flush 之后必须 start()，否则输入侧永久空转】============
+             *
+             * 平台契约（AOSP MediaCodec.flush() 的原文，见 developer.android.com/reference/
+             * android/media/MediaCodec#flush() ）：
+             *
+             *   "Upon return, all indices previously returned in calls to dequeueInputBuffer
+             *    and dequeueOutputBuffer — or obtained via onInputBufferAvailable or
+             *    onOutputBufferAvailable callbacks — become invalid, and all buffers are
+             *    owned by the codec.
+             *    If the codec is configured in asynchronous mode, call start after flush has
+             *    returned to resume codec operations. **The codec will not request input
+             *    buffers until this has happened.**"
+             *
+             * 也就是说：异步模式下 flush() 之后**不调 start() 就永远不会再有
+             * onInputBufferAvailable**。而上面 mInputIndices.clear() 把输入侧重填的
+             * **唯一**来源也清空了 ⇒ 输入侧永久空转、解码器永远拿不到落点关键帧、
+             * 一帧都不上屏。真机日志（2026-09-27 21:54:27 本地文件 / 21:55:28 DASH，
+             * 两次症状完全相同）：
+             *
+             *   PFR: seek → FlushVideoPath → kWhatFlushCompleted → clearCache ret 0（flush state 1）
+             *   → MediaCodecDecoder: async input path looks dead
+             *       (criterion=no-input-callback-after-flush, waitedMs=1003/1029,
+             *        mInputWaitCount=31/30, noOutputHeld=true)
+             *   → 无解码帧 ⇒ 画面永久卡死（同一窗口 KPI total fps 0.9 / 1.0）
+             *
+             * 三个注意点：
+             *   1) 这里调的是**平台**的 mMediaCodec.start()，**不是**本类的 start() 方法：
+             *      后者会重建 HandlerThread 并再次 setCallback（setCallback 必须在本实例
+             *      start 之前且只注册一次），在 flush 之后调它会破坏异步回调注册。
+             *   2) 只对异步模式调。同步模式按同一份契约会自行恢复（配置了 input surface 的
+             *      自动恢复，其余在 dequeueInputBuffer 时恢复），多调一次可能抛
+             *      "Cannot call start() twice"。
+             *   3) 顺序不能反：必须**先** clear()（旧 index 全部作废）**再** start()，
+             *      否则 start() 之后到达的回调会把新 index 又清掉，等于没修。
+             *   4) 这不是兜底、也没有任何计时器：它补齐的是平台要求的**状态迁移**
+             *      （Executing → Flushed → start() → Executing）。
+             */
+            try {
+                mMediaCodec.start();
+            } catch (Exception e) {
+                Logger.e(TAG, "start after flush fail " + e.getMessage());
+            }
         } else {
             /* 轮询模式没有回调队列，但计数也要清，避免跨 flush 累积。 */
             mInputWaitCount = 0;
