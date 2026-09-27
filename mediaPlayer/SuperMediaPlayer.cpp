@@ -2726,7 +2726,30 @@ bool SuperMediaPlayer::DoCheckBufferPass()
         mLoadingProcess = 0;
         mTimeoutStartTime = INT64_MIN;
         mMasterClock.pause();
-        mAVDeviceManager->pauseAudioRender(true);
+        /*
+         * ============ 【修：seek 引起的缓冲不再暂停音频设备】============
+         *
+         * 真机日志（2026-09-27，每次 seek 都出现）：
+         *   AudioTrack pause() → flush() → baseStart()/start()        ← FlushAudioPath 那一轮
+         *   AudioTrack pause()（本行）→ …缓冲出口… → start()           ← 缓冲态又一轮
+         * 也就是**每次 seek 音频设备被 pause/flush/start 折腾两轮**，紧接着系统侧报
+         *   onAudioException -1003 / -1004 → PlayerBase baseTimeout() → baseStop()
+         * （这份日志里 7 次）。设备被反复停/起 + 期间靠 keep-alive 写静音，正是这些
+         * 系统级 AudioTrack 异常与"声音突然没了"的来源。
+         *
+         * seek 那一轮已经 flush 过设备（旧时间轴的 PCM 已丢弃），设备本身不需要再被暂停：
+         * 让它保持运行、由 AudioTrackRender 的 keep-alive 写静音（它本来就是为"设备别被
+         * 框架判超时停掉"而存在的），PCM 一到立刻继续出声。
+         * 判据是纯状态（mSeekFlag）：只有 seek 引起的缓冲跳过这次暂停，**真正的网络卡顿
+         * （!mSeekFlag）行为逐字不变**。
+         */
+        if (!mSeekFlag) {
+            mAVDeviceManager->pauseAudioRender(true);
+        } else {
+            AF_LOGI("seek buffering: the audio device is deliberately NOT paused (it was already flushed by "
+                    "the seek; pausing it again made the track do pause/flush/start twice per seek and the "
+                    "system then reported onAudioException -1003/-1004)\n");
+        }
         /*
          * 从这一刻起声音是停的（时钟与音频设备都停了，且缓冲态里 doRender 不调 render()）。
          * 记一条静音开始（reason=4=缓冲态）；缓冲出口恢复时记"结束"。
@@ -9618,6 +9641,20 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
      * mPausedSwitchRenderPending 会跨片源残留，让下一次操作误走暂停切档分支。
      */
     resetPausedSwitchState();
+
+    /*
+     * ============ 【修：flush 之后"已经解到关键帧"这个闩必须清掉】============
+     *
+     * 这条闩（mSeekDecodeStartIsKey）的语义是"**当前这块解码器**已经从关键帧起步了"，
+     * 而本函数刚刚 flush 过解码器（清解码器 = 它重新进入"等关键帧"状态）。不清的话：
+     *   · 渲染侧以为可以接受落点帧（脏帧风险）；
+     *   · doRender() 里的"解码器停摆"判据（stall）看到闩为真 ⇒ 认为"有关键帧了却一帧
+     *     不出"= 死锁 ⇒ **每次 seek 都白重建一次解码器**，而重建要重新等下一个关键帧
+     *     （真机日志 2026-09-27：10:27:41.391 / 10:27:50.052 各一次，紧跟着 300+ 行
+     *     `wait a key frame`）。
+     * flush 与"重新等关键帧"本来就是同一件事，所以这里必须一起清。
+     */
+    mSeekDecodeStartIsKey = false;
 
     mPlayedVideoPts = INT64_MIN;
     mCurVideoPts = INT64_MIN;
