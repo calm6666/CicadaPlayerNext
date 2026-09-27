@@ -112,6 +112,36 @@ namespace Cicada {
      *     "no frame!" / "Error while decoding frame -1094995529" 刷屏，一帧都
      *     出不来，窗口就是一片空白（实测就是这样）。所以改成让 FFmpeg 挑一个
      *     软件格式继续解，画面接着播，只是这条流退回软解。
+     *
+     * ============ 【这个回调什么时候被调用，以及"复位会不会误伤"】 ============
+     *
+     * 唯一的调用入口是 FFmpeg 的 ff_get_format()（本仓库自带的 FFmpeg 源码：
+     * external/external/ffmpeg/libavcodec/decode.c:1229），而它**每一次都会调本回调**
+     * （没有"结果缓存、命中就不再回调"这回事）：
+     *
+     *   user_choice = avctx->get_format(avctx, choices);        decode.c:1258
+     *
+     * 而且它是个重试循环：本回调选中的硬解格式如果 hwaccel_init() 失败
+     * （decode.c:1341-1343），它会 goto try_again，**把那个格式从候选列表 choices
+     * 里删掉**再回调一次（decode.c:1348-1357；每轮进循环前还会 ff_hwaccel_uninit()）。
+     * 所以"第二次进来时列表里已经没有 d3d11"只有一个含义：**FFmpeg 已经决定这条流
+     * 不再用 GPU 解**（硬件初始化失败或设备丢失）。这时复位 mHwDecodeInUse 是如实反映
+     * 事实，不是误伤 —— 界面必须跟着变成"软解"。
+     *
+     * 那 initHwDecoder() 里置的那个真值会不会被"打开期间的第一次协商"覆盖掉？不会，
+     * 因为 h264/hevc 都**不在 avcodec_open2() 里**协商像素格式：
+     *   * h264：调用点是 h264_slice.c:921（get_pixel_format()，由
+     *     h264_slice_header_init() 调），也就是第一个 slice 解析的时候；
+     *   * hevc：调用点是 hevcdec.c:712（get_format()，由 picture header 那段
+     *     :3260 调），同样在第一帧的图像头到达时。
+     * avcodec_open2() 里只有 codec->init()（avcodec.c:339-349），它只解析 extradata
+     * 里的参数集，走不到这两个调用点。
+     *
+     * 另一个要写清楚的时序事实：avcodec_is_open() 就是 `!!s->internal`
+     * （avcodec.c:702-705），而 internal 在 avcodec_open2() 的一开头就分配好了
+     * （avcodec.c:194-201，早于 codec->init()）。所以在 avcodec_open2() 内部这个判断
+     * 已经为真 —— 下面"打开之后才降级"这条分支的判据**不是**"在不在 open 里"，而是
+     * "候选列表里真的没有硬解格式了"，这正是我们要的。
      */
     enum AVPixelFormat avcodecDecoder::getHwFormat(AVCodecContext *ctx,
                                                         const enum AVPixelFormat *pixFmts)
@@ -132,6 +162,9 @@ namespace Cicada {
 
                 dec->hwDecodeActive = true;
                 dec->owner->mHwDecodeInUse.store(true);
+                /* 两份状态一起写：界面读的是上面那个，IDecoder::getFlags() 读的是下面这个。 */
+                dec->owner->mFlags |= (int) DECFLAG_HW;
+                dec->flags = DECFLAG_HW;
                 return *p;
             }
         }
@@ -145,13 +178,27 @@ namespace Cicada {
                             "this stream as %s\n", CICADA_HW_NAME,
                             av_get_pix_fmt_name(dec->hwPixFmt), av_get_pix_fmt_name(*p));
                     dec->hwDecodeActive = false;
-                    /* 运行期降级：界面上的"硬解"必须跟着变成"软解"。 */
+                    /*
+                     * 运行期降级：界面上的"硬解"必须跟着变成"软解"。两份状态一起写 ——
+                     * mHwDecodeInUse 是界面读数，IDecoder::mFlags 那个位是解码器重建时
+                     * 用来"继续请求硬解"的（见 init_decoder() 里的说明）。
+                     */
                     dec->owner->mHwDecodeInUse.store(false);
+                    dec->owner->mFlags &= ~(int) DECFLAG_HW;
+                    dec->flags = DECFLAG_SW;
                     return *p;
                 }
             }
         }
 
+        /*
+         * 拒绝协商（返回 NONE）：这一轮硬解没成，调用方会走软解那条路，
+         * 两份对外读数一并复位，别让"上一次打开留下来的真值"骗过 getFlags()。
+         */
+        dec->hwDecodeActive = false;
+        dec->owner->mHwDecodeInUse.store(false);
+        dec->owner->mFlags &= ~(int) DECFLAG_HW;
+        dec->flags = DECFLAG_SW;
         AF_LOGE("%s: decoder did not offer %s, refusing\n",
                 CICADA_HW_NAME, av_get_pix_fmt_name(dec->hwPixFmt));
         return AV_PIX_FMT_NONE;
@@ -221,6 +268,8 @@ namespace Cicada {
         mPDecoder->hwDecodeActive = false;
         /* 解码器已经关掉：对外读数回到"没有硬解在用"（下次 open 会重新判定）。 */
         mHwDecodeInUse.store(false);
+        /* IDecoder::mFlags 那一份同步复位（理由见 init_decoder() 里的说明）。 */
+        mFlags &= ~(int) DECFLAG_HW;
 
         if (mPDecoder->swsCtx != nullptr) {
             sws_freeContext(static_cast<SwsContext *>(mPDecoder->swsCtx));
@@ -314,7 +363,33 @@ namespace Cicada {
         // any failure the decoder is left exactly as a software decoder.
         if (!isAudio && (flags & DECFLAG_HW) && initHwDecoder(meta)) {
             mPDecoder->flags = DECFLAG_HW;
+            /*
+             * ============ 【IDecoder::mFlags 里的 DECFLAG_HW 必须跟着置上】 ============
+             *
+             * 这个位是"解码器打开之后对外报的解码方式"（IDecoder::getFlags()），
+             * SMPAVDeviceManager::getVideoDecoderFlags() 读的就是它，而它有三个消费者：
+             *   * SuperMediaPlayer::GetDecoderType()（对外 API 的硬解/软解读数）；
+             *   * SuperMediaPlayer::rebuildVideoDecoder()（:7189）—— 解码器重建时用
+             *     "上一次是不是硬解"决定这一次还要不要请求硬解，这个位是假的话，一次
+             *     解码器重建（错误恢复、切档时 meta 不匹配）就把整条流**悄悄换成软解**，
+             *     而用户的"硬解"开关还开着 —— 这正是"我开的是硬解、面板却显示软件"；
+             *   * setUpVideoDecoder() 里那条"已切到软解"的用户通知（:6955-6960）。
+             *
+             * 以前这里只写了 mPDecoder->flags（本对象内部那份），IDecoder::mFlags 从头到尾
+             * 没有 DECFLAG_HW —— 于是上面三处在 Windows/Linux 的 FFmpeg 路上永远把"正在
+             * 硬解"看成"软解"（avcodecDecoder 用的就是基类那份按位判定的语义，只是它自己
+             * 从来不含这个位）。两份状态必须成对写：置真的两处（这里、getHwFormat()）、
+             * 复位的四处（getHwFormat() 的运行期降级与拒绝协商、close_decoder()、下面
+             * 没进硬解时的兜底）。
+             */
+            mFlags |= (int) DECFLAG_HW;
             mPDecoder->codecCont->thread_count = 1;
+        } else if (!isAudio) {
+            /*
+             * 没进硬解（调用方没要求，或 initHwDecoder() 失败、本构建里没有该编码的硬解
+             * 配置）：明确清掉这个位，别让上一次打开留下的状态骗过 getFlags()。
+             */
+            mFlags &= ~(int) DECFLAG_HW;
         }
 
 #endif
@@ -728,6 +803,10 @@ namespace Cicada {
          * getHwFormat() 的运行期降级、close_decoder() 复位）。构建里没有硬解配置、
          * 硬解设备建不出来时这个读数一直是假，也就是如实报"软解"。
          * 没有平台分支：本平台没有硬解后端时 initHwDecoder() 根本不会被调用。
+         *
+         * 同一个状态还**镜像**在 IDecoder::mFlags 的 DECFLAG_HW 位上（六处成对写，
+         * 见 init_decoder() 的说明）：界面读这个方法，而
+         * SMPAVDeviceManager::getVideoDecoderFlags() 读的是那一位，两者必须永远一致。
          */
         return mHwDecodeInUse.load();
     }

@@ -175,6 +175,11 @@ namespace Cicada{
          *
          * 覆盖 IDecoder::isHardwareDecoderInUse()：基类那个默认实现只看打开时留下的
          * 标志位，而这里的状态在解码途中还会变（运行期降级），必须单独跟踪。
+         *
+         * 【同一状态镜像在 IDecoder::mFlags 的 DECFLAG_HW 位上】打开成功时两份一起置真，
+         * 运行期降级/拒绝协商/关闭时两份一起复位（见 .cpp 的 init_decoder() 与
+         * getHwFormat()）。界面读的是这个方法，而 SMPAVDeviceManager::getVideoDecoderFlags()
+         * 读的是那一位（解码器重建时靠它继续请求硬解），两者必须永远一致。
          */
         bool isHardwareDecoderInUse() override;
 
@@ -257,6 +262,9 @@ namespace Cicada{
          * 而运行期降级发生在 getHwFormat()（FFmpeg 解码线程）；读它的是界面线程
          * （Qt 每 2Hz 组装"解码方式"那一栏）。普通 bool 跨线程读写是数据竞争，
          * 这里只求一个一致的单值，原子量正合适。
+         *
+         * 同一事实还镜像在 IDecoder::mFlags 的 DECFLAG_HW 位上（只有解码器自己那条
+         * 线程会写，读取方是 getVideoDecoderFlags()），两份状态在 .cpp 里成对写。
          */
         std::atomic_bool mHwDecodeInUse{false};
     };

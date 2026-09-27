@@ -414,7 +414,7 @@ fun PlayerInfoPanel(
         listOf(
             "分辨率" to stats.resolutionText(),
             "编解码器" to stats.codecText(),
-            "解码方式" to stats.decoderText(),
+            "解码方式" to stats.decodeMethodText(),
             "解码器" to stats.decoderNameText(),
             "帧率" to stats.frameRateText(),
             "视频码率" to stats.bitrateText(),

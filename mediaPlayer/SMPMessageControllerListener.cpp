@@ -42,7 +42,25 @@ bool SMPMessageControllerListener::OnPlayerMsgIsPadding(PlayMsgType msg, MsgPara
 
     switch (msg) {
         case MSG_CHANGE_VIDEO_STREAM:
-            padding = mPlayer.mVideoChangedFirstPts != INT64_MIN;
+            /*
+             * 【为什么视频切档消息**不再**延后派发】
+             *
+             * 这里原来是 `padding = (mVideoChangedFirstPts != INT64_MIN)` —— 那是**双解码器**
+             * 时代的产物：切档要等"目标路第一个包/第一帧"到了才允许处理后面的请求。
+             *
+             * 单解码器模型下切档是**同步**完成的（SwitchVideo：关旧流→开新流→按流 seek→
+             * 原地重建同一块解码器→落点过滤接管），入口 switchVideoStream() 自己就实现了
+             * "最新请求覆盖旧请求"，**不需要**任何延后。
+             *
+             * 而且留着它会**把队列永久堵死**：switchVideoStream() 会把该闩置成 INT64_MAX，
+             * 而它的复位判据是 `info.pts >= mVideoChangedFirstPts`（本文件 ProcessRenderedMsg）
+             * —— 帧 pts 永远不可能 ≥ INT64_MAX，所以闩一次也复位不了。
+             * 真机实测（2026-09-27 Qt，用户连点清晰度）：第一次切档成功，此后每一次点击
+             * 都只剩 "switch stream request posted"、没有任何执行日志 —— 消息全被扣在队列里。
+             *
+             * 因此这里恒为 false：视频切档请求一律立即派发。
+             */
+            padding = false;
             break;
 
         case MSG_CHANGE_AUDIO_STREAM:
@@ -1592,7 +1610,12 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
         switchPos = 0;
     }
 
-    mPlayer.mVideoChangedFirstPts = INT64_MAX;
+    /*
+     * 【不要在这里设"等目标路首帧"的闩】这里原来有一行
+     * `mPlayer.mVideoChangedFirstPts = INT64_MAX;` —— 双解码器时代用它把后续切档请求
+     * 延后派发（见 OnPlayerMsgIsPadding）。单解码器切档是同步完成的，这行既是死代码，
+     * 又会让那个永远复位不了的闩把切档请求永久扣在消息队列里（真机实测的"点了没反应"）。
+     */
     mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
 
     /*

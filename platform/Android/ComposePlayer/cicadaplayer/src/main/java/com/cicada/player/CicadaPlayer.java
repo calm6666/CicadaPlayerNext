@@ -1613,4 +1613,20 @@ public interface CicadaPlayer {
      * @param json see above; null / empty clears it
      */
     abstract public void setVideoCodecSupport(String json);
+
+    /**
+     * 当前视频解码器是否**实际在用硬解**。
+     *
+     * <p>这是<b>活动解码器实例的事实读数</b>（内核 IDecoder::isHardwareDecoderInUse，
+     * 经 MediaPlayer::IsVideoDecoderHardware → CicadaIsVideoDecoderHardware 上来），
+     * 与"设备/构建支持不支持硬解"（{@link #getVideoCodecSupport()} 里那份 hwDecode）
+     * 不是一件事：建解码器时硬解没能起来、或者解码途中从硬解退回软解，这里都会是 false。</p>
+     *
+     * <p>界面上的"解码方式"显示必须用它：不许读"配置想用哪种"，也不许按解码器名字去猜。</p>
+     *
+     * <p>没有视频解码器（没有片源 / 还没建起来 / 已销毁）或者没有播放器时返回 false。</p>
+     *
+     * @return true = 活动解码器正在硬解；false = 软解或取不到
+     */
+    abstract public boolean isVideoDecoderHardware();
 }

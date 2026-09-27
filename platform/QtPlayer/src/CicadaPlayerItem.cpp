@@ -1083,6 +1083,9 @@ namespace cicadaqt {
      *     短名本身（内核给所有应用看的规范名）一个字都没改；
      *   * 显卡名 —— CicadaHardwareDevice::deviceName()（Windows 上就是 DXGI 适配器名）。
      *     **不去解析 description() 那段实现细节文本**。
+     *
+     * 同时（复用这一拍，**不新增定时器**）打一条"值变化才打"的诊断日志，见下面
+     * reportDecoderDiagnostics() 的说明。
      */
     void CicadaPlayerItem::refreshDecodeMethod()
     {
@@ -1098,14 +1101,21 @@ namespace cicadaqt {
                  */
                 const QString codec = codecDisplayName(QString::fromUtf8(video->videoCodec).trimmed());
 
-                if (m_player->IsVideoDecoderHardware()) {
+                /*
+                 * 事实读数先取出来：显示与诊断用的是同一份值（只读一次，避免两处取值
+                 * 之间状态又变了，出现"面板显示硬解、日志说软解"这种自相矛盾）。
+                 */
+                const bool hardware = m_player->IsVideoDecoderHardware();
+                const QString deviceName = CicadaHardwareDevice::instance().deviceName();
+
+                reportDecoderDiagnostics(video->videoCodec, codec, hardware, deviceName);
+
+                if (hardware) {
                     /*
                      * 显卡名只认 CicadaHardwareDevice 那份 DXGI 适配器名（专门访问器，
                      * 见 deviceName()）。拿不到就只写"硬解 <编码>"，绝不把设备描述
                      * 文本里的实现细节当型号显示。
                      */
-                    const QString deviceName = CicadaHardwareDevice::instance().deviceName();
-
                     if (codec.isEmpty()) {
                         method = QStringLiteral("硬解");
                     } else if (deviceName.isEmpty()) {
@@ -1130,6 +1140,53 @@ namespace cicadaqt {
 
         m_decodeMethod = method;
         emit decodeMethodChanged();
+    }
+
+    /*
+     * 【解码/呈现诊断：值变化才打一条，复用统计的 2Hz 那一拍】
+     *
+     * 为什么需要它：用户报的是"开关是硬解、面板却显示软件，而且没有显卡型号"。
+     * 这两种现象都只能靠**事实读数**区分：
+     *   * hw=1 而面板显示软解 ⇒ 界面/状态传递的问题；
+     *   * hw=0 而 requestHw=1 ⇒ 解码器**真的**没在用硬解（构建里没有该编码的硬解配置、
+     *     设备建不出来、或者运行期 FFmpeg 把硬解格式摘掉降级了 —— 后两种在
+     *     framework/codec/avcodecDecoder.cpp 里都有对应的 AF_LOGW）；
+     *   * device 为空 ⇒ 显卡名这一路没拿到（见 CicadaHardwareDevice::deviceName()）。
+     * 以前这些值只在"变了的时候"影响面板文字，日志里一行都没有，事后完全没法判断到底
+     * 是哪种情况。
+     *
+     * 触发条件：这一拍（refreshStats() 的 2Hz，**不新增定时器、不改刷新频率**）里上面
+     * 五个值拼出的签名与上次不同就打一条；完全没变就一行都不打。没有视频流时不打
+     * （那时面板本来就是"--"，没有诊断价值）。
+     */
+    void CicadaPlayerItem::reportDecoderDiagnostics(const char *rawCodec, const QString &codec,
+                                                    bool hardware, const QString &deviceName)
+    {
+        /*
+         * 签名只用"会显示/会被误判"的那几项：是否硬解、是否请求了硬解、编码（规范短名 +
+         * 显示名）、显卡名、渲染后端、零拷贝。值不变 ⇒ 不打。
+         */
+        const QString signature = QStringLiteral("hw=%1 requestHw=%2 codec=%3/%4 device=%5 backend=%6 zeroCopy=%7")
+                                          .arg(hardware ? 1 : 0)
+                                          .arg(m_hardwareDecoding ? 1 : 0)
+                                          .arg(QString::fromUtf8(rawCodec != nullptr ? rawCodec : ""))
+                                          .arg(codec)
+                                          .arg(deviceName)
+                                          .arg(backend())
+                                          .arg(zeroCopy() ? 1 : 0);
+
+        if (signature == m_decodeDiagSignature) {
+            return;
+        }
+
+        m_decodeDiagSignature = signature;
+
+        AF_LOGI("decode/display: hw=%d requestHw=%d codec=%s codecShort=%s device=%s backend=%s zeroCopy=%d\n",
+                (int) hardware, (int) m_hardwareDecoding,
+                codec.isEmpty() ? "-" : codec.toUtf8().constData(),
+                (rawCodec == nullptr || rawCodec[0] == '\0') ? "-" : rawCodec,
+                deviceName.isEmpty() ? "-" : deviceName.toUtf8().constData(),
+                backend().toUtf8().constData(), (int) zeroCopy());
     }
 
     /* ------------------------------------------------------------------ */

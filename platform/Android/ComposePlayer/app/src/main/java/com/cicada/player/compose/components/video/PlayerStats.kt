@@ -3,6 +3,7 @@ package com.cicada.player.compose.components.video
 import com.cicada.player.compose.player.CicadaPlayerController
 import com.cicada.player.nativeclass.MediaInfo
 import com.cicada.player.nativeclass.TrackInfo
+import com.cicada.player.utils.HardwareNameUtil
 
 /**
  * 「视频信息」面板的数据（**全部来自本工程内核的真实读数**，不引 Media3）。
@@ -22,6 +23,20 @@ data class PlayerStats(
     val positionMs: Long = 0,
     val durationMs: Long = 0,
     val speedBps: Long = 0,
+    /*
+     * ---- 「解码方式」那一栏的三个读数（**全部是内核事实，一个都不猜**）----
+     *
+     * 默认值就是"没有播放器 / 没有当前视频流"那一档：hasVideoStream = false ⇒ 整栏 "--"。
+     * 拼装文案见 [decodeMethodText]，数据来源见 companion 里的 from()。
+     */
+    /** 当前视频流的编码短名（内核规范名 "H.264"/"H.265"/…）；**空串 = 内核认不出** */
+    val videoCodecShort: String = "",
+    /** 有没有"当前视频流"（内核 `currentTrack(TYPE_VIDEO)` 非空）；false ⇒ 整栏显示 "--" */
+    val hasVideoStream: Boolean = false,
+    /** 活动解码器**实际**是否在硬解（事实读数；不是"配置想用哪种"、也不是"设备支持不支持"） */
+    val hardwareDecoder: Boolean = false,
+    /** 硬件名（SoC/硬件/板级型号）；**空串 = 拿不到 ⇒ 不写括号**。软解时本字段不参与拼装 */
+    val hardwareName: String = "",
 ) {
     fun resolutionText(): String =
         if (widthPx <= 0 || heightPx <= 0) "--"
@@ -29,13 +44,38 @@ data class PlayerStats(
 
     fun codecText(): String = sampleMimeType.ifEmpty { "--" }
 
-    /** 硬解 / 软解（判据：解码器名以 c2.android./omx.google. 开头或含 .sw./ffmpeg 为软解） */
-    fun decoderText(): String {
-        if (decoderName.isEmpty()) return "--"
-        val lower = decoderName.lowercase()
-        val software = lower.startsWith("c2.android.") || lower.startsWith("omx.google.") ||
-            lower.contains(".sw.") || lower.contains("ffmpeg")
-        return if (software) "软解" else "硬解"
+    /**
+     * 【「解码方式」的最终显示文案】—— 与 Qt 的 `refreshDecodeMethod()` 同一套口径
+     * （platform/QtPlayer/src/CicadaPlayerItem.cpp:1087-1133，那边是权威标杆）：
+     *
+     *     硬解 HEVC（SM8650）   硬解 + 编码显示名 + （硬件名）
+     *     硬解 HEVC             拿不到硬件名 ⇒ **不写括号**
+     *     硬解 / 软解           内核认不出编码 ⇒ 只写硬解/软解，不写"未知"、不猜
+     *     软解 H.264            **软解绝不写型号**（解码根本没在编解码单元上跑）
+     *     --                    没有播放器 / 没有当前视频流
+     *
+     * 编码那一段走**同一处**短名→显示名映射 [codecDisplayNameOf]（H.265 → HEVC，其余原样），
+     * 这里不另写一套；内部标识/分组键仍旧用内核短名。
+     *
+     * 三个读数全部由 `PlayerStats.from()` 从内核取（活动解码器的事实读数 + 当前视频流的
+     * 编码 + 设备硬件名），本函数只负责拼文案，不做任何推断。
+     */
+    fun decodeMethodText(): String {
+        /* 没有当前视频流（含没有播放器）：按用户要求整栏 "--"，不写"软解"也不写"未知" */
+        if (!hasVideoStream) return "--"
+
+        val codec = codecDisplayNameOf(videoCodecShort)
+
+        return if (hardwareDecoder) {
+            when {
+                codec.isEmpty() -> "硬解"
+                hardwareName.isEmpty() -> "硬解 $codec"
+                else -> "硬解 $codec（$hardwareName）"
+            }
+        } else {
+            /* 软解：**绝不写型号** —— 写上会让人以为硬解生效了 */
+            if (codec.isEmpty()) "软解" else "软解 $codec"
+        }
     }
 
     fun decoderNameText(): String = decoderName.ifEmpty { "--" }
@@ -52,16 +92,56 @@ data class PlayerStats(
 
     companion object {
         /** 从内核控制器取快照（取不到的字段保持默认 → 面板显示 "--"） */
-        fun from(controller: CicadaPlayerController): PlayerStats = PlayerStats(
-            widthPx = controller.videoWidth,
-            heightPx = controller.videoHeight,
-            bufferedMs = (controller.bufferedMs - controller.positionMs).coerceAtLeast(0L),
-            positionMs = controller.positionMs,
-            durationMs = controller.durationMs,
-            speedBps = controller.downloadSpeedBps,
-            /* 硬解回退成软解时内核会通过 InfoCode 给一条说明，这里如实显示 */
-            decoderName = controller.softwareDecoderNotice.orEmpty(),
-        )
+        fun from(controller: CicadaPlayerController): PlayerStats {
+            /*
+             * 【「解码方式」三个读数：每次重组重读一次，**不新增计时器**】
+             *
+             * 本函数是 `CicadaVideoPlayer` 里 `PlayerPanel.Info` 那一支的实参，函数体里读的是
+             * controller 上的 Compose state（positionMs / bufferedMs / mediaInfo /
+             * softwareDecoderNotice …）。内核每送一条 InfoCode.CurrentPosition（以及切档、
+             * 硬解回退提示、视频尺寸变化）都会让那次重组重跑这里 —— 这就是安卓既有的统计刷新
+             * 机制（旧的"解码方式"那一栏也是这么刷的，见 PlayerPanels.kt 的"视频信息"面板），
+             * 所以这里照旧按需现读，**不加任何计时器**。
+             *
+             * 硬解/软解与"当前视频流"这两项必须是**内核事实读数**、且必须现读：
+             * 内核那条"硬解退回软解"（InfoCode.SwitchToSoftwareVideoDecoder）不会改任何已经
+             * 缓存在 controller 上的状态，只有现读才能跟着变。
+             */
+            val currentVideo = controller.currentVideoTrack()
+            val hardware = controller.isVideoDecoderHardware()
+            /* 编码短名用显式 getter（TrackInfo 同时有公有字段与 getter，属性语法可能歧义） */
+            val codecShort = (currentVideo?.getVideoCodec() ?: "").trim()
+
+            return PlayerStats(
+                widthPx = controller.videoWidth,
+                heightPx = controller.videoHeight,
+                bufferedMs = (controller.bufferedMs - controller.positionMs).coerceAtLeast(0L),
+                positionMs = controller.positionMs,
+                durationMs = controller.durationMs,
+                speedBps = controller.downloadSpeedBps,
+                /* 硬解回退成软解时内核会通过 InfoCode 给一条说明，这里如实显示 */
+                decoderName = controller.softwareDecoderNotice.orEmpty(),
+                videoCodecShort = codecShort,
+                hasVideoStream = currentVideo != null,
+                hardwareDecoder = hardware,
+                /*
+                 * 硬件名：安卓没有"显卡型号"这种直读接口，取证分级与 API 级别要求见
+                 * HardwareNameUtil 的类注释。三个实参分别是：
+                 *   · 第 1 个 = "在**已有** GL 上下文的线程上读到的 GL_RENDERER"。
+                 *     本工程没有这样的地方可读（唯一那份 EGL/GL 上下文在内核渲染线程里，
+                 *     Java 侧拿不到），而且**不许**为了显示一行字去新建上下文/线程 ⇒ null
+                 *     （第 1 级因此暂时取不到值）；
+                 *   · 第 2 个 = 活动解码器是否真的在硬解（内核事实读数）—— 软解时它会挡掉
+                 *     第 3 级，这就是"软解绝不写型号"的落实点；
+                 *   · 第 3 个 = 当前视频流的**内核编码短名**，只在第 1、2 级都拿不到时才被
+                 *     用来按 mime 查本机硬解组件名（MediaCodecInfo.getName()）。
+                 * 于是常见设备上取到的是第 2 级：Build.SOC_MODEL（API 31+）→ HARDWARE →
+                 * BOARD；都拿不到时落到第 3 级；仍拿不到就是空串 ⇒ 界面只写"硬解 <编码>"，
+                 * 不写括号。**没有任何一级是猜的**（详见 HardwareNameUtil 的类注释）。
+                 */
+                hardwareName = HardwareNameUtil.resolve(null, hardware, codecShort),
+            )
+        }
     }
 }
 

@@ -178,6 +178,50 @@ public class MediaCodecUtils {
         return false;
     }
 
+    /**
+     * 【本机上能解这个 mime 的**硬件**解码器名】—— 返回值就是
+     * {@link MediaCodecInfo#getName()}（例如 {@code c2.qti.hevc.decoder}、
+     * {@code OMX.qcom.video.decoder.hevc}）。
+     *
+     * <p>与上面的 {@link #isHardwareDecodeSupported(String)} 用**同一份**判据与**同一份**
+     * 缓存的解码器列表（{@code isHardwareCodec()} + {@code allDecoders}），所以两边不会
+     * 出现"一个说有硬解、一个说不出名字"的矛盾。</p>
+     *
+     * <p>调用方须知：它回答的是"**设备上有**哪个硬解组件能解这个编码"（取枚举顺序里的第一个），
+     * 不一定就是内核此刻真正选中的那一个组件 —— 内核选中的那个名字只在 SDK 自己的 JNI 解码
+     * 线程里（{@code utils/media/MediaCodecDecoder}），应用层读不到。所以它只适合放在
+     * "SoC / 板级型号也拿不到"之后的最后一级，且**只在确认真的是硬解时**才用。</p>
+     *
+     * @param mime 例如 "video/avc"、"video/hevc"、"video/av01"、"video/x-vnd.on2.vp9"
+     * @return 硬件解码器名；确定没有时 null
+     */
+    public static synchronized String findHardwareDecoderName(String mime) {
+        if (mime == null) {
+            return null;
+        }
+
+        if (allDecoders == null) {
+            allDecoders = getDeviceDecodecs();
+        }
+
+        for (MediaCodecInfo mediaCodecInfo : allDecoders) {
+            if (getCodecMimeType(mediaCodecInfo, mime) == null) {
+                continue;
+            }
+
+            if (!isHardwareCodec(mediaCodecInfo)) {
+                continue;
+            }
+
+            String name = mediaCodecInfo.getName();
+            if (name != null && name.length() > 0) {
+                return name;
+            }
+        }
+
+        return null;
+    }
+
     private static boolean isHardwareCodec(MediaCodecInfo info) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
             return info.isHardwareAccelerated();

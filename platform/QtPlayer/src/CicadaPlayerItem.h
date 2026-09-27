@@ -805,6 +805,23 @@ namespace cicadaqt {
          */
         void refreshDecodeMethod();
 
+        /*
+         * 解码/呈现诊断日志（见 .cpp 的实现说明）。
+         *
+         * 由 refreshDecodeMethod() 在同一拍里调用（统计定时器 2Hz，**不新增定时器**）：
+         * 只有"是否硬解 / 是否请求硬解 / 编码 / 显卡名 / 渲染后端 / 零拷贝"这几个值
+         * 拼出的签名与上次不同时才打一条 AF_LOGI，值没变就一行都不打。
+         *
+         * 参数就是 refreshDecodeMethod() 已经取好的那份事实读数，所以日志与面板显示
+         * 永远说的是同一件事：
+         *   rawCodec  —— 内核规范短名（StreamInfo::videoCodec 那个 char[16] 原样，可能为空串）；
+         *   codec     —— 界面上显示的那一段（H.265 → HEVC，见 codecDisplayName()）；
+         *   hardware  —— IsVideoDecoderHardware()（活动解码器实例的事实读数）；
+         *   deviceName—— CicadaHardwareDevice::deviceName()（可能为空串）。
+         */
+        void reportDecoderDiagnostics(const char *rawCodec, const QString &codec,
+                                      bool hardware, const QString &deviceName);
+
     signals:
         void sourceChanged();
         void playingChanged();
@@ -1167,6 +1184,17 @@ namespace cicadaqt {
          * 中间插成员会和已有偏移量对不上。
          */
         QString m_decodeMethod;
+
+        /*
+         * 【解码/呈现诊断日志的"上次打过的值"签名】（见 .cpp 的 refreshDecodeMethod()）
+         *
+         * 只用来做"上面那几个值变了才打一条"的比较（硬解与否、编码、显卡名、渲染后端、
+         * 零拷贝），不参与任何显示逻辑、也不影响 decodeMethod 的取值。
+         *
+         * 【成员一律加在最后】理由同上：QML 引擎按 sizeof 分配本对象，中间插成员会和
+         * 已有偏移量对不上。只在 GUI 线程读写（refreshDecodeMethod() 由统计那一拍调用）。
+         */
+        QString m_decodeDiagSignature;
     };
 
 }// namespace cicadaqt

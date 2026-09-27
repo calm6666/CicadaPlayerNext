@@ -123,6 +123,100 @@ namespace cicadaqt {
     }
 
     /*
+     * 问一个具体的 D3D11 设备"你自己跑在哪块卡上"（DXGI 适配器名）。
+     *
+     * 这是"设备自己报的名字"，只对**我们手里真的有一个设备**的情况有效；查不出来
+     * 返回空串，由调用方决定要不要用下面那条与场景图无关的兜底。行为与改这个函数
+     * 之前 captureFromSceneGraph() 里那段内联代码完全一致（描述文案一个字没变）。
+     */
+    static QString adapterNameOfDevice(ID3D11Device *device)
+    {
+        if (device == nullptr) {
+            return QString();
+        }
+
+        IDXGIDevice *dxgiDevice = nullptr;
+        QString adapterName;
+
+        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))) {
+            IDXGIAdapter *adapter = nullptr;
+
+            if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && adapter != nullptr) {
+                DXGI_ADAPTER_DESC desc = {};
+
+                if (SUCCEEDED(adapter->GetDesc(&desc))) {
+                    adapterName = QString::fromWCharArray(desc.Description);
+                }
+
+                adapter->Release();
+            }
+
+            dxgiDevice->Release();
+        }
+
+        return adapterName;
+    }
+
+    /*
+     * 【与场景图无关的显卡名兜底：直接枚举 DXGI 适配器】
+     *
+     * 为什么需要它（三个真实分支都拿不到"设备自己的名字"）：
+     *   * 场景图的图形 API 不是 D3D11（Qt 退回别的后端，例如远程桌面、驱动异常时）；
+     *   * Qt 的 D3D11 设备没有 ID3D11VideoDevice（拿不到就不借给 FFmpeg 解码）；
+     *   * QSGRendererInterface 干脆没给出设备。
+     *
+     * 这三种情况下**硬解仍然可能真的在跑**：框架在拿不到外部设备时会自己
+     * av_hwdevice_ctx_create(D3D11VA, nullptr) 建一个解码设备，而设备字符串传空就是
+     * "默认适配器" —— 正好是这里枚举到的**第一块非软件适配器**。所以这条兜底问出来的
+     * 名字与"框架自己建的那个解码设备"指向同一块卡，界面写"硬解 <编码>（<显卡名>）"
+     * 不会张冠李戴。
+     *
+     * DXGI_ADAPTER_FLAG_SOFTWARE 的适配器（WARP，"Microsoft Basic Render Driver"）
+     * 被跳过：它做不了 D3D11 视频解码，绝不能当成显卡名显示出去。
+     *
+     * 只在**原来为空**时才会被调用（见 withAdapterNameFallback() 与各调用点）：
+     * 已经问出真名就一个字都不动。查不到（DXGI 失败、只有软件适配器）返回空串 ——
+     * 界面按"拿不到型号"处理，只写"硬解 <编码>"，不写任何占位文本。
+     */
+    static QString defaultAdapterNameFromDxgi()
+    {
+        IDXGIFactory1 *factory = nullptr;
+
+        if (FAILED(CreateDXGIFactory1(IID_PPV_ARGS(&factory))) || factory == nullptr) {
+            AF_LOGW("DXGI: CreateDXGIFactory1 failed, the panel will show no GPU name\n");
+            return QString();
+        }
+
+        QString adapterName;
+        IDXGIAdapter1 *adapter = nullptr;
+
+        for (UINT index = 0; factory->EnumAdapters1(index, &adapter) == S_OK; ++index) {
+            DXGI_ADAPTER_DESC1 desc = {};
+
+            if (SUCCEEDED(adapter->GetDesc1(&desc)) &&
+                    (desc.Flags & (UINT) DXGI_ADAPTER_FLAG_SOFTWARE) == 0) {
+                adapterName = QString::fromWCharArray(desc.Description);
+            }
+
+            adapter->Release();
+            adapter = nullptr;
+
+            if (!adapterName.isEmpty()) {
+                break;
+            }
+        }
+
+        factory->Release();
+        return adapterName;
+    }
+
+    /* 原来为空就用兜底补一次；补到就记住，补不到就保持空串。 */
+    static QString withAdapterNameFallback(const QString &current)
+    {
+        return current.isEmpty() ? defaultAdapterNameFromDxgi() : current;
+    }
+
+    /*
      * 框架在初始化解码器时会调用这个函数（可能在解码器线程上）。
      * 返回一个**新的引用**，框架用完 av_buffer_unref() 释放。
      */
@@ -198,10 +292,13 @@ namespace cicadaqt {
         if (rif == nullptr || rif->graphicsApi() != QSGRendererInterface::Direct3D11) {
             m_description = QStringLiteral("no Qt D3D11 device (scene graph uses another API)");
             /*
-             * 场景图不在 D3D11 上：这份设备我们没拿到，"显卡名"也就无从谈起
-             * （界面按"拿不到型号"处理，只写"硬解 <编码>"，见 deviceName()）。
+             * 场景图不在 D3D11 上：Qt 那份设备我们没拿到，但**显卡名不该因此丢掉** ——
+             * 框架接下来会自己 av_hwdevice_ctx_create(D3D11VA, nullptr) 建解码设备，
+             * 用的就是"默认适配器"，正好等于这里枚举到的第一块非软件适配器
+             * （见 defaultAdapterNameFromDxgi()）。拿不到仍然是空串，界面只写
+             * "硬解 <编码>"。
              */
-            m_deviceName.clear();
+            m_deviceName = defaultAdapterNameFromDxgi();
             AF_LOGW("Qt scene graph is not on D3D11, zero copy with FFmpeg D3D11VA is not "
                     "possible; the framework will create its own device (copy-back)\n");
             return false;
@@ -213,6 +310,8 @@ namespace cicadaqt {
                             rif->getResource(window, QSGRendererInterface::DeviceContextResource));
 
         if (device == nullptr) {
+            /* 同上面那条分支：拿不到 Qt 的设备，显卡名走与场景图无关的 DXGI 兜底。 */
+            m_deviceName = defaultAdapterNameFromDxgi();
             AF_LOGW("Qt gave no D3D11 device, zero copy is not possible\n");
             return false;
         }
@@ -281,6 +380,13 @@ namespace cicadaqt {
         if (!hasVideoSupport(device)) {
             m_description = QStringLiteral("Qt's D3D11 device has no video support "
                                            "(no zero-copy; hardware decoding via copy-back)");
+            /*
+             * 这块设备不能借给 FFmpeg（借了连硬解都起不来），框架会自己建设备 ——
+             * 同样建在**默认适配器**上，所以显卡名用与场景图无关的 DXGI 兜底
+             * （见 defaultAdapterNameFromDxgi()）。只在原来为空时才问一次：同一个单例
+             * 上一次 capture 已经问到的名字不会被覆盖。
+             */
+            m_deviceName = withAdapterNameFallback(m_deviceName);
             AF_LOGW("Qt's D3D11 device has no ID3D11VideoDevice/VideoContext, so FFmpeg cannot "
                     "decode on it. Qt's own device choice is left untouched: hardware decoding "
                     "stays available because FFmpeg creates its own device (the way it always "
@@ -294,24 +400,7 @@ namespace cicadaqt {
         HwDeviceBridge::setProvider(&provideHwDevice);
 
         /* 描述信息里带上设备名，方便确认到底用的哪块卡。 */
-        IDXGIDevice *dxgiDevice = nullptr;
-        QString adapterName;
-
-        if (SUCCEEDED(device->QueryInterface(IID_PPV_ARGS(&dxgiDevice)))) {
-            IDXGIAdapter *adapter = nullptr;
-
-            if (SUCCEEDED(dxgiDevice->GetAdapter(&adapter)) && adapter != nullptr) {
-                DXGI_ADAPTER_DESC desc = {};
-
-                if (SUCCEEDED(adapter->GetDesc(&desc))) {
-                    adapterName = QString::fromWCharArray(desc.Description);
-                }
-
-                adapter->Release();
-            }
-
-            dxgiDevice->Release();
-        }
+        const QString adapterName = adapterNameOfDevice(device);
 
         /*
          * 显卡名单独留一份给界面（见 deviceName()）：界面上"硬解 HEVC（<显卡名>）"
@@ -319,8 +408,13 @@ namespace cicadaqt {
          * CicadaPlayerItem::codecDisplayName() 换过来）。DXGI 查不出来时留**空串** ——
          * 界面按"拿不到型号"处理，只写"硬解 <编码>"，不会把下面的 "unknown adapter"
          * 当成一块卡的名字显示出去。
+         *
+         * 这一条路是真的把 Qt 的设备借给了 FFmpeg，所以名字以**设备自己**的适配器为准；
+         * 只有它查不出来（GetDesc 失败）时才退到与场景图无关的那条 DXGI 兜底。注意
+         * description() 的文案**不受兜底影响**，仍按"设备名查不出来就写 unknown adapter"
+         * 的既有语义拼。
          */
-        m_deviceName = adapterName;
+        m_deviceName = withAdapterNameFallback(adapterName);
 
         m_description = QStringLiteral("Qt D3D11 device (%1)")
                                 .arg(adapterName.isEmpty() ? QStringLiteral("unknown adapter") : adapterName);

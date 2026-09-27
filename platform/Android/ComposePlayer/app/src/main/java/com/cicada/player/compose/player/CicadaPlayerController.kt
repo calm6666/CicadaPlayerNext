@@ -611,6 +611,42 @@ class CicadaPlayerController(context: Context) {
     var currentSubtitleIndex by mutableIntStateOf(TrackInfo.AUTO_SELECT_INDEX)
         private set
 
+    /*
+     * ---- 「解码方式」那一栏的两个事实读数（为了面板显示，按需现读）----
+     *
+     * 这两个是**只读快照**：`PlayerStats.from()` 每次重组时各取一次，跟着既有统计/信息
+     * 刷新机制走 —— **不在这里缓存、不新增计时器**（理由写在 PlayerStats.from() 里）。
+     */
+
+    /**
+     * 当前视频流（内核 `GetCurrentStreamInfo(ST_TYPE_VIDEO)` 的 Java 落点：
+     * `currentTrack(TrackInfo.Type.TYPE_VIDEO)`）。
+     *
+     * **没有当前视频流时返回 null**（没有播放器 / 没有片源 / 还没解析出视频轨）——
+     * 界面据此把「解码方式」整栏显示成 `--`。判据与 Qt 的 `refreshDecodeMethod()`
+     * （platform/QtPlayer/src/CicadaPlayerItem.cpp:1092）完全一致：那边也是先看
+     * `GetCurrentStreamInfo(ST_TYPE_VIDEO)` 拿到没有；拿不到就整栏为空 → 界面显示 "--"。
+     *
+     * 编码短名请用返回值上的 `getVideoCodec()`（显式 getter：`TrackInfo` 同时有公有字段
+     * 与 getter，Kotlin 属性语法可能歧义）。**认不出来时它是空串**，界面此时不写编码。
+     */
+    fun currentVideoTrack(): TrackInfo? = player.currentTrack(TrackInfo.Type.TYPE_VIDEO)
+
+    /**
+     * 活动视频解码器**实际在用硬解还是软解**的事实读数。
+     *
+     * 链路：内核 `IDecoder::isHardwareDecoderInUse()`
+     * → `MediaPlayer::IsVideoDecoderHardware()` → C API `CicadaIsVideoDecoderHardware(player)`
+     * → JNI `NativePlayerBase.nIsVideoDecoderHardware()`（本轮新增）
+     * → `CicadaPlayer.isVideoDecoderHardware()`。
+     *
+     * 与"设备/构建支持不支持硬解"（`getVideoCodecSupport()` 那份 JSON 里的 hwDecode）
+     * **不是一件事**：这里回答的是眼下真正走的那条路，所以"建解码器时硬解没能起来"和
+     * "解码途中退回软解"之后都会是 false —— 界面显示的正是这个。
+     * 没有播放器 / 没有视频解码器时返回 false。
+     */
+    fun isVideoDecoderHardware(): Boolean = player.isVideoDecoderHardware()
+
     /**
      * 用户**意图**是不是"自动清晰度"（内核 ABR）。
      *

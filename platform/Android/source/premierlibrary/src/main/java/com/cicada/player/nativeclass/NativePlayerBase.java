@@ -517,6 +517,28 @@ public class NativePlayerBase {
         nSetVideoCodecSupport(json);
     }
 
+    /*
+     * ---- 当前解码方式（硬解 / 软解）的事实读数 ----
+     *
+     * 与"设备支持不支持硬解"（上面 getVideoCodecSupport() 那份 JSON 里的 hwDecode）不是一件事：
+     * 这里问的是**活动解码器实例**眼下真正走的那条路，包含"建解码器时硬解没能起来"和
+     * "解码途中退回软解"两种情况。
+     *
+     * JNI 落点：nIsVideoDecoderHardware()（native 侧实现见 jni/player/NativeBase.cpp），
+     * 最终转发到内核的 CicadaIsVideoDecoderHardware(player)。界面上的"解码方式"显示用它。
+     */
+
+    /**
+     * 当前视频解码器是否**实际在用硬解**。
+     *
+     * @return true = 活动解码器正在硬解；false = 软解 / 没有视频解码器 / 没有播放器
+     */
+    public boolean isVideoDecoderHardware() {
+        boolean hardware = nIsVideoDecoderHardware();
+        Logger.v(TAG, "isVideoDecoderHardware = " + hardware);
+        return hardware;
+    }
+
     ////===============-------------------==================------------------////
 
     protected native void nConstruct(String name);
@@ -646,6 +668,14 @@ public class NativePlayerBase {
     protected native String nGetVideoCodecSupport();
 
     protected native void nSetVideoCodecSupport(String json);
+
+    /**
+     * 活动解码器是否在硬解 —— 内核 CicadaIsVideoDecoderHardware 的 JNI 落点。
+     *
+     * 对应 NativeBase.cpp 里注册的 "nIsVideoDecoderHardware"（签名字符串 "()Z"）：
+     * 两边**一字不差**，写错不会编译报错，只在运行期抛 UnsatisfiedLinkError。
+     */
+    protected native boolean nIsVideoDecoderHardware();
 
     //////==========--------------==================------------------================//
 

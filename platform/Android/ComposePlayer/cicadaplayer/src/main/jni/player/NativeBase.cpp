@@ -1048,6 +1048,31 @@ void NativeBase::java_SetVideoCodecSupport(JNIEnv *env, jobject instance, jstrin
     player->SetVideoCodecSupport(chars == nullptr ? "" : chars);
 }
 
+/*
+ * 【当前视频解码器实际在用硬解还是软解】—— 活动解码器实例的事实读数。
+ *
+ * 走包装转发：MediaPlayer::IsVideoDecoderHardware() 内部再调内核的 C API
+ * CicadaIsVideoDecoderHardware(player)。所以本层既不需要 include media_player_api.h，
+ * 也没有任何东西需要释放（返回的是 bool，不是 malloc 出来的 C 字符串）—— 与上面那对
+ * CodecSupport 方法的纪律完全一致。
+ *
+ * 没有播放器时按 false 回答（那一档的语义见 CicadaPlayer.isVideoDecoderHardware() 的
+ * javadoc）：界面拿不到事实时**不许**显示"硬解"。
+ */
+jboolean NativeBase::java_IsVideoDecoderHardware(JNIEnv *env, jobject instance)
+{
+    AF_TRACE;
+    MediaPlayer *player = getPlayer(env, instance);
+
+    if (player == nullptr) {
+        /* 没有播放器：按"不是硬解"回答（语义见 CicadaPlayer.isVideoDecoderHardware 的 javadoc）。 */
+        return (jboolean) false;
+    }
+
+    /* 直接把内核的事实读数转成 jboolean；本层不做任何加工、不缓存。 */
+    return (jboolean) player->IsVideoDecoderHardware();
+}
+
 void NativeBase::java_SetVideoBackgroundColor(JNIEnv *env, jobject instance, jint color)
 {
     MediaPlayer *player = getPlayer(env, instance);
@@ -1241,6 +1266,10 @@ static JNINativeMethod nativePlayer_method_table[] = {
          * 一字不差（写错不会编译报错，只在运行期抛 UnsatisfiedLinkError）。 */
         {"nGetVideoCodecSupport", "()Ljava/lang/String;", (void *) NativeBase::java_GetVideoCodecSupport},
         {"nSetVideoCodecSupport", "(Ljava/lang/String;)V", (void *) NativeBase::java_SetVideoCodecSupport},
+        /* 活动解码器的硬解/软解事实读数。签名必须和 NativePlayerBase.java 里的
+         *   protected native boolean nIsVideoDecoderHardware();
+         * 一字不差（写错不会编译报错，只在运行期抛 UnsatisfiedLinkError）。 */
+        {"nIsVideoDecoderHardware", "()Z", (void *) NativeBase::java_IsVideoDecoderHardware},
 
 };
 

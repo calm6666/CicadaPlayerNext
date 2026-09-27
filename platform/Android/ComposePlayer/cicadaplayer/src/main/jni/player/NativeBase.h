@@ -176,6 +176,23 @@ public:
     static jstring java_GetVideoCodecSupport(JNIEnv *env, jobject instance);
 
     static void java_SetVideoCodecSupport(JNIEnv *env, jobject instance, jstring json);
+
+    /*
+     * 【当前视频解码器实际在用硬解还是软解】—— **活动解码器实例**的事实读数。
+     *
+     * 与"设备/构建支持不支持硬解"（decoderFactory::isHardwareDecodeSupported /
+     * MediaCodecDecoder.isHardwareDecodeSupported）是两件事：这里回答的是眼下真正走的那条路，
+     * 所以"建解码器时硬解没起来"以及"解码途中从硬解退回软解"之后都会是 false。
+     *
+     * 同样走 MediaPlayer 的包装转发（内核已经把这一行转发加好了，本层依旧不碰
+     * media_player_api.h）：
+     *     MediaPlayer::IsVideoDecoderHardware() -> bool（没有视频解码器时 false）
+     * 内核出口是 C API CicadaIsVideoDecoderHardware(playerHandle *)。
+     *
+     * Java 侧对应：NativePlayerBase.nIsVideoDecoderHardware()（boolean），
+     * 签名见下面 nativePlayer_method_table 里那一行。
+     */
+    static jboolean java_IsVideoDecoderHardware(JNIEnv *env, jobject instance);
 public:
 
     static void onRequestProvisionCallback(char**responseData, int* responseSize, const char* url, const char *data, int size , void *arg);

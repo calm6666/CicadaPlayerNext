@@ -118,6 +118,13 @@ namespace cicadaqt {
          * 专门一个访问器，**不是**从 description() 那段文本里抠出来的 —— description()
          * 是排查用的实现细节文案（"Qt D3D11 device (...)"），界面不许解析它。
          *
+         * 【名字的第二个来源：与场景图无关的 DXGI 兜底】正常来源是"Qt 场景图设备的
+         * 适配器"（captureFromSceneGraph 里问出来），但这条来源在某些环境下拿不到
+         * （场景图不是 D3D11、Qt 的设备没有视频接口……）。那种情况下框架会自己
+         * av_hwdevice_ctx_create(D3D11VA, nullptr) 建设备 —— 设备字符串传空 = 默认
+         * 适配器 —— 于是改成**直接枚举 DXGI 适配器**（跳过软件适配器/WARP）把名字问出来，
+         * 只在原来为空时使用，问不到仍然是空串。名字的来源变化**不影响** description()。
+         *
          * 取不到时是**空串**（非 Windows 平台、场景图还没初始化、DXGI 查不出名字），
          * 调用方据此只写"硬解 <编码>"、不写型号，不许拿 "unknown adapter" 之类的
          * 占位文本当显卡名显示。
@@ -135,7 +142,9 @@ namespace cicadaqt {
         QString m_description;
         /*
          * 显卡名（**追加在成员末尾**）：与 m_description 同一套线程约定 —— 渲染线程在
-         * captureFromSceneGraph() 里写，界面线程读（Qt 组装"解码方式"那一栏）。
+         * captureFromSceneGraph() 里写（含那条与场景图无关的 DXGI 兜底，它也在同一个
+         * 函数里、同一条线上执行），界面线程读（Qt 组装"解码方式"那一栏）。不新增独立的
+         * 后台查询、不新增锁，线程约定与 m_description 逐字一致。
          */
         QString m_deviceName;
     };

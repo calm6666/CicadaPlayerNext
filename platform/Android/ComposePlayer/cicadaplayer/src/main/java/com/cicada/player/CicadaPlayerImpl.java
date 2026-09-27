@@ -1194,6 +1194,17 @@ import java.lang.ref.WeakReference;
     public void setVideoCodecSupport(String json) {
         mCorePlayer.setVideoCodecSupport(json);
     }
+
+    /*
+     * ---- 当前解码方式（硬解 / 软解）的事实读数（见 CicadaPlayer 接口上的说明）----
+     * 同样只是转发给 NativePlayerBase（那边再走 JNI -> 内核 CicadaIsVideoDecoderHardware）；
+     * 不做任何加工、不缓存，也不按解码器名字猜。
+     */
+
+    @Override
+    public boolean isVideoDecoderHardware() {
+        return mCorePlayer.isVideoDecoderHardware();
+    }
 }
 
 
