@@ -74,15 +74,15 @@
  * 【第七项：死代码清理】原 VIDEO_RECOVER_STALL_MS / VIDEO_RECOVER_SAMPLE_MS /
  * VIDEO_RECOVER_COOLDOWN_MS 三个宏已删除：它们是"多久没上屏就判死并重建解码器"
  * 那套墙钟巡检的参数，而那套机制已按红线整体删除（见 doRender() 里那段历史说明），
- * 四个宏在代码里已无任何引用。当前"有输入却零输出"的救援是纯状态判据，
- * 见 DECODE_STALL_REBUILD_ROUNDS。
+ * 四个宏在代码里已无任何引用。当前"有输入却零输出"已改为**错误驱动**的救援：
+ * 解码器自己报错才重建，不再用任何轮次/时间阈值推断"它死了"（原轮次阈值看门狗本轮一并删除）。
  */
 
 /*
  * 【第七项：死代码清理】原 VIDEO_RECOVER_STUCK_SEEK_MS 已删除：它是上面那套墙钟
  * 巡检在 seek 期间的宽限值，随机制一起删除，代码里已无引用。
- * seek 期间解码器卡死现在由 DECODE_STALL_REBUILD_ROUNDS 那条状态判据负责恢复
- * （判据里显式包含"seek 在途"这一支），不再需要任何"多等一会儿"的时间宽限。
+ * seek 期间解码器卡死同样只走**错误驱动**的重建，不再需要任何"多等一会儿"的
+ * 时间宽限，也不再用轮次阈值去猜（原轮次看门狗本轮删除）。
  */
 
 /*
@@ -169,7 +169,6 @@
  *   · 4K 下一次重建要释放并重配约 250MB 输出缓冲池，所以轮数不能太小：
  *     取 100 —— 远大于"刚起解码器需要几轮"的量级，又能在用户察觉前收敛。
  */
-#define DECODE_STALL_REBUILD_ROUNDS (100)
 /*
  * "音频静音窗口"的**状态**编码，只用于起止各一条的日志（不参与任何管线决策）。
  * 与 framework/render/audio/Android/AudioTrackRender.cpp 里同名编码保持一致，
@@ -3008,9 +3007,9 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
     /*
      * 旧流的关闭与清包**不在这里**：单解码器模型下 SwitchVideo() 在切换当场就
      * CloseStream(旧) 并按流 DropPacketsByStream(旧)（见 SwitchVideo 的 ②a / ③b），
-     * 所以走到终态时既没有"退役流"要收尾，也没有 retired 索引可用。
+     * 所以走到终态时既没有"退役流"要收尾，也没有 retired 解码器要释放
+     * —— 全工程只有一块视频解码器，它在切换时被原地重建。
      */
-    mAVDeviceManager->releaseRetiredVideoDecoder();
 
     AF_LOGI("finishQualitySwitch ready=%d stream=%d pts=%lld master=%lld reason=%s\n",
             (int) ready, committedStream, (long long) committedPts,
@@ -3465,7 +3464,7 @@ void SuperMediaPlayer::doRender()
      *   3. mVideoFrameQue.empty()：**一帧都没产出**（不是"慢"，是"无"）；
      *   4. 解码器有效、且渲染门没有在拦截（isRenderGateHit：暂停帧恢复那条路会
      *      故意把帧挡在 codec 里，那时"没帧"是设计如此，必须排除）；
-     *   5. 上面四条连续成立 DECODE_STALL_REBUILD_ROUNDS 轮。
+     *   5. 上面四条连续成立 100 轮。
      *
      * 动作：走**已存在**的错误驱动路径 rebuildVideoDecoder(false)
      *   （invalidateDecoder + CreateVideoDecoder，硬解失败自动落软解，主流做法；
@@ -3480,94 +3479,19 @@ void SuperMediaPlayer::doRender()
      * 明确不做的事：不 FlushVideoPath（红线）、不动音频、不动主时钟、不丢包追赶。
      */
     /*
-     * 解码器本该在产出帧的状态：播放中且没在缓冲（缓冲态本来就整条管线停着），
-     * 或者 seek 在途（seek 期间解码器同样可能卡死，那时更要救）。
+     * ============ 看门狗式"停滞就重建解码器"已整体删除（本轮）============
+     *
+     * 这里原本是：解码器"不收输入 && 一帧都没产出"连续 100 轮
+     * （100 轮）就判定解码器已死并 rebuildVideoDecoder()。按红线删除，理由与本文件里
+     * 已删除的 VIDEO_RECOVER_* 那两条墙钟看门狗完全同构：
+     *   · 它是"用轮次推断解码器死亡"，属于禁止的看门狗 / 超时兜底；
+     *   · 主流实现（mpv/ffplay）不推断解码器死亡：解码器故障一律走**错误驱动**的重建
+     *     （既有 mVideoDecodeRebuildCount + rebuildVideoDecoder 调用），管线停顿由
+     *     "缓冲 / 停顿"状态如实上报给界面，而不是偷偷改管线；
+     *   · 它要治的"seek 老不出帧"根因已由不连续点 + 单一落点过滤（"落点帧即上屏"）修掉：
+     *     现在每次 seek 的落点帧在有限帧内必然被采纳，EOF 也有结构性终止，
+     *     不存在"永远等不到"的状态 —— 因此不需要任何阈值。
      */
-    const bool decodeShouldProduce = mAppStatus != APP_BACKGROUND && !mEof &&
-        (mSeekFlag || (mPlayStatus == PLAYER_PLAYING && !mBufferingFlag));
-
-    if (HAVE_VIDEO && decodeShouldProduce && !mDecodeStallRebuildDone &&
-        mPlayStatus != PLAYER_PREPARING) {
-        IDecoder *videoDecoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
-        const bool stalledWithoutOutput =
-            mVideoDecodeRetrySeen && videoDecoder != nullptr &&
-            mAVDeviceManager->isDecoderValid(SMPAVDeviceManager::DEVICE_TYPE_VIDEO) &&
-            mVideoFrameQue.empty() && videoDecoder->isRenderGateHit() &&
-            mBufferController->GetPacketSize(BUFFER_TYPE_VIDEO) > 0;
-
-        /*
-         * ============ 【修：seek 落点窗口里"还没解到关键帧"不是卡死】============
-         *
-         * 真机日志（2026-09-27 10:16，本地文件也一样）每次 seek 都是这个形状：
-         *   PFR: seek posUs=22142000
-         *   video decoder accepts no input and produced no frame
-         *     (retry rounds=100, frameQ empty, packetQ=1236, playStatus=5, seekFlag=1) — rebuilding it once
-         *   [AFActiveDecoder] wait a key frame × 100+        ← 真实原因：在等新时间轴的第一个关键帧
-         * 也就是说：**把"正常的等关键帧"误判成死锁**，于是每次 seek 都重建解码器。
-         * 而重建的代价不是几百毫秒 —— 新解码器必须重新等**下一个**关键帧（上一个已经被
-         * 读/丢走了），在本片源（IDR 间隔 4.5~11 s）上等于再等一整个 GOP；重建预算还是 2 次，
-         * 最坏一次 seek 要白等两个 GOP —— 这就是"本地视频 seek 也非常慢、有时候直接卡死"。
-         *
-         * 判据（纯状态）：只要这次 seek 的新时间轴**还没有解出第一个关键帧**
-         * （mSeekDecodeStartIsKey == false，它在 DecodeVideoPacket 里"关键帧已送进解码器"
-         * 的那一刻置真），"没收输入/没有帧"就属于**预期行为**，不许计入停滞轮次。
-         * 一旦关键帧已送进去却仍然不出帧，那才是真的卡死，照旧走重建。
-         * 与既有语义的关系：mSeekDecodeStartIsKey 本来就是"新解码器必须从关键帧起步"的闩，
-         * 这里只是把同一条状态用到停滞判据上，不引入任何新状态、不引入计时器。
-         */
-        const bool waitingFirstKeyFrameOfSeek =
-            (mSeekFlag || mDiscontinuity.filterActive.load()) && !mSeekDecodeStartIsKey;
-
-        if (waitingFirstKeyFrameOfSeek && stalledWithoutOutput) {
-            /* 只是"还在等关键帧"：把停滞轮次清零（并限流打一行，方便日志确认判断正确）。 */
-            mDecodeStallIters = 0;
-
-            if (floodLogAllowed(FLOOD_DECODE_STALL, 2, "waiting for the first key frame of the seek")) {
-                AF_LOGI("decode stall check skipped: this seek has not decoded its first key frame yet "
-                        "(keyFrames are what the decoder is waiting for) — packetQ=%d, no rebuild\n",
-                        (int) mBufferController->GetPacketSize(BUFFER_TYPE_VIDEO));
-            }
-        } else if (stalledWithoutOutput) {
-            if (++mDecodeStallIters >= DECODE_STALL_REBUILD_ROUNDS) {
-                /* 闩住：这次卡死只做一次，无论下面的重建成功与否，都不再重复进入
-                 *（出帧时 FillVideoFrame 会把这个闩与重建预算一起复位）。 */
-                mDecodeStallRebuildDone = true;
-                mDecodeStallIters = 0;
-                mVideoDecodeRetrySeen = false;
-
-                if (mVideoDecodeRebuildCount < MAX_VIDEO_DECODER_REBUILDS) {
-                    ++mVideoDecodeRebuildCount;
-                    AF_LOGW("video decoder accepts no input and produced no frame "
-                            "(retry rounds=%d, frameQ empty, packetQ=%d, playStatus=%d, seekFlag=%d) "
-                            "— rebuilding it once (attempt %d/%d, release + init with hw->sw fallback)\n",
-                            (int) DECODE_STALL_REBUILD_ROUNDS,
-                            (int) mBufferController->GetPacketSize(BUFFER_TYPE_VIDEO),
-                            (int) mPlayStatus, (int) mSeekFlag,
-                            (int) mVideoDecodeRebuildCount, (int) MAX_VIDEO_DECODER_REBUILDS);
-
-                    if (rebuildVideoDecoder(false) >= 0) {
-                        /*
-                         * 新解码器是干净状态，必须重新从关键帧起步：闩归假后
-                         * DecodeVideoPacket 会重新闩关键帧，渲染侧在闩为真之前不接受落点帧
-                         * —— 最多再等一个 GOP，绝不把缺参考帧的脏帧显示出去。
-                         */
-                        mSeekDecodeStartIsKey = false;
-
-                        videoDecoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
-                        if (videoDecoder != nullptr) {
-                            videoDecoder->clean_error();
-                        }
-                    }
-                } else {
-                    AF_LOGW("video decoder accepts no input and produced no frame, but the "
-                            "rebuild budget is exhausted (attempts=%d/%d) — not rebuilding\n",
-                            (int) mVideoDecodeRebuildCount, (int) MAX_VIDEO_DECODER_REBUILDS);
-                }
-            }
-        } else {
-            mDecodeStallIters = 0;
-        }
-    }
 }
 
 void SuperMediaPlayer::doDeCode()
@@ -6179,9 +6103,11 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
         finishQualitySwitch(false, "video path flushed (seek/stop/catch-up)");
     }
 
-    // seek/stop 时新旧切换都失去渲染条件，retired decoder 也必须立即释放，
-    // 防止下一次 seek 长时间占用旧的硬解 surface。
-    mAVDeviceManager->releaseRetiredVideoDecoder();
+    /*
+     * 这里原来要"立即释放退役解码器，防止下一次 seek 长时间占着旧硬解 surface"。
+     * 单解码器模型下不存在退役解码器：切换时旧流当场 CloseStream、解码器原地重建，
+     * 任何时刻只有一块视频解码器，没有第二个 surface 需要回收。
+     */
 
     mActiveVideoPtsOffset = INT64_MIN;
     /* B10：时间轴重建（seek/stop/换源）时逐帧配对表必须一起丢掉，否则旧代的 pts 可能撞上新帧 */

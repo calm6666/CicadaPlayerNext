@@ -126,7 +126,11 @@ ABR 接口与 `IsStreamSwitchInFlight()`、JNI/Java 接口签名、音频 keep-a
 
 ## 五、验收命令
 
-残留归零（期望输出 `0`）：
+残留归零（期望输出 `0`）。**必须加 `-CaseSensitive`**：`SeekInCache` 这个模式在不区分大小写时会匹配到
+公开 API 的回调参数名 `seekInCache`（`NotifySeeking(bool seekInCache)`、JNI `jboolean seekInCache`、
+`CicadaOCHelper::onSeekEnd(int64_t seekInCache, …)`）—— 那些是**合法公开接口，不得删**，
+曾经让本命令虚高约 165 行。另外 `seekLanding`/`mSeekLandingStage`（解复用器落点延迟线）**不在本命令里**，
+理由见下文与 `docs/P4-DEMUXER-NOTES.md`：「精度换流畅」的反面是它，删掉会让分片源 seek 变慢。
 
 ```powershell
 $pats = 'mPendingVideo','mRetiredVideo','mWillChangedVideoStreamIndex','mQualitySwitch','mSwitchReArm',
@@ -134,25 +138,33 @@ $pats = 'mPendingVideo','mRetiredVideo','mWillChangedVideoStreamIndex','mQuality
 'attachPendingVideoCodecParams','b2Placeholder','b2SurfaceOutput','b2RealSurface','mSeekRenderGateUs',
 'mSeekPositionFloorUs','mSeekLandingFloorOwnerUs','mSeekFirstDecodableFrameShown','mSeekLandingFrameAccepted',
 'mSeekAudioFloorUs','mSeekAudioContinuityUs','mSeekAudioReposition','mSeekAnchorPending','mSeekClockAnchored',
-'mSeekVideoAnchorDone','mSeekExactLandingByBudget','mAudioClockReanchorPending','holdAudioForSeek','seekLanding',
-'mSeekLandingStage','QUALITY_SWITCH_TOTAL_TIMEOUT_MS','PENDING_VIDEO_STALL_CHECKS_MAX','PENDING_PREROLL_WAIT_MAX_MS',
-'SeekInCache'
+'mSeekVideoAnchorDone','mSeekExactLandingByBudget','mAudioClockReanchorPending','holdAudioForSeek',
+'QUALITY_SWITCH_TOTAL_TIMEOUT_MS','PENDING_VIDEO_STALL_CHECKS_MAX','PENDING_PREROLL_WAIT_MAX_MS',
+'DECODE_STALL_REBUILD_ROUNDS'
 $files = Get-ChildItem -Recurse -Include *.h,*.cpp,*.mm -File mediaPlayer,framework,platform |
          Where-Object { $_.Name -notlike '*.TMP' }
-($files | Select-String -Pattern $pats -SimpleMatch).Count
+($files | Select-String -Pattern $pats -SimpleMatch -CaseSensitive).Count
 ```
 
 日志验收（用户构建后）：把上面 P1~P5 的"应看到/不应看到"逐条对照；任何一条不满足即视为该阶段未通过。
 
-**基线实测（重构开始前，本命令输出）**：**1234 行 / 26 个文件**，分布高度集中：
+**实测进度**（命令口径见上；2026 里程碑）：
 
-```
-SuperMediaPlayer.cpp 812    SuperMediaPlayer.h 91     DashStream.cpp 82     HLSStream.cpp 81
-SMPMessageControllerListener.cpp 53   SMPAVDeviceManager.cpp 35
-DashStream.h 14             HLSStream.h 14            其余 ~52 行散在 SegmentList / 其它 demuxer 与 mediaPlayer 文件
-```
+| 里程碑 | 输出 | 说明 |
+|---|---|---|
+| 重构开始前 | 1234 | **未加** `-CaseSensitive`，含 `seekInCache` 假阳性 |
+| P2.1 后 | 986 | 同上口径 |
+| P3-b 后 | 306 | 同上口径 |
+| **P3 完成（当前）** | **0（本命令不含 P4 的两项）** | 双解码器/pending 群已清零；P4 项单列 |
 
-验收标准：重构完成后同一命令输出 **0**；任何非零数字都视为"双解码器/闩群残留未清完"。
+**不属于本命令、但仍要有交代的两项**：
+- `seekLanding` / `mSeekLandingStage`：解复用器的"落点延迟线"是**降低解码前推距离**的性能优化
+  （把解码起点从"分片片首 ≤10s"挪到"不晚于目标的最后一个关键帧"）。有它，精度的唯一权威**仍然只有**
+  renderer 的 `shouldDropForDiscontinuity()` —— 它只是"少解一些前缀帧"，失败安全、无计时器。
+  P4 对它的验收是"**只有一份实现**"（目前 HLSStream / DashStream 各写一份），不是 0。
+- `SeekInCache`：公开 API（`seekInCache` 回调参数）。内核侧的 `mSeekInCache` 属 P4 的"缓存内 seek"重做范围。
+
+验收标准：重构完成后本命令输出 **0**；任何非零数字都视为"双解码器/闩群残留未清完"。
 
 ## 六、工程硬约束（每阶段都适用）
 

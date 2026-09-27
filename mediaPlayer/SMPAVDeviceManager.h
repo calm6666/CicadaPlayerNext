@@ -59,37 +59,6 @@ namespace Cicada {
             return nullptr;
         }
 
-        /**
-         * 待切换视频解码器。
-         *
-         * 清晰度切换期间，旧解码器仍然负责输出当前画面；新码流只送入这
-         * 个 pending decoder，等它成功解出第一帧后再 promote。该接口位于
-         * 公共核心层，因此软解、MediaCodec、VideoToolbox、FFmpeg 等平台
-         * 都遵循同一套切换语义，渲染层无需知道切换细节。
-         */
-        IDecoder *getPendingVideoDecoder() const
-        {
-            return mPendingVideoDecoder.decoder.get();
-        }
-        bool isPendingVideoDecoderValid() const
-        {
-            return mPendingVideoDecoder.valid;
-        }
-        // 创建 pending decoder；创建失败时 active decoder 不受影响。
-        int setUpPendingVideoDecoder(uint64_t decFlag, const Stream_meta *meta, void *device, uint32_t dstFormat);
-        // 从 pending decoder 取出已解码帧，送入 pending 帧队列。
-        int getPendingVideoFrame(std::unique_ptr<IAFFrame> &frame, uint64_t timeOut);
-        // 只向 pending decoder 投递目标清晰度的数据包，禁止混入 active decoder。
-        int sendPendingVideoPacket(std::unique_ptr<IAFPacket> &packet, uint64_t timeOut);
-        // 仅标记 pending 无效，供异常恢复路径使用。
-        void invalidatePendingVideoDecoder();
-        // 取消切换并释放 pending decoder 及其内部资源。
-        void discardPendingVideoDecoder();
-        // 新 decoder 首帧就绪后，把 pending 提升为 active。
-        void promotePendingVideoDecoder();
-        // 将旧 active 解码器保留到新帧真正交给渲染器之后，避免 Qt/D3D11 仍引用旧 surface。
-        void releaseRetiredVideoDecoder();
-
         bool isDecoderValid(deviceType type) const
         {
             if (type == DEVICE_TYPE_VIDEO) {
@@ -189,9 +158,6 @@ namespace Cicada {
         std::mutex mMutex{};
         DecoderHandle mAudioDecoder;
         DecoderHandle mVideoDecoder;
-        DecoderHandle mPendingVideoDecoder;
-        // 切换提交后暂存旧解码器；渲染线程确认新帧上屏前绝不能销毁。
-        DecoderHandle mRetiredVideoDecoder;
         std::unique_ptr<IAudioRender> mAudioRender{nullptr};
         IAFFrame::audioInfo mAudioRenderInfo{};
         bool mAudioRenderValid{false};

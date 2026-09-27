@@ -32,14 +32,6 @@ SMPAVDeviceManager::~SMPAVDeviceManager()
         mVideoDecoder.decoder->flush();
         mVideoDecoder.decoder->close();
     }
-    if (mPendingVideoDecoder.decoder) {
-        mPendingVideoDecoder.decoder->flush();
-        mPendingVideoDecoder.decoder->close();
-    }
-    if (mRetiredVideoDecoder.decoder) {
-        mRetiredVideoDecoder.decoder->flush();
-        mRetiredVideoDecoder.decoder->close();
-    }
 }
 int SMPAVDeviceManager::setUpDecoder(uint64_t decFlag, const Stream_meta *meta, void *device, deviceType type, uint32_t dstFormat)
 {
@@ -125,115 +117,12 @@ int SMPAVDeviceManager::setUpDecoder(uint64_t decFlag, const Stream_meta *meta, 
     return 0;
 }
 
-int SMPAVDeviceManager::setUpPendingVideoDecoder(uint64_t decFlag, const Stream_meta *meta, void *device, uint32_t dstFormat)
-{
-    // 该函数只操作 pending slot，不会关闭或 flush 当前正在显示画面的 active
-    // decoder，所以创建失败也不会影响旧清晰度继续播放。
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    DecoderHandle &h = mPendingVideoDecoder;
-    if (h.valid) return 0;
 
-    DrmInfo drmInfo{};
-    if (meta->keyFormat != nullptr) {
-        drmInfo.format = meta->keyFormat;
-        drmInfo.uri = meta->keyUrl == nullptr ? "" : meta->keyUrl;
-    }
-    if (meta->drmPssh != nullptr) drmInfo.pssh = meta->drmPssh;
-    if (meta->drmKeyId != nullptr) drmInfo.keyId = meta->drmKeyId;
 
-    if (h.decoder) {
-        h.decoder->flush();
-        h.decoder->close();
-        h.decoder.reset();
-    }
-    h.meta = *meta;
-    h.decFlag = decFlag;
-    h.device = device;
-    h.mDrmInfo = drmInfo;
-    h.mDstFormat = dstFormat;
-    h.decoder = decoderFactory::create(*meta, decFlag, std::max(meta->height, meta->width), drmInfo.empty() ? nullptr : &drmInfo);
-    if (!h.decoder) return gen_framework_errno(error_class_codec, codec_error_video_not_support);
-    h.decoder->setRequireDrmHandlerCallback(
-        [this](const DrmInfo &info) -> std::shared_ptr<DrmHandler> { return move(mDrmManager->require(info)); });
-    int ret = h.decoder->open(meta, device, decFlag, drmInfo.empty() ? nullptr : &drmInfo);
-    if (ret < 0) {
-        h.decoder.reset();
-        return gen_framework_errno(error_class_codec, codec_error_video_device_error);
-    }
-    h.valid = true;
-    /*
-     * 【角色标签，2026-09-24】
-     *
-     * 排查"切档后花屏/卡住"时最缺的一条事实是：日志里那些 codec 级输出
-     * （AFActiveDecoder / mediaCodecDecoder 等）到底是 active、pending 还是
-     * retired 解码器打的 —— 三者共用同一个 LOG_TAG，光看日志分不出来，
-     * 于是"坏包到底是新路还是旧路产生的"只能猜。
-     *
-     * 这里在**创建时刻**打一行带角色+实现名的 INFO（每次 setUpPendingVideoDecoder
-     * 只会成功走到这里一次，天然限频，不需要额外控制），配合 active/retired
-     * 那两处已有的日志，就能按时间线把三个角色的存活区间对上。
-     */
-    AF_LOGI("pending video decoder is up: role=pending impl=%s flag=0x%llx (active decoder keeps running)\n",
-            h.decoder->getName().c_str(), (unsigned long long) decFlag);
-    return 0;
-}
 
-int SMPAVDeviceManager::getPendingVideoFrame(std::unique_ptr<IAFFrame> &frame, uint64_t timeOut)
-{
-    // 解码器管理器统一加锁，避免后台解码线程和切换提交线程同时操作 decoder。
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    if (!mPendingVideoDecoder.valid || !mPendingVideoDecoder.decoder) return -EINVAL;
-    return mPendingVideoDecoder.decoder->getFrame(frame, timeOut);
-}
 
-int SMPAVDeviceManager::sendPendingVideoPacket(std::unique_ptr<IAFPacket> &packet, uint64_t timeOut)
-{
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    if (!mPendingVideoDecoder.valid || !mPendingVideoDecoder.decoder) return -EINVAL;
-    return mPendingVideoDecoder.decoder->send_packet(packet, timeOut);
-}
 
-void SMPAVDeviceManager::invalidatePendingVideoDecoder()
-{
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    mPendingVideoDecoder.valid = false;
-}
 
-void SMPAVDeviceManager::discardPendingVideoDecoder()
-{
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    if (mPendingVideoDecoder.decoder) {
-        mPendingVideoDecoder.decoder->flush();
-        mPendingVideoDecoder.decoder->close();
-    }
-    mPendingVideoDecoder = DecoderHandle{};
-}
-
-void SMPAVDeviceManager::promotePendingVideoDecoder()
-{
-    // 调用方已经确认 pending 有首帧。旧 decoder 不能在这里 close：Qt 场景图/D3D11
-    // 可能仍持有旧 surface 的输入视图。先把旧 decoder 移到 retired，等新帧真正
-    // 送入渲染器后再释放，避免切高清时出现左上角残片、黑帧和 GPU 卡死。
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    if (!mPendingVideoDecoder.valid || !mPendingVideoDecoder.decoder) return;
-    if (mRetiredVideoDecoder.decoder) {
-        mRetiredVideoDecoder.decoder->flush();
-        mRetiredVideoDecoder.decoder->close();
-        mRetiredVideoDecoder = DecoderHandle{};
-    }
-    mRetiredVideoDecoder = std::move(mVideoDecoder);
-    std::swap(mVideoDecoder, mPendingVideoDecoder);
-    mPendingVideoDecoder = DecoderHandle{};
-}
-
-void SMPAVDeviceManager::releaseRetiredVideoDecoder()
-{
-    std::lock_guard<std::mutex> uMutex(mMutex);
-    if (!mRetiredVideoDecoder.decoder) return;
-    mRetiredVideoDecoder.decoder->flush();
-    mRetiredVideoDecoder.decoder->close();
-    mRetiredVideoDecoder = DecoderHandle{};
-}
 
 SMPAVDeviceManager::DecoderHandle *SMPAVDeviceManager::getDecoderHandle(const SMPAVDeviceManager::deviceType &type)
 {
