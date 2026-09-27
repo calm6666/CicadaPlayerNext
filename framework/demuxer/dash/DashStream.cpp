@@ -1307,10 +1307,22 @@ int64_t DashStream::seek(int64_t us, int flags)
             mReopen = true;
         }
 
+        /*
+         * 【日志勘误，不改行为】这里打出的 segNum 是 tracker 的"游标"，而读取线程取下一段时
+         * 走的是 DashSegmentTracker::getNextSegment()，它**先 ++mCurrentSegNumber 再取段**
+         * （DashSegmentTracker.cpp:149）。于是 `setCurSegNum(num - 1)` 配上那次 ++ 正好读
+         * 第 num 段 —— 也就是**包含请求时刻的那一段**，这是对的。
+         * 但旧日志只打游标值，看上去就像"请求第 5 段却定位到第 4 段"（真机排查时被误读成
+         * 落点偏了一个分片）。所以这里把"第一段实际会读哪一段"一并打出来，避免下一次再被误读。
+         * 判据仍是纯状态（游标值 + 1 = num），不引入任何计时器 / 阈值。
+         */
         mPTracker->setCurSegNum(num - 1);
-        AF_LOGI("[seek] dash %s: tracker positioned at segNum=%llu (reqUs=%lld, reopened)\n",
+        AF_LOGI("[seek] dash %s: tracker cursor set to segNum=%llu (reqUs=%lld, reopened) — the read thread "
+                "advances with ++, so the FIRST segment read is segNum=%llu (this must be the segment that "
+                "CONTAINS the request; landing at its head IDR is intended)\n",
                 mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
-                (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought);
+                (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought,
+                (unsigned long long) num);
     }
 
     /*

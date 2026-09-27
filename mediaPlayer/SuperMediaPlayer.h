@@ -1508,6 +1508,20 @@ namespace Cicada {
          */
         std::mutex mAppCodecSupportMutex;
         std::shared_ptr<const decoderFactory::AppCodecSupport> mAppCodecSupport;
+
+        /*
+         * 【落点过滤诊断限频】"落点过滤丢掉一帧"的日志已经为哪个代际打过。
+         *
+         * RenderVideo 的单一落点过滤（shouldDropForDiscontinuity）在"完全落在目标之前"时
+         * 会丢掉这一帧；前缀帧可能有几百上千张，逐帧记只会淹掉真正重要的那几行。
+         * 这里按**代际**限频（纯状态比较，不是计数器、不是计时器），一次不连续点至多一行 ——
+         * 而这一行正好回答了上次真机死锁里唯一缺的那个问题：
+         *   **判据用的那个"帧位置"与目标点是不是同一根轴**。
+         * （真机 2026-09-27 那次暂停态 seek 就是因为两者不同轴，过滤永不结束，
+         *  日志里只有 812 条 drop frame、0 条 accepted，看不出原因。）
+         * 追加在成员列表**最末尾**（本工程硬规则：只有追加才是增量 ABI 安全的）。
+         */
+        int mVideoLandingDropLoggedGen{-1};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

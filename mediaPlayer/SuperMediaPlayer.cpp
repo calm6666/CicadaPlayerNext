@@ -4873,11 +4873,33 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
      * 那正是分片源"seek 永远差一个落点前缀"的根因。
      */
     if (mDiscontinuity.filterActive.load()) {
-        int64_t frameTimePos = videoFrame->getInfo().timePosition;
+        /*
+         * ============ 【落点判据必须用渲染路径自己的那根轴：帧 pts】============
+         *
+         * 真机实证（安卓 DASH，2026-09-27 19:52:23 那次**暂停态** seek，target=47.55s）：
+         * 这里原来优先用 videoFrame->getInfo().timePosition，而 targetUs 来自 API 的
+         * seekPos（内容时间轴）。两者在安卓 + DASH 上**不是同一根轴**：
+         *   · 安卓 MediaCodec 后端不填 timePosition（mediaCodecDecoder 里那个 TODO
+         *     至今仍是 INT64_MIN）；
+         *   · DASH 的每一路 rendition 还会各自算 time2ptsDelta（分片边界处再修一次）。
+         * 后果：判据永远认为"这一帧还在目标之前" ⇒ 落点过滤**永不结束**：
+         *   812 条 `drop frame`（pts 从 40040000 一路涨到 55889167，而 target=47550000）、
+         *   **0 条** `seek landing frame accepted`。暂停态下两个防冻阀门按设计都不参与
+         *   （见下面 landingFilterActive 那段：落点过滤激活时阀门不介入），
+         *   于是画面永久冻结，音频保活 2.4s 耗尽后设备报 onAudioException -1003。
+         * 这不是"没解到目标"，而是"判据和它在比的那个数不是一根轴"——纯逻辑死锁。
+         *
+         * 修法：改用**渲染节拍判定用的同一个值** videoPts。理由：
+         *   · 主时钟在 seek 一开始就被 ProcessSeekToMsg() 钉在 targetUs 上，而节拍判定
+         *     就是 `videoLateUs = mMasterClock.GetTime() - videoPts`（见上面）——
+         *     也就是说整条渲染路径早就把 videoPts 当作与 targetUs 同轴的值在用；
+         *   · 判据与节拍用同一个值之后，"包含/越过目标的帧"必然出现（帧 pts 单调前进）。
+         * 只有在 pts 未知（INT64_MIN）时才退回 timePosition，绝不反过来。
+         */
+        int64_t frameTimePos = videoPts;
 
-        if (frameTimePos < 0) {
-            /* 容器/流不填 timePosition 时退回帧自己的 pts：同一时间轴、同一单位。 */
-            frameTimePos = videoFrame->getInfo().pts;
+        if (frameTimePos == INT64_MIN) {
+            frameTimePos = videoFrame->getInfo().timePosition;
         }
 
         int64_t seekFrameDurUs = videoFrame->getInfo().duration;
@@ -4966,6 +4988,26 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
              *     存在，另有上面那条 EOF 采纳，以及 playCompleted() 自己清 mSeekFlag。
              */
             render = false;
+
+            /*
+             * 【诊断，每个不连续点至多一行】把判据真正用到的 usedPos 与原始两个字段
+             * （pts / timePosition）、目标点、主时钟一起打出来。限频按**代际**（纯状态，
+             * 没有计数器、没有计时器），所以一次 seek 只多一行；而这一行正是上次真机死锁里
+             * 唯一缺的证据 —— 判据用的那个位置与目标点不同轴时，过滤就会永不结束而日志里
+             * 只有一串 drop frame，看不出原因。
+             */
+            if (mVideoLandingDropLoggedGen != mDiscontinuity.generation.load()) {
+                mVideoLandingDropLoggedGen = mDiscontinuity.generation.load();
+                AF_LOGW("seek landing filter: dropping frame pts=%lld timePosition=%lld usedPos=%lld dur=%lld "
+                        "target=%lld generation=%d master=%lld — frames before the target are never shown; "
+                        "printed once per discontinuity (if the filter then never accepts, the frame position "
+                        "is on a different axis than the target)\n",
+                        (long long) videoFrame->getInfo().pts,
+                        (long long) videoFrame->getInfo().timePosition,
+                        (long long) frameTimePos, (long long) seekFrameDurUs,
+                        (long long) mDiscontinuity.targetUs, mVideoLandingDropLoggedGen,
+                        (long long) masterPlayedTime);
+            }
         } else {
             /*
              * 包含目标（framePos <= target < framePos + 帧长），或者已经越过目标
