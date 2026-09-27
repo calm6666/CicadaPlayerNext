@@ -7108,7 +7108,30 @@ bool SuperMediaPlayer::render()
          * 恢复播放时从锚点（目标）起算。要等也只等"音频数据到达"，**不等时钟**。
          * 判据是纯状态（mPlayStatus），没有计时器；只影响暂停态，播放/缓冲路径逐字不变。
          */
-        const bool seekHoldDisabled = (mPlayStatus == PLAYER_PAUSED);
+        /*
+         * ============ 【本轮修：时钟不走的时候，这道门必须彻底禁用】============
+         *
+         * 真机日志（2026-09-27 10:29:12~10:29:21，本地文件）：
+         *   audio silence starts (reason=4): buffering: the clock and the audio render are paused (empty cache)
+         *   audio silence starts (reason=1 audioPts=33130667 masterClock=30080897):
+         *       seek window: the pcm head is ahead of the master clock, holding pcm until the clock catches up
+         *   audio keep-alive: reached the resource cap (120 silence writes ≈ 2400 ms)
+         *   audio silence ends (was reason=1)          ← 总共 **8.4 秒**没有任何声音
+         *
+         * 死锁形状：缓冲态把主时钟 pause 了（上面第一条，reason=4），而这道门的前提是
+         * "时钟按 1× 自己往前走、走到队首 PTS 就开"（见上面那段注释）。时钟被暂停之后
+         * "追上"永远不可能发生 ⇒ PCM 一直被扣住 ⇒ 设备侧只能写 keep-alive 静音，
+         * 用户就是"seek 之后没声音了，过一会儿才出来"。
+         *
+         * 处置：把"时钟**此刻**是不是在走"作为禁用条件（mMasterClock.isPaused()），
+         * 与暂停态、缓冲态一起并入 seekHoldDisabled。语义：
+         *   · 时钟在走（正常 seek，缓存够）⇒ 这道门照旧生效，A/V 落点之差不背债；
+         *   · 时钟停着（缓冲/暂停）⇒ 立刻放行 PCM —— 宁可让音频先走、
+         *     也不允许"永远等一个不动的时钟"这种结构性静音。
+         * 全状态判据、无计时器；不改变任何落点/精度判定。
+         */
+        const bool clockNotAdvancing = mBufferingFlag || mMasterClock.isPaused();
+        const bool seekHoldDisabled = (mPlayStatus == PLAYER_PAUSED) || clockNotAdvancing;
 
         if (!seekHoldDisabled && inSeekAudioWindow && !mAudioFrameQue.empty() && mAudioFrameQue.front() != nullptr) {
             audioSilencePts = mAudioFrameQue.front()->getInfo().pts;
@@ -7145,7 +7168,7 @@ bool SuperMediaPlayer::render()
              */
             if (mAudioSilenceReason == AUDIO_SILENCE_SEEK_CLOCK) {
                 logAudioSilence(AUDIO_SILENCE_NONE,
-                                "paused: the frozen clock cannot catch up, so pcm is not held any more",
+                                "the clock is not advancing (paused/buffering), so pcm is not held any more",
                                 audioSilencePts, audioSilenceClock);
             }
         } else if (holdAudioForSeek && mAudioSilenceReason == AUDIO_SILENCE_NONE) {
