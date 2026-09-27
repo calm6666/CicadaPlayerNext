@@ -1764,6 +1764,24 @@ namespace Cicada {
         int mAudioLandingDropLoggedGen{-1};
 
         /*
+         * ============ 【P3：单解码器切档的"挂着的切换请求"（新模型的唯一在途判据）】============
+         *
+         * mVideoSwitchInFlight   —— 是否有一次切档请求正在生效。由
+         *   `SMPMessageControllerListener::switchVideoStream()` 在发出 STARTED 前置真，
+         *   由 `finishQualitySwitch()` 在终态（READY / FAILED / CANCELED）清零。
+         *   本工程"切档在途"只此一个判据：`qualitySwitchInFlight()` 与
+         *   `ICicadaPlayer::IsStreamSwitchInFlight()`（ABR 让路）都返回它。
+         * mVideoSwitchTargetIndex —— 目标档索引；READY 通知与日志用它（终态时清 -1）。
+         *
+         * 双解码器那套"切档在途"曾经由 9 个成员拼出来；单解码器切档是**立即切换**
+         * （关旧流 → 开新流 → 按流 seek → 只 flush 视频 → 重建同一块解码器 → 落点过滤
+         *  → 落点帧上屏即 READY），所以只需要这两个字段。
+         * 追加在成员列表末尾（本文件约定：只有追加才是增量 ABI 安全的）。
+         */
+        bool mVideoSwitchInFlight{false};
+        int mVideoSwitchTargetIndex{-1};
+
+        /*
          * 不连续点本体。**追加在成员列表最末尾**：本工程增量构建不记录头文件
          * 依赖，插在中间会移动其后成员的偏移，让旧的 friend TU 目标文件按错
          * 偏移访问（见本文件里"以下这些成员必须留在成员列表的最末尾"那段）。

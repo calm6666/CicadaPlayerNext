@@ -746,4 +746,127 @@ P1-b 的位置上报是"不连续点基准 + **墙钟**增量"，P2 的音频参
   —— 与 `shouldDropForDiscontinuity()` 完全一致。
 * **构建要求：仍需全量重编**（`Discontinuity` 结构体尺寸再次变化）。
 
+---
+
+## 十二、P3 施工图（单解码器切档：立即切换路径 A + 删尽双解码器）
+
+### 12.1 机制选择：路径 A（立即切换），证据行号
+
+按父代理拍定实现 **路径 A**（不复用 demuxer 分片边界交接、不保留 pending 机制）。可行性已用代码事实核对：
+
+| 事实 | 位置 | 结论 |
+|---|---|---|
+| `OpenStream(index)` 只把目标流置 `selected = true` 并 start，**不取消旧流的 selected** | `framework/demuxer/play_list/HLSManager.cpp:327-374`（`:365` `i->selected = true`） | ⇒ 路径 A **必须**先 `CloseStream(old)`，否则两路包混进同一条队列（这正是双解码器能工作、也让单解码器不可用的原因） |
+| `CloseStream(id)` 置 `selected = false` 并 `stop()` 旧流 | `HLSManager.cpp:398-422`（`:414`/`:417`） | ⇒ 旧 rendition 当场停止投递，单解码器不再收到旧流数据 |
+| `seek(us, flags, index)` 对 **video index 只 seek 那一路**（`index == -1` 才走 "seek all"），且**完全不碰音频流** | `HLSManager.cpp:442-567`（`:480` 的 `index == -1` 分支 vs `:562-567` 的按 id 单流 seek） | ⇒ 切档的 `Seek(switchPos, 0, newIndex)` **不会重定位音频** ⇒ 声音连续（"切档后没声音"的一类根因在结构上消失） |
+| DashManager 同形 | `framework/demuxer/dash/DashManager.cpp:319`（Open）、`:557-578`（`SwitchStreamAligned` 被改成只写 `toStreamId`） | 同上 |
+
+理由（对应 §2 规则 4）：① 立即生效，不依赖 manager 的分片边界交接语义 ⇒ 满足"切换时间必须短 / 100% 成功"；
+② 复用的正是 P1 已经做准的 seek 路径（落点精度由 `shouldDropForDiscontinuity` 承担）；
+③ 音频流不动 ⇒ 切档期间声音连续；④ 单解码器 ⇒ 占位面 / 双 surface 那一整套在结构上不再需要。
+
+### 12.2 新模型（file:line 级时序）
+
+```
+① 记录目标档 + 切换点
+   SMPMessageControllerListener::switchVideoStream()：
+       mVideoSwitchInFlight = true;  mVideoSwitchTargetIndex = index;   /* 单一"挂着的切换请求" */
+       switchPos = mPlayer.getCurrentPosition()  ← 唯一内容时间轴（P2.1：mMasterClock）
+       NotifyVideoQualitySwitch(STARTED, index, "quality switch started")
+② 关旧流 → 开新流 → 按流定位到切换点           SuperMediaPlayer::SwitchVideo(switchPos)
+       CloseStream(mCurrentVideoIndex)         /* 旧 rendition 当场停止投递 */
+       OpenStream(mVideoSwitchTargetIndex)     /* 失败 ⇒ FAILED + 清 in-flight（不动播放） */
+       Seek(switchPos / 1000 * 1000, 0, mVideoSwitchTargetIndex)   /* 只 seek 这一路，音频不受影响 */
+③ 只 flush 视频：FlushVideoPath(false, false, __func__)
+       （视频解码器 + 解码帧队列 + 目标点之前的陈旧视频包；**不碰音频**）
+④ 用目标流 meta 重建**同一块**解码器（任何时刻只有一块、无占位面）
+       GetStreamMeta(meta, target, true) → isVideoDecoderMetaMatched(meta)
+         匹配   ⇒ 什么都不做（③ 的 flush 已经复位解码器）
+         不匹配 ⇒ invalidateDecoder(VIDEO) + CreateVideoDecoder(false, meta)
+⑤ 提交"当前档"并武装单一过滤（**必须在 ③/④ 之后**，否则旧流的帧会被当成落点帧）
+       mCurrentVideoIndex = mVideoSwitchTargetIndex
+       mSeekDecodeStartIsKey = false            /* 脏帧保护重新武装：新流首帧必须来自关键帧 */
+       beginDiscontinuity(switchPos)            /* 唯一落点过滤接管：新流首个上屏帧 = 包含 switchPos 的那一帧 */
+⑥ 落点帧被采纳 ⇒ READY
+       acceptDiscontinuityLandingFrame()：if (mVideoSwitchInFlight) finishQualitySwitch(true, "quality switch rendered")
+```
+
+**为什么不会花屏 / 不会快进**：新流解码从 demuxer 按流 seek 的落点（关键帧 ≤ switchPos）开始；
+`mSeekDecodeStartIsKey = false` 让"非关键帧起步的脏帧不上屏"这条保护覆盖切档路径（P3 要求 3）；
+落点过滤保证 switchPos 之前的帧一律不上屏 ⇒ 不会"从头扫一遍"。
+
+**新成员**（追加在类末尾，符合本文件约定）：
+
+| 成员 | 语义 |
+|---|---|
+| `bool mVideoSwitchInFlight{false}` | 是否有挂着的切档请求（唯一判据，`qualitySwitchInFlight()` / `IsStreamSwitchInFlight()` 都返回它） |
+| `int mVideoSwitchTargetIndex{-1}` | 目标档索引（替代 `mQualitySwitchCommittedStreamIndex` 的入口作用） |
+
+### 12.3 兼用语义替换表（逐条落实）
+
+| § | 被删成员 | 兼着的语义 | 替代 |
+|---|---|---|---|
+| 5.1 | `mPausedSwitchRenderPending` | "暂停态切档不锚主时钟"的两处守卫（`SuperMediaPlayer.cpp:7512-7523`、`:7919-7927`） | 改成 `!mDiscontinuity.filterActive.load() && !mSeekFlag`（更强：同时覆盖 seek 在途与切档） |
+| 5.2 | `mQualitySwitchCommittedStreamIndex` | READY 入口 + 日志索引 | `mVideoSwitchTargetIndex`（in-flight 时）/ `mCurrentVideoIndex`（提交后） |
+| 5.2 | `mWillChangedVideoStreamIndex` / `mPendingVideoStreamIndex` | "切档在途"判据（ABR 让路、read-ahead 门、日志） | `qualitySwitchInFlight()`（= `mVideoSwitchInFlight`）——ABR 让路本来就是读 `IsStreamSwitchInFlight()` |
+| 5.2 | `mSwitchStartedWhilePaused` / `mPausedSwitch*` | 暂停态切档"补做欠帧" | 落点帧渲染本身就是补做：`filterActive` 转假时该帧已被采纳并上屏 |
+| 5.2 | `mRetiredVideoStreamIndex` | "旧流何时 CloseStream" | ② 立即 `CloseStream(old)`（单解码器不需要旧流继续供帧） |
+| 5.2 | 四个死线常量 | 超时兜底 | **直接删**：单解码器 + 落点过滤没有"等不到"的状态 |
+
+### 12.4 要删的符号（`P3-BOUNDARY-SWITCH-NOTES.md` 第四节 + §3 清单）
+
+`SMPAVDeviceManager.{h,cpp}`：`mPendingVideoDecoder` / `mRetiredVideoDecoder` / `getPendingVideoDecoder()` /
+`isPendingVideoDecoderValid()` / `setUpPendingVideoDecoder()` / `getPendingVideoFrame()` /
+`sendPendingVideoPacket()` / `invalidatePendingVideoDecoder()` / `discardPendingVideoDecoder()` /
+`promotePendingVideoDecoder()`（含槽位交换）/ `releaseRetiredVideoDecoder()`。
+`SuperMediaPlayer.{h,cpp}`：`CreatePendingVideoDecoder` / `DecodePendingVideoPacket` / `FillPendingVideoFrame` /
+`DrainPendingVideoFrames` / `TryCommitPendingVideoSwitch` / `attachPendingVideoCodecParams`、
+`mPendingVideo*`、`mRetiredVideo*`、`mWillChangedVideoStreamIndex`、`mQualitySwitch*`、`mSwitchReArm*`、
+`mPausedSwitch*`、`mSwitchStartedWhilePaused`、B2/B2' 占位面（`b2Placeholder`/`b2SurfaceOutput`/`b2RealSurface`）、
+`mPendingVideoSwitchTimePosition`、宏 `QUALITY_SWITCH_TOTAL_TIMEOUT_MS` / `DECODE_STALL_REBUILD_ROUNDS` /
+`PENDING_VIDEO_STALL_CHECKS_MAX` / `PENDING_PREROLL_WAIT_MAX_MS`。
+**保留**：`NotifyVideoQualitySwitch(...)` 生命周期、`isVideoDecoderMetaMatched()`、`rebuildVideoDecoder()`、
+`CreateVideoDecoder()`、`FlushVideoPath()`、`mCurrentVideoIndex`、ABR 接口与
+`ICicadaPlayer::IsStreamSwitchInFlight()`、JNI/Java 签名。
+
+### 12.5 验收标记（P3）
+
+* 切档只有 `status=0(STARTED) → status=1(READY)`；手动与 ABR 都成功（失败才 `2/3`）；
+* 日志里不再出现：`[switch] state=decoderSwitch`、`pendingPktQ`/`pendingFrameQ`、`pending preroll`、
+  `placeholder surface handover`、`quality switch timed out`、`wait a key frame` 风暴、
+  两块 4K 实例 `-1010`、`video decoder accepts no input … rebuilding it once`；
+* 切档期间**声音连续**（音频流未被 seek/flush）；切档后位置不回弹（落点过滤挡掉 switchPos 之前的帧）；
+* 切档不花屏（新流从关键帧起解 + 脏帧不上屏）；
+* 切档耗时只有 "OpenStream + 按流 Seek + flush + 一次 meta 比较"（无预热等待、无分片边界等待）。
+
+### 12.6 P3 阶段性完成记录（机制已落地；物理清理由后续收尾完成）
+
+**本轮已实现（路径 A 机制，已可运行）**：
+
+| 文件:行 | 改动 |
+|---|---|
+| `SuperMediaPlayer.h:1766-1787` | 新增新模型的两个成员 `mVideoSwitchInFlight` / `mVideoSwitchTargetIndex`（追加在成员列表末尾，`mDiscontinuity` 仍保持最后） |
+| `SuperMediaPlayer.cpp:9391-9520`（`SwitchVideo()`） | **整段重写为路径 A**：`CloseStream(旧)` → `OpenStream(新)` → `Seek(switchPos,0,新)` → 提交 `mCurrentVideoIndex` → `FlushVideoPath(false,false,…)` → 按流 `DropPacketsByStream(VIDEO, 旧)` → `isVideoDecoderMetaMatched()` 不匹配才 `rebuildVideoDecoder(false)`（**同一块**）→ `mSeekDecodeStartIsKey = false` → `beginDiscontinuity(switchPos)`；三个失败出口（Open/Seek/meta/重建）是**唯一**的 FAILED 来源 |
+| `SuperMediaPlayer.cpp:3160-3166`、`:3213-3218`（`finishQualitySwitch()`） | 终态前置条件换成 `mVideoSwitchInFlight`；索引改用 `mVideoSwitchTargetIndex`；终态清零两个新成员 |
+| `SuperMediaPlayer.cpp:11280-11292`（`acceptDiscontinuityLandingFrame()`） | 新增 READY 出口：落点帧被采纳 + `mVideoSwitchInFlight` ⇒ `finishQualitySwitch(true, "quality switch rendered")` —— 单解码器切档**唯一**的成功出口 |
+| `SuperMediaPlayer.cpp:10260-10270`（`qualitySwitchInFlight()`） | 从 9 个 pending 成员的并集改为 `return mVideoSwitchInFlight;`（`IsStreamSwitchInFlight()`/ABR 让路随之只认这一个判据） |
+| `SuperMediaPlayer.cpp:7489-7491`、`:7897-7899` | §5.1 的两处 S6 守卫由 `!mPausedSwitchRenderPending` 改为 `!mDiscontinuity.filterActive.load()`（更强：同时覆盖 seek 在途与切档） |
+| `SMPMessageControllerListener.cpp:1401-1449`（`switchVideoStream()`） | 换成新模型入口：置 in-flight + 目标档 → `switchPos = getCurrentPosition()`（唯一内容时间轴）→ `NotifyVideoQualitySwitch(STARTED)` → `SwitchVideo(switchPos)`；删掉 `mWillChangedVideoStreamIndex`/pending 判据与旧的 `mMasterClock.GetTime()` 起点计算 |
+
+**本轮未完成的物理清理（按 §12.4，留给后续收尾）**：pending/retired 机器**全部成员与函数仍在源码里**，
+但已被新路径**结构性旁置**（视频切档不再写 `mWillChangedVideoStreamIndex`/`mPendingVideoStreamIndex`，
+所以 `SuperMediaPlayer.cpp:4680-4689` 的 `CreatePendingVideoDecoder` 分支不再可达）。仍需删除：
+`SuperMediaPlayer.{h,cpp}` 的 `CreatePendingVideoDecoder`/`DecodePendingVideoPacket`/`FillPendingVideoFrame`/
+`DrainPendingVideoFrames`/`TryCommitPendingVideoSwitch`/`attachPendingVideoCodecParams`、`mPendingVideo*`、
+`mRetiredVideo*`、`mQualitySwitch*`、`mSwitchReArm*`、`mPausedSwitch*`、`mSwitchStartedWhilePaused`、
+B2/B2' 占位面、四个死线常量，以及 `SMPAVDeviceManager.{h,cpp}` 的 pending/retired 槽位与 promote 交换。
+
+**收尾时必须一并处理的一处纠缠（本轮新发现，必须记录）**：
+`SuperMediaPlayer.cpp:8391-8418` 那条 "muxed 流里自动选择视频子流" 的路径仍然会写
+`mWillChangedVideoStreamIndex = streamId`（条件：`mDuration < 0 && mMainStreamId != -1 && id != mMainStreamId
+&& streamId != mCurrentVideoIndex`）。它是 pending 机器的**第二个激活入口**（起播时 `mCurrentVideoIndex`
+可能是 -1 或不同子流），所以"删净 pending 机器"必须先把这条改成单解码器语义（直接
+`CloseStream(旧子流)/OpenStream(新子流)` 或复用 `SwitchVideo`），否则删了成员这条路径会编译不过或被
+裸删成行为回退 —— 这正是 §12.4 说的"不得裸删"那一类。**先定这条，再删成员。**
+
 

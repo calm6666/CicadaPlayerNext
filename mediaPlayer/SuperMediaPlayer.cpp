@@ -3140,9 +3140,16 @@ void SuperMediaPlayer::logQualitySwitchState()
  */
 void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
 {
-    const bool hadCommit = mQualitySwitchCommitPending || mQualitySwitchCommittedStreamIndex >= 0;
-
-    if (!hadCommit) {
+    /*
+     * 【P3】终态前置条件 = 新模型的单一闩（`mVideoSwitchInFlight`），旧提交闩保留为幂等兜底。
+     *
+     * 旧实现这里还有"旧帧计数（mQualitySwitchOldFramesPending）必须归零 + 批次仲裁"，
+     * 那是双解码器"旧路还要再出 N 帧才算切完"的产物（原注释自己写着"如果这里也递减就会让
+     * finishQualitySwitch(true) 永远不成立，最终由 QUALITY_SWITCH_DEADLINE_MS 收掉"）。
+     * 单解码器模型下"切档完成"**只有一个判据**：新流的落点帧被采纳并上屏
+     * （acceptDiscontinuityLandingFrame() 里那次调用），所以这里不再有任何计数/仲裁前置。
+     */
+    if (!mVideoSwitchInFlight && !mQualitySwitchCommitPending && mQualitySwitchCommittedStreamIndex < 0) {
         return;
     }
 
@@ -3154,7 +3161,8 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
     setVideoDecodeBoost(false);
     setPendingVideoDecodeBoost(false);
 
-    const int committedStream = mQualitySwitchCommittedStreamIndex;
+    const int committedStream = (mVideoSwitchTargetIndex >= 0) ? mVideoSwitchTargetIndex
+                                                              : mQualitySwitchCommittedStreamIndex;
     const int retiredStream = mRetiredVideoStreamIndex;
     const int64_t committedPts = mPlayedVideoPts;
 
@@ -3205,6 +3213,9 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
     mQualitySwitchCommittedStreamIndex = -1;
     mQualitySwitchOldFramesPending = 0;
     mRetiredVideoStreamIndex = -1;
+    /* 【P3】新模型的在途闩在终态清零（READY / FAILED / CANCELED 三个出口共用本函数）。 */
+    mVideoSwitchInFlight = false;
+    mVideoSwitchTargetIndex = -1;
 
     /*
      * 【B19 终态出口 1/2：READY（status=1）与 FAILED】本函数同时是这两个终态的唯一出口
@@ -7511,7 +7522,7 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
          * 目标帧等时钟到点再上屏就是正确行为（那时 videoLateUs 会回到正常范围）。
          */
         if ((!mMasterClock.haveMaster() || !mMasterClock.isMasterValid()) && !mSeekFlag &&
-            !mPausedSwitchRenderPending) {
+            !mDiscontinuity.filterActive.load()) {
             /*
              * S6：暂停态切档期间**不锚时钟**。这里的第一张帧是"暂停点之前的关键帧
              * 到暂停点之间"解出来的，它的 pts 比用户暂停的位置更早或更晚都可能；
@@ -7917,7 +7928,7 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
              * 但 **seek 期间不能锚** —— 理由和上面 RenderVideo 里那段一样：
              * seek 目标点的时钟已经由 ProcessSeekToMsg 钉住，而这里的第一张帧可能
              * 是解码器冲到目标点后面 2~3 秒才解出来的，锚上去等于把时钟推飞。 */
-            if (mPlayedVideoPts == INT64_MIN && !mSeekFlag && !mPausedSwitchRenderPending) {
+            if (mPlayedVideoPts == INT64_MIN && !mSeekFlag && !mDiscontinuity.filterActive.load()) {
                 /*
                  * S6：暂停态切档期间不锚时钟（理由同上一条 guard）。暂停切档可能
                  * 是"纯视频片源 + 暂停中切档"这种组合，此时 mPlayedVideoPts 恰好
@@ -9368,80 +9379,152 @@ bool SuperMediaPlayer::isVideoDecoderMetaMatched(const Stream_meta *newMeta) con
     return true;
 }
 
-void SuperMediaPlayer::SwitchVideo(int64_t startTime)
+void SuperMediaPlayer::SwitchVideo(int64_t switchPos)
 {
-    AF_LOGD("video change find start time is %lld", startTime);
-    const int targetStreamIndex = mWillChangedVideoStreamIndex;
     /*
-     * 【B5-2：把"切档耗时"拆成可判定的两段】
+     * ============ 【P3】单解码器切档：立即切换（唯一路径，对应 §12.2）============
      *
-     * 真机实测（2026-09-25，DASH + 4K，GL 路）：从 UI 的
-     * `PLAYER_QUALITY_SWITCH_STARTED` 到新档首帧上屏共 0.86~1.41 s，其中
-     * "真面交接"只占 240 ms（`post-handover first frame … attachToFirstFrameMs=240`），
-     * 其余全在**目标档的准备**上 —— 而准备的头两步（下面 OpenStream / Seek）是
-     * **同步、且要等网络**的，它们发生在 `mPendingVideoSwitchStartMs` 计时零点**之前**，
-     * 所以在既有日志里是看不见的一段。这里把这两步各自计时打出来，
-     * 让"到底是 OpenStream、Seek、还是预滚等分片"一眼可判 —— 只加日志，不改任何行为。
-     * 结论性证据（同一份日志）：预滚起点那条行里 `master-ref = 0.776 s`，而要跨越的
-     * 媒体长度 `lead = 4.529 s` ⇒ 0.78 s 墙钟内交付 4.53 s 目标档媒体，且该窗口内
-     * 一帧都没解（跳过发生在喂解码器之前）⇒ 耗时在网络/分片粒度，不在解码或选择逻辑。
+     * 双解码器版本在这里做的是"打开目标流、**保留**旧流、等上层预热 + 提交"：旧流与目标流
+     * 同时 `selected`（`HLSManager::OpenStream` 只置目标 selected、不取消旧的，见
+     * `HLSManager.cpp:327-374`），所以必须再养一块解码器和一整套 pending/retired 状态机。
+     *
+     * 现在全程**只有一块解码器**，六步：
+     *   ② CloseStream(旧) → OpenStream(新) → Seek(切换点, 0, 新)
+     *      —— 带 index 的 Seek 只 seek 这一路（`HLSManager.cpp:562-567`，`index == -1`
+     *         才走 "seek all"）⇒ **完全不碰音频** ⇒ 切档期间声音连续；
+     *   ③ FlushVideoPath(false, false) + 丢掉旧流留在公共队列里的视频包：
+     *      只动视频解码器/视频队列，不碰音频；
+     *   ④ 目标 meta 与解码器不匹配才 invalidateDecoder() + rebuildVideoDecoder()
+     *      （复用既有 `isVideoDecoderMetaMatched()`；匹配就只靠 ③ 的 flush）—— 任何时刻一块；
+     *   ⑤ 提交"当前档" + 重新武装脏帧保护 + `beginDiscontinuity(switchPos)`：单一落点过滤接管；
+     *   ⑥ 落点帧被采纳 ⇒ `acceptDiscontinuityLandingFrame()` 里 `finishQualitySwitch(true)`。
+     *
+     * 没有预热队列、没有占位面、没有分片边界等待、没有任何死线。
      */
-    const int64_t switchVideoStartMs = af_getsteady_ms();
+    const int targetStreamIndex = mVideoSwitchTargetIndex;
+
+    if (targetStreamIndex < 0) {
+        AF_LOGW("switch video: no target stream (the in-flight request is gone) — nothing to do\n");
+        return;
+    }
+
+    AF_LOGD("video change find start time is %lld", switchPos);
+    const int64_t switchStartMs = af_getsteady_ms();
+
+    /*
+     * ②a 关掉旧流：单解码器下旧流必须**当场**停止投递 —— CloseStream 把它的 selected
+     * 置假并 stop（`HLSManager.cpp:398-422`），否则两路包会混进同一条队列。
+     * 关的只是这一路视频流，音频是另一路、有自己的 selected，不受影响。
+     */
+    const int oldStreamIndex = mCurrentVideoIndex;
+
+    if (oldStreamIndex >= 0 && oldStreamIndex != targetStreamIndex && mDemuxerService != nullptr) {
+        mDemuxerService->CloseStream(oldStreamIndex);
+        AF_LOGI("quality switch: closed the old video stream %d immediately (single-decoder switch)\n",
+                oldStreamIndex);
+    }
+
+    /* ②b 打开新流 */
     int ret = mDemuxerService->OpenStream(targetStreamIndex);
 
     if (ret < 0) {
         AF_LOGW("switch video open stream failed, target stream index %d\n", targetStreamIndex);
-        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED,
-                                             targetStreamIndex,
+        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
                                              "target video stream open failed");
-        mWillChangedVideoStreamIndex = -1;
+        mVideoSwitchInFlight = false;
+        mVideoSwitchTargetIndex = -1;
         return;
     }
 
     AF_LOGI("quality switch: target stream %d opened in %lld ms (synchronous demuxer open)\n",
-            targetStreamIndex, (long long) (af_getsteady_ms() - switchVideoStartMs));
+            targetStreamIndex, (long long) (af_getsteady_ms() - switchStartMs));
 
-    /*
-     * 不要在这里关闭旧流。SwitchVideo() 只是启动目标路，旧流要一直保留到
-     * TryCommitPendingVideoSwitch() 完成并且新帧真正上屏；否则 pending 路还在
-     * 追关键帧时，active decoder 会立刻断粮，音画时钟自然分离。旧流的关闭由
-     * 提交后的安全点执行。
-     */
+    /* ②c 把新流按流定位到切换点（只这一路；音频不被重定位） */
     const int64_t seekStartMs = af_getsteady_ms();
-    ret = mDemuxerService->Seek(startTime / 1000 * 1000, 0, targetStreamIndex);
+    ret = mDemuxerService->Seek(switchPos / 1000 * 1000, 0, targetStreamIndex);
 
     if (ret < 0) {
         AF_LOGW("switch video seek failed, target stream index %d ret=%d\n", targetStreamIndex, ret);
-        mDemuxerService->CloseStream(targetStreamIndex);
-        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED,
-                                             targetStreamIndex,
+        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
                                              "target video stream seek failed");
-        mWillChangedVideoStreamIndex = -1;
+        mVideoSwitchInFlight = false;
+        mVideoSwitchTargetIndex = -1;
         return;
     }
 
     AF_LOGI("quality switch: target stream %d seeked to %lld us in %lld ms (synchronous demuxer seek)\n",
-            targetStreamIndex, (long long) startTime,
-            (long long) (af_getsteady_ms() - seekStartMs));
+            targetStreamIndex, (long long) switchPos, (long long) (af_getsteady_ms() - seekStartMs));
 
     /*
-     * 这里绝对不能清空 active 路在 startTime 之后的缓冲。
-     *
-     * 旧实现为了“把切换点对齐”调用 ClearPacketAfterTimePosition()，但
-     * BufferController 只有一条公共视频队列，里面保存的是当前 active
-     * representation 的数据。目标 representation 此时还没有进入队列，
-     * 因而这句实际上删掉了旧 decoder 继续播放所需的全部后续 GOP。目标
-     * 流又必须先下载 init + 关键帧、解码并追到主时钟后才能 promote，于是
-     * 两条路之间出现真空，日志表现为 video fps=0/1、声音继续播放。
-     *
-     * 主流播放器的切换顺序是：保留 active 缓冲 -> 单独预热目标 period/
-     * decoder -> 在目标帧可显示时原子替换。目标流的 seek 已在上面按
-     * startTime 完成，不需要再修改 active 公共队列。
+     * 提交"当前档"必须早于 ③/④：FlushVideoPath() 与 rebuildVideoDecoder() 都按
+     * mCurrentVideoIndex 取 meta / 打日志 / 归零偏移，所以先把目标档坐实，后面的
+     * flush 与重建就是"对新档做一次单解码器复位"。
      */
+    mCurrentVideoIndex = targetStreamIndex;
+
+    /* ③ 只 flush 视频：解码器 + 解码帧队列（音频一个字节都不动） */
+    FlushVideoPath(false, false, "quality switch immediate");
+
+    /*
+     * ③b CloseStream 只停止投递，**不清**已经进公共队列的旧流包。单解码器下这些包
+     * 必须当场丢掉，否则它们会被解出来、可能被落点过滤当成"包含 switchPos 的帧"而
+     * 误报 READY（画面还是旧档）。按流丢弃是既有能力（DropPacketsByStream）。
+     */
+    if (oldStreamIndex >= 0 && oldStreamIndex != targetStreamIndex) {
+        const int droppedOldPackets = mBufferController->DropPacketsByStream(BUFFER_TYPE_VIDEO, oldStreamIndex);
+
+        if (droppedOldPackets > 0) {
+            AF_LOGI("quality switch: dropped %d stale video packet(s) of the old stream %d at switch time\n",
+                    droppedOldPackets, oldStreamIndex);
+        }
+    }
+
+    /* ④ meta 不匹配才重建**同一块**解码器（无第二实例、无占位面） */
+    Stream_meta newMeta{};
+
+    if (mDemuxerService->GetStreamMeta(&newMeta, targetStreamIndex, false) < 0) {
+        AF_LOGW("switch video: cannot read the target stream meta (stream=%d) — reporting FAILED\n",
+                targetStreamIndex);
+        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
+                                             "target video stream meta unavailable");
+        mVideoSwitchInFlight = false;
+        mVideoSwitchTargetIndex = -1;
+        return;
+    }
+
+    if (!isVideoDecoderMetaMatched(&newMeta)) {
+        AF_LOGI("quality switch: the target stream needs an in-place decoder rebuild (codec=%d %dx%d) — the "
+                "SINGLE decoder is rebuilt, never a second one\n",
+                (int) newMeta.codec, newMeta.width, newMeta.height);
+
+        if (rebuildVideoDecoder(false) < 0) {
+            AF_LOGW("switch video: in-place decoder rebuild failed for stream %d\n", targetStreamIndex);
+            mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
+                                                 "in-place decoder rebuild failed");
+            mVideoSwitchInFlight = false;
+            mVideoSwitchTargetIndex = -1;
+            return;
+        }
+    } else {
+        AF_LOGI("quality switch: the target stream matches the current decoder meta — only the flush is "
+                "needed (no second decoder, no rebuild)\n");
+    }
+
+    /*
+     * ⑤ 脏帧保护重新武装 + 单一落点过滤接管。
+     * 顺序不能反：必须等 ③（清帧/清包）与 ④（重建）都完成之后再武装过滤，否则窗口里
+     * 旧流的帧会被当成落点帧。武装之后，新流首个上屏帧 = 包含 switchPos 的那一帧。
+     */
+    mSeekDecodeStartIsKey = false;
+    beginDiscontinuity(switchPos);
 
     mWillSwitchVideo = false;
     mVideoChangedFirstPts = INT64_MAX;
     mEof = false;
+
+    AF_LOGI("quality switch: single-decoder switch applied in %lld ms (stream=%d switchPos=%lld); the landing "
+            "filter now waits for the frame that contains switchPos\n",
+            (long long) (af_getsteady_ms() - switchStartMs), targetStreamIndex, (long long) switchPos);
 }
 
 int64_t SuperMediaPlayer::getAudioPlayTimeStampCB(void *arg)
@@ -10175,11 +10258,14 @@ int SuperMediaPlayer::RestartVideoDecoder()
  */
 bool SuperMediaPlayer::qualitySwitchInFlight() const
 {
-    return mPendingVideoStreamIndex >= 0 || mWillChangedVideoStreamIndex >= 0 ||
-           mPendingVideoDecoderSwitch || mQualitySwitchCommitPending ||
-           mQualitySwitchCommittedStreamIndex >= 0 || mQualitySwitchOldFramesPending != 0 ||
-           mRetiredVideoStreamIndex >= 0 || mSwitchStartedWhilePaused ||
-           mPausedSwitchRenderPending || mSwitchReArmPending;
+    /*
+     * 【P3】单一判据：有没有"挂着的切换请求"。
+     *
+     * 旧实现是由 9 个双解码器成员（pending 流/pending 解码器闩/提交闩/退役流/暂停切档/
+     * 重装闩……）拼出一个并集，任何一处漏清都会让 ABR 永远让路。单解码器切档的
+     * 立即切换路径只有"请求生效 → 终态"这一段生命周期，所以一个布尔量就够。
+     */
+    return mVideoSwitchInFlight;
 }
 
 int SuperMediaPlayer::RestorePausedVideoFrame()
@@ -11194,6 +11280,15 @@ void SuperMediaPlayer::acceptDiscontinuityLandingFrame(int64_t framePos, int gen
     mDiscontinuity.acceptedFramePos = framePos;
     /* 这就是"结束本次过滤"的唯一写点（另一个出口是 beginDiscontinuity）。 */
     mDiscontinuity.filterActive = false;
+
+    /*
+     * 【P3】切档的 READY 出口：单解码器切档把"新流落点帧被采纳"当作"新画面已经上屏"
+     * （同一个 RenderVideo 调用里紧接着就会把它强制上屏，见 P1 的单一过滤规则）。
+     * 这是切档唯一的成功出口 —— 没有 pending 提交、没有预热等待、没有任何死线。
+     */
+    if (mVideoSwitchInFlight) {
+        finishQualitySwitch(true, "quality switch rendered");
+    }
 
     /*
      * 【P2.1】把**内容时间轴**（唯一的那一根）钉在 targetUs。

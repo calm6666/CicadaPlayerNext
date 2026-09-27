@@ -1405,62 +1405,41 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     }
 
     /*
-     * 【修：同一个目标档位的重复请求不再"取消再重启"】
-     *
-     * 现场：手动档与 ABR 很容易在几百毫秒内对**同一档**各发一次请求（ABR 一秒一决策，
-     * 用户手动点档时它可能刚好也在选同一档，或 UI 连点两次）。而内核原来对任何新请求都
-     * 走"新请求取代旧请求"：先把在途那次判 CANCELED、关掉目标流、丢掉 pending 解码器，
-     * 再从零重建 —— 用户看到的就是界面先弹"已取消切换"、切档时间白白翻倍。
-     *
-     * 判据是纯状态：请求的目标 == 在途切档的目标（mWillChangedVideoStreamIndex 是"已选定
-     * 但 pending 路还没建立"，mPendingVideoStreamIndex 是"pending 路已经在跑"），
-     * 那就什么都不用做 —— 在途那次本来就在朝同一个目标走。
+     * 【P3】"同一个目标档的重复请求不再取消再重启"：判据换成新模型的单一闩
+     * （请求的目标 == 在途请求的目标 ⇒ 什么都不做，在途那次本来就在朝同一个目标走）。
      */
-    if (mPlayer.mWillChangedVideoStreamIndex == index || mPlayer.mPendingVideoStreamIndex == index) {
-        AF_LOGI("quality switch ignored: stream %d is already the target of the in-flight switch "
-                "(no cancel-and-restart churn; willChanged=%d pending=%d)\n",
-                index, mPlayer.mWillChangedVideoStreamIndex, mPlayer.mPendingVideoStreamIndex);
+    if (mPlayer.mVideoSwitchInFlight && mPlayer.mVideoSwitchTargetIndex == index) {
+        AF_LOGI("quality switch ignored: stream %d is already the in-flight target\n", index);
         return;
     }
 
     AF_LOGD("video change video bitrate before is %d,after is %d",
             currentInfo != nullptr ? currentInfo->videoBandwidth : 0, willChangeInfo->videoBandwidth);
-    //TODO: different strategy
-    mPlayer.mWillChangedVideoStreamIndex = index;
+
+    /*
+     * ① 记录目标档 + 切换点。切换点取**唯一内容时间轴**（P2.1 起 getCurrentPosition() 读的就是
+     *    mMasterClock：有音频 = 目标点 + 设备已消费量，无音频 = 暂停感知的自走时钟）。
+     */
+    mPlayer.mMixMode = (type == STREAM_TYPE_MIXED);
+    mPlayer.mVideoSwitchTargetIndex = index;
+    mPlayer.mVideoSwitchInFlight = true;
+
+    int64_t switchPos = mPlayer.getCurrentPosition();
+
+    if (switchPos < 0 || switchPos == INT64_MIN) {
+        switchPos = 0;
+    }
+
     mPlayer.mVideoChangedFirstPts = INT64_MAX;
     mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
 
     /*
-     * 双 decoder 对升档、降档采用完全相同的入口：先保留旧路，再打开目标
-     * representation 并从当前缓存的安全点预热。旧的“降档走
-     * SwitchStreamAligned、升档直接 SwitchVideo”模型依赖 manager 在旧分片
-     * 结束时替换流；现在旧流必须一直播放到目标帧真正渲染，若降档仍走旧
-     * 分支，目标流根本不会 Open，表现就是 HLS 点击清晰度没有任何变化。
+     * ② 立即切换（单解码器，§12.2）：关旧流 → 开新流 → 按流 seek 到切换点 → 只 flush 视频
+     *    → meta 不匹配才原地重建**同一块**解码器 → beginDiscontinuity(switchPos) 让单一落点
+     *    过滤接管。终态只有两种：落点帧上屏 ⇒ READY；真正的错误（Open/Seek/meta/重建失败）
+     *    ⇒ FAILED。没有预热等待、没有分片边界等待、没有任何死线。
      */
-    mPlayer.mMixMode = (type == STREAM_TYPE_MIXED);
-    /*
-     * 切换目标必须从当前播放时钟附近开始，而不是从公共缓存队列的末端
-     * （FindSeamlessPointTimePosition）开始。后者在本地测试中会得到 40s、
-     * 但当前播放点只有 20s；目标 decoder 被迫从未来 GOP 追赶，active 路
-     * 同时又可能被追帧逻辑判定为落后，最终出现 FPS=0/1。主流播放器是
-     * “current media time + 最近关键帧”策略：demuxer 自己选择不晚于该时刻
-     * 的 segment，pending decoder 解码到当前时钟后再原子提交。
-     */
-    int64_t startTime = mPlayer.mMasterClock.GetTime();
-    if (startTime <= 0 || startTime == INT64_MIN) {
-        startTime = mPlayer.mCurrentPos;
-    }
-    if (startTime < 0) {
-        startTime = 0;
-    }
-    /*
-     * 【P0】切档也是一次不连续点：在真正动流之前推进代际，目标点 = 这次切档要求
-     * 新流接入的媒体位置（与下面 SwitchVideo 的起点同源）。这样"上一次切档/seek
-     * 留下的包、帧、待处理事件"都带着旧代际，任何按代际比对的消费者都能当场作废
-     * 它们，不再需要 mWillChangedVideoStreamIndex 这类归属标记做手工防线。
-     */
-    mPlayer.beginDiscontinuity(startTime);
-    mPlayer.SwitchVideo(startTime);
+    mPlayer.SwitchVideo(switchPos);
 }
 
 void SMPMessageControllerListener::switchAudio(int index)
