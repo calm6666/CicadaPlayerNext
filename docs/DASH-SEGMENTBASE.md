@@ -99,11 +99,18 @@
 |---|---|
 | `output.mpd` | 现状：分段式（SegmentTemplate + SegmentTimeline） |
 | ✅ `output-segmentbase.mpd` | SegmentBase 版：每个 Representation 一个 m4s，`<BaseURL>` + `<SegmentBase indexRange=…><Initialization range=…/></SegmentBase>` |
-| ✅ `sb-{video,audio}-<id>.m4s` | SegmentBase 用的**单一 m4s**（init + media + 全局 sidx 都在里面） |
+| ✅ `sb-{video,audio}-<编码>-<高度>p.m4s` | SegmentBase 用的**单一 m4s**（init + media + 全局 sidx 都在里面），**不带序号** |
+| ✅ `sb-*.m3u8` | **HLS 版**：每个 single m4s 一个媒体播放列表，用 `#EXT-X-MAP:URI="…",BYTERANGE="长度@起点"` + 每段 `#EXTINF` / `#EXT-X-BYTERANGE:长度@起点` + 同一个文件 URI 表达"单文件 + 字节范围" |
+| ✅ `master-segmentbase.m3u8` | 把上面这些媒体播放列表串起来（视频 `#EXT-X-STREAM-INF`、音频 `#EXT-X-MEDIA`） |
 | `chunk-stream*-*.m4s` | 现状：分片文件 |
-| `master.m3u8` / `media_*.m3u8` | 现状：HLS |
+| `master.m3u8` / `media_*.m3u8` | 现状：分段式 HLS |
 | `test-hls-{version}.json` / `test-dash-{version}.json`（+ `-explicit`） | 现状：4 个 JSON |
-| ✅ `test-dash-{version}-segmentbase.json` | SegmentBase 模式 JSON（字段与现有一致，见 4.3） |
+| ✅ `test-dash-{version}-segmentbase.json` | SegmentBase 模式 JSON（`mode:"single"` + `indexRange` + `segments[]`） |
+| ✅ `test-hls-{version}-segmentbase.json` | HLS 版 SegmentBase JSON：字段与 dash 版**完全一样**，只多 `mediaSourceType:"hls"` 与每个 rep 的 `segmentInfo.mediaSequence`（与既有 HLS JSON 约定一致） |
+
+⚠️ **两种记法不要混**：m3u8 **文本**里是 HLS 记法 `长度@起点`（如 `587314@908`，长度 = 终点 − 起点 + 1）；
+**JSON** 里 `byteRange`/`initialization`/`indexRange` 仍用 DASH 闭区间（如 `"908-588221"`）—— 内核
+`ManifestDemuxer` 按 `%lld-%lld` 解析，web 侧 HLS 转换器自己换算成 HLS 记法（见 §九）。
 
 ### 4.2 落地做法：主命令不动 + 一条 `-c copy` 再封装（**已实现的方案**）
 
@@ -384,3 +391,26 @@ JSON 交给 DASH 插件即可 —— 既可以给 JSON 文件 URL（`loadJsonMan
 `bandwidth="0"` —— 已用主清单补齐）；② `-use_template 1 + -single_file 1` 若写的是
 `<SegmentTemplate>` 而非实测的 SegmentList，改写与 sidx 仍成立、只把 MPD 交叉校验降级为"以 sidx 为准 + 警告"；
 ③ `frameRate` 在两个脚本间可能不一致（既有实现本来就有 `round(x,2)` 与 `round(x,6)` 的差异）。
+
+### 10.1 HLS 侧新增（脚本同步更新，本轮）
+
+因为 web 与 native 两侧的 HLS 都已支持 single/字节范围（§九、§八），转码脚本补上了 HLS 版产物：
+
+| 新增 | 内容 |
+|---|---|
+| `transcode_all.py` | `sb_media_playlist_name()`（**单文件名 + `.m3u8`**，与 `SB_REPS[i].fileName` 同一份命名、不带序号）、`build_segmentbase_hls_playlist()`（媒体播放列表：`#EXT-X-MAP` = init 段 + 每段 `#EXTINF`/`#EXT-X-BYTERANGE:长度@起点`/单文件名）、`build_segmentbase_hls_master()`、`generate_segmentbase_hls()`、`generate_hls_segmentbase_json()`、`_sb_hls_byte_range()`（DASH 闭区间 → HLS 记法，**只此一处换算**）；接在 `prepare_segmentbase_artifacts()` 成功之后的同一条收尾链上，失败即 `segmentbase_ok=False` + 非零退出；`write_json_manifests` 内置兜底也从 5 个 JSON 改成 6 个 |
+| `convert-to-manifest.py` | `build_hls_segmentbase_manifest()`：以 dash 版清单为基座，**只改两处**（`mediaSourceType:"hls"` + 每个 rep 的 `segmentInfo.mediaSequence`），`segmentInfo` 先复制再改，不污染 dash 基座；`main()` 写第 6 个 JSON（MPD 缺失只警告跳过，sidx/校验失败 `[错误]` + 非零退出） |
+| `verify_segmentbase.py` | 新增第 8 组断言 `check_hls_segmentbase()`：`sb-*.m3u8` 存在且名字 = 单文件名 + `.m3u8`；`#EXT-X-MAP` 条数/属性、`URI` == 单文件、`BYTERANGE` == MPD `<Initialization range>` == `0-(sidxStart-1)`，**并读该段字节确认含 `ftyp` 与 `moov`**；每条 `#EXT-X-BYTERANGE` 与后一行 URI 逐条对齐 sidx 推出的范围、`#EXTINF` 数与配对数一致、`TARGETDURATION` 足够、总时长与 MPD 相符；master 引用的播放列表都存在、无重复、目录里每个 `sb-*.m3u8` 都被挂上；`test-hls-*-segmentbase.json` 与 dash 版**逐字段相等**（除 `mediaSourceType`/`mediaSequence` 两处）、dash 版若带 `mediaSequence` 即 FAIL |
+
+**`py_compile` 三个脚本全部通过**（Python 3.10.9，本机实跑）。
+
+**两处关键风险已核实（读两侧解析器源码）**：
+1. `#EXT-X-MAP:BYTERANGE="820@0"` 这种 `长度@起点` 形式**两侧都接受** —— 内核 `HlsTags::getByteRange()`
+   (`HlsTags.cpp:63-83`) 先读 length、遇到 `@` 再读 offset，得到 `(offset=0, length=820)`；
+   web fork `setByteRange()` (`hls.mjs:533-542`) 按 `@` 切分，得到 `_byteRange=[0,820]`。
+2. `#EXT-X-MEDIA` 用的 `GROUP-ID`/`NAME`/`DEFAULT`/`AUTOSELECT`/`CODECS`/`URI` 都是标准大写连字符属性名，
+   内核按 `getAttributeByName("GROUP-ID")` 读取（`HlsParser.cpp:683/729-730`）✓；且 JSON 路径根本不看 master，
+   master 只服务 m3u8 文本路径。
+
+**仍未真跑**：脚本的真实产物（含新 m3u8 与第 6 个 JSON）仍待用户侧 `python transcode_all.py` +
+`python verify_segmentbase.py . v4` 核对（本机执行该命令的提权此前被拒，用户已接手）。
