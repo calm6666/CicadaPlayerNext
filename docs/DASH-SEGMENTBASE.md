@@ -309,6 +309,24 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
 （`core/warning.ts`、`player/src/**`）的既有问题，改动涉及的两个文件（`manifest-to-dash.ts`、
 `validate.ts`）零报错。
 
+**运行期自检（真跑，不是看代码）**：把 vendor 树单独编成 CJS 再用 Node 断言，**20/20 全过**
+（脚本已落在 `packages/plugins/test/segmentbase.converter.check.cjs`）：
+
+| 用例 | 断言结果 |
+|---|---|
+| 新 SegmentBase JSON（`single` + `indexRange` + `segments[]`） | `BaseURL` = 单文件且**无尾斜杠**；`SegmentBase{indexRange:"820-907", Initialization:{range:"0-819"}, timescale:12800}`；同一条 rep 上没有 `SegmentList`/`SegmentTemplate` |
+| `single` 无 `indexRange`（只有 `segments[]`） | 不产出空壳 `SegmentBase`；退回 `SegmentList`：每段 `media` = 单文件、`mediaRange` = `byteRange`、`Initialization.range` = 字节范围 |
+| `list` 带 `byteRange`（既有行为不回归） | `SegmentURL[].mediaRange` 保留；`BaseURL` 仍补尾斜杠；`Initialization.sourceURL` 仍是 URL 形式 |
+| `validate` 收紧 | 无 `indexRange` 且无 `segments[]` → 报错；`initialization` 写成 URL → 报错；`indexRange` 非 `start-end` → 报错；两种合法形态（有 `indexRange` / 只有 `segments[]`）→ 通过 |
+
+复跑方式（在 `packages/plugins` 下）：
+```
+node_modules\.bin\tsc.cmd src/vendor/manifest-to-dash.ts src/vendor/utils/validate.ts ^
+  --ignoreConfig --outDir <临时目录> --module commonjs --target es2020 ^
+  --moduleResolution node --skipLibCheck --esModuleInterop
+node <临时目录>\segmentbase.converter.check.cjs      （退出码 0 = 全过）
+```
+
 **相邻缺口（本次未做，如实记录）**：`src/vendor/manifest-to-hls.ts:127` 对 `single` 仍是
 `return undefined` ⇒ 同一份 SegmentBase JSON 若被 HLS 插件接手，会得到**空播放列表**。
 `MediaManifest` 的类型注释里写着"HLS: 映射为 #EXT-X-BYTERANGE"，即当初有意图但未实现；
