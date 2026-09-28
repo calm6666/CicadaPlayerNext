@@ -253,8 +253,26 @@ namespace Cicada {
         }
 
         mCurInitSeg = mCurSeg->init_section;
+        /*
+         * init 段的缓冲长度要按**它自己的字节范围**算：单文件模式（SegmentBase 的
+         * Initialization / EXT-X-MAP 的 BYTERANGE）下 init 只是那个大文件里的一段，
+         * 而 seekSegment(0, SEEK_SIZE) 返回的是**整个文件**大小（实测 154MB 的文件会白白
+         * malloc 154MB，而且长度与实际要回放的 init 对不上）。四种组合的判定顺序与
+         * DashStream::upDateInitSection() 保持一致。
+         */
+        int64_t initStart = INT64_MIN;
+        int64_t initEnd = INT64_MIN;
+        mCurInitSeg->getDownloadRange(initStart, initEnd);
         mInitSegSize = defaultInitSegSize;
-        mInitSegSize = seekSegment(0, SEEK_SIZE);
+        if (initStart == INT64_MIN && initEnd == INT64_MIN) {
+            mInitSegSize = seekSegment(0, SEEK_SIZE);
+        } else if (initStart != INT64_MIN && initEnd == INT64_MIN) {
+            mInitSegSize = seekSegment(0, SEEK_SIZE) - initStart;
+        } else if (initStart == INT64_MIN && initEnd != INT64_MIN) {
+            mInitSegSize = initEnd + 1;
+        } else {
+            mInitSegSize = initEnd - initStart + 1;
+        }
 
         if (mInitSegSize < 0) {
             mInitSegSize = defaultInitSegSize;
@@ -648,6 +666,17 @@ namespace Cicada {
     int HLSStream::openSegment(const string &uri, int64_t start, int64_t end)
     {
         int ret;
+        /*
+         * setRange() 的 end 是**开区间**（CurlDataSource::Read 按 end - tell() 截断），
+         * 而段上的字节范围是闭区间（含最后一个字节）。这里 +1 换算，否则每条范围都少最后
+         * 一个字节：普通分片少 1 字节通常看不出来，但 init 段少 1 字节会丢掉 moov 末尾的
+         * mvex（分片 mp4 的标记盒）—— 解析器于是只解出轨道信息、之后再也读不到任何分片
+         * 数据（每段 open 成功却立刻 EOS）。DashStream::openSegment() 用的就是同一个换算。
+         */
+        int64_t fixEnd = end;
+        if (fixEnd != INT64_MIN) {
+            fixEnd++;
+        }
 
         if (mExtDataSource) {
             if (mIsFirstOpen) {
@@ -656,7 +685,7 @@ namespace Cicada {
                     mExtDataSource->setSegmentList(getSegmentList());
                 }
             }
-            mExtDataSource->setRange(start, end);
+            mExtDataSource->setRange(start, fixEnd);
             int ret = mExtDataSource->Open(uri);
             if (mPTracker->getStreamType() == STREAM_TYPE_MIXED && !mPTracker->isLive()) {
                 mExtDataSource->enableCache(uri, true);
@@ -668,10 +697,10 @@ namespace Cicada {
 
         if (mPdataSource == nullptr) {
             recreateSource(uri);
-            mPdataSource->setRange(start, end);
+            mPdataSource->setRange(start, fixEnd);
             ret = mPdataSource->Open(0);
         } else {
-            mPdataSource->setRange(start, end);
+            mPdataSource->setRange(start, fixEnd);
             ret = mPdataSource->Open(uri);
             if (mPTracker->getStreamType() == STREAM_TYPE_MIXED && !mPTracker->isLive()) {
                 mPdataSource->enableCache(uri, true);

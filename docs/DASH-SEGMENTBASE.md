@@ -170,7 +170,10 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
 
 ### 4.3 SegmentBase JSON 设计（**字段沿用现有，不新造**）
 
-字段全部来自现有 schema（`MediaManifest.h` 的 `SegmentInfo` / `Segment`）：
+字段全部来自现有 schema（`MediaManifest.h` 的 `SegmentInfo` / `Segment`）。**单文件模式不抄段表**：
+一个文件 + 一段 init 范围 + 一段 sidx 范围就够了，逐段字节范围由播放器读那个文件的 `sidx` 自己推
+（用户口径："都已经是一个文件了还写这么多"）；形状对齐 B 站 playurl 的
+`baseUrl` + `backupUrl` + `SegmentBase{Initialization, indexRange}`：
 
 ```json
 {
@@ -179,27 +182,32 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
     "baseUrl": "http://127.0.0.1:9000/video/dash2/379995093081395200-video-h265-1920_1080.m4s",
     "backupUrls": ["…", "…"],
     "bandwidth": 3000000,
+    "mimeType": "video/mp4",
     "codecs": "avc1.64001f",
-    "width": 1920, "height": 1080, "frameRate": "30000/1001",
+    "width": 1920, "height": 1080, "frameRate": 23.98, "sar": "1:1",
     "segmentInfo": {
       "mode": "single",
-      "timescale": 90000,
-      "initialization": "0-1479",
-      "indexRange": "1480-2048",
-      "segments": [
-        { "duration": 6.006, "url": "379995093081395200-video-h265-1920_1080.m4s", "byteRange": "2049-560000" },
-        { "duration": 6.006, "url": "379995093081395200-video-h265-1920_1080.m4s", "byteRange": "560001-1110000" }
-      ]
+      "timescale": 24000,
+      "initialization": "0-879",
+      "indexRange": "880-1435",
+      "targetDuration": 6.006
     }
   }]
 }
 ```
 
-- `mode: "single"` + `indexRange` = 让内核**用 sidx 自己推段**（本次要实现的路径）；
-- 同时给出 `segments[]`（每条 `byteRange` + `duration`）= 兼容"只认显式列表"的实现，
-  两份数据由脚本从同一个 sidx 解析出来，保证一致；
-- `initialization` 为**字节范围**（single 模式语义，见 `MediaManifest.h:93`），不是 URL；
-- `baseUrl`/`backupUrls`/`bandwidth`/`codecs`/`frameRate` 等与现有 JSON 完全同名字段。
+- **没有 `segments[]`**（也没有 `mediaSequence`）：段表就是这个文件的 `sidx`，谁读都只有一份权威数据，
+  不会出现"清单里的段表和文件里的 sidx 不一致"这种错；
+- `mode: "single"` + `indexRange` 让内核 `ManifestDemuxer::expandSegmentBase()` **按范围把 sidx 拉下来自己推段**
+  （偏移基准 `first_offset + indexEnd + 1`，与 `DashSegmentTracker::parseIndex` 一致）；web 侧 dash.js 同样
+  用 `SegmentBase@indexRange` 自己读 sidx；
+- `initialization` 为**字节范围**（single 模式语义，见 `MediaManifest.h:93`），不是 URL；实测
+  `0-879` 正好是 `ftyp`(32) + `moov`(848)，`indexRange` `880-1435` 正好是那个 556 字节的 `sidx` 盒；
+- `baseUrl`/`backupUrls`/`bandwidth`/`codecs`/`frameRate` 等与现有 JSON 完全同名字段
+  （`backupUrls` 允许故意填同一个源用于测试）；
+- HLS 版 JSON 与 dash 版**逐字段相等**，只多 `mediaSourceType:"hls"`；HLS 协议里没有 `sidx` 概念，
+  所以 HLS 侧逐段范围由随包产出的媒体播放列表（同名 `.m3u8`，`#EXT-X-MAP` + `#EXT-X-BYTERANGE`）承载，
+  web 的 `manifest-to-hls.ts` 在这种"只有 indexRange"的清单上会直接指向那个播放列表。
 
 ### 4.4 脚本结构改动
 
@@ -225,15 +233,15 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
 
 | 项 | 手段 | 现状 |
 |---|---|---|
-| 内核改动编译 | 鸿蒙 `assembleHar` + `assembleHap`（零错误零告警）；桌面 MSVC 侧同源编译 | 待本轮执行 |
-| JSON 契约 | 用改造后的脚本产出的 SegmentBase JSON 走 `MediaManifestParser` 解析，逐字段比对 | 待本轮执行 |
-| SegmentBase MPD 解析 | 断言每个 Representation 有 `indexRange` + `Initialization@range`，且单文件确有 sidx | 待本轮执行 |
-| 脚本自检 | `python -m py_compile` 两个脚本；有输入视频则真跑一遍并核对产物 | 待本轮执行 |
-| 产物结构 | `D:\hilihili\转码脚本\verify_segmentbase.py`（新写的验收脚本，只用标准库）：断言 MPD 有
+| 内核改动编译 | 桌面 MSVC：`cmake --build platform\QtPlayer\build\msvc-static --target demuxer --config Release`（`HLSStream.cpp` 重编通过；`--target media_player` 不带动 `demuxer`，会漏编）；鸿蒙 `assembleHar` + `assembleHap` | ✅ 本轮已过（`demuxer`/`media_player` exit 0，唯一告警 `C4305` 在 `updateKey()` 的既有 `return -1;` 上，与本次改动无关） |
+| JSON 契约 | 用改造后的脚本产出的 SegmentBase JSON 走 `MediaManifestParser` 解析，逐字段比对；single 不得带 `segments[]`/`mediaSequence` | 待用户侧用新脚本重跑 |
+| SegmentBase MPD 解析 | 断言每个 Representation 有 `indexRange` + `Initialization@range`，且单文件确有 sidx | ✅ 用户实测 `output-segmentbase.mpd` 起播/切档/seek 正常 |
+| 脚本自检 | `python -m py_compile` 三个脚本；有输入视频则真跑一遍并核对产物 | ✅ `py_compile` 通过（Python 3.10.9） |
+| 产物结构 | `D:\hilihili\转码脚本\verify_segmentbase.py`（只用标准库）：断言 MPD 有
 `BaseURL`/`SegmentBase@indexRange`/`Initialization@range`、init 与 sidx 紧邻不重叠、文件里真有 sidx 且
-范围等于 `indexRange`、段范围连续无缝、JSON 的 `mode/initialization/indexRange/segments[]` 与 sidx **同源一致**、
-没有带序号的临时名残留；任一不符退出码 1 | 待本轮执行 |
-| 端到端播放 | 桌面/真机：`output-segmentbase.mpd` 与 `test-dash-*-segmentbase.json` 两条清单各播一遍（起播、seek、切档） | **需要用户侧设备/桌面实测**（本机无鸿蒙设备） |
+范围等于 `indexRange`、段范围连续无缝（**段表一律以单文件里的 sidx 为权威**，JSON 不再携带 `segments[]`）、
+没有带序号的临时名残留；任一不符退出码 1 | 待用户侧用新脚本重跑 |
+| 端到端播放 | 桌面/真机：`output-segmentbase.mpd` 与 `test-dash-*-segmentbase.json` 两条清单各播一遍（起播、seek、切档） | MPD 路 **✅ 已实测正常**；JSON 路本轮修掉 `HLSStream` 的 1 字节截断（§8.1），**待用户在重编后的播放器上复测** |
 
 ---
 
@@ -304,6 +312,37 @@ m3u8 **文本**那条路另有两点：
   （`HlsParser.cpp:366-371`），会把整个文件当 init 段拉下来 —— 本轮已补上：
   `getByteRange()` 返回 `(offset, length)`（offset 缺省 -1 → 按 0 处理），
   `range.second > 0` 时 `setByteRange(start, start + length - 1)`。native 重编：0 error / 0 代码告警。
+
+### 8.1 单文件 HLS 管线读不出数据的根因与修复（`HLSStream`，本轮）
+
+**症状**（用户实测 `test-dash-v4-segmentbase.json` + Qt 播放器）：清单校验通过、6 个视频档都解析出来，
+但起播失败；日志形态是"某一档的**每一个段逐个 open**，每次都是 `file have 1 streams` + `DAR`，然后立刻
+`EOS`"，把该档 43 个段扫完之后 `Player ReadPacket EOF` → `player error 537067523: open stream failed`。
+同一批文件用 `output-segmentbase.mpd`（原生 DASH 路径）播放**完全正常**（出首帧、切档、seek 全部 OK），
+说明**文件和字节范围都没问题，坏的只是 HLS 段管线对"init 与分片同处一个文件"的处理**。
+
+**根因**：同样面对"单文件 + 字节范围"，两条路对 `IDataSource::setRange()` 终点语义处理不同 ——
+`setRange` 的 `end` 是**开区间**（`CurlDataSource::Read` 按 `end - tell()` 截断，`curl_data_source.cpp:438-455`）：
+
+| 环节 | `DashStream`（MPD，正常） | `HLSStream`（JSON，失败） |
+|---|---|---|
+| 段/init 范围终点 | `openSegment()` 里先 `fixEnd = end + 1` 再 `setRange(start, fixEnd)`（`DashStream.cpp:466-477`） | 把闭区间的 `end` 直接交给 `setRange`（`HLSStream.cpp:659`）→ **每条范围少最后 1 字节** |
+| init 缓冲长度 | 按 init 段自己的字节范围算（`endByte - startByte + 1` = 880，`DashStream.cpp:170-179`） | 用 `seekSegment(0, SEEK_SIZE)` = **整个文件**大小（实测 154 MB 的文件白 malloc 154 MB），循环实际只读到 879 字节（`HLSStream.cpp:256-257`） |
+
+于是发往解析器的 init 段少了最后 1 个字节。单文件模式的盒布局实测是
+`ftyp[0-31] moov[32-879] sidx[880-1435] moof[1436-3263] mdat[3264-2177984] …`，而 `mvex`
+（分片 mp4 的标记盒）正好落在 `moov` 末尾 —— 少这一字节，解析器仍能解出轨道并算出 `DAR`
+（所以日志里 `file have 1 streams`、`DAR 854:480` 都对），却不再把它当分片电影：每个段都读不出任何包、
+立刻 EOS，43 个段扫完即终局失败。分段式产物（每段一个文件、init 是单独的 848 字节 `-0.m4s`，范围缺省
+不带 BYTERANGE）不受影响，所以这个 bug 只在"单文件 SegmentBase / `#EXT-X-MAP` 带 `BYTERANGE`"这条路上暴露。
+
+**修复**（`framework/demuxer/play_list/HLSStream.cpp`，两处都对齐 DashStream 的既有写法，不引入开关）：
+1. `openSegment()`：`fixEnd = (end != INT64_MIN) ? end + 1 : end`，三处 `setRange(start, fixEnd)`；
+2. `upDateInitSection()`：按 init 段自身的 `getDownloadRange()` 决定缓冲长度（四种组合的判定顺序与
+   `DashStream::upDateInitSection()` 完全一致），不再按整个文件大小分配。
+
+**编译验证**：`cmake --build platform\QtPlayer\build\msvc-static --target demuxer --config Release`
+（`HLSStream.cpp` 属于 `demuxer` 目标；注意 `--target media_player` 不会带着它重编）。
 
 ## 九、Web 侧（hili-player plugins，dash.js 5.1.1）
 
