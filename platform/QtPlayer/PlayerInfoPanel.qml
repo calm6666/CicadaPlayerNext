@@ -409,7 +409,9 @@ Rectangle {
                 color: Qt.rgba(1, 1, 1, 0.16)
             }
 
-            /* 折线：每段一个矩形（x/y/长/角度都由 chart.segments 算好） */
+            /* 曲线：每段一个矩形（x/y/长/角度都由 chart.segments 算好）。
+               顶点是细分后的平滑采样点（见 smoothPolyline），所以这里画出来的是平滑曲线；
+               如果哪天要回到"直接连采样点"的硬折线，把 segments 里的顶点换回 polyline 即可。 */
             Repeater {
                 model: chart.segments
 
@@ -469,9 +471,124 @@ Rectangle {
             return pts
         }
 
-        /* 把顶点两两连成线段（每段的起点/长度/角度），交给 Repeater 画 */
-        readonly property var segments: {
+        /*
+         * -----------------------------------------------------------------------
+         * 拐角平滑：把"点与点之间直接直线相连"换成过点、不过冲的平滑曲线采样
+         *
+         * 采样点每 500ms 一个（30 秒窗口共 60 个），而曲线区宽 580px —— 每段直线将近 10px，
+         * 点与点之间就是**硬折角**，看起来一格一折（用户反馈"有棱有角、很生硬"）。
+         * 这里在每两个采样点之间用**单调三次 Hermite**（Fritsch–Carlson 选切线）再采样若干次：
+         *   · 曲线严格过每一个采样点，峰值/谷值不会被磨平；
+         *   · 单调段保持单调、切线被限幅，所以不会过冲 —— 不会画出比邻点更高的值、也不会钻到
+         *     0 以下（统计曲线不能为了好看而"编"数据）；
+         *   · 只改形状、不改数据：标题行的"当前/峰值"仍是 series 原始值。
+         * 画法照旧"一段一个细矩形"，只是段更短、转角更小 —— 依然只用最基础的矩形几何。
+         * -----------------------------------------------------------------------
+         */
+        function smoothPoints(pts, subdiv) {
+            const n = pts.length
+
+            if (n < 2 || subdiv < 1)
+                return pts
+
+            /* 相邻割线（x 是等距的，所以斜率统一用"每段 Δy"作单位；Hermite 里直接乘基函数，
+               不再乘 dx —— 这是上面那条"过冲"曾经写错的地方：乘了 dx 等于放大一个段宽） */
+            const delta = []
+
+            for (let i = 0; i + 1 < n; ++i)
+                delta.push(pts[i + 1].y - pts[i].y)
+
+            /* 节点切线：内点取相邻割线平均，两端取单侧割线 */
+            const slope = [delta[0]]
+
+            for (let i = 1; i + 1 < n; ++i)
+                slope.push((delta[i - 1] + delta[i]) / 2)
+
+            slope.push(delta[n - 2])
+
+            /* Fritsch–Carlson 限幅：不过冲 */
+            for (let i = 0; i + 1 < n; ++i) {
+                if (delta[i] === 0) {
+                    slope[i] = 0
+                    slope[i + 1] = 0
+                    continue
+                }
+
+                const a0 = slope[i] / delta[i]
+                const b0 = slope[i + 1] / delta[i]
+                /*
+                 * 切线方向与该段割线相反时必须压成 0：否则三次曲线一定会在段内先反向再折回来
+                 * （表现为谷底往下鼓、峰顶往上鼓，也就是"过冲"）。这一步和下面的限幅一起，
+                 * 才是完整的 Fritsch–Carlson。
+                 */
+                let a = a0 < 0 ? 0 : a0
+                let b = b0 < 0 ? 0 : b0
+
+                if (a !== a0)
+                    slope[i] = 0
+
+                if (b !== b0)
+                    slope[i + 1] = 0
+
+                const s = a * a + b * b
+
+                if (s > 9) {
+                    const t = 3 / Math.sqrt(s)
+                    slope[i] = t * a * delta[i]
+                    slope[i + 1] = t * b * delta[i]
+                }
+            }
+
+            /* 每段再采样 subdiv 次（Hermite 基函数），最后补上终点 */
+            const out = []
+
+            for (let i = 0; i + 1 < n; ++i) {
+                const x0 = pts[i].x
+                const dx = pts[i + 1].x - x0
+                const y0 = pts[i].y
+                const y1 = pts[i + 1].y
+
+                for (let k = 0; k < subdiv; ++k) {
+                    const t = k / subdiv
+                    const t2 = t * t
+                    const t3 = t2 * t
+                    const h00 = 2 * t3 - 3 * t2 + 1
+                    const h10 = t3 - 2 * t2 + t
+                    const h01 = -2 * t3 + 3 * t2
+                    const h11 = t3 - t2
+
+                    out.push(Qt.point(x0 + t * dx,
+                                      h00 * y0 + h10 * slope[i] + h01 * y1 + h11 * slope[i + 1]))
+                }
+            }
+
+            out.push(pts[n - 1])
+            return out
+        }
+
+        /*
+         * 细分密度：把每段直线再切到"单段不超过约 3px"，限制在 2~5 段之间。
+         * 580px / 59 段 ≈ 10px，所以实际取 4 段（单段约 2.5px）；这个尺度下折角的视觉误差
+         * 已经远小于抗锯齿的一像素，肉眼就是一条平滑曲线。
+         * 代价：一条曲线的矩形数从 59 变成约 236（三条约 700 个），全是最基础的 Rectangle、
+         * 面板可见时每 500ms 随采样一起重建一次；数据点数少时 dx 大、subdiv 才大，不会失控。
+         */
+        readonly property var smoothPolyline: {
             const pts = polyline
+
+            if (pts.length < 2)
+                return pts
+
+            const dx = pts[1].x - pts[0].x
+            const subdiv = Math.max(2, Math.min(5, Math.ceil(dx / 3)))
+            return smoothPoints(pts, subdiv)
+        }
+
+        /* 把顶点两两连成线段（每段的起点/长度/角度），交给 Repeater 画。
+           顶点用细分后的 smoothPolyline，所以相邻线段之间的转角很小 —— 看上去是平滑曲线，
+           而不是原来那种一格一折的硬角。 */
+        readonly property var segments: {
+            const pts = smoothPolyline
             const segs = []
 
             for (let i = 0; i + 1 < pts.length; ++i) {
