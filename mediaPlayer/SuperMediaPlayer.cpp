@@ -7201,8 +7201,12 @@ int SuperMediaPlayer::CreateVideoDecoder(bool bHW, Stream_meta &meta)
      *   · 软解（avcodecDecoder）：帧是我们自己解出来并深拷贝的（AVAFFrame），可以安全地
      *     在队列里预放 1 帧 ⇒ 允许"解码与渲染重叠"，上限取 2；
      *   · 硬解（Android MediaCodec / VideoToolbox 等）：交出去的每一帧都持有一个平台
-     *     buffer index，必须尽快 release（B5-4 的"释放代"机制正是按"至多一帧在飞"设计）
-     *     ⇒ 保持串行（上限 1）。这是**正确性优先**，不是性能妥协。
+     *     buffer index，"多留一帧"意味着平台侧少一个可用输出缓冲。本工程**当前保持串行
+     *     （上限 1）是一个保守选择**，不是机制限制 —— 逐帧核实过：`FrameReleaseState`
+     *     （见 mediaCodecDecoder.h 的 B5-4 说明）是**按帧**校验的（每帧各持一份
+     *     generation 快照 + shared_ptr 状态），能安全容纳任意多张在飞帧；把硬解也放到 2
+     *     是"可测的后续优化"，等真机数据（simpleperf + seek 延迟）说明平台缓冲够用时再动，
+     *     避免现在改动正在被验证的路径。
      *
      * 事实核查：`mPictureCacheType` 此前只有在声明处的默认值 `picture_cache_type_cannot`，
      * **全仓没有任何赋值点**（`grep mPictureCacheType` 只有声明与 doDeCode() 那一处读）⇒

@@ -982,8 +982,12 @@ mPictureCacheType = IsVideoDecoderHardware() ? picture_cache_type_cannot : pictu
 - 用 `IsVideoDecoderHardware()`（问**活动解码器对象** `IDecoder::isHardwareDecoderInUse()`，
   含 FFmpeg 运行期降级）而不是请求参数 `bHW`：请求硬解但实际落软解时，也必须按"实际是软解"
   放行流水线；
-- **硬解侧行为完全不变**（仍是上限 1）：硬解交出去的每一帧都持有平台 buffer index，必须尽快
-  release —— B5-4 的"释放代"机制正是按"至多一帧在飞"设计的。这是**正确性优先**，不是性能妥协；
+- **硬解侧本轮保持串行**（上限 1）：硬解交出去的每一帧都持有一个平台 buffer index，
+  "多留一帧"= 平台侧少一个可用输出缓冲。**这是保守选择，不是机制限制** —— 逐帧核实过
+  `FrameReleaseState`（`mediaCodecDecoder.h` 的 B5-4 说明）是**按帧**校验的（每帧各持
+  generation 快照 + shared_ptr 状态），能安全容纳任意多张在飞帧；把硬解也放到 2 属
+  **可测的后续优化**，等真机数据（simpleperf + seek 延迟）说明平台缓冲够用时再动，
+  不在设备验证前改正在被验证的路径；
 - 软解侧帧是深拷贝（`AVAFFrame`，`AVAFPacket.cpp:188-193`），多预放 1 帧安全；落点过滤仍逐帧
   判定，**不改变**"首个上屏帧 = 包含目标的那一帧"这条精度契约（属"加流水线"，不是"精度换流畅"）；
 - 新增一条 INFO 便于真机核对取值与理由：
@@ -1081,3 +1085,17 @@ if (cur > mSet->maxBufferDuration &&
 
 **用法**：真机日志按最右列逐条勾选；任何一条"应看到"缺失或"不应看到"出现，即该条款未通过，
 按中列定位到具体函数再修 —— 这样避免"凭感觉说好了/没好"。
+
+**已用证据补验的边界（2026-09-27 本轮）**：**seek 到视频轨末尾之后**
+（目标超时长、或视频轨比音频轨短）时，落点过滤由"EOF 的结构性终止"结束
+（`SuperMediaPlayer.cpp:4949-4981`）：
+
+- 判据只用**既有状态** `videoDecoderEOS && mVideoFrameQue.size() == 1`
+  （解码器已 drain + 只剩手里这一张），既不是超时、也不是"X 帧没进展"计数器、更不是看门狗；
+  对比另外两个候选：`mEof`（解复用器读完，偏早）、`mVideoEOS`（要求包队列也空，偏晚）；
+- 它**排在脏帧门之前** ⇒ `filterActive` 一定会被结束（否则 inSeekWindow / 追赶阀门 /
+  缓冲发布会一直走 seek 分支）；而"这一帧不是从关键帧解出来"时仍 `render=false`，
+  **花屏绝不放行**。
+
+真机标记：该场景下 `seek landing frame accepted … reason=no frame can reach the target (eof)`，
+画面不冻结、后续 `[seekdiag]` 回到正常分支。
