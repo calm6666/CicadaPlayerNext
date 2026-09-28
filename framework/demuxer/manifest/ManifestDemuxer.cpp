@@ -24,6 +24,8 @@
 #include <demuxer/play_list/segment.h>
 #include <demuxer/play_list/segment_decrypt/SegmentEncryption.h>
 #include <data_source/proxyDataSource.h>
+#include <data_source/dataSourcePrototype.h>
+#include <demuxer/dash/SidxParser.h>
 #include <utils/frame_work_log.h>
 
 #include <cmath>
@@ -185,6 +187,136 @@ namespace Cicada {
     }
 
     // --------------------------------------------------------- playList building --
+    namespace {
+        /*
+         * "start-end" 形式的字节范围。返回 false 说明它不是字节范围（可能是 URL）。
+         */
+        bool parseByteRangeText(const std::string &text, int64_t &start, int64_t &end)
+        {
+            if (text.empty()) {
+                return false;
+            }
+            long long rangeStart = 0;
+            long long rangeEnd = 0;
+            if (sscanf(text.c_str(), "%lld-%lld", &rangeStart, &rangeEnd) != 2) {
+                return false;
+            }
+            if (rangeStart < 0 || rangeEnd < rangeStart) {
+                return false;
+            }
+            start = rangeStart;
+            end = rangeEnd;
+            return true;
+        }
+    } // namespace
+
+    std::vector<Segment> ManifestDemuxer::expandSegmentBase(const std::string &fileUrl,
+                                                            const SegmentInfo &info)
+    {
+        std::vector<Segment> segments;
+
+        /* 一、显式段表优先：生成器可以从同一个 sidx 把段表算好一起给出。 */
+        if (!info.segments.empty()) {
+            for (const Segment &seg : info.segments) {
+                Segment resolved = seg;
+                /*
+                 * 单文件模式下所有段都来自**同一个文件**，baseUrl 就是这个文件本身
+                 * （见 MediaManifest.h 的 single 语义与 docs/MANIFEST-OBJECT-GUIDE.md 6.3）。
+                 * 所以：
+                 *   · url 留空 → 用文件；
+                 *   · url 只是文件名（相对）→ 仍然用文件，绝不把文件名再拼到文件 URL 后面
+                 *     （那样会得到 xxx.m4s/xxx.m4s 这种错地址）；
+                 *   · 只有绝对 URL（http/https/以 / 开头）才当作"这一段其实在别的文件里"。
+                 */
+                const bool absoluteUrl = seg.url.compare(0, 7, "http://") == 0 ||
+                                         seg.url.compare(0, 8, "https://") == 0 ||
+                                         (!seg.url.empty() && seg.url[0] == '/');
+                resolved.url = absoluteUrl ? seg.url : fileUrl;
+                segments.push_back(resolved);
+            }
+            return segments;
+        }
+
+        /* 二、按 indexRange 取 sidx 自己推段。 */
+        int64_t indexStart = 0;
+        int64_t indexEnd = 0;
+        if (!parseByteRangeText(info.indexRange, indexStart, indexEnd)) {
+            AF_LOGE("segmentBase: mode=single needs segments[] or a valid indexRange, got \"%s\"\n",
+                    info.indexRange.c_str());
+            return segments;
+        }
+
+        IDataSource *dataSource = dataSourcePrototype::create(fileUrl, nullptr);
+        if (dataSource == nullptr) {
+            AF_LOGE("segmentBase: can't create a data source for %s\n", fileUrl.c_str());
+            return segments;
+        }
+
+        const int64_t size = indexEnd - indexStart + 1;
+        std::vector<uint8_t> buffer(static_cast<size_t>(size));
+        int64_t readLen = 0;
+        if (dataSource->Open(0) < 0) {
+            AF_LOGE("segmentBase: open %s failed\n", fileUrl.c_str());
+            delete dataSource;
+            return segments;
+        }
+        if (dataSource->Seek(indexStart, SEEK_SET) < 0) {
+            AF_LOGE("segmentBase: seek to %lld in %s failed\n", static_cast<long long>(indexStart),
+                    fileUrl.c_str());
+            delete dataSource;
+            return segments;
+        }
+        while (readLen < size) {
+            const int ret = dataSource->Read(buffer.data() + readLen, static_cast<int>(size - readLen));
+            if (ret <= 0) {
+                break;
+            }
+            readLen += ret;
+        }
+        delete dataSource;
+
+        if (readLen <= 0) {
+            AF_LOGE("segmentBase: read index range %s of %s failed\n", info.indexRange.c_str(),
+                    fileUrl.c_str());
+            return segments;
+        }
+
+        Dash::SidxParser parser;
+        parser.ParseSidx(buffer.data(), readLen);
+        const Dash::SidxBox &sidx = parser.GetSidxBox();
+        if (sidx.reference_count == 0 || sidx.items == nullptr) {
+            AF_LOGE("segmentBase: no sidx reference in %s (indexRange %s)\n", fileUrl.c_str(),
+                    info.indexRange.c_str());
+            return segments;
+        }
+
+        /*
+         * 偏移基准与 DashSegmentTracker::parseIndex 一致：sidx 里的偏移从"index 段结束之后"
+         * 算起，所以基准是 first_offset + indexEnd + 1。
+         */
+        int64_t offset = static_cast<int64_t>(sidx.first_offset) + indexEnd + 1;
+        const int64_t timescale = sidx.timescale > 0
+                                  ? static_cast<int64_t>(sidx.timescale)
+                                  : (info.timescale > 0 ? info.timescale : 1);
+        for (uint16_t i = 0; i < sidx.reference_count; i++) {
+            const Dash::SidxBoxItem &item = sidx.items[i];
+            if (item.referenced_size == 0) {
+                continue;
+            }
+            Segment seg;
+            seg.url = fileUrl;
+            seg.byteRange = std::to_string(offset) + "-" +
+                            std::to_string(offset + static_cast<int64_t>(item.referenced_size) - 1);
+            seg.duration = static_cast<double>(item.subsegment_duration) / static_cast<double>(timescale);
+            segments.push_back(seg);
+            offset += static_cast<int64_t>(item.referenced_size);
+        }
+
+        AF_LOGI("segmentBase: %zu segments from sidx of %s (timescale %lld, indexRange %s)\n",
+                segments.size(), fileUrl.c_str(), static_cast<long long>(timescale),
+                info.indexRange.c_str());
+        return segments;
+    }
 
     playList *ManifestDemuxer::buildPlayList()
     {
@@ -226,7 +358,12 @@ namespace Cicada {
             representation->b_live = mManifest->live;
             representation->targetDuration = static_cast<int64_t>(
                     (rep.hasSegmentInfo ? rep.segmentInfo.targetDuration : 4) * CLOCK_FREQ_US);
-            if (rep.hasSegmentInfo && rep.segmentInfo.mode != SegmentMode::Single) {
+            if (rep.hasSegmentInfo) {
+                /*
+                 * 单文件（mode == "single"）也要设：段的 URL 会与 getBaseUri() 用 combinePaths
+                 * 合并，而段上带的是绝对文件 URL，合并后仍是它自己 —— 与 MPD 路径的 SegmentBase
+                 * 语义一致（baseUrl 就是那个唯一的文件）。
+                 */
                 representation->setBaseUrl(rep.baseUrl);
             }
             if (!rep.codecs.empty()) {
@@ -252,16 +389,43 @@ namespace Cicada {
                     } else if (segInfo.mode == SegmentMode::Template) {
                         segments = expandTemplate(segInfo, mManifest->duration, rep.baseUrl);
                     }
+                } else if (segInfo.mode == SegmentMode::Single) {
+                    /*
+                     * SegmentBase：rep.baseUrl 就是那个唯一的文件（init + media + sidx 都在里面），
+                     * 所有段都是它的字节范围。段表来源见 expandSegmentBase()：显式 segments[] 优先，
+                     * 否则按 indexRange 把 sidx 拉下来推段。一段也拿不到就跳过这个 representation
+                     * （下面打日志），不留下"清单能开、永远没数据"的空段表。
+                     */
+                    segments = expandSegmentBase(rep.baseUrl, segInfo);
+                    if (segments.empty()) {
+                        AF_LOGE("manifest: video representation (mode=single) %s has no usable segment, "
+                                "skipping it\n", rep.baseUrl.c_str());
+                        delete representation;
+                        continue;
+                    }
                 }
 
                 uint64_t sequence = segInfo.hasMediaSequence ? static_cast<uint64_t>(segInfo.mediaSequence)
                                     : static_cast<uint64_t>(segInfo.startNumber > 0 ? segInfo.startNumber : 1);
 
-                // init segment (EXT-X-MAP style) when present
+                /*
+                 * init 段（EXT-X-MAP / SegmentBase 的 Initialization）。
+                 * single 模式下 initialization 是**字节范围**而不是 URL（见 MediaManifest.h
+                 * 的字段注释与 docs/MANIFEST-OBJECT-GUIDE.md 6.3）：文件就是 rep.baseUrl，
+                 * 范围挂在段上；写成 URL 的老写法仍然兼容。
+                 */
                 std::shared_ptr<segment> initSegment;
-                if (!segInfo.initialization.empty() && segInfo.mode != SegmentMode::Single) {
+                if (!segInfo.initialization.empty()) {
+                    int64_t initStart = 0;
+                    int64_t initEnd = 0;
                     initSegment = std::make_shared<segment>(sequence++);
-                    initSegment->setSourceUrl(resolveUrl(rep.baseUrl, segInfo.initialization));
+                    if (segInfo.mode == SegmentMode::Single &&
+                        parseByteRangeText(segInfo.initialization, initStart, initEnd)) {
+                        initSegment->setSourceUrl(rep.baseUrl);
+                        initSegment->setByteRange(initStart, initEnd);
+                    } else {
+                        initSegment->setSourceUrl(resolveUrl(rep.baseUrl, segInfo.initialization));
+                    }
                     segmentList->addInitSegment(initSegment);
                 }
 
@@ -320,7 +484,16 @@ namespace Cicada {
                 const SegmentInfo &segInfo = rep.segmentInfo;
                 auto *segmentList = new SegmentList(representation);
                 std::vector<Segment> segments;
-                if (!segInfo.segments.empty()) {
+                if (segInfo.mode == SegmentMode::Single) {
+                    /* 音频同样支持 SegmentBase：单文件 + 字节范围，段表来源见 expandSegmentBase()。 */
+                    segments = expandSegmentBase(rep.baseUrl, segInfo);
+                    if (segments.empty()) {
+                        AF_LOGE("manifest: audio representation (mode=single) %s has no usable segment, "
+                                "skipping it\n", rep.baseUrl.c_str());
+                        delete representation;
+                        continue;
+                    }
+                } else if (!segInfo.segments.empty()) {
                     for (const Segment &seg : segInfo.segments) {
                         Segment resolved = seg;
                         resolved.url = resolveUrl(rep.baseUrl, seg.url);
@@ -332,9 +505,17 @@ namespace Cicada {
 
                 uint64_t sequence = static_cast<uint64_t>(segInfo.startNumber > 0 ? segInfo.startNumber : 1);
                 std::shared_ptr<segment> initSegment;
-                if (!segInfo.initialization.empty() && segInfo.mode != SegmentMode::Single) {
+                if (!segInfo.initialization.empty()) {
+                    int64_t initStart = 0;
+                    int64_t initEnd = 0;
                     initSegment = std::make_shared<segment>(sequence++);
-                    initSegment->setSourceUrl(resolveUrl(rep.baseUrl, segInfo.initialization));
+                    if (segInfo.mode == SegmentMode::Single &&
+                        parseByteRangeText(segInfo.initialization, initStart, initEnd)) {
+                        initSegment->setSourceUrl(rep.baseUrl);
+                        initSegment->setByteRange(initStart, initEnd);
+                    } else {
+                        initSegment->setSourceUrl(resolveUrl(rep.baseUrl, segInfo.initialization));
+                    }
                     segmentList->addInitSegment(initSegment);
                 }
 

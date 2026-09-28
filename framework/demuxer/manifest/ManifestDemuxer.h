@@ -123,6 +123,21 @@ namespace Cicada {
         static void buildSegmentEncryptions(const Manifest::MediaManifest &manifest,
                                             const Manifest::MediaRepresentation &rep,
                                             std::vector<SegmentEncryption> &out);
+        /*
+         * SegmentBase（mode == "single"）展开：一个文件 + 字节范围。
+         *
+         * 取段来源两种，优先显式列表、其次 sidx：
+         *   · info.segments 非空 → 直接用它（每条自带 byteRange / duration），
+         *     这是"生成器同时把段表算好"的那条路，不依赖运行期解析；
+         *   · 否则用 info.indexRange 按范围把 sidx 拉下来解析：偏移基准与
+         *     DashSegmentTracker::parseIndex 同一套（first_offset + indexEnd + 1），
+         *     每个 reference 生成一段（byteRange + duration）。
+         *
+         * 返回空表表示这段没法播（没有 segments[]、indexRange 非法、拉不到或解析不出 sidx），
+         * 调用方据此跳过这个 representation 并打日志，不静默留一个空段表。
+         */
+        static std::vector<Manifest::Segment> expandSegmentBase(const std::string &fileUrl,
+                                                               const Manifest::SegmentInfo &info);
 
     private:
         std::unique_ptr<Manifest::MediaManifest> mManifest;
