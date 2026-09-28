@@ -1022,3 +1022,39 @@ fps 也拿不到时帧长 = 1 秒，会把目标前近 1 秒的**前缀帧**判�
 "取不晚于目标的最后一帧"需要**前瞻一帧**（把落点候选按住到下一帧到达再决定）。
 本轮**故意不动**落点过滤的状态机（它刚在 P1–P4 定稿、正等真机验证）：
 等真机日志确认 `dur=0` 这档是否真会出现，再决定是否实现"落点窗口内按住一帧"。
+
+---
+
+## 十八、条款核查："有界前向缓冲单一规则"（2026-09-27；结论：**已成立，无需改动**）
+
+**规则本体**（唯一的读循环闸门，`SuperMediaPlayer.cpp:2136-2163`）：
+
+```cpp
+cur = getPlayerBufferDuration(false, false);              // 度量
+if (cur > mSet->maxBufferDuration &&
+    getPlayerBufferDuration(false, true) > mSet->startBufferDuration) {
+    mBufferIsFull = true;
+    break;                                                // 停读
+}
+```
+
+- **度量**：`getPlayerBufferDuration(gotMax, internal)`（`:6286-6361`）= 各流
+  `mBufferController->GetPacketDuration(...)`（`internal == false` 时再加 demuxer 读缓冲；
+  再加解码器 input padding），然后 **`gotMax == false` ⇒ 取最小值** ——
+  以**最落后的一路**为准，这正是"有界"应有的口径；
+- **上限**：单一开关 `mSet->maxBufferDuration`，默认 **50 s**（`MediaPlayerConfig.cpp:16`）；
+  低延迟分支在 `MediaPlayer.cpp:537-560` 对 `start/high/max` 三者重排，仍是同一对量；
+- **无例外**：`:2136-2144` 的注释明确"对任何状态都生效"（切档在途也不再豁免）——
+  它记录的事故（队列被读到 **6978 包 ≈ 233 秒**，切档后解码器只能从落后上百秒的队首啃）
+  就是加这条的原因；`mBufferIsFull` 配 1 秒回差（`BufferGap`）防抖。
+
+**结论**：objective (4) 的"有界前向缓冲单一规则"**已成立**。此前我记的 `packetQ(v)=31772`
+属于**该修复之前**的日志；现行代码不会再出现无界预读（这也是 P3 之后 seek 不再"啃队首"的前提）。
+
+**单一规则上的唯一例外（已知，方向保守，本轮未改）**：低内存分支会在运行中把
+`startBufferDuration` / `highLevelBufferDuration` **单向压到 ≤ 800 ms**
+（`SuperMediaPlayer.cpp:2176-2184`，由 `AFGetSystemMemInfo()` 这个**内存事实**驱动，不是计时器），
+且内存恢复后**不回升**（`mLowMem = false` 但值保持）。它只会让预读更小、起播更早，
+**不会**造成无界预读，因此不影响本条款；若要严格"单一"，应改成"内存恢复时还原原值"
+（需追加 3 个成员记录原值，新成员按规则追加类末尾）—— 属独立小改动，
+等真机出现内存压力日志后再做，避免现在动 L1 缓冲阈值。
