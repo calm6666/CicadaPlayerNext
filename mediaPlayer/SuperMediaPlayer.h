@@ -1592,8 +1592,14 @@ namespace Cicada {
          *                use-after-free 在类型上就不可能发生（换成裸指针时它要靠调用
          *                时序去保证）。取快照的临界区只有一次拷贝，不持锁做任何 I/O，
          *                因此与 mCreateMutex 之间不存在锁序问题。
-         * mCacheSuccess  缓存文件已经写成（CacheManager 的成功回调触发过）。只用于
-         *                "循环播放时不再写第二遍"这一个判断；Stop() 里复位。
+         * mCacheSuccess  缓存文件已经写成（CacheManager 的成功回调触发过）。语义是
+         *                "这一份缓存已经完整"：成功回调之后 remuxer 线程已经退出
+         *                （CacheModule::streamEnd 让 mFrameEof 置真 → mux 线程收尾并
+         *                退出），而 CacheModule::addFrame 仍会把包 clone 进它那条只进
+         *                不出的队列 —— 所以本类必须靠这个标志停止喂包
+         *                （见 .cpp 的 sendMediaFrameToCache）。SetDataSource / Stop 复位。
+         *                它**不**参与循环语义：本类的循环是 playCompleted 里原地 seek 回 0，
+         *                没有"播完重设源"那条路径，改 bLooping 只会让播放停住。
          *
          * mCacheMutex    只保护 mCacheManager 这一个 shared_ptr 的读写（换入/换出/取
          *                快照），不保护管理器内部状态（它自己有一套锁）。
@@ -1604,6 +1610,7 @@ namespace Cicada {
         std::atomic<bool> mCacheSuccess{false};
         std::mutex mCacheMutex{};
         std::shared_ptr<CacheManager> cacheManagerOrNull();
+        void sendMediaFrameToCache(const IAFPacket *frame, StreamType type);
         void ReleaseCacheManager();
 #endif
     };

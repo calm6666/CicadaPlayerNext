@@ -391,6 +391,38 @@ std::shared_ptr<CacheManager> SuperMediaPlayer::cacheManagerOrNull()
     return mCacheManager;
 }
 
+void SuperMediaPlayer::sendMediaFrameToCache(const IAFPacket *frame, StreamType type)
+{
+    /*
+     * 【缓存文件写成之后不再喂包】—— 这是"循环播放 / 反复 seek"下不涨内存的关键。
+     *
+     * CacheManager::complete()（在 EOF 处调用）会让 CacheModule::streamEnd() 把
+     * mFrameEof 置真：remuxer 线程随即 break 出循环、关闭 muxer、把 .tmp 改名成正式
+     * 缓存文件，然后**退出**。但 CacheModule::addFrame() 并不看这个状态 ——
+     * 它照样 frame->clone() 后推进 mFrameInfoQueue，而那是一条只进不出的队列。
+     * 于是"缓存已经写完、播放还在继续"（循环、或用户 seek 回去重播）时，
+     * 队列会一直被填满而没有任何消费者。
+     *
+     * 所以成功回调触发过之后，这一层直接不再喂：文件已经完整，喂了也没有消费者。
+     * 纯状态判据（一个 bool），没有计时器、没有轮次阈值。
+     *
+     * 顺带说明"为什么这里不像 C++ 门面那样在成功回调里临时关掉 loop"：
+     * 门面 `MediaPlayer` 关 loop 是因为它自己的 `completionCallback` 会在播完之后
+     * **重新 setDataSource(源 URL) + Prepare()** 把循环接过去（下一次直接播缓存文件）。
+     * 本类（内核这一层）的循环是 `playCompleted()` 里原地 seek 回 0，**没有**那条
+     * "播完重设源"的路径；在这里关掉 loop 只会让播放停住（而不是循环），
+     * 用户看到的就是"一开缓存就不循环了"。上面的"写成后不再喂"已经解决了循环下的
+     * 内存问题，所以这里不动循环语义。
+     */
+    if (mCacheSuccess.load()) {
+        return;
+    }
+
+    if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
+        cacheManager->sendMediaFrame(frame, type);
+    }
+}
+
 void SuperMediaPlayer::ReleaseCacheManager()
 {
     std::shared_ptr<CacheManager> manager;
@@ -584,17 +616,17 @@ void SuperMediaPlayer::SetDataSource(const char *url)
                 }
             });
             manager->setCacheSuccessCallback([this]() -> void {
-                mCacheSuccess = true;
                 /*
-                 * 缓存文件已经写成、而应用层要循环播放：把循环交给"播完之后重新
-                 * setDataSource"那条既有路径（与 C++ 门面 MediaPlayer 的做法一致），
-                 * 这样下一次播放直接命中缓存文件，不会把同一份内容再写一遍。
-                 * 注意这里改的是内核的 mSet->bLooping（不是再调 SetLooping()，
-                 * 那会再触发一次本类的循环处理）。
+                 * 缓存文件已经写成。除了上报事件，这个标志还是"不再往缓存里喂包"的判据
+                 * （见 sendMediaFrameToCache()：complete() 之后 remuxer 线程已经退出，
+                 * 继续喂只会往它的队列里堆没人消费的包）。
+                 *
+                 * 这里**不改循环语义**：C++ 门面 MediaPlayer 在成功回调里临时把 loop 关掉，
+                 * 是因为它的 completionCallback 会重新 setDataSource(源 URL) 把循环接过去；
+                 * 本类的循环是 playCompleted() 里原地 seek 回 0，没有那条重设源的路径，
+                 * 在这里关 loop 只会让播放停住。详见 sendMediaFrameToCache() 的说明。
                  */
-                if (isLooping()) {
-                    mSet->bLooping = false;
-                }
+                mCacheSuccess = true;
 
                 if (mPNotifier != nullptr) {
                     /*
@@ -1112,17 +1144,6 @@ void SuperMediaPlayer::SetDropBufferThreshold(int dropValue)
 void SuperMediaPlayer::SetLooping(bool looping)
 {
     mSet->bLooping = looping;
-#ifdef ENABLE_CACHE_MODULE
-    /*
-     * 与 C++ 门面 MediaPlayer::SetLooping 里那段对称：缓存**已经写成**之后应用层
-     * 才打开循环，就把循环交给"播完之后重新 setDataSource"那条既有路径
-     * （播循环时不再写第二遍缓存）。缓存还没写成时不动 —— 这次播放该写完。
-     * 没有任何按时间判定的分支，两个条件都是状态读数。
-     */
-    if (mCacheSuccess.load() && isLooping()) {
-        mSet->bLooping = false;
-    }
-#endif
 }
 
 bool SuperMediaPlayer::isLooping()
@@ -5966,7 +5987,7 @@ int SuperMediaPlayer::ReadPacket()
         mHaveVideoPkt = true;
 #ifdef ENABLE_CACHE_MODULE
         /*
-         * 【播放缓存】编码视频包直接喂给缓存管理器。
+         * 【播放缓存】编码视频包喂给缓存管理器（"写成之后不再喂"见 sendMediaFrameToCache）。
          *
          * 这里（读包路径）才是**编码包**，而 SendVideoFrameToRender() 拿到的是已解码帧 ——
          * 缓存要把原始码流重新封装成缓存文件，所以必须在这一层喂。位置紧跟既有的
@@ -5976,9 +5997,7 @@ int SuperMediaPlayer::ReadPacket()
          * 不挂在 mMediaFrameCb 上：那条回调是应用层用来出帧的，应用层不注册它就为空，
          * 缓存不能依赖应用层注册（C API 句柄这条路本来就不注册）。
          */
-        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
-            cacheManager->sendMediaFrame(pMedia_Frame.get(), ST_TYPE_VIDEO);
-        }
+        sendMediaFrameToCache(pMedia_Frame.get(), ST_TYPE_VIDEO);
 #endif
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_VIDEO);
@@ -6096,9 +6115,7 @@ int SuperMediaPlayer::ReadPacket()
 
 #ifdef ENABLE_CACHE_MODULE
         /* 【播放缓存】音频编码包，同上。 */
-        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
-            cacheManager->sendMediaFrame(pMedia_Frame.get(), ST_TYPE_AUDIO);
-        }
+        sendMediaFrameToCache(pMedia_Frame.get(), ST_TYPE_AUDIO);
 #endif
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_AUDIO);
@@ -6109,9 +6126,7 @@ int SuperMediaPlayer::ReadPacket()
     } else if (pFrame->getInfo().streamIndex == mCurrentSubtitleIndex || pFrame->getInfo().streamIndex == mWillChangedSubtitleStreamIndex) {
 #ifdef ENABLE_CACHE_MODULE
         /* 【播放缓存】字幕包（缓存文件里的字幕轨），同上。 */
-        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
-            cacheManager->sendMediaFrame(pMedia_Frame.get(), ST_TYPE_SUB);
-        }
+        sendMediaFrameToCache(pMedia_Frame.get(), ST_TYPE_SUB);
 #endif
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_SUB);

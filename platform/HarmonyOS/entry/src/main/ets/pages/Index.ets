@@ -667,23 +667,13 @@ struct Index {
     this.log('player config applied');
   }
 
-  /**
-   * PlayerCacheConfigFragment apply.
-   *
-   * NOT WIRED TO THE PLAYER: the play-and-cache (边播边缓存) config is not
-   * reachable through the C API this NAPI layer is built on. CacheConfig is set
-   * on the MediaPlayer C++ facade, which the Android SDK's JNI binds directly;
-   * the C API's handle is an ICicadaPlayer (SuperMediaPlayer), which has no
-   * cache-config method and no cache implementation at all. The UI is kept for
-   * parity and reports the gap instead of silently doing nothing.
+  /*
+   * 旧 demo 的"缓存配置"面板（PlayerCacheConfigFragment 那一套）已随旧组件一起删除：
+   * 播放器 UI 现在整体来自 SDK 的 compose 一套（与 Compose 安卓版对齐），那里面没有
+   * 缓存入口。play-and-cache 本身现在是**支持**的，走 SDK 的 setCacheConfig() /
+   * getCachePath()（见 docs/Packaging_HarmonyOS.md 第 6 节），应用层要暴露什么入口由
+   * 应用自己决定，本 Demo 的播放页不再摆这个面板。
    */
-  private onApplyCacheConfig(enable: boolean, maxDurationS: string, maxSizeMB: string, dir: string): void {
-    const duration: number = maxDurationS.length > 0 ? Number.parseInt(maxDurationS) : 300;
-    const sizeMB: number = maxSizeMB.length > 0 ? Number.parseInt(maxSizeMB) : 500;
-    this.log(`cache config requested: enable=${enable} ${duration}s ${sizeMB}MB dir=${dir}`);
-    this.log('cache config is not exposed by the C API; ignored');
-    promptAction.showToast({ message: S.refreshConfigSuccess, duration: 2000 });
-  }
 
   /** Android showMediaInfo(): one Toast with resolution / bitrate / audio / subtitle. */
   private showMediaInfo(): void {

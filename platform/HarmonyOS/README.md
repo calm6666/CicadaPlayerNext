@@ -185,11 +185,18 @@ callbacks the pages implement。
    handle (`SuperMediaPlayer`) had no cache entry point at all. It now does:
    `ICicadaPlayer::SetCacheConfig` / `GetCachePathByURL` (appended at the end of
    the vtable with empty default bodies, so no other platform changed a line),
-   implemented in `SuperMediaPlayer` on top of the very same
-   `CacheManager` + `ICacheDataSource` machinery the facade uses
-   (`SuperMediaPlayerCacheDataSource`; the manager is held by `shared_ptr` so a
-   player thread that took a snapshot can never touch a freed manager), plus
-   `CicadaSetCacheConfig` / `CicadaGetCachePath` in the C API, the NAPI functions
+   implemented in `SuperMediaPlayer` on top of the same `CacheManager` the facade
+   uses, with a **new inline `ICacheDataSource` adapter**
+   (`SuperMediaPlayerCacheDataSource` — not the facade's `PlayerCacheDataSource`,
+   which takes a `playerHandle*` that only exists *outside* `SuperMediaPlayer`);
+   the manager is held by `shared_ptr` so a player thread that took a snapshot can
+   never touch a freed manager. After the file is complete the kernel stops
+   feeding it (`CacheModule::addFrame` would otherwise keep cloning packets into a
+   queue nobody drains, growing on every loop or re-seek), and loop semantics are
+   left alone: `SuperMediaPlayer` loops by seeking back to 0 in place, so it does
+   **not** do what the `MediaPlayer` facade does (turn loop off in the success
+   callback, because *its* completion path re-runs `setDataSource(sourceUrl)`).
+   Plus `CicadaSetCacheConfig` / `CicadaGetCachePath` in the C API, the NAPI functions
    `setCacheConfig` / `getCachePath` (JSON contract, field names identical to
    `CacheConfig`'s members) and the ArkTS `setCacheConfig(config)` /
    `getCachePath(url)` with `onCacheSuccess` / `onCacheError` events
