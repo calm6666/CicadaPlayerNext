@@ -1,0 +1,11 @@
+{
+  "name": "@cicada/cicadaplayer",
+  "version": "1.0.0",
+  "description": "CicadaPlayerNext HarmonyOS SDK：自研内核（FFmpeg + OH_AVCodec 硬解 + OHAudio + DRM Kit）的 ArkTS 全功能播放器，封装成 HAR 供其它工程直接依赖。",
+  "main": "Index.ets",
+  "author": "CicadaPlayerNext",
+  "license": "Apache-2.0",
+  "dependencies": {
+    "libcicadaplayer.so": "file:./src/main/cpp/types/libcicadaplayer"
+  }
+}

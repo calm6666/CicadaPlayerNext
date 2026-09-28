@@ -1,7 +1,9 @@
-# CMakeLists for the HarmonyOS native module.
+# CMakeLists for the CicadaPlayerNext HarmonyOS SDK (HAR module).
 #
 # Builds the whole Cicada player (framework + mediaPlayer) plus the NAPI
-# wrapper into one shared library `libentry.so`.
+# wrapper into one shared library, `libcicadaplayer.so`, which is packaged into
+# `@cicada/cicadaplayer.har` so that other HarmonyOS projects only have to add
+# one dependency (see docs/Packaging_HarmonyOS.md).
 #
 # The hvigor externalNativeOptions invoke this file with the OHOS NDK
 # toolchain (ohos.toolchain.cmake). Externals must be prebuilt with
@@ -12,7 +14,8 @@ project(cicada_ohos LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 
-# CicadaPlayerNext source root (this repo layout: platform/HarmonyOS/entry/src/main/cpp)
+# CicadaPlayerNext source root (this repo layout:
+# platform/HarmonyOS/cicadaplayer/src/main/cpp)
 get_filename_component(CPP_DIR ${CMAKE_CURRENT_SOURCE_DIR} ABSOLUTE)
 set(CICADA_ROOT ${CPP_DIR}/../../../../../..)
 
@@ -27,12 +30,14 @@ set(BUILD_TEST OFF CACHE BOOL "" FORCE)
 add_subdirectory(${CICADA_ROOT}/mediaPlayer ${CMAKE_CURRENT_BINARY_DIR}/mediaPlayer)
 
 # --- NAPI wrapper -------------------------------------------------------------
-add_library(entry SHARED
+# The module name must match napi_module_register() in napi_init.cpp: ArkTS does
+# `import cicada from 'libcicadaplayer.so'`.
+add_library(cicadaplayer SHARED
         napi_init.cpp
         napi_player.cpp
         napi_events.cpp)
 
-target_include_directories(entry PRIVATE
+target_include_directories(cicadaplayer PRIVATE
         ${CICADA_ROOT}/mediaPlayer
         ${CICADA_ROOT}/framework
         ${CICADA_ROOT}/framework/base
@@ -41,7 +46,7 @@ target_include_directories(entry PRIVATE
 # media_player is a STATIC library and does not declare its framework
 # dependencies, so this shared object has to link the same set the cmdline
 # executable links (see cmdline/CMakeLists.txt).
-target_link_libraries(entry PUBLIC
+target_link_libraries(cicadaplayer PUBLIC
         media_player
         demuxer
         data_source
@@ -59,6 +64,7 @@ target_link_libraries(entry PUBLIC
         libnative_media_vdec.so
         libnative_media_acodec.so
         libnative_media_core.so
+        libnative_vsync.so
         libohaudio.so
         libnative_drm.so
         ${FFMPEG_INSTALL_DIR_OHOS_LOCAL}/libffmpeg.so)

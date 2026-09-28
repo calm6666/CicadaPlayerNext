@@ -10,29 +10,30 @@
 import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import window from '@ohos.window';
-import { CicadaPlayer } from '../player/CicadaPlayer';
-import { PlayerControlBar } from '../view/PlayerControlBar';
-import { PlayerGestureLayer } from '../view/PlayerGestureLayer';
-import { PlayerTrackPanel, TRACK_INDEX_AUTO } from '../view/PlayerTrackPanel';
-import { PlayerTipsOverlay } from '../view/PlayerTipsOverlay';
-import { PlayerOptionPanel } from '../view/PlayerOptionPanel';
 import {
+  CicadaPlayer,
   CicadaPlayerListener,
   MediaInfo,
   MirrorMode,
-  PlayerRouteParams,
+  PlayerControlBar,
+  PlayerGestureLayer,
+  PlayerOptionPanel,
+  PlayerTipsOverlay,
+  PlayerTrackPanel,
   RotateMode,
   ScaleMode,
-  SourceType,
   StreamInfo,
-  StreamType
-} from '../model/CicadaTypes';
+  StreamType,
+  TRACK_INDEX_AUTO,
+  formatMs,
+  formatSpeed,
+  S
+} from '@cicada/cicadaplayer';
+import { PlayerRouteParams, SourceType } from '../model/AppTypes';
 import { PLAYER_NAME_KEY, Settings } from '../util/Settings';
 import { NetWatchdog } from '../util/NetWatchdog';
 import { SnapshotSaver } from '../util/SnapshotSaver';
 import { SnapShotRouteParams } from './SnapShotPage';
-import { formatMs, formatSpeed } from '../util/TimeFormater';
-import { S } from '../util/Strings';
 
 const DEFAULT_URL: string =
   'https://storage.googleapis.com/gtv-videos-bucket/sample/BigBuckBunny.mp4';

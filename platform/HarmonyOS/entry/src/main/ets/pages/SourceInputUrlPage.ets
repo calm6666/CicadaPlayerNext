@@ -9,8 +9,8 @@ import { common } from '@kit.AbilityKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { scanBarcode } from '@kit.ScanKit';
 import { TitleBar } from '../view/TitleBar';
-import { PlayerRouteParams, SourceType } from '../model/CicadaTypes';
-import { S, UrlDefaults } from '../util/Strings';
+import { PlayerRouteParams, SourceType } from '../model/AppTypes';
+import { S, UrlDefaults } from '@cicada/cicadaplayer';
 
 @Entry
 @Component

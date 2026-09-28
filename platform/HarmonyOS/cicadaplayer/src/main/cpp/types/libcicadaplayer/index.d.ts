@@ -1,7 +1,8 @@
-// Type declarations for the CicadaPlayerNext NAPI module (libentry.so).
-// Kept in sync with platform/HarmonyOS/entry/src/main/cpp/napi_init.cpp.
+// Type declarations for the CicadaPlayerNext NAPI module (libcicadaplayer.so,
+// shipped inside @cicada/cicadaplayer.har).
+// Kept in sync with platform/HarmonyOS/cicadaplayer/src/main/cpp/napi_init.cpp.
 //
-// Usage from ArkTS:  import cicada from 'libentry.so';
+// Usage from ArkTS:  import cicada from 'libcicadaplayer.so';
 
 declare namespace cicadaNapi {
     /**
@@ -94,6 +95,30 @@ declare namespace cicadaNapi {
     const invokeComponent: (id: number, content: string) => number;
     const getVideoRenderFps: (id: number) => number;
     const getVideoDecodeFps: (id: number) => number;
+
+    /** DRM 许可证回调：内核在播放线程同步索要，必须当场返回（ArrayBuffer 或 base64）。 */
+    type DrmCallback =
+        (drmType: string, requestType: string, url: string, data: ArrayBuffer) => ArrayBuffer | string | null;
+
+    // ---- 解码事实 / 切档状态 ----
+    const isVideoDecoderHardware: (id: number) => boolean;
+    const isStreamSwitchInFlight: (id: number) => boolean;
+
+    // ---- 画面滤镜 ----
+    const setColorMatrix: (id: number, matrix: number[] | null) => boolean;
+    const setFilterConfig: (id: number, filterConfig: string) => number;
+    const updateFilterConfig: (id: number, target: string, options: string) => number;
+    const setFilterInvalid: (id: number, target: string, invalid: boolean) => number;
+
+    // ---- 硬解能力 / 编码偏好 ----
+    const getVideoCodecSupport: (id: number) => string;
+    const setVideoCodecSupport: (id: number, json: string | null) => number;
+
+    // ---- 字符串属性 ----
+    const getPropertyString: (id: number, key: number, paramJson: string) => string;
+
+    // ---- DRM ----
+    const setDrmRequestCallback: (id: number, callback: DrmCallback) => boolean;
 }
 
 export default cicadaNapi;

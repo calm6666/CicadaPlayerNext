@@ -8,6 +8,10 @@
 
 #include <cstdio>
 #include <cstring>
+#include <condition_variable>
+
+// base64 解码：DRM 请求/响应在 JS 侧走 base64 文本（ArrayBuffer 亦可）。
+#include <utils/CicadaUtils.h>
 
 // CicadaGetVideoRenderFps / CicadaGetVideoDecodeFps are defined in
 // media_player_api.cpp but are missing from media_player_api.h, so they are
@@ -986,4 +990,377 @@ namespace cicada_ohos {
         return makeDouble(env, CicadaGetVideoDecodeFps(a.player->handle));
     }
 
+    // ---------------------------------------------------------------------
+    // 解码事实 / 切档状态
+    //
+    // 这两个都不是"配置开关"，而是问内核当前的真实状态：
+    //   IsVideoDecoderHardware：活动解码器此刻走的是硬解还是软解（含中途回退），
+    //     用来在界面上显示"解码方式"；
+    //   IsStreamSwitchInFlight：当前是否有清晰度切换在途，给 ABR 让路用。
+    // ---------------------------------------------------------------------
+    napi_value IsVideoDecoderHardware(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a)) {
+            return makeBool(env, false);
+        }
+        return makeBool(env, CicadaIsVideoDecoderHardware(a.player->handle));
+    }
+
+    napi_value IsStreamSwitchInFlight(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a)) {
+            return makeBool(env, false);
+        }
+        return makeBool(env, CicadaIsStreamSwitchInFlight(a.player->handle));
+    }
+
+    // ---------------------------------------------------------------------
+    // 画面滤镜 / 色觉辅助矩阵
+    // ---------------------------------------------------------------------
+    napi_value SetColorMatrix(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 2) {
+            return makeBool(env, false);
+        }
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, a.argv[1], &type);
+        if (type == napi_null || type == napi_undefined) {
+            // 空 = 关闭滤镜（等价于单位矩阵）。
+            CicadaSetColorMatrix(a.player->handle, nullptr);
+            return makeBool(env, true);
+        }
+        bool isArray = false;
+        uint32_t length = 0;
+        if (napi_is_array(env, a.argv[1], &isArray) != napi_ok || !isArray) {
+            return makeBool(env, false);
+        }
+        if (napi_get_array_length(env, a.argv[1], &length) != napi_ok || length != 9) {
+            return makeBool(env, false);
+        }
+        float matrix[9] = {0};
+        for (uint32_t i = 0; i < 9; i++) {
+            napi_value item = nullptr;
+            double value = 0;
+            if (napi_get_element(env, a.argv[1], i, &item) != napi_ok) {
+                return makeBool(env, false);
+            }
+            if (napi_get_value_double(env, item, &value) != napi_ok) {
+                return makeBool(env, false);
+            }
+            matrix[i] = static_cast<float>(value);
+        }
+        CicadaSetColorMatrix(a.player->handle, matrix);
+        return makeBool(env, true);
+    }
+
+    napi_value SetFilterConfig(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 2) {
+            return makeInt32(env, -1);
+        }
+        CicadaSetFilterConfig(a.player->handle, argString(env, a.argv[1]));
+        return makeInt32(env, 0);
+    }
+
+    napi_value UpdateFilterConfig(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 3) {
+            return makeInt32(env, -1);
+        }
+        CicadaUpdateFilterConfig(a.player->handle, argString(env, a.argv[1]), argString(env, a.argv[2]));
+        return makeInt32(env, 0);
+    }
+
+    napi_value SetFilterInvalid(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        bool invalid = false;
+        if (!unpack(env, info, a) || a.argc < 3 || !argBool(env, a.argv[2], invalid)) {
+            return makeInt32(env, -1);
+        }
+        CicadaSetFilterInvalid(a.player->handle, argString(env, a.argv[1]), invalid);
+        return makeInt32(env, 0);
+    }
+
+    // ---------------------------------------------------------------------
+    // 硬解能力与效率偏好（应用层可持久化后回传，内核不再自行探测）
+    // ---------------------------------------------------------------------
+    napi_value GetVideoCodecSupport(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a)) {
+            return makeString(env, "");
+        }
+        const char *json = CicadaGetVideoCodecSupport(a.player->handle);
+        if (json == nullptr) {
+            return makeString(env, "");
+        }
+        // 内核返回的是 malloc 出来的副本，必须交回内核释放。
+        const std::string out(json);
+        CicadaFreeString(json);
+        return makeString(env, out);
+    }
+
+    napi_value SetVideoCodecSupport(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 2) {
+            return makeInt32(env, -1);
+        }
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, a.argv[1], &type);
+        const bool clear = (type == napi_null || type == napi_undefined);
+        const std::string json = clear ? std::string() : argString(env, a.argv[1]);
+        return makeInt32(env,
+                         CicadaSetVideoCodecSupport(a.player->handle, json.empty() ? nullptr : json.c_str()));
+    }
+
+    // ---------------------------------------------------------------------
+    // 字符串属性（PropertyKey + 可选 JSON 参数）
+    // ---------------------------------------------------------------------
+    napi_value GetPropertyString(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        int32_t key = 0;
+        if (!unpack(env, info, a) || a.argc < 2 || !argInt32(env, a.argv[1], key)) {
+            return makeString(env, "");
+        }
+        const std::string paramJson = a.argc >= 3 ? argString(env, a.argv[2]) : std::string();
+        const CicadaJSONItem param = paramJson.empty() ? CicadaJSONItem() : CicadaJSONItem(paramJson);
+        return makeString(env, CicadaGetPropertyString(a.player->handle, static_cast<PropertyKey>(key), param));
+    }
+
+    // ---------------------------------------------------------------------
+    // DRM 许可证回调
+    //
+    // 语义与 Android 侧 NativeBase 的同步 JNI 调用一致：内核在播放线程上调用
+    // drmCallback，必须当场拿到许可证响应才能继续。这里用一条可阻塞的
+    // threadsafe function 把请求投到 JS 线程，播放线程在条件变量上等 JS 的
+    // 返回值 —— 没有超时兜底，只有确定性的两条出口：JS 回调返回、或 JS 环境
+    // 拆除（finalize 把在途请求全部标记为 aborted）。
+    // ---------------------------------------------------------------------
+    struct DrmHandshake {
+        std::mutex mutex;
+        std::condition_variable cond;
+        bool done{false};
+        bool aborted{false};
+        std::string drmType;
+        std::string requestType;
+        std::string url;
+        std::string requestData;
+        std::string response;
+    };
+
+    namespace {
+        void finishHandshake(DrmHandshake *handshake, bool aborted)
+        {
+            if (handshake == nullptr) {
+                return;
+            }
+            std::lock_guard<std::mutex> lock(handshake->mutex);
+            handshake->aborted = aborted;
+            handshake->done = true;
+            handshake->cond.notify_all();
+        }
+
+        void drmCallJs(napi_env env, napi_value jsCallback, void * /*context*/, void *data)
+        {
+            auto *handshake = static_cast<DrmHandshake *>(data);
+            if (handshake == nullptr) {
+                return;
+            }
+            if (env == nullptr || jsCallback == nullptr) {
+                finishHandshake(handshake, true);
+                return;
+            }
+
+            napi_value argv[4] = {nullptr, nullptr, nullptr, nullptr};
+            argv[0] = makeString(env, handshake->drmType);
+            argv[1] = makeString(env, handshake->requestType);
+            argv[2] = makeString(env, handshake->url);
+            void *raw = nullptr;
+            napi_value buffer = nullptr;
+            if (napi_create_arraybuffer(env, handshake->requestData.size(), &raw, &buffer) == napi_ok &&
+                raw != nullptr) {
+                if (!handshake->requestData.empty()) {
+                    memcpy(raw, handshake->requestData.data(), handshake->requestData.size());
+                }
+                argv[3] = buffer;
+            } else {
+                napi_get_undefined(env, &argv[3]);
+            }
+
+            napi_value recv = nullptr;
+            napi_value result = nullptr;
+            napi_get_undefined(env, &recv);
+            const napi_status status = napi_call_function(env, recv, jsCallback, 4, argv, &result);
+            bool pending = false;
+            napi_is_exception_pending(env, &pending);
+            if (pending) {
+                napi_value ignored = nullptr;
+                napi_get_and_clear_last_exception(env, &ignored);
+            }
+
+            if (status == napi_ok && result != nullptr) {
+                napi_valuetype type = napi_undefined;
+                napi_typeof(env, result, &type);
+                if (type == napi_string) {
+                    char *decoded = nullptr;
+                    const int size = CicadaUtils::base64dec(argString(env, result), &decoded);
+                    if (decoded != nullptr && size > 0) {
+                        handshake->response.assign(decoded, static_cast<size_t>(size));
+                    }
+                    if (decoded != nullptr) {
+                        free(decoded);
+                    }
+                } else if (type == napi_object) {
+                    bool isBuffer = false;
+                    if (napi_is_arraybuffer(env, result, &isBuffer) == napi_ok && isBuffer) {
+                        void *bytes = nullptr;
+                        size_t length = 0;
+                        if (napi_get_arraybuffer_info(env, result, &bytes, &length) == napi_ok &&
+                            bytes != nullptr && length > 0) {
+                            handshake->response.assign(static_cast<const char *>(bytes), length);
+                        }
+                    }
+                }
+            }
+            finishHandshake(handshake, false);
+        }
+
+        // JS 环境拆除时，把还在等响应的播放线程全部放行（标记 aborted）。
+        void drmFinalize(napi_env /*env*/, void *finalizeData, void * /*finalizeHint*/)
+        {
+            auto *holder = static_cast<PlayerPtr *>(finalizeData);
+            if (holder != nullptr) {
+                PlayerPtr entry = *holder;
+                if (entry != nullptr) {
+                    std::vector<std::shared_ptr<DrmHandshake>> pending;
+                    {
+                        std::lock_guard<std::mutex> lock(entry->drmMutex);
+                        entry->drmTsfn = nullptr;
+                        pending.swap(entry->drmPending);
+                    }
+                    for (const auto &handshake : pending) {
+                        finishHandshake(handshake.get(), true);
+                    }
+                }
+                delete holder;
+            }
+        }
+    } // namespace
+
+    napi_value SetDrmRequestCallback(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 2) {
+            return makeBool(env, false);
+        }
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, a.argv[1], &type);
+        if (type != napi_function) {
+            return makeBool(env, false);
+        }
+
+        const PlayerPtr entry = a.player;
+        // 换回调：旧的 threadsafe function 必须先撤掉（只能释放一次）。
+        {
+            std::lock_guard<std::mutex> lock(entry->drmMutex);
+            if (entry->drmTsfn != nullptr) {
+                napi_release_threadsafe_function(entry->drmTsfn, napi_tsfn_abort);
+                entry->drmTsfn = nullptr;
+            }
+        }
+
+        napi_value resourceName = makeString(env, "CicadaDrmRequest");
+        napi_threadsafe_function tsfn = nullptr;
+        const napi_status status = napi_create_threadsafe_function(env, a.argv[1], nullptr, resourceName, 0, 1,
+                                                                  new PlayerPtr(entry), drmFinalize, nullptr,
+                                                                  drmCallJs, &tsfn);
+        if (status != napi_ok || tsfn == nullptr) {
+            return makeBool(env, false);
+        }
+        {
+            std::lock_guard<std::mutex> lock(entry->drmMutex);
+            entry->drmTsfn = tsfn;
+        }
+
+        CicadaSetDrmRequestCallback(
+                entry->handle,
+                [entry](const Cicada::DrmRequestParam &param) -> Cicada::DrmResponseData * {
+                    if (entry->released.load()) {
+                        return nullptr;
+                    }
+                    auto *jsonParam = static_cast<CicadaJSONItem *>(param.mParam);
+                    std::string requestType;
+                    std::string url;
+                    std::string data;
+                    if (jsonParam != nullptr) {
+                        requestType = jsonParam->getString("requestType");
+                        url = jsonParam->getString("url");
+                        data = jsonParam->getString("data");
+                    }
+
+                    auto handshake = std::make_shared<DrmHandshake>();
+                    handshake->drmType = param.mDrmType;
+                    handshake->requestType = requestType;
+                    handshake->url = url.empty() ? param.mLicenseUrl : url;
+                    if (!data.empty()) {
+                        char *decoded = nullptr;
+                        const int size = CicadaUtils::base64dec(data, &decoded);
+                        if (decoded != nullptr && size > 0) {
+                            handshake->requestData.assign(decoded, static_cast<size_t>(size));
+                        }
+                        if (decoded != nullptr) {
+                            free(decoded);
+                        }
+                    }
+
+                    napi_threadsafe_function target = nullptr;
+                    {
+                        std::lock_guard<std::mutex> lock(entry->drmMutex);
+                        target = entry->drmTsfn;
+                        if (target != nullptr) {
+                            entry->drmPending.push_back(handshake);
+                        }
+                    }
+                    if (target == nullptr) {
+                        return nullptr;
+                    }
+                    if (napi_call_threadsafe_function(target, handshake.get(), napi_tsfn_blocking) != napi_ok) {
+                        std::lock_guard<std::mutex> lock(entry->drmMutex);
+                        for (auto it = entry->drmPending.begin(); it != entry->drmPending.end(); ++it) {
+                            if (it->get() == handshake.get()) {
+                                entry->drmPending.erase(it);
+                                break;
+                            }
+                        }
+                        return nullptr;
+                    }
+                    {
+                        std::unique_lock<std::mutex> lock(handshake->mutex);
+                        handshake->cond.wait(lock, [&handshake]() { return handshake->done; });
+                    }
+                    {
+                        std::lock_guard<std::mutex> lock(entry->drmMutex);
+                        for (auto it = entry->drmPending.begin(); it != entry->drmPending.end(); ++it) {
+                            if (it->get() == handshake.get()) {
+                                entry->drmPending.erase(it);
+                                break;
+                            }
+                        }
+                    }
+                    if (handshake->aborted || handshake->response.empty()) {
+                        return nullptr;
+                    }
+                    return new Cicada::DrmResponseData(const_cast<char *>(handshake->response.data()),
+                                                       static_cast<int>(handshake->response.size()));
+                });
+        return makeBool(env, true);
+    }
 } // namespace cicada_ohos

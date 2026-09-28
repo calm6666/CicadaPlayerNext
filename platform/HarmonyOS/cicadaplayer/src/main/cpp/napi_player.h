@@ -25,6 +25,9 @@
 #include "media_player_api.h"
 
 namespace cicada_ohos {
+    // DRM 许可证握手对象（定义在 napi_player.cpp）：内核在播放线程上同步要
+    // 许可证响应，这里用它把"原生线程 -> JS 线程 -> 原生线程"串起来。
+    struct DrmHandshake;
 
     // ---------------------------------------------------------------------
     // One native player plus everything ArkTS needs to talk to it.
@@ -54,6 +57,11 @@ namespace cicada_ohos {
         std::atomic<int> videoWidth{0};
         std::atomic<int> videoHeight{0};
         std::atomic<int> videoRotation{0};
+        // DRM 请求回调：内核在播放线程上同步索要许可证，所以这里单独挂一条
+        // 可阻塞的 threadsafe function（事件桥那条是 nonblocking 的，不能混用）。
+        napi_threadsafe_function drmTsfn{nullptr};
+        std::mutex drmMutex;
+        std::vector<std::shared_ptr<DrmHandshake>> drmPending;
     };
 
     using PlayerPtr = std::shared_ptr<PlayerEntry>;
@@ -162,6 +170,25 @@ namespace cicada_ohos {
     napi_value GetVideoRenderFps(napi_env env, napi_callback_info info);
     napi_value GetVideoDecodeFps(napi_env env, napi_callback_info info);
 
+    // ---- 解码事实 / 切档状态 ----
+    napi_value IsVideoDecoderHardware(napi_env env, napi_callback_info info);
+    napi_value IsStreamSwitchInFlight(napi_env env, napi_callback_info info);
+
+    // ---- 画面滤镜 ----
+    napi_value SetColorMatrix(napi_env env, napi_callback_info info);
+    napi_value SetFilterConfig(napi_env env, napi_callback_info info);
+    napi_value UpdateFilterConfig(napi_env env, napi_callback_info info);
+    napi_value SetFilterInvalid(napi_env env, napi_callback_info info);
+
+    // ---- 硬解能力 / 编码偏好 ----
+    napi_value GetVideoCodecSupport(napi_env env, napi_callback_info info);
+    napi_value SetVideoCodecSupport(napi_env env, napi_callback_info info);
+
+    // ---- 属性字符串 ----
+    napi_value GetPropertyString(napi_env env, napi_callback_info info);
+
+    // ---- DRM ----
+    napi_value SetDrmRequestCallback(napi_env env, napi_callback_info info);
 } // namespace cicada_ohos
 
 #endif // CICADA_OHOS_NAPI_PLAYER_H

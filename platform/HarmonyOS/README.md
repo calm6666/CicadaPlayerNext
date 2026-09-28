@@ -1,8 +1,16 @@
-# HarmonyOS / OpenHarmony demo application (API 12+)
+# HarmonyOS / OpenHarmony：SDK（HAR）+ Demo（API 12+）
 
-ArkTS + NAPI port of the Android demo in `platform/Android` (`paasApp` + the
-zxing scanner). The native player (framework + mediaPlayer, including OH_AVCodec
-hardware decoding and the DRM Kit) is compiled into `libentry.so` by hvigor.
+本目录下有两个模块：
+
+* **`cicadaplayer/` —— 对外发布的 SDK**，ohpm 包名 `@cicada/cicadaplayer`，产物是
+  `cicadaplayer.har`。自研内核（framework + mediaPlayer，含 OH_AVCodec 硬解、OHAudio
+  渲染、DRM Kit、DASH/HLS/对象清单播放）编成 `libcicadaplayer.so`，再加上 ArkTS API
+  （`CicadaPlayer` / `CicadaTypes`）与开箱即用组件（`CicadaVideo`、控制条、手势层、
+  轨道面板、选项面板、提示浮层）。别的工程只要依赖这个 HAR 即可，接入方式见
+  `docs/Packaging_HarmonyOS.md` 第 6 节。
+* **`entry/` —— Demo（HAP）**，ArkTS 版的 Android demo（`paasApp` + zxing 扫描）。
+  它自己**不再带 native**：播放相关全部通过 `@cicada/cicadaplayer` 使用，用来证明
+  这个包在"只写 UI 的工程"里可以直接用。
 
 ## Build
 
@@ -16,12 +24,16 @@ $env:NODE_HOME       = "$D\tools\node"
 $env:PATH            = "$D\tools\node;$D\tools\ohpm\bin;$env:PATH"
 
 Set-Location <repo>\platform\HarmonyOS
+& "$D\tools\ohpm\bin\ohpm.bat" install --all          # 链接 file: 依赖（纯本地，离线可用）
+& "$D\tools\hvigor\bin\hvigorw.bat" assembleHar --mode module -p module=cicadaplayer@default -p product=default --no-daemon
 & "$D\tools\hvigor\bin\hvigorw.bat" assembleHap --mode module -p product=default --no-daemon
 ```
 
-Output: `entry/build/default/outputs/default/entry-default-unsigned.hap`
-(~37 MB; `libentry.so` + `libffmpeg.so` + `libc++_shared.so` for arm64-v8a and
-x86_64).
+Outputs:
+`cicadaplayer/build/default/outputs/default/cicadaplayer.har`（含 `libs/<abi>/` 下的
+`libcicadaplayer.so` + `libffmpeg.so` + `libc++_shared.so`）与
+`entry/build/default/outputs/default/entry-default-unsigned.hap`
+（~37 MB，两个 ABI：arm64-v8a / x86_64）。
 
 Verified against DevEco Studio 6.0.2 / bundled SDK **API 22 (HarmonyOS 6.0.2)** /
 hvigor **6.22.3**. `build-profile.json5` keeps `compatibleSdkVersion 5.0.0(12)`.
@@ -33,23 +45,32 @@ hvigor **6.22.3**. `build-profile.json5` keeps `compatibleSdkVersion 5.0.0(12)`.
 ## Layout
 
 ```
-entry/src/main/cpp/
-  napi_init.cpp      module registration + exported symbol table
-  napi_player.h/.cpp registry, argument marshalling, ~60 control/config API
-  napi_events.cpp    all 26 playerListener_t callbacks -> one threadsafe fn
-  types/libentry/    index.d.ts (typed native module) + oh-package.json5
-entry/src/main/ets/
-  model/CicadaTypes.ets   enums/structs mirrored from native + route params
-  player/CicadaPlayer.ets typed wrapper over libentry.so
-  pages/                  SourceChoosePage, SourceChooseListPage,
-                          SourceInputUrlPage, SettingPage, MultiPlayerPage,
-                          SnapShotPage, AvPlayerPage, Index (the player)
-  view/                   TitleBar, PlayerControlBar, PlayerGestureLayer,
-                          PlayerTrackPanel, PlayerOptionPanel,
-                          PlayerTipsOverlay, MultiPlayerItem
-  util/                   Strings, SourceListParser, Settings, NetWatchdog,
-                          SnapshotSaver, TimeFormater
-entry/src/main/resources/rawfile/  sourceList.json, test.ass
+cicadaplayer/                     SDK 模块（HAR）
+  Index.ets                       对外唯一入口（re-export 全部 API 与组件）
+  oh-package.json5                @cicada/cicadaplayer
+  src/main/cpp/
+    CMakeLists.txt                内核 + NAPI 桥 → libcicadaplayer.so
+    napi_init.cpp                 模块注册 + 导出符号表（70 个函数）
+    napi_player.h/.cpp            注册表、参数编组、控制/配置 API
+    napi_events.cpp               27 个 playerListener_t 回调 → 一条 threadsafe fn
+    types/libcicadaplayer/        index.d.ts（native 模块类型声明）
+  src/main/ets/
+    api/CicadaTypes.ets           枚举 / 结构 / 事件名 / 监听器
+    api/CicadaPlayer.ets          播放器封装
+    component/CicadaVideo.ets     XComponent + 生命周期 + 播放器装配
+    component/Player*.ets         控制条、手势层、轨道面板、选项面板、提示浮层
+    util/Strings.ets              UI 文案
+    util/TimeFormater.ets         时间/速率格式化
+entry/                            Demo 模块（HAP，无 native）
+  src/main/ets/
+    model/AppTypes.ets            本 App 自己的类型（sourceList、路由参数）
+    pages/                        SourceChoosePage, SourceChooseListPage,
+                                  SourceInputUrlPage, SettingPage, MultiPlayerPage,
+                                  SnapShotPage, AvPlayerPage, Index（播放页）
+    view/                         TitleBar, MultiPlayerItem
+    util/                          Settings, SourceListParser, LocalVideoSource,
+                                  NetWatchdog, SnapshotSaver
+  src/main/resources/rawfile/     sourceList.json, test.ass
 ```
 
 ### Native event bridge
@@ -65,7 +86,7 @@ small payload and ArkTS receives a uniform signature:
 ```
 
 `CicadaPlayer.ets` dispatches those onto the optional `CicadaPlayerListener`
-callbacks the pages implement.
+callbacks the pages implement。
 
 ## Feature parity with the Android demo
 
@@ -150,20 +171,43 @@ callbacks the pages implement.
 1. **Play-and-cache config is not wired.** `CacheConfig` lives on the
    `MediaPlayer` C++ facade, which the Android SDK's JNI binds directly; the C
    API handle is an `ICicadaPlayer` (`SuperMediaPlayer`) with no cache-config
-   method and no cache implementation. The cache tab is kept for parity and logs
-   the gap. Wiring it means implementing caching on the `ICicadaPlayer` path.
-2. **No DRM licence callback in ArkTS.** `OhosDrmHandler` now exposes the licence
-   challenge (`DrmRequestParam::mKeyRequest`) and the server URL
-   (`mLicenseUrl`), but `drmCallback` is invoked synchronously on a player
-   thread, so a JS callback would need a blocking handshake that NAPI cannot do
-   from a non-JS thread. `setDrmCallback` is therefore not exposed yet.
-3. **Audio AAC: `OH_MD_KEY_AAC_IS_ADTS` is not set**, so ADTS streams may not
-   decode. Pre-existing; `mediaCodecDecoder.cpp` derives it from extra-data sync
-   words and could be mirrored.
-4. **Compile-verified only.** There is no HarmonyOS device or emulator available
+   method and no cache implementation. The HAR therefore exposes no
+   `setCacheConfig`; the demo's cache tab is kept for parity and logs the gap.
+   Wiring it means implementing caching on the `ICicadaPlayer` path.
+2. **DRM licence callback: exposed, with a thread contract.** `setDrmCallback`
+   is now on the SDK. The kernel asks for the licence **synchronously on a player
+   thread**, so the callback must return immediately (`ArrayBuffer` or base64
+   text) and must not call the player's synchronous APIs, or the two threads wait
+   for each other. The blocking handshake is a threadsafe function plus a
+   condition variable with two deterministic exits — the JS callback returning,
+   or the JS environment being torn down (pending requests are then marked
+   aborted). No timeout fallback is involved.
+3. **Audio AAC ADTS: fixed.** `OhosAVCodecDecoder` now sets
+   `OH_MD_KEY_AAC_IS_ADTS` and, for raw AAC, passes the `AudioSpecificConfig` as
+   `OH_MD_KEY_CODEC_CONFIG`, using the same rule as the Android side
+   (`mediaCodecDecoder.cpp`): no extradata means in-band ADTS, extradata means
+   raw AAC and ADTS must be explicitly 0.
+4. **Audio clock: now the device's own position.** `OhosAudioRender::getPosition()`
+   reports the frames actually presented by the audio service (API 15
+   `OH_AudioRenderer_GetAudioTimestampInfo`, resolved at runtime, falling back to
+   the API 10 `OH_AudioRenderer_GetTimestamp`) minus the baseline pinned at the
+   last flush — i.e. microseconds since flush, `INT64_MIN` when unavailable,
+   never negative and never a write-ahead byte count. `flush()` no longer calls
+   into the device while holding the queue lock: `OH_AudioRenderer_Flush` waits
+   for the in-flight write callback, which needs that same lock, so the old order
+   was a guaranteed self-deadlock on every seek.
+5. **Software-decoded video has no on-screen path.** `videoRenderFactory` returns
+   `DummyVideoRender` on OHOS for anything that is not surface-mode hardware
+   decode, so software frames are dropped instead of displayed (hardware decode
+   is unaffected). The fix is to register a renderer through
+   `videoRenderFactory::setRenderCreator()` — an EGL/GLES renderer reusing
+   `framework/render/video/glRender`, plus an OHOS native-vsync implementation in
+   `VSyncFactory` (`native_vsync` is available in the public SDK). Deliberately
+   not shipped untested: it is on the render path.
+6. **Compile-verified only.** There is no HarmonyOS device or emulator available
    here, so nothing has been run: gestures, window brightness, orientation
-   switching, hardware decoding, DRM and ScanKit all compile and link but are
-   unverified at runtime.
+   switching, hardware decoding, audio output, DRM and ScanKit all compile and
+   link but are unverified at runtime.
 
 ## Framework note: never re-set the listener on a running player
 

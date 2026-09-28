@@ -6,7 +6,7 @@
 
 import { router } from '@kit.ArkUI';
 import { TitleBar } from '../view/TitleBar';
-import { S } from '../util/Strings';
+import { S } from '@cicada/cicadaplayer';
 
 /** router params for this page. */
 export interface SnapShotRouteParams {

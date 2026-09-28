@@ -4,7 +4,7 @@
 // in napi_player.cpp (registry + control/config API) and napi_events.cpp
 // (playerListener_t -> ArkTS event bridge).
 //
-// From ArkTS:  import cicada from 'libentry.so'
+// From ArkTS:  import cicada from 'libcicadaplayer.so'
 
 #include "napi_player.h"
 
@@ -93,6 +93,25 @@ static napi_value Init(napi_env env, napi_value exports)
         {"invokeComponent", nullptr, cicada_ohos::InvokeComponent, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getVideoRenderFps", nullptr, cicada_ohos::GetVideoRenderFps, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getVideoDecodeFps", nullptr, cicada_ohos::GetVideoDecodeFps, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // ---- 解码事实 / 切档状态 ----
+        {"isVideoDecoderHardware", nullptr, cicada_ohos::IsVideoDecoderHardware, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"isStreamSwitchInFlight", nullptr, cicada_ohos::IsStreamSwitchInFlight, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- 画面滤镜 ----
+        {"setColorMatrix", nullptr, cicada_ohos::SetColorMatrix, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setFilterConfig", nullptr, cicada_ohos::SetFilterConfig, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"updateFilterConfig", nullptr, cicada_ohos::UpdateFilterConfig, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setFilterInvalid", nullptr, cicada_ohos::SetFilterInvalid, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- 硬解能力 / 编码偏好 ----
+        {"getVideoCodecSupport", nullptr, cicada_ohos::GetVideoCodecSupport, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"setVideoCodecSupport", nullptr, cicada_ohos::SetVideoCodecSupport, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- 字符串属性 ----
+        {"getPropertyString", nullptr, cicada_ohos::GetPropertyString, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- DRM ----
+        {"setDrmRequestCallback", nullptr, cicada_ohos::SetDrmRequestCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;
@@ -106,12 +125,12 @@ static napi_module cicadaModule = {
         0,          // nm_flags
         nullptr,    // nm_filename
         Init,       // nm_register_func
-        "entry",    // nm_modname -> libentry.so
+        "cicadaplayer", // nm_modname -> libcicadaplayer.so
         nullptr,    // nm_priv
         {0},        // reserved
 };
 
-extern "C" __attribute__((constructor)) void RegisterEntryModule(void)
+extern "C" __attribute__((constructor)) void RegisterCicadaPlayerModule(void)
 {
     napi_module_register(&cicadaModule);
 }

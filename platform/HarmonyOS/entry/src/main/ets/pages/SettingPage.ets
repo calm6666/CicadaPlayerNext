@@ -19,9 +19,8 @@ import { common } from '@kit.AbilityKit';
 import { deviceInfo } from '@kit.BasicServicesKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { TitleBar } from '../view/TitleBar';
-import { CicadaPlayer } from '../player/CicadaPlayer';
+import { CicadaPlayer, S } from '@cicada/cicadaplayer';
 import { PLAYER_NAME_KEY, PLAYER_TYPE_AVPLAYER, Settings } from '../util/Settings';
-import { S } from '../util/Strings';
 
 @Entry
 @Component

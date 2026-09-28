@@ -24,6 +24,18 @@
   },
   "modules": [
     {
+      "name": "cicadaplayer",
+      "srcPath": "./cicadaplayer",
+      "targets": [
+        {
+          "name": "default",
+          "applyToProducts": [
+            "default"
+          ]
+        }
+      ]
+    },
+    {
       "name": "entry",
       "srcPath": "./entry",
       "targets": [

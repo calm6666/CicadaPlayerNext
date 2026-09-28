@@ -134,3 +134,12 @@ app.*.symbols
 !**/ios/**/default.perspectivev3
 !/packages/flutter_tools/test/data/dart_dependencies_test/**/.packages
 !/dev/ci/**/Gemfile.lock
+
+# HarmonyOS (hvigor / ohpm) build outputs
+platform/HarmonyOS/cicadaplayer/.cxx/
+platform/HarmonyOS/cicadaplayer/build/
+platform/HarmonyOS/cicadaplayer/oh_modules/
+platform/HarmonyOS/cicadaplayer/BuildProfile.ets
+platform/HarmonyOS/entry/oh_modules/
+platform/HarmonyOS/.hvigor/report/
+platform/HarmonyOS/.hvigor/cache/

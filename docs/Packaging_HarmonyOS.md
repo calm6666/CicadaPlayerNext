@@ -66,30 +66,43 @@ external/install/ffmpeg/OHOS/<abi>/libffmpeg.so
 external/install/ffmpeg/OHOS/<abi>/include/   (FFmpeg 头文件)
 ```
 
-## 3. 第二步：编译原生模块（hvigor）
+## 3. 第二步：编译 SDK（HAR）与 Demo（hvigor）
 
-`platform/HarmonyOS/` 已提供完整 Demo（ArkTS XComponent + NAPI + 全量 native 播放器）：
+工程分成两个模块：**可复用的 SDK（HAR）** + **只做 UI 的 Demo（HAP）**。
+
+| 模块 | 类型 | 内容 |
+|---|---|---|
+| `platform/HarmonyOS/cicadaplayer` | **HAR（静态库，ohpm 包名 `@cicada/cicadaplayer`）** | `libcicadaplayer.so`（全量内核 + NAPI 桥）、ArkTS API（`CicadaPlayer` / `CicadaTypes`）、开箱即用组件（`CicadaVideo`、`PlayerControlBar`、`PlayerGestureLayer`、`PlayerTrackPanel`、`PlayerOptionPanel`、`PlayerTipsOverlay`）、native 模块类型声明 |
+| `platform/HarmonyOS/entry` | HAP（Demo） | 页面与业务；播放相关一律通过 `@cicada/cicadaplayer` 使用，不再自带 native |
 
 ```bash
 cd platform/HarmonyOS
+ohpm install --all                       # 链接 file: 依赖（全部本地，离线可用）
+hvigorw assembleHar --mode module -p module=cicadaplayer@default -p product=default
 hvigorw assembleHap --mode module -p product=default
 ```
 
 构建链：
-1. `entry/build-profile.json5` → `externalNativeOptions.path = ./src/main/cpp/CMakeLists.txt`
+1. `cicadaplayer/build-profile.json5` → `externalNativeOptions.path = ./src/main/cpp/CMakeLists.txt`，
    `abiFilters: ["arm64-v8a","x86_64"]`
 2. hvigor 用 `$OHOS_SDK/<os>/native/build/cmake/ohos.toolchain.cmake` 调用 CMake
    （`-DOHOS_ARCH=<abi> -DOHOS_PLATFORM=OHOS -DOHOS_STL=c++_shared`）
-3. `entry/src/main/cpp/CMakeLists.txt`：
+3. `cicadaplayer/src/main/cpp/CMakeLists.txt`：
    - `add_subdirectory(<repo>/mediaPlayer)` → 构建 framework（`framework/HarmonyOS.cmake`）+
      mediaPlayer 全量代码；
-   - `add_library(entry SHARED napi_init.cpp)` 链接 `media_player`、
-     `libffmpeg.so` 与 NDK 多媒体桩库
-     （`libnative_window.so`、`libnative_media_codecbase.so`、`libnative_media_vdec.so`、
-     `libnative_media_audiocodec.so`、`libnative_media_core.so`、`libohaudio.so`、`libnative_drm.so`）。
-4. 产物 `libentry.so`（+ `libc++_shared.so`）被打进 `.hap` 的 `libs/<abi>/`。
+   - `add_library(cicadaplayer SHARED napi_init.cpp napi_player.cpp napi_events.cpp)` 链接
+     `media_player`、`libffmpeg.so` 与 NDK 桩库（`libace_napi.z.so`、`libnative_window.so`、
+     `libnative_buffer.so`、`libnative_media_codecbase.so`、`libnative_media_vdec.so`、
+     `libnative_media_acodec.so`、`libnative_media_core.so`、`libnative_vsync.so`、
+     `libohaudio.so`、`libnative_drm.so`）。
+4. 模块名必须是 `cicadaplayer`：它与 `napi_init.cpp` 里 `napi_module_register` 的 `nm_modname`
+   一致，ArkTS 侧才能 `import cicada from 'libcicadaplayer.so'`。
+5. 产物 `libcicadaplayer.so`（+ `libc++_shared.so`）随 HAR 打进 `libs/<abi>/`，HAR 被 entry
+   依赖后再进 `.hap` 的 `libs/<abi>/`。
 
-产物：`entry/build/default/outputs/default/entry-default-signed.hap`
+产物：
+- `cicadaplayer/build/default/outputs/default/cicadaplayer.har`
+- `entry/build/default/outputs/default/entry-default-signed.hap`
 
 ## 4. 硬件加速通路（本仓库实现）
 
@@ -116,3 +129,114 @@ hvigorw assembleHap --mode module -p product=default
 - 首启排障可用 `export OHOS_DISABLE_ASM=TRUE` 关掉 FFmpeg 手写汇编。
 - Demo 中 `libffmpeg.so` 路径由 `FFMPEG_INSTALL_DIR_OHOS` 覆盖（默认
   `<repo>/external/install/ffmpeg/OHOS/<abi>/`）。
+
+## 6. 把 SDK 接进别的 HarmonyOS 工程
+
+### 6.1 三种接入方式
+
+| 方式 | 做法 | 适用 |
+|---|---|---|
+| 源码依赖（开发期推荐） | 消费者 `oh-package.json5` 写 `"@cicada/cicadaplayer": "file:../CicadaPlayerNext/platform/HarmonyOS/cicadaplayer"`，再 `ohpm install` | 与内核源码同仓演进、可断点调试 |
+| 本地 har 包 | `hvigorw assembleHar ...` 产出 `cicadaplayer.har`，拷到消费者工程后写 `"@cicada/cicadaplayer": "file:./libs/cicadaplayer.har"` | 交付二进制、不带源码 |
+| 私仓发布 | `ohpm publish cicadaplayer.har`（先在 `oh-package.json5` 补 `author` / `license` / `repository`），消费者写版本号 | 多工程统一升级 |
+
+前置：消费者工程 `compatibleSdkVersion ≥ 5.0.0(12)`（`OH_NativeWindow_CreateNativeWindowFromSurfaceId`
+是 API 12+）。FFmpeg 由 SDK 打进 HAR 一起交付，消费者不需要再单独放 `libffmpeg.so`。
+
+### 6.2 最小可用示例
+
+```ts
+import { CicadaPlayer, CicadaPlayerListener } from '@cicada/cicadaplayer';
+
+@Entry
+@Component
+struct PlayerPage {
+  private player: CicadaPlayer = new CicadaPlayer();
+  private xc: XComponentController = new XComponentController();
+  @State positionMs: number = 0;
+
+  private readonly listener: CicadaPlayerListener = {
+    onPrepared: () => this.player.start(),
+    onFirstFrameShow: () => { /* 首帧已上屏 */ },
+    onPositionUpdate: (positionMs: number) => { this.positionMs = positionMs; },
+    onVideoSizeChanged: (width: number, height: number) => { /* 按需调整容器比例 */ },
+    onError: (code: number, msg: string) => { /* 错误提示 */ }
+  };
+
+  aboutToDisappear(): void {
+    this.player.release();
+  }
+
+  build() {
+    Stack() {
+      XComponent({ id: 'surface', type: XComponentType.SURFACE, controller: this.xc })
+        .width('100%')
+        .height('100%')
+        .backgroundColor(Color.Black)
+        .onLoad(() => {
+          const surfaceId: string = this.xc.getXComponentSurfaceId();
+          if (!this.player.setSurface(surfaceId)) {
+            return;
+          }
+          this.player.create(this.listener);
+          this.player.setDataSource('https://example.com/video.m3u8');
+          this.player.prepare();
+        })
+    }
+  }
+}
+```
+
+也可以用组件版（组件内部已处理好 surface 与生命周期）：
+
+```ts
+import { CicadaVideo, CicadaVideoController } from '@cicada/cicadaplayer';
+
+private controller: CicadaVideoController = new CicadaVideoController();
+// ...
+CicadaVideo({ controller: this.controller, listener: this.listener })
+// 之后 this.controller.player.xxx() 就是完整的播放器接口
+```
+
+### 6.3 顺序与线程约束（必读）
+
+1. **先拿 surface，再 setDataSource / prepare**：OHOS 走 surface 模式硬解直出，画面由解码器
+   直接写进 XComponent 的原生窗口；surface 未绑定时起播没有画面。
+2. **不要重复 setListener**：`PlayerNotifier::setListener()` 会 `afThread::pause()`，在"已运行且
+   空闲"的播放器上会永久阻塞调用线程（UI 线程上表现为 APP_INPUT_BLOCK）。SDK 只在
+   `create()` 时注册一次监听。
+3. **DRM 回调是同步的**：内核在播放线程上等许可证响应，回调里不要再调用播放器的同步接口，
+   否则两边互相等待。JS 环境拆除时在途请求会被标记为 aborted 放行（确定性出口，不用超时兜底）。
+4. **`release()` 之后句柄失效**：再调用任何接口都是空操作（返回默认值）。
+
+### 6.4 完整能力清单（ArkTS 侧）
+
+- 生命周期：`create` / `prepare` / `start` / `pause` / `stop` / `reload` / `release`
+- 画面：`setSurface` / `clearScreen` / `setScaleMode` / `setRotateMode` / `setMirrorMode` /
+  `setVideoBackgroundColor` / `setColorMatrix` / `setFilterConfig` / `updateFilterConfig` /
+  `setFilterInvalid`
+- 传输：`seekTo` / `setSpeed` / `setVolume` / `setMute` / `setLoop` / `setAutoPlay`
+- 进度：`getDuration` / `getCurrentPosition` / `getCurrentBufferedPosition` / `getMasterClockPts` /
+  `getVideoResolution` / `getVideoRotation`
+- 清晰度与轨道：`selectTrack`（含自动档）/ `getCurrentStreamIndex` / `getCurrentStreamInfo` /
+  `isStreamSwitchInFlight` / `setDefaultBandWidth` / `getVideoCodecSupport` /
+  `setVideoCodecSupport`
+- 字幕：`addExtSubtitle` / `selectExtSubtitle` / `setStreamDelayTime`
+- 解码：`enableHardwareDecoder` / `getDecoderType` / `isVideoDecoderHardware`
+- 网络：`setTimeout` / `setDropBufferThreshold` / `setReferer` / `setUserAgent` /
+  `addCustomHttpHeader` / `removeAllCustomHttpHeader`
+- 截图：`snapshot`
+- DRM：`setDrmCallback` / `setDataSourceWithManifest`
+- 诊断：`setOption` / `getOption` / `getPropertyLong` / `getPropertyString` / `getPlayerName` /
+  `getVideoRenderFps` / `getVideoDecodeFps` / `invokeComponent`
+- 事件：27 个回调，含 `onVideoQualitySwitch`（STARTED / READY / FAILED / CANCELED）
+
+### 6.5 尚未覆盖的能力（如实记录）
+
+- **播放缓存（play-and-cache）**：缓存配置落在 C++ `MediaPlayer` 门面上，C API 句柄
+  （`ICicadaPlayer` / `SuperMediaPlayer`）这条路径还没有 CacheConfig 入口，因此 HAR 暂不提供
+  `setCacheConfig`；Demo 的缓存页保持原样（只记录缺口）。
+- **软件解码上屏**：OHOS 侧 `videoRenderFactory` 对非 surface 路径返回 `DummyVideoRender`，
+  即软解帧不出画（硬解直出不受影响）。补法是接 `videoRenderFactory::setRenderCreator()` 注入
+  一个基于 EGL/GLES 的渲染器（复用 `framework/render/video/glRender`），属独立一件事。
+- **播放器级 ASS 字幕渲染**：内核给事件与文本，渲染由应用层负责。

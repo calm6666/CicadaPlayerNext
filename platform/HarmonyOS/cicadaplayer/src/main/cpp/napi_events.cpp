@@ -115,6 +115,15 @@ namespace cicada_ohos {
         void cbSeekEnd(int64_t pos, void *d) { postNumber(d, "seekEnd", pos); }
         void cbPositionUpdate(int64_t pos, void *d) { postNumber(d, "positionUpdate", pos); }
         void cbUtcTimeUpdate(int64_t t, void *d) { postNumber(d, "utcTimeUpdate", t); }
+        // 清晰度切换状态：index 里放 status，size 里放 streamIndex，text 放描述。
+        // 内核在 mListener.VideoQualitySwitch 为空时直接 return，所以不挂这个回调
+        // 就完全收不到 STARTED / READY / FAILED / CANCELED。
+        void cbVideoQualitySwitch(int64_t status, int64_t streamIndex, const void *desc, void *d)
+        {
+            const char *text = static_cast<const char *>(desc);
+            post(entryFrom(d), "videoQualitySwitch", EventKind::CodeMsg, static_cast<double>(status),
+                 static_cast<double>(streamIndex), text, text != nullptr ? strlen(text) : 0, {});
+        }
         void cbBufferPositionUpdate(int64_t pos, void *d) { postNumber(d, "bufferPositionUpdate", pos); }
         void cbLoadingProgress(int64_t percent, void *d) { postNumber(d, "loadingProgress", percent); }
         void cbCurrentDownLoadSpeed(int64_t speed, void *d) { postNumber(d, "currentDownLoadSpeed", speed); }
@@ -339,6 +348,7 @@ namespace cicada_ohos {
         listener.SubtitleShow = cbSubtitleShow;
         listener.SubtitleExtAdd = cbSubtitleExtAdd;
         listener.SubtitleHeader = cbSubtitleHeader;
+        listener.VideoQualitySwitch = cbVideoQualitySwitch;
 
         listener.userData = holder;
 

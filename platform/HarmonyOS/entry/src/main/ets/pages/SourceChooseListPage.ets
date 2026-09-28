@@ -18,10 +18,10 @@ import {
   SourceGroupParams,
   SourceSample,
   SourceType
-} from '../model/CicadaTypes';
+} from '../model/AppTypes';
 import { SourceListParser } from '../util/SourceListParser';
 import { PLAYER_TYPE_AVPLAYER, Settings } from '../util/Settings';
-import { S } from '../util/Strings';
+import { S } from '@cicada/cicadaplayer';
 
 /** AppStorage key holding the entries chosen for multi-instance playback. */
 export const MULTI_PLAYER_KEY: string = 'multiPlayerSelection';

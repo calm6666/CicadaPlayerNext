@@ -1,5 +1,5 @@
 /*
- * Shared types for the HarmonyOS demo.
+ * CicadaPlayerNext HarmonyOS SDK —— 播放器类型/枚举/回调定义（HAR 对外导出）。
  *
  * Mirrors the enums/structures of the native player
  * (mediaPlayer/native_cicada_player_def.h) plus the JSON payloads produced by
@@ -144,6 +144,7 @@ export class PlayerEventName {
   static readonly SUBTITLE_HIDE: string = 'subtitleHide';
   static readonly SUBTITLE_SHOW: string = 'subtitleShow';
   static readonly SUBTITLE_EXT_ADD: string = 'subtitleExtAdd';
+  static readonly VIDEO_QUALITY_SWITCH: string = 'videoQualitySwitch';
   static readonly SUBTITLE_HEADER: string = 'subtitleHeader';
 }
 
@@ -177,65 +178,38 @@ export interface CicadaPlayerListener {
   onSubtitleShow?: (id: number, text: string) => void;
   onSubtitleHide?: (id: number) => void;
   onSubtitleExtAdd?: (index: number, url: string) => void;
+  onVideoQualitySwitch?: (status: number, streamIndex: number, desc: string) => void;
+}
+
+/** 清晰度切换状态（native: player_quality_switch_status）。 */
+export enum VideoQualitySwitchStatus {
+  STARTED = 0,
+  READY = 1,
+  FAILED = 2,
+  CANCELED = 3
 }
 
 /**
- * External subtitle URLs attached to a source entry.
- * Mirrors the Android demo's sourceList.json "subtitle" object.
+ * 设备的硬解能力与效率偏好（native: CicadaGet/SetVideoCodecSupport 的 JSON 契约）。
+ * 应用侧可以把它持久化后回传，内核就不再自己探测设备。
  */
-export interface SourceSubtitle {
-  /** zh WebVTT url. */
-  cn?: string;
-  /** en-US WebVTT url. */
-  en?: string;
-  /** Local .ass path. (The Android demo never reads this when passed by Intent.) */
-  ass?: string;
+export interface VideoCodecSupport {
+  /** get 时说明数据来自应用层（app）还是内核探测（kernel）；set 时忽略。 */
+  source: string;
+  /** 设备能硬解的编码短名集合，顺序无关（H.264 / H.265 / AV1 / VP9 / MPEG-4 / MPEG-2）。 */
+  hwDecode: string[];
+  /** 从高到低的效率序覆盖；缺省时内核用自己的效率序。 */
+  preference: string[];
+  /** 手动指定的默认视频格式；空串 = 不指定（全自动）。 */
+  preferred: string;
 }
 
 /**
- * One media source entry, mirroring sourceList.json's samples[].
- * `type` is "url" or "live" for list entries; the local-file fallback uses "URL".
+ * DRM 许可证回调。
+ *
+ * 内核在播放线程上同步索要许可证，回调必须当场返回：ArrayBuffer（原始字节）
+ * 或 base64 文本都可以；返回 null / 空表示拿不到许可证。回调里不要调用播放器
+ * 的同步接口，否则会与播放线程互相等待。
  */
-export interface SourceSample {
-  url: string;
-  type: string;
-  name: string;
-  subtitle?: SourceSubtitle;
-}
-
-/** A named group of sources (sourceList.json's top-level array element). */
-export interface SourceGroup {
-  name: string;
-  samples: SourceSample[];
-}
-
-/** Values used by SourceSample.type, matching CicadaPlayerActivity's constants. */
-export class SourceType {
-  static readonly URL: string = 'url';
-  static readonly LIVE: string = 'live';
-  static readonly LOCAL: string = 'local';
-  static readonly MANIFEST: string = 'manifest';
-}
-
-/** router params: SourceChoosePage -> SourceChooseListPage. */
-export interface SourceGroupParams {
-  groupName: string;
-}
-
-/** router params: any source entry -> the player page. */
-export interface PlayerRouteParams {
-  url: string;
-  /** SourceType.URL / LIVE / LOCAL / MANIFEST. */
-  playType: string;
-  /** Group title, used as the player's title bar text. */
-  groupName?: string;
-  /** External subtitle urls, when the entry carried them. */
-  subtitleCn?: string;
-  subtitleEn?: string;
-}
-
-/** One selection in the multi-instance list. */
-export interface MultiPlayerSelection {
-  url: string;
-  name: string;
-}
+export type CicadaDrmCallback =
+  (drmType: string, requestType: string, url: string, data: ArrayBuffer) => ArrayBuffer | string | null;

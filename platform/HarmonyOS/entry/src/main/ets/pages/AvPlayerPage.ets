@@ -20,10 +20,9 @@ import { BusinessError } from '@kit.BasicServicesKit';
 import { fileIo } from '@kit.CoreFileKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { TitleBar } from '../view/TitleBar';
-import { PlayerRouteParams } from '../model/CicadaTypes';
+import { PlayerRouteParams } from '../model/AppTypes';
 import { LocalVideoSource } from '../util/LocalVideoSource';
-import { formatMs } from '../util/TimeFormater';
-import { S } from '../util/Strings';
+import { formatMs, S } from '@cicada/cicadaplayer';
 
 @Entry
 @Component

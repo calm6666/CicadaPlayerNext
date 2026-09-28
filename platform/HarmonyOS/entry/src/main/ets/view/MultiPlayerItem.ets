@@ -9,8 +9,7 @@
  * lifetime (created in aboutToAppear, released in aboutToDisappear).
  */
 
-import { CicadaPlayer } from '../player/CicadaPlayer';
-import { S } from '../util/Strings';
+import { CicadaPlayer, S } from '@cicada/cicadaplayer';
 
 @Component
 export struct MultiPlayerItem {

@@ -6,10 +6,11 @@
  * event stream into the listener callbacks the pages use.
  */
 
-import cicada from 'libentry.so';
+import cicada from 'libcicadaplayer.so';
 import {
   CicadaPlayerListener,
   DecoderType,
+  CicadaDrmCallback,
   MediaInfo,
   MirrorMode,
   PlayerEventName,
@@ -19,8 +20,9 @@ import {
   ScaleMode,
   StreamInfo,
   StreamType,
+  VideoCodecSupport,
   VideoResolution
-} from '../model/CicadaTypes';
+} from './CicadaTypes';
 
 export class CicadaPlayer {
   private id: number = -1;
@@ -386,6 +388,75 @@ export class CicadaPlayer {
     return this.id < 0 ? 0 : cicada.getVideoDecodeFps(this.id);
   }
 
+  // ------------------------------------------------- 解码事实 / 切档状态
+  /** 活动视频解码器此刻走的是硬解还是软解（含解码途中回退），用于界面显示"解码方式"。 */
+  isVideoDecoderHardware(): boolean {
+    return this.id < 0 ? false : cicada.isVideoDecoderHardware(this.id);
+  }
+
+  /** 当前是否有清晰度切换在途（ABR 让路用）。 */
+  isStreamSwitchInFlight(): boolean {
+    return this.id < 0 ? false : cicada.isStreamSwitchInFlight(this.id);
+  }
+
+  // ------------------------------------------------------------- 画面滤镜
+  /** 色觉辅助 3x3 颜色矩阵（行主序 9 个数）；传 null 或不传 = 关闭。 */
+  setColorMatrix(matrix: number[] | null): boolean {
+    if (this.id < 0) {
+      return false;
+    }
+    return cicada.setColorMatrix(this.id, matrix);
+  }
+
+  /** 设置滤镜链配置，必须在 prepare 之前调用。 */
+  setFilterConfig(filterConfig: string): number {
+    return this.id < 0 ? -1 : cicada.setFilterConfig(this.id, filterConfig);
+  }
+
+  updateFilterConfig(target: string, options: string): number {
+    return this.id < 0 ? -1 : cicada.updateFilterConfig(this.id, target, options);
+  }
+
+  /** target 传空串 = 对全部滤镜生效；invalid=true 表示启用。 */
+  setFilterInvalid(target: string, invalid: boolean): number {
+    return this.id < 0 ? -1 : cicada.setFilterInvalid(this.id, target, invalid);
+  }
+
+  // --------------------------------------------- 硬解能力 / 编码偏好
+  /** 取当前生效的能力与偏好；取不到返回 null。 */
+  getVideoCodecSupport(): VideoCodecSupport | null {
+    if (this.id < 0) {
+      return null;
+    }
+    const json: string = cicada.getVideoCodecSupport(this.id);
+    if (json.length === 0 || json === 'null') {
+      return null;
+    }
+    return JSON.parse(json) as VideoCodecSupport;
+  }
+
+  /** 应用侧直接告诉内核设备能力与偏好；传 null = 清除，恢复内核自行探测。 */
+  setVideoCodecSupport(support: VideoCodecSupport | null): number {
+    if (this.id < 0) {
+      return -1;
+    }
+    return cicada.setVideoCodecSupport(this.id, support === null ? null : JSON.stringify(support));
+  }
+
+  // -------------------------------------------------------------- 属性
+  /** 字符串属性（PropertyKey 见 CicadaTypes），paramJson 视属性而定，可为空串。 */
+  getPropertyString(key: PropertyKey, paramJson: string): string {
+    return this.id < 0 ? '' : cicada.getPropertyString(this.id, key, paramJson);
+  }
+
+  // --------------------------------------------------------------- DRM
+  /** 注册 DRM 许可证回调（见 CicadaDrmCallback 的线程约定）。 */
+  setDrmCallback(callback: CicadaDrmCallback): boolean {
+    if (this.id < 0) {
+      return false;
+    }
+    return cicada.setDrmRequestCallback(this.id, callback);
+  }
   // ------------------------------------------------------------- events
   private handleEvent(name: string, a: number, b: number, payload: string | ArrayBuffer): void {
     const listener = this.listener;
@@ -513,6 +584,11 @@ export class CicadaPlayer {
       case PlayerEventName.SUBTITLE_HIDE:
         if (listener.onSubtitleHide) {
           listener.onSubtitleHide(a);
+        }
+        break;
+      case PlayerEventName.VIDEO_QUALITY_SWITCH:
+        if (listener.onVideoQualitySwitch) {
+          listener.onVideoQualitySwitch(a, b, payload as string);
         }
         break;
       case PlayerEventName.SUBTITLE_EXT_ADD:

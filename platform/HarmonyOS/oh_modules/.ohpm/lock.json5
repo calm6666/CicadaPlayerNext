@@ -15,12 +15,24 @@
       "dynamicDependencies": {},
       "maskedByOverrideDependencyMap": false
     },
+    "cicadaplayer": {
+      "name": "cicadaplayer",
+      "dependencies": {
+        "libcicadaplayer.so": {
+          "specifier": "file:cicadaplayer/src/main/cpp/types/libcicadaplayer",
+          "version": "file:cicadaplayer/src/main/cpp/types/libcicadaplayer"
+        }
+      },
+      "devDependencies": {},
+      "dynamicDependencies": {},
+      "maskedByOverrideDependencyMap": false
+    },
     "entry": {
       "name": "entry",
       "dependencies": {
-        "libentry.so": {
-          "specifier": "file:entry/src/main/cpp/types/libentry",
-          "version": "file:entry/src/main/cpp/types/libentry"
+        "@cicada/cicadaplayer": {
+          "specifier": "file:cicadaplayer",
+          "version": "file:cicadaplayer"
         }
       },
       "devDependencies": {},
@@ -29,8 +41,18 @@
     }
   },
   "packages": {
-    "libentry.so@file:entry/src/main/cpp/types/libentry": {
-      "storePath": "entry/src/main/cpp/types/libentry",
+    "@cicada/cicadaplayer@file:cicadaplayer": {
+      "storePath": "cicadaplayer",
+      "dependencies": {
+        "libcicadaplayer.so": "cicadaplayer/src/main/cpp/types/libcicadaplayer"
+      },
+      "dynamicDependencies": {},
+      "dev": false,
+      "dynamic": false,
+      "maskedByOverrideDependencyMap": false
+    },
+    "libcicadaplayer.so@file:cicadaplayer/src/main/cpp/types/libcicadaplayer": {
+      "storePath": "cicadaplayer/src/main/cpp/types/libcicadaplayer",
       "dependencies": {},
       "dynamicDependencies": {},
       "dev": false,

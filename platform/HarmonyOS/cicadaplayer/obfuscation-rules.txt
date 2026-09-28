@@ -1,0 +1,9 @@
+# Obfuscation rules for the @cicada/cicadaplayer HAR itself.
+#
+# Kept disabled by default (build-profile.json5 -> ruleOptions.enable = false):
+# the native bridge is reached by name from libcicadaplayer.so, so the
+# exported ArkTS surface must stay stable for consumers.
+-enable-property-obfuscation
+-enable-toplevel-obfuscation
+-enable-filename-obfuscation
+-enable-export-obfuscation

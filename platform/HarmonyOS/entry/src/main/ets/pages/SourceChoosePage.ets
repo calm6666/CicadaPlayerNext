@@ -16,11 +16,11 @@ import { common } from '@kit.AbilityKit';
 import { picker } from '@kit.CoreFileKit';
 import { promptAction, router } from '@kit.ArkUI';
 import { TitleBar } from '../view/TitleBar';
-import { SourceGroup, SourceGroupParams, SourceType } from '../model/CicadaTypes';
+import { SourceGroup, SourceGroupParams, SourceType } from '../model/AppTypes';
 import { SourceListParser } from '../util/SourceListParser';
 import { LocalVideoSource } from '../util/LocalVideoSource';
 import { PLAYER_TYPE_AVPLAYER, Settings } from '../util/Settings';
-import { S } from '../util/Strings';
+import { S } from '@cicada/cicadaplayer';
 
 @Entry
 @Component

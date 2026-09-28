@@ -1,0 +1,45 @@
+# Consumer-side obfuscation rules for @cicada/cicadaplayer.
+#
+# 消费者工程开启混淆时，下面这些符号会被 ArkTS 以字符串/反射方式访问，
+# 不能被改名的务必保留（本 HAR 对外 API 均由 Index.ets 显式导出）。
+-keep-property-name
+    onPrepared
+    onCompletion
+    onFirstFrameShow
+    onAutoPlayStart
+    onLoopingStart
+    onError
+    onInfo
+    onPositionUpdate
+    onBufferPositionUpdate
+    onSeeking
+    onSeekEnd
+    onLoadingStart
+    onLoadingProgress
+    onLoadingEnd
+    onDownloadSpeed
+    onVideoSizeChanged
+    onStatusChanged
+    onVideoRendered
+    onAudioRendered
+    onMediaInfo
+    onStreamSwitchSuc
+    onSnapshot
+    onSubtitleShow
+    onSubtitleHide
+    onSubtitleExtAdd
+    streamIndex
+    type
+    description
+    bitrate
+    videoBandwidth
+    videoWidth
+    videoHeight
+    hdrType
+    audioLang
+    nChannels
+    sampleRate
+    sampleFormat
+    subtitleLang
+    totalBitrate
+    streams

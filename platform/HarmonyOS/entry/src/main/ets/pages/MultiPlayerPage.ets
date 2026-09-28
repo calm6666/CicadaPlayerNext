@@ -11,9 +11,9 @@
 import { router } from '@kit.ArkUI';
 import { TitleBar } from '../view/TitleBar';
 import { MultiPlayerItem } from '../view/MultiPlayerItem';
-import { MultiPlayerSelection } from '../model/CicadaTypes';
+import { MultiPlayerSelection } from '../model/AppTypes';
 import { MULTI_PLAYER_KEY } from './SourceChooseListPage';
-import { S } from '../util/Strings';
+import { S } from '@cicada/cicadaplayer';
 
 @Entry
 @Component

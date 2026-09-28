@@ -9,7 +9,7 @@
 
 import { common } from '@kit.AbilityKit';
 import { util } from '@kit.ArkTS';
-import { SourceGroup, SourceSample } from '../model/CicadaTypes';
+import { SourceGroup, SourceSample } from '../model/AppTypes';
 
 export class SourceListParser {
   static readonly ASSET_NAME: string = 'sourceList.json';
