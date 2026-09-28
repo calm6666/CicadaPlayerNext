@@ -347,12 +347,45 @@ namespace Cicada {
 
         int streamIndex = pkt->stream_index;
 
+        /*
+         * 【防御性形态回退】清单层说这条流不加密，于是 OpenStream 时就把 bsf 建好、
+         * codecpar 也已经被改写成 Annex B 了；但万一这个判断是错的（包上真的带了
+         * AV_PKT_DATA_ENCRYPTION_INFO），就必须当场把形态还原：撤掉 bsf，并把 codecpar
+         * 的 extradata 恢复成 bsf 改写之前的容器原形态。这样包与 meta 同时回到容器原形态，
+         * 与"从头就不建 bsf"的 DRM 路径完全一致，只撤 bsf 不还原 codecpar 会造成反向错位。
+         *
+         * 这是状态判断，不是重试或超时兜底：判据就是这一包自己的 side data。
+         */
+        if (mStreamCtxMap[streamIndex] != nullptr && mStreamCtxMap[streamIndex]->bsf != nullptr) {
+            // FFmpeg 9: av_packet_get_side_data 的尺寸参数为 size_t*
+            size_t encryption_info_size = 0;
+            const uint8_t *new_encryption_info = av_packet_get_side_data(pkt, AV_PKT_DATA_ENCRYPTION_INFO, &encryption_info_size);
+
+            if (encryption_info_size > 0 && new_encryption_info != nullptr) {
+                dropBsf(streamIndex);
+            }
+        }
+
         // If is drm encrypted, should not create bsf.
         // But can not know if stream is encrypted when open stream,
         // so create bsf here when got first pkt.
-        if (!mStreamCtxMap[pkt->stream_index]->bsfInited) {
+        if (mStreamCtxMap[pkt->stream_index] != nullptr && !mStreamCtxMap[pkt->stream_index]->bsfInited) {
             createBsf(pkt, streamIndex);
-            mStreamCtxMap[pkt->stream_index]->bsfInited = true;
+
+            if (mStreamCtxMap[pkt->stream_index] != nullptr) {
+                mStreamCtxMap[pkt->stream_index]->bsfInited = true;
+            }
+        }
+
+        if (mStreamCtxMap[pkt->stream_index] == nullptr) {
+            /*
+             * createBsf 建 bsf 失败时会把流上下文置空，原有语义是"这条流不再投递包"
+             * （与上面读循环里"上下文为空就丢弃这个包"的处理一致）。原代码在这里会直接
+             * 解引用空指针，而"开流时就提前建 bsf"让这条失败路径更容易走到，
+             * 所以显式收口成丢弃这一包。
+             */
+            av_packet_free(&pkt);
+            return -EAGAIN;
         }
 
         bool needUpdateExtraData = false;
@@ -452,6 +485,44 @@ namespace Cicada {
         mStreamCtxMap[index] = unique_ptr<AVStreamCtx>(new AVStreamCtx());
         mStreamCtxMap[index]->opened = true;
         mStreamCtxMap[index]->bsfInited = false;
+
+        /*
+         * 【形态对齐的唯一落点】非加密流在这里就把 head 合并 bsf 建起来。
+         *
+         * 为什么必须落在"开流"这一刻、而不是等第一个包：bsf 的 init 会把 codecpar 的
+         * extradata 从 hvcC/AVCC 改写成 Annex B（AVBSF::init 最后一步是
+         * avcodec_parameters_copy(codecpar, par_out)），而 GetStreamMeta 给出的 extradata
+         * 就是这份 codecpar（get_stream_meta 直接读 AVStream 的 codecpar->extradata）。
+         * 若 bsf 拖到第一个包才建，那么"内层 demuxer 刚建好、还没产出任何包"的窗口里，
+         * GetStreamMeta 给的仍是容器的 hvcC，而随后真正投递的包已经是 bsf 转出的 Annex B，
+         * 解码器按 4 字节长度前缀去拆 Annex B 的包必然每包失败（ff_h2645_packet_split
+         * 返回 -1094995529，日志刷 re-assert 与 Invalid data），一帧不出、画面冻死，
+         * 只有 seek（重建解码器）才恢复。HLS 每个分片都重建一次内层 demuxer
+         * （HLSStream::createDemuxer），长期停在这个窗口里，所以几乎必中；DASH 只在刚打开
+         * 目标档 / reopen 后的那一小段输掉竞态，所以偶发。
+         *
+         * 在 OpenStream 就建好之后，这条流的 codecpar 从"还没有任何包"开始就是包的形态，
+         * 此后任何时刻取 meta 都与包同形态。
+         *
+         * 加密流（mStreamEncrypted 为真）不走这里，保持第一个包上懒建的原行为：DRM 时
+         * bsf 本就不该建，包与 meta 都是容器原形态。清单层判错的情况由
+         * ReadPacketInternal 里的防御性回退兜住。
+         */
+        if (!mStreamEncrypted && createBsf(nullptr, index) == 0 && mStreamCtxMap[index] != nullptr) {
+            mStreamCtxMap[index]->bsfInited = true;
+        }
+
+        if (mStreamCtxMap[index] == nullptr) {
+            /*
+             * createBsf 建 bsf 失败时会把流上下文置空（原有语义）。开流这条新路径上不能让
+             * 这个副作用把一条已经打开的流变成"包全被丢弃"：把上下文补回来，形态判定于是
+             * 退回"第一个包上懒建"的原行为，等于这次提前建 bsf 没发生过。
+             */
+            mStreamCtxMap[index] = unique_ptr<AVStreamCtx>(new AVStreamCtx());
+            mStreamCtxMap[index]->opened = true;
+            mStreamCtxMap[index]->bsfInited = false;
+        }
+
         return 0;
     }
 
@@ -471,11 +542,18 @@ namespace Cicada {
 
     int avFormatDemuxer::createBsf(AVPacket *pkt, int index)
     {
-        // FFmpeg 9: av_packet_get_side_data 的尺寸参数为 size_t*
-        size_t encryption_info_size = 0;
-        const uint8_t *new_encryption_info = av_packet_get_side_data(pkt, AV_PKT_DATA_ENCRYPTION_INFO, &encryption_info_size);
-        if (encryption_info_size > 0 && new_encryption_info != nullptr) {
-            return 0;
+        /*
+         * pkt 为 nullptr 表示"开流前的提前创建"（见 OpenStream）：那时还没有包，
+         * 也就无从判断加密，加密与否由清单层的 setStreamEncrypted 提示决定，
+         * 这里只跳过"看包上的加密 side data"这一步。
+         */
+        if (pkt != nullptr) {
+            // FFmpeg 9: av_packet_get_side_data 的尺寸参数为 size_t*
+            size_t encryption_info_size = 0;
+            const uint8_t *new_encryption_info = av_packet_get_side_data(pkt, AV_PKT_DATA_ENCRYPTION_INFO, &encryption_info_size);
+            if (encryption_info_size > 0 && new_encryption_info != nullptr) {
+                return 0;
+            }
         }
 
         string bsfName{};
@@ -508,6 +586,11 @@ namespace Cicada {
 #if AF_HAVE_PTHREAD
             std::lock_guard<std::mutex> uLock(mCtxMutex);
 #endif
+            /*
+             * init 会把 codecpar 改写成 bsf 的输出形态，先留一份改写前的 extradata，
+             * 供"提前建了 bsf 之后才发现是加密流"时还原（见 dropBsf）。
+             */
+            saveCodecParBeforeBsf(index);
             mStreamCtxMap[index]->bsf = unique_ptr<IAVBSF>(IAVBSFFactory::create(bsfName));
             ret = mStreamCtxMap[index]->bsf->init(bsfName, mCtx->streams[index]->codecpar);
 
@@ -518,6 +601,75 @@ namespace Cicada {
         }
 
         return ret;
+    }
+
+    void avFormatDemuxer::saveCodecParBeforeBsf(int index)
+    {
+        if (mCtx == nullptr || index < 0 || index >= mCtx->nb_streams) {
+            return;
+        }
+
+        if (mStreamCtxMap.find(index) == mStreamCtxMap.end() || mStreamCtxMap[index] == nullptr) {
+            return;
+        }
+
+        AVCodecParameters *codecpar = mCtx->streams[index]->codecpar;
+        std::vector<uint8_t> &saved = mStreamCtxMap[index]->preBsfExtraData;
+        saved.clear();
+
+        if (codecpar->extradata != nullptr && codecpar->extradata_size > 0) {
+            saved.assign(codecpar->extradata, codecpar->extradata + codecpar->extradata_size);
+        }
+    }
+
+    void avFormatDemuxer::dropBsf(int index)
+    {
+        if (mCtx == nullptr || index < 0 || index >= mCtx->nb_streams) {
+            return;
+        }
+
+#if AF_HAVE_PTHREAD
+        std::lock_guard<std::mutex> uLock(mCtxMutex);
+#endif
+        /*
+         * 上下文的存在性判断与使用都在锁内完成：createBsf 建 bsf 失败时会把上下文置空，
+         * 那是在同一把锁里做的，锁外先判断再进来用会读到中途被置空的上下文。
+         */
+        if (mStreamCtxMap.find(index) == mStreamCtxMap.end() || mStreamCtxMap[index] == nullptr) {
+            return;
+        }
+
+        AVStreamCtx *ctx = mStreamCtxMap[index].get();
+
+        if (ctx->bsf == nullptr) {
+            return;
+        }
+
+        AF_LOGW("stream %d got an encrypted packet, drop the header merge bsf and restore codecpar\n", index);
+        ctx->bsf = nullptr;
+
+        /*
+         * 还原 codecpar 的 extradata：bsf 的 init 已经把它改写成了 Annex B，
+         * 只撤 bsf 不还原的话，包（容器原形态）与 meta（Annex B）仍然错位，
+         * 正好是本次要修的那个 bug 的镜像。
+         */
+        AVCodecParameters *codecpar = mCtx->streams[index]->codecpar;
+        std::vector<uint8_t> &saved = ctx->preBsfExtraData;
+        av_free(codecpar->extradata);
+        codecpar->extradata = nullptr;
+        codecpar->extradata_size = 0;
+
+        if (!saved.empty()) {
+            codecpar->extradata = static_cast<uint8_t *>(av_malloc(saved.size() + AV_INPUT_BUFFER_PADDING_SIZE));
+
+            if (codecpar->extradata != nullptr) {
+                memcpy(codecpar->extradata, saved.data(), saved.size());
+                memset(codecpar->extradata + saved.size(), 0, AV_INPUT_BUFFER_PADDING_SIZE);
+                codecpar->extradata_size = static_cast<int>(saved.size());
+            }
+        }
+
+        saved.clear();
     }
 
     void avFormatDemuxer::flush()

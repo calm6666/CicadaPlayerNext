@@ -10,6 +10,7 @@
 #include <mutex>
 #include <atomic>
 #include <deque>
+#include <vector>
 #include "base/media/IAFPacket.h"
 #include "AVBSF.h"
 #include <demuxer/IDemuxer.h>
@@ -38,6 +39,13 @@ namespace Cicada {
             std::unique_ptr<IAVBSF> bsf{};
             bool opened{true};
             bool bsfInited{false};
+            /*
+             * 追加在成员末尾（增量 ABI 安全）：pre-create bsf 之前 codecpar 的
+             * extradata 快照。bsf 的 init 会把 codecpar 改写成 Annex B，一旦发现这条流
+             * 其实是加密的（包带 AV_PKT_DATA_ENCRYPTION_INFO），必须连 extradata
+             * 一起还原成容器原形态，否则包与 meta 又会错位。
+             */
+            std::vector<uint8_t> preBsfExtraData{};
         };
 
     public:
@@ -87,6 +95,15 @@ namespace Cicada {
 
         int64_t getBufferDuration(int index)  const override;
 
+        /*
+         * 覆盖 IDemuxer::setStreamEncrypted（该虚函数定义在 IDemuxer 虚函数列表末尾）。
+         * 覆写的位置不影响 vtable 槽位，槽位只由基类声明顺序决定。
+         */
+        void setStreamEncrypted(bool encrypted) override
+        {
+            mStreamEncrypted = encrypted;
+        }
+
     protected:
         explicit avFormatDemuxer(int dummy);
 
@@ -116,6 +133,17 @@ namespace Cicada {
         void init();
 
         int createBsf(AVPacket *pkt, int index);
+
+        /*
+         * 撤掉已经建好的 bsf，并把 codecpar 的 extradata 还原成 bsf 改写之前的快照。
+         * 只用于"按非加密提前建了 bsf、随后却收到加密包"的防御性回退。
+         */
+        void dropBsf(int index);
+
+        /*
+         * 记录 createBsf 即将改写 codecpar 之前的 extradata 快照（幂等，每次覆盖）。
+         */
+        void saveCodecParBeforeBsf(int index);
 
         int ReadPacketInternal(std::unique_ptr<IAFPacket> &packet);
 
@@ -159,6 +187,13 @@ namespace Cicada {
         atomic <int64_t> mError{0};
         mutable std::mutex mCtxMutex{};
 #endif
+
+        /*
+         * 追加在成员末尾（增量 ABI 安全）：清单层在开流前给出的"这一段是否加密"提示。
+         * false（默认）= 非加密，OpenStream 时就建 head 合并 bsf，保证 codecpar 从
+         * 还没有任何包时起就已经是包的形态。true = 加密，保持第一个包上懒建的原行为。
+         */
+        bool mStreamEncrypted{false};
 
     };
 }

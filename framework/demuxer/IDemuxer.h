@@ -288,6 +288,39 @@ namespace Cicada {
             return -1;
         }
 
+        /*
+         * 【加密形态提示】在开流之前，把"这条流的包会不会带
+         * AV_PKT_DATA_ENCRYPTION_INFO（即样本级加密、DRM）"告诉解复用器。
+         *
+         * 为什么需要这个接口：head 合并 bsf 必须在**第一个包之前**决定建不建。
+         * 因为 bsf 的 init 会把 codecpar 的 extradata 改写成另一种 NAL 形态
+         * （AVBSF::init 最后一步是 avcodec_parameters_copy(codecpar, par_out)），
+         * 而 GetStreamMeta 给出的 extradata 就是这份 codecpar。要是 bsf 拖到第一个包
+         * 才建，那么在"demuxer 刚建好、还没出包"的窗口里取到的 meta 还是容器的
+         * hvcC/AVCC，随后真正投递的包却已经是 bsf 转出来的 Annex B，解码器按长度前缀
+         * 去拆 Annex B 的包必然失败：日志刷 re-assert、一帧不出、画面冻死。
+         *
+         * 而"包是否带加密信息"只有清单层知道（HLS 的 EXT-X-KEY、DASH 的
+         * ContentProtection），容器本身要等到第一个包才看得出来，所以由清单层在
+         * 开流前告知：默认 false 表示非加密，解复用器可以在 OpenStream 时就建 bsf；
+         * 传 true 表示加密，保持"第一个包上懒建"的原行为。
+         *
+         * 这个提示只是提前量，判错不丢正确性：ReadPacketInternal 里还有一道
+         * "见到带加密信息的包就撤掉 bsf 并把 codecpar 还原"的防御性回退。
+         *
+         * 默认实现忽略提示：建 head 合并 bsf 的只有 avFormatDemuxer，它覆写本函数
+         * （提示存放在那里，不占基类的成员，基类布局一个字节都不动）。转发型解复用器
+         * （playList_demuxer、ManifestDemuxer）由各自的流对象把提示直接设到内层
+         * demuxer 上，因此也不需要在这里存。
+         *
+         * 本虚函数必须留在虚函数列表末尾（理由同上面的 SeekStream），
+         * 以后新增同类接口继续往这里追加。
+         */
+        virtual void setStreamEncrypted(bool encrypted)
+        {
+            (void) encrypted;
+        }
+
     public:
         int64_t estimateExclusiveEndPositionBytes(const string &url, int64_t timeMicSec, int64_t totalLength) override;
 

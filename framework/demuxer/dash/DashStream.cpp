@@ -391,6 +391,19 @@ int DashStream::createDemuxer()
 
     if (mPDemuxer->getDemuxerHandle()) {
         mPDemuxer->getDemuxerHandle()->setBitStreamFormat(this->mMergeVideoHeader, this->mMergerAudioHeader);
+        /*
+         * 【形态提示：这一段是不是样本级加密】与 HLSStream::createDemuxer 同一处语义
+         * （必须在 initOpen 之前，见那里的详细说明）。DASH 侧今天没有任何
+         * ContentProtection 解析（MPDParser 不产出加密信息，DashSegment 上也没有
+         * 加密字段），所以这里如实按"非加密"处理：OpenStream 时就建 head 合并 bsf，
+         * 让 codecpar 从还没有包时起就是包的形态，堵住"刚打开目标档 / reopen 后
+         * GetStreamMeta 抢在第一个包之前"的那一小段竞态。
+         *
+         * 万一这一段其实是加密的（带 ContentProtection 的档位），内层 demuxer 会在
+         * 第一个带 AV_PKT_DATA_ENCRYPTION_INFO 的包上撤掉 bsf 并把 codecpar 还原
+         * （见 avFormatDemuxer::ReadPacketInternal 的防御性回退），DRM 路径不受影响。
+         */
+        mPDemuxer->getDemuxerHandle()->setStreamEncrypted(false);
     }
 
     //        if (mDemuxerMeta) {

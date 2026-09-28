@@ -579,6 +579,22 @@ namespace Cicada {
 
         if (mPDemuxer->getDemuxerHandle()) {
             mPDemuxer->getDemuxerHandle()->setBitStreamFormat(this->mMergeVideoHeader, this->mMergerAudioHeader);
+            /*
+             * 【形态提示：这一段是不是样本级加密】必须在 initOpen 之前告诉内层 demuxer，
+             * 让它在"还没有任何包"时就能决定 head 合并 bsf 建不建：
+             *   · 非加密（提示 false，默认）：OpenStream 时就建 bsf，codecpar 从此刻起
+             *     就是 Annex B，此后任何时刻取 meta 都与包同形态 —— 这正是本次要修的
+             *     "HLS 每个分片重建内层 demuxer、长期停在没出包的窗口里"的那个 bug；
+             *   · 加密（提示 true）：保持第一个包上懒建的原行为，DRM 时 bsf 本就不该建。
+             *
+             * 判据是 AES_SAMPLE（样本级加密）而不是 mProtectedBuffer（method != NONE）：
+             * AES_128 / AES_PRIVATE 是**整片解密**，解密在 HLSStream 这一层做完才把明文喂给
+             * demuxer，包上没有加密 side data，bsf 该建；只有 AES_SAMPLE 的加密样本是
+             * demuxer 看得见、包上带 AV_PKT_DATA_ENCRYPTION_INFO 的（DRM 的 keyFormat
+             * 分支与平台 sample aes 解密分支都是如此）。这条信息此刻已经确定：上面
+             * updateDecrypter 已经按 mCurrentEncryption 选好了解密路径。
+             */
+            mPDemuxer->getDemuxerHandle()->setStreamEncrypted(mCurrentEncryption.method == SegmentEncryption::AES_SAMPLE);
         }
 
         //        if (mDemuxerMeta) {
