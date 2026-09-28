@@ -99,8 +99,8 @@
 |---|---|
 | `output.mpd` | 现状：分段式（SegmentTemplate + SegmentTimeline） |
 | ✅ `output-segmentbase.mpd` | SegmentBase 版：每个 Representation 一个 m4s，`<BaseURL>` + `<SegmentBase indexRange=…><Initialization range=…/></SegmentBase>` |
-| ✅ `sb-{video,audio}-<编码>-<高度>p.m4s` | SegmentBase 用的**单一 m4s**（init + media + 全局 sidx 都在里面），**不带序号** |
-| ✅ `sb-*.m3u8` | **HLS 版**：每个 single m4s 一个媒体播放列表，用 `#EXT-X-MAP:URI="…",BYTERANGE="长度@起点"` + 每段 `#EXTINF` / `#EXT-X-BYTERANGE:长度@起点` + 同一个文件 URI 表达"单文件 + 字节范围" |
+| ✅ `<雪花ID>-video-<编码>-<宽>_<高>.m4s` / `<雪花ID>-audio.m4s` | SegmentBase 用的**单一 m4s**（init + media + 全局 sidx 都在里面）。**命名 = 分段式分片名去掉尾部序号**，如 `379995093081395200-video-h265-1920_1080.m4s`（对应分片 `379995093081395200-video-h265-1920_1080-1.m4s`）、`379995093081395200-audio.m4s`（对应 `379995093081395200-audio-1.m4s`） |
+| ✅ `<单文件名>.m3u8` | **HLS 版**：每个 single m4s 一个媒体播放列表（名 = 单文件名换后缀，如 `379995093081395200-video-h265-1920_1080.m3u8`），用 `#EXT-X-MAP:URI="…",BYTERANGE="长度@起点"` + 每段 `#EXTINF` / `#EXT-X-BYTERANGE:长度@起点` + 同一个文件 URI 表达"单文件 + 字节范围" |
 | ✅ `master-segmentbase.m3u8` | 把上面这些媒体播放列表串起来（视频 `#EXT-X-STREAM-INF`、音频 `#EXT-X-MEDIA`） |
 | `chunk-stream*-*.m4s` | 现状：分片文件 |
 | `master.m3u8` / `media_*.m3u8` | 现状：分段式 HLS |
@@ -149,13 +149,19 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
    ⚠️ ffmpeg 原本的 `<Initialization range="0-907"/>` **把 sidx（820-907）包在里面**，重写时必须只到
    `sidxStart-1` —— 既符合 DASH 语义，也与内核"只有 indexRange 时合成 `[0, indexRangeStart-1]`"一致
    （`MPDParser.cpp:330-336`）。
-2. **单文件改名（用户口径：不要序号）**：ffmpeg 模板只有 `$RepresentationID$` 可用，所以先出临时名
-   `sb-<id>.m4s`，再按**类型-编码-分辨率**重命名，并把新名写回 MPD 的 `<BaseURL>` 与 JSON 的
-   `baseUrl` / `segments[].url`：
-   - 视频：`sb-video-<编码短名>-<高度>p.m4s`（如 `sb-video-h264-1080p.m4s`；同编码同高度重复时追加
-     `-<kbps>k` 消歧）
-   - 音频：`sb-audio-<编码短名>.m4s`（如 `sb-audio-aac.m4s`；同编码多路时追加采样率消歧）
-   - 临时名必须从输出目录消失；目标名已存在就报错退出（不静默覆盖）。
+2. **单文件改名（用户口径：与分片同名同构，只是去掉尾部序号）**：ffmpeg 模板只有 `$RepresentationID$`
+   可用，所以先出临时名 `sb-<id>.m4s`，再重命名成**分段式分片名去掉尾部序号**的那个名字，并把新名写回
+   MPD 的 `<BaseURL>`、两个 SegmentBase JSON 的 `baseUrl` / `segments[].url` / `backupUrls`，以及
+   HLS 侧各媒体播放列表（名 = 单文件名 + `.m3u8`）：
+   - 分片名是 `f"{BASE_ID}-{suffix}-{seq}.m4s"`（`init` 段序号为 0），于是
+   - 视频：`<雪花ID>-video-<编码短名>-<宽>_<高>.m4s`，如 `379995093081395200-video-h265-1920_1080.m4s`
+     （= 分片 `379995093081395200-video-h265-1920_1080-1.m4s` 去掉 `-1`）
+   - 音频：`<雪花ID>-audio.m4s`，如 `379995093081395200-audio.m4s`（= 分片 `…-audio-1.m4s` 去掉 `-1`）
+   - **为什么不加消歧后缀**：同一轮里雪花 ID 固定，(类型, 编码, 分辨率) 已唯一确定一个 Representation，
+     去掉序号不会撞名 —— 所以按用户口径**不**再拼 `<kbps>k` / 采样率之类；真的撞名时
+     `build_sb_rename_map()` 直接报错退出，绝不静默覆盖。
+   - 命名只此一处（`sb_single_file_name()`）产出，MPD / JSON / m3u8 三处都取它，避免两套名字。
+   - 临时名必须从输出目录消失（`sb-<数字>.m4s`，验收脚本专门查残留）；目标名已存在就报错退出。
 3. **校验**：脚本改动后必须跑 `verify_segmentbase.py`（§五）。
 
 **备用方案（若某台机器上 `-i output.mpd -c copy` 这条再封装路径不成立）**：给每条流加
@@ -170,7 +176,7 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
 {
   "video": [{
     "id": 0,
-    "baseUrl": "http://127.0.0.1:9000/video/dash2/sb-video-0.m4s",
+    "baseUrl": "http://127.0.0.1:9000/video/dash2/379995093081395200-video-h265-1920_1080.m4s",
     "backupUrls": ["…", "…"],
     "bandwidth": 3000000,
     "codecs": "avc1.64001f",
@@ -181,8 +187,8 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
       "initialization": "0-1479",
       "indexRange": "1480-2048",
       "segments": [
-        { "duration": 6.006, "url": "sb-video-0.m4s", "byteRange": "2049-560000" },
-        { "duration": 6.006, "url": "sb-video-0.m4s", "byteRange": "560001-1110000" }
+        { "duration": 6.006, "url": "379995093081395200-video-h265-1920_1080.m4s", "byteRange": "2049-560000" },
+        { "duration": 6.006, "url": "379995093081395200-video-h265-1920_1080.m4s", "byteRange": "560001-1110000" }
       ]
     }
   }]
@@ -311,7 +317,7 @@ m3u8 **文本**那条路另有两点：
 
 | # | 缺口 | 后果 | 修法 |
 |---|---|---|---|
-| 1 | `toDashRepresentation()` 对 `rep.baseUrl` 无条件调 `ensureTrailingSlash()` | single 模式下 `baseUrl` 是**媒体文件**（`…/sb-video-h264-1080p.m4s`），补斜杠后 dash.js 会拼出 `…m4s/` → 404 | single 模式（`segmentInfo.mode === 'single'`）的 `baseUrl`/`backupUrls` **原样保留**，不补斜杠 |
+| 1 | `toDashRepresentation()` 对 `rep.baseUrl` 无条件调 `ensureTrailingSlash()` | single 模式下 `baseUrl` 是**媒体文件**（`…/379995093081395200-video-h265-1920_1080.m4s`），补斜杠后 dash.js 会拼出 `…m4s/` → 404 | single 模式（`segmentInfo.mode === 'single'`）的 `baseUrl`/`backupUrls` **原样保留**，不补斜杠 |
 | 2 | `toSegmentBase()` 没有 `indexRange` 时也返回 `{}` | 产出一个**没有段表的空 `<SegmentBase/>`** —— dash.js 无从取段，静默停摆 | 无 `indexRange` 时返回 `undefined`，把段表交给 `toSegmentList()` 兜底 |
 | 3 | `toSegmentList()` 对 `single` 直接 `return undefined`，且从不写 `mediaRange` | ① 只有 `segments[]`（无 sidx）的 single JSON 彻底没段表；② 任何带 `byteRange` 的 list 都被丢掉字节范围（整文件当分片拉） | single 且**无** `indexRange` 时允许走 SegmentList：每段 `media` = 单文件、`mediaRange` = `byteRange`，`Initialization` 用 `{range}`（字节范围）而不是 `{sourceURL}`；list 模式也补上 `mediaRange` |
 
@@ -369,9 +375,10 @@ JSON 交给 DASH 插件即可 —— 既可以给 JSON 文件 URL（`loadJsonMan
 
 | 文件 | 规模 | 新增/改动 |
 |---|---|---|
-| `transcode_all.py` | 49.1 KB → 86.4 KB | 常量 `SEGMENTBASE_MPD_NAME` / `SB_TMP_TEMPLATE` / `SB_REPS` / `SB_META`；`build_segmentbase_cmd()` + `run_segmentbase_remux()`（§4.2 的再封装阶段）；`parse_segmentbase_mpd()`（**三种段定位都认**：SegmentBase / SegmentList(mediaRange) / SegmentTemplate）；`parse_m4s_sidx()` + `sb_segment_ranges()`；`sb_single_file_name()` + `build_sb_rename_map()`（唯一命名口径，无开关）；`rewrite_segmentbase_mpd()`（重写成真 SegmentBase + 换 BaseURL + 补 bandwidth）；`prepare_segmentbase_artifacts()`（解析→sidx→交叉校验→命名冲突检查→**先在内存改写 MPD 并补 codecs**→才重命名文件→写回）；`generate_segmentbase_json()`（第 5 个 JSON）；`write_json_manifests` 内置兜底也产出第 5 个；`main()` 串起"主转码 → 再封装 → 重命名/改写 → 关键帧校验"，失败非零退出 |
+| `transcode_all.py` | 49.1 KB → 86.4 KB | 常量 `SEGMENTBASE_MPD_NAME` / `SB_TMP_TEMPLATE` / `SB_REPS` / `SB_META`；`build_segmentbase_cmd()` + `run_segmentbase_remux()`（§4.2 的再封装阶段）；`parse_segmentbase_mpd()`（**三种段定位都认**：SegmentBase / SegmentList(mediaRange) / SegmentTemplate）；`parse_m4s_sidx()` + `sb_segment_ranges()`；`sb_single_file_name()` + `build_sb_rename_map()`（唯一命名口径 = 分片名去掉尾部序号，无开关，撞名即报错）；`rewrite_segmentbase_mpd()`（重写成真 SegmentBase + 换 BaseURL + 补 bandwidth）；`prepare_segmentbase_artifacts()`（解析→sidx→交叉校验→命名冲突检查→**先在内存改写 MPD 并补 codecs**→才重命名文件→写回）；`generate_segmentbase_json()`（第 5 个 JSON）；`write_json_manifests` 内置兜底也产出第 5 个；`main()` 串起"主转码 → 再封装 → 重命名/改写 → 关键帧校验"，失败非零退出 |
 | `convert-to-manifest.py` | 23.4 KB → 40.3 KB | `parse_mpd()` 增加 SegmentBase/SegmentList/SegmentTemplate 三种识别与 `index_range`/`init_range`/`media_ranges`/`segment_base_timescale`/`is_audio`；独立的 `parse_m4s_sidx()` / `build_sidx_segments()` / `join_url()`（标准库）；`build_segmentbase_manifest()`（清单里没有 `<SegmentBase>` 就报错，避免改写失败时产出错清单）；`build_segment_info(..., single=...)` 新增 single 分支；`main()` 多写 `test-dash-{version}-segmentbase.json`（文件缺失只警告跳过，存在但 sidx/校验失败则非零退出） |
-| `verify_segmentbase.py` | 新增 11.7 KB | 验收工具（§五）：MPD/JSON/单文件 sidx 三方交叉校验 + 临时名残留检查 |
+| `verify_segmentbase.py` | 新增 11.7 KB | 验收工具（§五）：MPD/JSON/单文件 sidx 三方交叉校验 + 临时名残留检查（见 §10.2） |
+| `_sb_name_selfcheck.py` | 新增 | 离线自校验（§10.2）：不需要真跑转码，直接核对"单文件名 = 分片名去掉尾部序号"、形态正则与临时名正则三者一致 |
 
 **已完成的验证**：
 - 三个脚本 `python -m py_compile` **全部通过**（Python 3.10.9）；
@@ -400,7 +407,7 @@ JSON 交给 DASH 插件即可 —— 既可以给 JSON 文件 URL（`loadJsonMan
 |---|---|
 | `transcode_all.py` | `sb_media_playlist_name()`（**单文件名 + `.m3u8`**，与 `SB_REPS[i].fileName` 同一份命名、不带序号）、`build_segmentbase_hls_playlist()`（媒体播放列表：`#EXT-X-MAP` = init 段 + 每段 `#EXTINF`/`#EXT-X-BYTERANGE:长度@起点`/单文件名）、`build_segmentbase_hls_master()`、`generate_segmentbase_hls()`、`generate_hls_segmentbase_json()`、`_sb_hls_byte_range()`（DASH 闭区间 → HLS 记法，**只此一处换算**）；接在 `prepare_segmentbase_artifacts()` 成功之后的同一条收尾链上，失败即 `segmentbase_ok=False` + 非零退出；`write_json_manifests` 内置兜底也从 5 个 JSON 改成 6 个 |
 | `convert-to-manifest.py` | `build_hls_segmentbase_manifest()`：以 dash 版清单为基座，**只改两处**（`mediaSourceType:"hls"` + 每个 rep 的 `segmentInfo.mediaSequence`），`segmentInfo` 先复制再改，不污染 dash 基座；`main()` 写第 6 个 JSON（MPD 缺失只警告跳过，sidx/校验失败 `[错误]` + 非零退出） |
-| `verify_segmentbase.py` | 新增第 8 组断言 `check_hls_segmentbase()`：`sb-*.m3u8` 存在且名字 = 单文件名 + `.m3u8`；`#EXT-X-MAP` 条数/属性、`URI` == 单文件、`BYTERANGE` == MPD `<Initialization range>` == `0-(sidxStart-1)`，**并读该段字节确认含 `ftyp` 与 `moov`**；每条 `#EXT-X-BYTERANGE` 与后一行 URI 逐条对齐 sidx 推出的范围、`#EXTINF` 数与配对数一致、`TARGETDURATION` 足够、总时长与 MPD 相符；master 引用的播放列表都存在、无重复、目录里每个 `sb-*.m3u8` 都被挂上；`test-hls-*-segmentbase.json` 与 dash 版**逐字段相等**（除 `mediaSourceType`/`mediaSequence` 两处）、dash 版若带 `mediaSequence` 即 FAIL |
+| `verify_segmentbase.py` | 新增第 8 组断言 `check_hls_segmentbase()`：每个单文件的媒体播放列表（名 = 单文件名换 `.m3u8`，集合按 MPD 的 `<BaseURL>` 推出，**不写死前缀**）存在且单文件名形态符合 `<雪花ID>-video-<编码>-<宽>_<高>.m4s` / `<雪花ID>-audio.m4s`、与目录里真实分片对账（分片名去掉尾部 `-<序号>` 必须逐字等于单文件名）、雪花 ID 一致；`#EXT-X-MAP` 条数/属性、`URI` == 单文件、`BYTERANGE` == MPD `<Initialization range>` == `0-(sidxStart-1)`，**并读该段字节确认含 `ftyp` 与 `moov`**；每条 `#EXT-X-BYTERANGE` 与后一行 URI 逐条对齐 sidx 推出的范围、`#EXTINF` 数与配对数一致、`TARGETDURATION` 足够、总时长与 MPD 相符；master 引用的播放列表都存在、无重复、`expected_playlists` 每个都被挂上、目录里没有多余的 `.m3u8`；`test-hls-*-segmentbase.json` 与 dash 版**逐字段相等**（除 `mediaSourceType`/`mediaSequence` 两处）、dash 版若带 `mediaSequence` 即 FAIL |
 
 **`py_compile` 三个脚本全部通过**（Python 3.10.9，本机实跑）。
 
@@ -414,3 +421,43 @@ JSON 交给 DASH 插件即可 —— 既可以给 JSON 文件 URL（`loadJsonMan
 
 **仍未真跑**：脚本的真实产物（含新 m3u8 与第 6 个 JSON）仍待用户侧 `python transcode_all.py` +
 `python verify_segmentbase.py . v4` 核对（本机执行该命令的提权此前被拒，用户已接手）。
+
+### 10.2 单文件命名口径的最终定稿（用户口径，取代早前的 `sb-*` 方案）
+
+早前方案是 `sb-video-<编码>-<高度>p.m4s`（如 `sb-video-h264-1080p.m4s`）/ `sb-audio-<编码>.m4s`，
+并准备用码率/采样率后缀消歧。用户随后明确了口径，**该方案作废**，改成：
+
+> 单文件名 = **分段式分片名去掉尾部序号**，其余逐字一致。
+
+于是：
+- 分片 `379995093081395200-video-h265-1920_1080-1.m4s` → 单文件 `379995093081395200-video-h265-1920_1080.m4s`
+- 分片 `379995093081395200-audio-1.m4s` → 单文件 `379995093081395200-audio.m4s`
+- 媒体播放列表 = 单文件名换 `.m3u8`（`…-video-h265-1920_1080.m3u8` / `…-audio.m3u8`）
+
+**为什么天然不重复（用户原话"这样也是不会重复的"）**：分片名本身就是
+`f"{BASE_ID}-{suffix}-{seq}.m4s"`（`transcode_all.py` 的分段式重命名规则），`BASE_ID` 是本轮雪花 ID、
+`suffix` 是 `video-<编码>-<宽>_<高>` 或 `audio`，同一轮里 `(类型, 编码, 分辨率)` 已唯一确定一个
+Representation —— 所以去掉尾部序号后不会撞名，**不再需要**码率/采样率消歧后缀。真撞名时
+`build_sb_rename_map()` 直接 `ValueError` 退出（不静默覆盖），另外新增防呆：视频 rep 缺 `width`/`height`
+时直接报错，不允许拼出 `…-0_1080.m4s` 这种与分片对不上的名字。
+
+**连带同步（都取同一个 `sb_single_file_name()`，避免两套名字）**：`output-segmentbase.mpd` 的
+`<BaseURL>`、两个 SegmentBase JSON 的 `baseUrl` / `segments[].url` / `backupUrls`、各媒体播放列表名与
+`master-segmentbase.m3u8` 里 `#EXT-X-STREAM-INF` / `#EXT-X-MEDIA` 的 `URI`。分段式产物
+（`chunk-stream*`、`master.m3u8`、`media_*.m3u8`）**零改动** —— 分段式重写规则是
+`\b{old_id}-(\d+)\.m4s` 且 `old_id` 为纯数字，新名单文件前缀是字母，不会被误改。
+
+**`verify_segmentbase.py` 同步**：不再写死 `sb-*` 前缀 —— 期望的播放列表集合改为按 MPD 的
+`<BaseURL>` 推出；新增单文件名形态断言 `SB_SINGLE_FILE_RE`
+（`^(\d+)-(?:video-[A-Za-z0-9]+-\d+_\d+|audio)\.m4s$`）、所有单文件雪花 ID 一致、**与目录里真实分片对账**
+（`^(.+)-(\d+)\.m4s$` 取前缀，必须逐字等于单文件名，排除 `sb-<数字>.m4s` 临时名）、master 引用了 MPD 里
+没有对应单文件的列表即 FAIL、目录里多余的 `.m3u8` 一律报出（显式放行分段式的 `master.m3u8` /
+`media_<数字>.m3u8`）。`TMP_NAME_RE = ^sb-\d+\.m4s$` **原样保留**，只用来查 ffmpeg 中间名残留
+（中间名模板仍是 `SB_TMP_TEMPLATE = "sb-$RepresentationID$.m4s"`，与最终名无关）；残留检查从
+"只扫 `sb-*.m3u8`"改成"扫全部 `.m3u8` 再按临时名口径判定"，否则新命名下这条会变成永不触发的死检查。
+
+**本机已验证（离线，不需真跑转码）**：
+- `python -m py_compile transcode_all.py convert-to-manifest.py verify_segmentbase.py _sb_name_selfcheck.py` → 退出码 0；
+- `python _sb_name_selfcheck.py` → **PASS**：三例命名（`…-video-h265-1920_1080.m4s` /
+  `…-video-h264-1280_720.m4s` / `…-audio.m4s`）逐字等于"分片名去掉尾部序号"，形态正则接受它们、
+  临时名正则不误判它们，且分片名能反向还原出单文件名；播放列表名 = 单文件名换后缀。
