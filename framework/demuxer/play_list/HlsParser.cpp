@@ -366,8 +366,19 @@ namespace Cicada {
                             const Attribute *byterangeAttr = keytag->getAttributeByName("BYTERANGE");
 
                             if (byterangeAttr) {
-                                const std::pair<int64_t, int64_t> range = byterangeAttr->unescapeQuotes().getByteRange();
-                                //   initSegment->setByteRange(range.first, range.first + range.second - 1);
+                                /*
+                                 * EXT-X-MAP 的 BYTERANGE 与分片同语法「长度[@起点]」，
+                                 * getByteRange() 返回 (offset, length)，offset 缺省是 -1。
+                                 * 单文件（SegmentBase）流就靠它把 init 段定位到文件里那一段；
+                                 * 不设的话会把一整个文件当 init 段拉下来。
+                                 */
+                                const std::pair<int64_t, int64_t> range =
+                                        byterangeAttr->unescapeQuotes().getByteRange();
+
+                                if (range.second > 0) {
+                                    const int64_t start = range.first < 0 ? 0 : range.first;
+                                    curInitSegment->setByteRange(start, start + range.second - 1);
+                                }
                             }
 
                             segmentList->addInitSegment(curInitSegment);

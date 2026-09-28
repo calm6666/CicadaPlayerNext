@@ -281,6 +281,17 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
    representation**，不再留下"清单能开、永远没数据"的空段表。
 5. 编译：鸿蒙 native 目标链接通过，**0 error / 0 代码告警**（见提交记录）。
 
+**HLS 侧（native / CicadaPlayerNext 内核）**：JSON 清单这条路**协议无关** —— `ManifestDemuxer`
+把 single 模式展开成带字节范围的 `SegmentList`（§八 的第 1-5 条），下游 `PlaylistManager`/`HLSStream`
+用 `segment::getDownloadRange()` → `tryOpenSegment(uri, start, end)` → `IDataSource::setRange()` 取段，
+所以**同一份 single JSON 走 HLS 管线同样能播**，与 DASH 走的是同一段代码。
+m3u8 **文本**那条路另有两点：
+- 分片的 `#EXT-X-BYTERANGE` 本来就支持（`HlsParser.cpp:543-553` 解析并 `setByteRange`，缺省 offset 接上一段结尾）；
+- `#EXT-X-MAP:URI="…",BYTERANGE="…"`（单文件流的 init 段）**原来解析出来但那行 `setByteRange` 是注释掉的**
+  （`HlsParser.cpp:366-371`），会把整个文件当 init 段拉下来 —— 本轮已补上：
+  `getByteRange()` 返回 `(offset, length)`（offset 缺省 -1 → 按 0 处理），
+  `range.second > 0` 时 `setByteRange(start, start + length - 1)`。native 重编：0 error / 0 代码告警。
+
 ## 九、Web 侧（hili-player plugins，dash.js 5.1.1）
 
 位置：`D:\hilihili\front\hili-player\packages\plugins`（该目录是**独立的 git 仓库**，根在
@@ -327,11 +338,19 @@ node_modules\.bin\tsc.cmd src/vendor/manifest-to-dash.ts src/vendor/utils/valida
 node <临时目录>\segmentbase.converter.check.cjs      （退出码 0 = 全过）
 ```
 
-**相邻缺口（本次未做，如实记录）**：`src/vendor/manifest-to-hls.ts:127` 对 `single` 仍是
-`return undefined` ⇒ 同一份 SegmentBase JSON 若被 HLS 插件接手，会得到**空播放列表**。
-`MediaManifest` 的类型注释里写着"HLS: 映射为 #EXT-X-BYTERANGE"，即当初有意图但未实现；
-补法是：用 `segments[]` 逐条产出 `#EXTINF` + `#EXT-X-BYTERANGE:<len>@<start>`（URI 用单文件），
-并用 `#EXT-X-MAP:URI="<单文件>",BYTERANGE="<initialization>"` 表达 init 段。本目标只做 DASH。
+**HLS 侧（同一份 single JSON 走 HLS 也能播了）**：`src/vendor/manifest-to-hls.ts` 原来对 `single`
+直接 `return undefined`（→ 空播放列表），而且 hls.js fork 的 `ManifestSegment` **没有字节范围字段**，
+所以单文件流在 HLS 上完全不可用。现在按 `#EXT-X-BYTERANGE` / `#EXT-X-MAP:BYTERANGE` 语义打通：
+
+| 改动位置 | 内容 |
+|---|---|
+| `media-manifest/hls.js/src/hls.ts`（fork **源码**，该目录被 front 仓库 gitignore，属本地树补丁）+ `packages/plugins/src/hls/vendor/hls.{mjs,d.ts}`（**被跟踪的 vendored 构建产物**，两处都改 —— 仓库里没有 fork 的 `node_modules`，不能就地 rebuild 后覆盖） | `ManifestSegment.byteRange?`、`ManifestPlaylistDetails.initSegmentRange?`（HLS 记法「长度@起点」）；`_buildLevelDetails()` 里 init 段 `setByteRange(initSegmentRange)`、每个分片 `setByteRange(seg.byteRange, 上一段)` —— 即 `M3U8Parser` 解析 `#EXT-X-BYTERANGE` 的**同一个入口**，取 Range 的通路是 fork 里既有的 |
+| `src/vendor/manifest-to-hls.ts` | 新增 `toHlsByteRange()`：把 JSON 的 DASH 闭区间 `"908-588221"` 换算成 HLS 记法 `"587314@908"`（fork 内部 `end = 起点 + 长度`，不换算会整体错位）；`toPlaylistDetails()` 补 single 分支（每段同文件 + `byteRange`，init 用 `{initSegmentUrl, initSegmentRange}`；**HLS 无 sidx 概念，要求显式 `segments[]`**，只有 `indexRange` 时返回 `undefined` 不产出半截清单）；list 模式带 `byteRange` 的段也带上范围；single 模式下 `variant.url`/`audioGroup.url` 不再补尾斜杠；AES-128 那段抽成 `applyEncryption()` 两种模式共用（行为不变） |
+
+**HLS 运行期自检**：`packages/plugins/test/segmentbase.hls.check.cjs`（纯 Node），**16/16 全过** ——
+single→每段同文件 + HLS 记法范围 + init 字节范围；single 只有 `indexRange`→不产出 `playlistDetails`；
+list→带范围且原有行为（尾斜杠 / init 用 URL）不回归；**真跑 fork 的 `_buildLevelDetails`**（`loadManifest`
+内部就是它）：`fragments=2`，`byteRange=[908,588222]`、`[588222,1184189]`，init `[0,820]`，URL 指向单文件。
 
 **怎么用**：协议由调用方选插件（web 侧**不**读 `mediaSourceType`）。播放 SegmentBase JSON 时把该
 JSON 交给 DASH 插件即可 —— 既可以给 JSON 文件 URL（`loadJsonManifest`），也可以直接传对象
