@@ -530,6 +530,18 @@ namespace Cicada {
                     pSegment->startTime = static_cast<uint64_t>(startTimeUs);
                     startTimeUs += pSegment->duration;
                     pSegment->init_section = initSegment;
+                    /*
+                     * 音频的 single 模式同样**必须**把每段的字节范围挂上去（与上面视频那条一字不差）。
+                     * 漏了它的后果不是"少读一点"，而是每个段都去读**整个音频文件**：数据源不带范围，
+                     * 每段都能读出开头那堆数据，于是永远在放同一段音频、而且永远读不到结尾 ——
+                     * 表现为"视频播完了音频还在继续、怎么拖都像同一段、永不暂停"（2026-09-28 用户实测）。
+                     */
+                    if (!seg.byteRange.empty()) {
+                        int64_t rangeStart = 0, rangeEnd = 0;
+                        if (sscanf(seg.byteRange.c_str(), "%lld-%lld", (long long *) &rangeStart, (long long *) &rangeEnd) == 2) {
+                            pSegment->setByteRange(rangeStart, rangeEnd);
+                        }
+                    }
                     if (!encryptions.empty()) {
                         pSegment->setEncryption(encryptions);
                     }
