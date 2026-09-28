@@ -371,3 +371,24 @@ adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso,symbol | Sel
 ### 11.3 回退
 `git reset --hard pre-ndk-mediacodec`（tag 已推送），或
 `git revert 74ec39a5 7c6d1ce0 31a65e7c`（保留文档与设计记录）。
+
+## 十二、工程门与验证记录（本次迁移的静态证据）
+
+对 `pre-ndk-mediacodec..HEAD` 的**改动集**（15 个文件；其中 C/C++ 8 个，**全部**位于 L0
+`framework/codec/Android/**`）逐门扫描：
+
+| 门 | 判据 | 结果 |
+|---|---|---|
+| 平台宏只在 L0 与构建系统 | `__(ANDROID\|APPLE\|linux)__\|_WIN32\|TARGET_OS_\|OHOS\|_MSC_VER` | 8 命中，全部在 `framework/codec/Android/**`（L0）与 CMake；**L1 核心 0** |
+| 不新增配置开关 | `setOption\|options::SET\|options::REPLACE\|addValue` | **0** |
+| 无看门狗 / 墙钟死线 | `watchdog\|_TIMEOUT_MS\|_DEADLINE_\|usleep(\|af_msleep(1xx` | **0**（`wait_for(lock, microseconds(timeoutUs))` 用的是**接口入参**超时，不是新死线） |
+| 不给既有类加虚函数 | `git diff` 的 `+.*virtual`（限定 `mediaCodecDecoder.h`、`MediaCodec_Decoder.h`） | **空**（虚函数只出现在新建的 `IAndroidCodecBinding`） |
+| 新成员不插既有类中间 | `git diff` 的成员行 | 只有 `mDecoder` **类型就地替换**、死成员 `mUseNdk` 删除；无中途新增 |
+| 注释不含"星号紧跟斜杠" | `\S\*/\S` | **0** |
+| 双解码器/pending 群/死线常量残余 | `SINGLE-DECODER-REFACTOR.md` §五 32 模式 `-CaseSensitive` | **0** |
+| 编译（Android） | `:cicadaplayer:assembleDebug` + `:app:assembleDebug`、`:premierlibrary:assembleDebug` | 均 **BUILD SUCCESSFUL**，0 error |
+| 编译（共享内核 MSVC） | `media_player` Release | 产出 `media_player.lib`；`error C\|warning C\|error LNK\|warning LNK` = **0** |
+| 音频帧数据所有权 | `framework/base/media/AVAFPacket.cpp:188-193`（`av_frame_get_buffer` + `memcpy`） | **深拷贝** ⇒ NDK 用 `AMediaCodec_getOutputBuffer` 直接指针后立刻 `releaseOutputBuffer` 是安全的 |
+
+**仍缺的证据（只能由真机给出，见 §十一）**：seek 落点帧是否就是"包含目标的那一帧"、位置是否
+单调不回退、切档成功率与耗时、音画同步；以及 `ndk-async` 下"每帧 0 JNI"的 simpleperf 数字。
