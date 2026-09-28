@@ -291,13 +291,18 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
 | `convert-to-manifest.py` | 23.4 KB → 40.3 KB | `parse_mpd()` 增加 SegmentBase/SegmentList/SegmentTemplate 三种识别与 `index_range`/`init_range`/`media_ranges`/`segment_base_timescale`/`is_audio`；独立的 `parse_m4s_sidx()` / `build_sidx_segments()` / `join_url()`（标准库）；`build_segmentbase_manifest()`（清单里没有 `<SegmentBase>` 就报错，避免改写失败时产出错清单）；`build_segment_info(..., single=...)` 新增 single 分支；`main()` 多写 `test-dash-{version}-segmentbase.json`（文件缺失只警告跳过，存在但 sidx/校验失败则非零退出） |
 | `verify_segmentbase.py` | 新增 11.7 KB | 验收工具（§五）：MPD/JSON/单文件 sidx 三方交叉校验 + 临时名残留检查 |
 
-**已完成的验证**：三个脚本 `python -m py_compile` **全部通过**（Python 3.10.9）。
+**已完成的验证**：
+- 三个脚本 `python -m py_compile` **全部通过**（Python 3.10.9）；
+- 内核改动后的**全量**鸿蒙构建：`hvigorw assembleHar`（module=cicadaplayer@default）与
+  `hvigorw assembleHap` 均 **BUILD SUCCESSFUL，0 error / 0 warning**；两个 ABI 的
+  `libcicadaplayer.so` 都重新链接（arm64-v8a 与 x86_64 时间戳一致），`libdemuxer.a` 两个 ABI 各自重编，
+  且两份 `.so` 里都能查到新代码的日志串（`segmentBase: %zu segments from sidx of`、
+  `segmentBase: no sidx reference in`）⇒ 改动确实进了两个 ABI，不是只有本机 arm64 探针。
+
 **尚未完成**：改动后的脚本**真跑一次**（我试图在临时工作目录跑全流程时，用户拒绝了该命令的提权，
-故未执行；按规则不重试、不绕道）→ 因此 §五 表里"脚本自检 / 产物结构"两行仍是**待执行**，
+故未执行；按规则不重试、不绕道；用户已选择**自行在本机跑**并把 `verify_segmentbase.py` 的输出反馈）
+→ 因此 §五 表里"脚本自检 / 产物结构"两行仍是**待执行**，
 `output-segmentbase.mpd` 与 `test-dash-*-segmentbase.json` 的**真实产物形状尚未经机器核对**。
-需要用户二选一：① 允许我在临时目录（`%TEMP%\sb_run`，已备好 1080p25/24s 测试源与脚本副本）
-真跑一遍并跑 `verify_segmentbase.py`；② 由用户在本机跑一次（脚本目录下 `input.mp4` + 三个脚本），
-把 `verify_segmentbase.py` 的输出贴回来。
 
 **风险点（脚本作者自述，按可能性排序）**：① `-i output.mpd -c copy … -single_file 1 -global_sidx 1`
 这条再封装路径未在真机验证（最可能是 dash demuxer→dashenc 复制的 DTS 报错，或再封装清单
