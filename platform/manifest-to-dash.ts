@@ -231,10 +231,15 @@ function toSegmentList(
   duration: number,
   baseUrl?: string,
 ): DashSegmentList | undefined {
-  if (segInfo.mode === 'single') return undefined;
+  const isSingle = segInfo.mode === 'single';
+
+  /* single 模式优先走 SegmentBase（dash.js 自己读单文件里的 sidx）；
+     只有"没有 indexRange、但给了显式 segments[]"时才退回 SegmentList —— 那些段都指向
+     同一个文件，所以每段必须带 mediaRange，媒体地址用单文件本身（baseUrl）。 */
+  if (isSingle && segInfo.indexRange) return undefined;
 
   /* 获取分片列表：优先显式 segments，其次展开模板 */
-  const segments = resolveSegments(segInfo, duration, baseUrl);
+  const segments = resolveSegments(segInfo, duration, isSingle ? undefined : baseUrl);
   if (segments.length === 0) return undefined;
 
   /* 有 media 模式或能自动推导 media 时用 SegmentTemplate，不用 SegmentList
@@ -244,9 +249,13 @@ function toSegmentList(
   const pattern = resolveMediaPattern(segInfo);
   if (pattern && !segInfo.segments?.length) return undefined;
 
-  const segmentUrls: DashSegmentUrl[] = segments.map((seg) => ({
-    media: seg.url,
-  }));
+  const segmentUrls: DashSegmentUrl[] = segments.map((seg) => {
+    const item: DashSegmentUrl = { media: isSingle && baseUrl ? baseUrl : seg.url };
+    /* 带字节范围的段（single 兜底，或显式给了 byteRange 的 list）必须写 mediaRange，
+       否则 dash.js 会把同一个文件整段当分片拉下来。 */
+    if (seg.byteRange) item.mediaRange = seg.byteRange;
+    return item;
+  });
 
   const timescale = segInfo.timescale ?? 1;
   /* 固定分片时长（timescale 单位）
@@ -265,7 +274,11 @@ function toSegmentList(
   };
 
   if (segInfo.initialization) {
-    result.Initialization = { sourceURL: resolveUrl(baseUrl, segInfo.initialization) };
+    /* single 模式的 initialization 是字节范围（SegmentList 的 Initialization 也支持 @range），
+       其余模式才是"初始化段 URL"。 */
+    result.Initialization = isSingle
+      ? { range: segInfo.initialization }
+      : { sourceURL: resolveUrl(baseUrl, segInfo.initialization) };
   }
 
   if (segInfo.startNumber !== undefined) {
@@ -283,14 +296,25 @@ function toSegmentList(
 function toSegmentBase(segInfo: SegmentInfo): DashSegmentBase | undefined {
   if (segInfo.mode !== 'single') return undefined;
 
+  /* 没有 indexRange 就没有段表来源：single 模式的段表在单文件的 sidx 里，
+     dash.js 必须靠 indexRange 才能定位它。这种情况交给 toSegmentList() 用显式
+     segments[]（带 byteRange）兜底 —— 不要产出一个没有段表的空 <SegmentBase/>。 */
+  if (!segInfo.indexRange) return undefined;
+
   const result: DashSegmentBase = {};
 
-  if (segInfo.indexRange) {
-    result.indexRange = segInfo.indexRange;
-  }
+  result.indexRange = segInfo.indexRange;
 
   if (segInfo.initialization) {
+    /* single 模式下 initialization 是**字节范围**（如 "0-819"）而不是 URL ——
+       与内核 ManifestDemuxer 的 single 语义一致（docs/MANIFEST-OBJECT-GUIDE.md 6.3）。
+       重写后的 output-segmentbase.mpd 也只覆盖到 sidx 之前，两边口径相同。 */
     result.Initialization = { range: segInfo.initialization };
+  }
+
+  if (segInfo.timescale !== undefined) {
+    /* 带上 timescale：段表时长以 sidx 自己的 timescale 为准，写出来便于与 MPD 对齐排查。 */
+    result.timescale = segInfo.timescale;
   }
 
   return result;
@@ -314,11 +338,14 @@ function toDashRepresentation(rep: MediaRepresentation, duration: number): DashR
    * dash.js 的 BaseURL 会与分片 URL 拼接，因此必须以 / 结尾。
    * 用户传入的 baseUrl/backupUrls 不应包含尾部 /，由转换器自动补全。 */
   const baseURLs: string[] = [];
+  /* single（SegmentBase）模式下 baseUrl/backupUrls 是**媒体文件本身**而不是目录：
+     补尾部斜杠会让 dash.js 把地址拼成 "xxx.m4s/"，所以原样保留。 */
+  const singleFile = rep.segmentInfo?.mode === 'single';
   if (rep.baseUrl) {
-    baseURLs.push(ensureTrailingSlash(rep.baseUrl));
+    baseURLs.push(singleFile ? rep.baseUrl : ensureTrailingSlash(rep.baseUrl));
   }
   if (rep.backupUrls && rep.backupUrls.length > 0) {
-    baseURLs.push(...rep.backupUrls.map(ensureTrailingSlash));
+    baseURLs.push(...rep.backupUrls.map((url) => (singleFile ? url : ensureTrailingSlash(url))));
   }
 
   const representation: DashRepresentation = {

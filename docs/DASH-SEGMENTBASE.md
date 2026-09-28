@@ -281,7 +281,45 @@ ffmpeg -y -i <OUTPUT_DIR>/output.mpd -map 0 -c copy -f dash \
    representation**，不再留下"清单能开、永远没数据"的空段表。
 5. 编译：鸿蒙 native 目标链接通过，**0 error / 0 代码告警**（见提交记录）。
 
-## 九、脚本改动落地情况（本轮）
+## 九、Web 侧（hili-player plugins，dash.js 5.1.1）
+
+位置：`D:\hilihili\front\hili-player\packages\plugins`（该目录是**独立的 git 仓库**，根在
+`D:\hilihili\front\hili-player`）。Web 侧不直接解析 MPD 文本，而是把 MediaManifest **对象**
+转成 dash.js 的清单对象注入：`src/dash/DashPlugin.ts` 的 JSON 路径
+（`loadJsonManifest()` 先 fetch JSON，或直接对象注入）→ `src/vendor/manifest-to-dash.ts`
+的 `manifestToDash()` → `dashPlayer.attachSource(dashManifest)`。
+
+**改造前存在三处缺口**（都会让新 SegmentBase JSON 播不了）：
+
+| # | 缺口 | 后果 | 修法 |
+|---|---|---|---|
+| 1 | `toDashRepresentation()` 对 `rep.baseUrl` 无条件调 `ensureTrailingSlash()` | single 模式下 `baseUrl` 是**媒体文件**（`…/sb-video-h264-1080p.m4s`），补斜杠后 dash.js 会拼出 `…m4s/` → 404 | single 模式（`segmentInfo.mode === 'single'`）的 `baseUrl`/`backupUrls` **原样保留**，不补斜杠 |
+| 2 | `toSegmentBase()` 没有 `indexRange` 时也返回 `{}` | 产出一个**没有段表的空 `<SegmentBase/>`** —— dash.js 无从取段，静默停摆 | 无 `indexRange` 时返回 `undefined`，把段表交给 `toSegmentList()` 兜底 |
+| 3 | `toSegmentList()` 对 `single` 直接 `return undefined`，且从不写 `mediaRange` | ① 只有 `segments[]`（无 sidx）的 single JSON 彻底没段表；② 任何带 `byteRange` 的 list 都被丢掉字节范围（整文件当分片拉） | single 且**无** `indexRange` 时允许走 SegmentList：每段 `media` = 单文件、`mediaRange` = `byteRange`，`Initialization` 用 `{range}`（字节范围）而不是 `{sourceURL}`；list 模式也补上 `mediaRange` |
+
+另外 `validate.ts` 的 single 分支收紧为：`initialization`/`indexRange` 必须是 `start-end`
+形式的字节范围（不再是"是字符串就行"），且**必须**给 `indexRange` 或非空 `segments[]`，
+否则直接报错（不留"空壳清单"等到播放时才失败）。类型侧无需改动 —— `DashSegmentUrl.mediaRange`
+与 `DashSegmentBase.timescale` 早已存在。
+
+**同步副本**：`CicadaPlayerNext/platform/manifest-to-dash.ts` 与本文件保持**字节一致**
+（它是 web 侧那份的参考副本），改完用 `Copy-Item` 覆盖并核对 SHA256。
+
+**验证**：`packages/plugins` 下 `tsc --noEmit` 的 20 条报错**全部**来自其它包
+（`core/warning.ts`、`player/src/**`）的既有问题，改动涉及的两个文件（`manifest-to-dash.ts`、
+`validate.ts`）零报错。
+
+**相邻缺口（本次未做，如实记录）**：`src/vendor/manifest-to-hls.ts:127` 对 `single` 仍是
+`return undefined` ⇒ 同一份 SegmentBase JSON 若被 HLS 插件接手，会得到**空播放列表**。
+`MediaManifest` 的类型注释里写着"HLS: 映射为 #EXT-X-BYTERANGE"，即当初有意图但未实现；
+补法是：用 `segments[]` 逐条产出 `#EXTINF` + `#EXT-X-BYTERANGE:<len>@<start>`（URI 用单文件），
+并用 `#EXT-X-MAP:URI="<单文件>",BYTERANGE="<initialization>"` 表达 init 段。本目标只做 DASH。
+
+**怎么用**：协议由调用方选插件（web 侧**不**读 `mediaSourceType`）。播放 SegmentBase JSON 时把该
+JSON 交给 DASH 插件即可 —— 既可以给 JSON 文件 URL（`loadJsonManifest`），也可以直接传对象
+（`manifestToDash(source)`）。生成的 JSON 顶层带 `mediaSourceType: "dash"`，与 6.3 节一致。
+
+## 十、脚本改动落地情况（本轮）
 
 两个脚本已改写（`D:\hilihili\转码脚本\`，**该目录不在 git 仓库里**，只随文件系统交付）：
 
