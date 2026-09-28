@@ -1058,3 +1058,26 @@ if (cur > mSet->maxBufferDuration &&
 **不会**造成无界预读，因此不影响本条款；若要严格"单一"，应改成"内存恢复时还原原值"
 （需追加 3 个成员记录原值，新成员按规则追加类末尾）—— 属独立小改动，
 等真机出现内存压力日志后再做，避免现在动 L1 缓冲阈值。
+
+---
+
+## 十九、objective 条款 → 实现位置 → 静态证据 → 真机标记（验收地图，2026-09-27）
+
+行号为**当前代码实测值**（非记忆）。真机验收时按最右列逐条比对即可。
+
+| objective 条款 | 实现位置 | 静态证据 | 真机标记（应看到 / 不应看到） |
+|---|---|---|---|
+| (1) 首个上屏帧 = **包含目标**的那一帧 | 判据唯一入口：`RenderVideo` → `shouldDropForDiscontinuity()`（声明 `SuperMediaPlayer.h:1422`，定义 `SuperMediaPlayer.cpp:8248`）；采纳 `acceptDiscontinuityLandingFrame()`（声明 `:1444`，定义 `:8315`；"包含/越过目标"出口 `:8305`，EOF 结构性出口经 `:4973`） | 判据**只与 `targetUs` 比**（无预算/无地板/无放弃距离，见 `:175`）；在 `RenderVideo` 里**无条件先调一次**（`:4942`，理由见 `:4970`）；帧长按解码器补齐（§十七） | 每条 seek **恰好一条** `seek landing frame accepted: pts=…, offsetFromTarget=…`（`:8349`），且 `offsetFromTarget = -(≤1 帧)`；不出现"永不上屏" |
+| (1) 位置 = 目标且**单调不回退** | 单一内容轴：`mMasterClock.GetTime()`；seek 受理钉 seekPos（`SMPMessageControllerListener.cpp:930/1250`），落点采纳再钉 targetUs（`:8315`） | 位置上报与渲染节拍**共用同一根轴**（`SuperMediaPlayer.cpp:1120-1150`）；音频参考 = 目标点 + 设备已消费量（`getAudioPlayTimeStamp`） | `[seekdiag] … master=…` 单调不减；暂停/缓冲时恒定；不出现"跳回 0 / 变负" |
+| (1) seek 后立刻出画出声、不卡顿 | 落点过滤 + `beginRendererJoining()`；音频对齐到**同一目标点**（`RenderAudio`） | joining 是**事件驱动**（无计时器）；帧队列上限按实际硬/软解（§十六） | `renderer joining started (seek finished)`；`audio first frame after seek … afterSeekMs`；`video frame queue cap: pictureCacheType=…` |
+| (2) **单解码器**切档、100% 成功 | `SwitchVideo()`（原地重建同一解码器）：CloseStream → OpenStream → Seek → `FlushVideoPath` → `DropPacketsByStream` → `rebuildVideoDecoder()`（原地）→ `beginDiscontinuity()`；READY 由"帧真的走完 `SendVideoFrameToRender`"驱动（`:5229`） | 双解码器/pending 群/占位面交接残余扫描 **0**（§五 32 模式 `-CaseSensitive`）；`finishQualitySwitch()` 幂等（`:2907`）；切档**不 flush 音频** | `quality switch: closed the old video stream … (single-decoder switch)`（`:6514`）；`quality switch: single-decoder switch applied in … ms`（`:6616`）；`quality switch rendered … (READY driver…)`（`:5229`）；只有 `status=0 → status=1` |
+| (3) 无花屏 / 马赛克 | HLS/DASH 落点延迟线 `SeekLandingStage`（从**关键帧**起解，前缀丢弃）；转码侧 IDR 2 s / 分片 6 s（`转码脚本/transcode_all.py`：`-forced-idr/-no-scenecut/-strict_gop`） | `[seekLanding] … RELEASE: … landingIsKey=1`；`video pts axis refreshed from the packet: … offset=0` | 无 `wait a key frame` 风暴；落点 `pts` 与目标同轴；画面无绿块/错帧 |
+| (4) `Discontinuity` 单一模型 | `struct Discontinuity{targetUs,startUs,generation,filterActive,acceptedFramePos,audioBaseUs,audioBaseConsumedUs}`（`SuperMediaPlayer.h:114-161`）；`beginDiscontinuity()` `SuperMediaPlayer.cpp:8185` | `generation` 是 atomic；读侧**先 load generation** 再读非原子字段（`SuperMediaPlayer.h:138-142`） | 日志里 `generation=N` 逐次 +1；无"跨代际误采纳" |
+| (4) 音频按已写字节重设基准 | `pinAudioClockBase()` 定义 `:6067`；写点：`FlushAudioPath`（`:6031/:6039/:6041/:6043`）+ RenderAudio 首帧（`:4490`） | 增量在 flush **之前**读、快照在 flush **之后**取（本轮修的正是这里） | `audio first frame after seek: … audioBase=… consumed=…`，`audioBase` **不为负**、`consumed` 不是 `INT64_MAX` |
+| (4) 有界前向缓冲**单一规则** | 唯一闸门 `:2136-2163`；度量 `getPlayerBufferDuration()` `:6286-6361`（取各流**最小值**）；上限 `mSet->maxBufferDuration`（默认 50 s，`MediaPlayerConfig.cpp:16`） | §十八 逐项核查（含低内存单向收紧这一例外） | `packetQ(v)` 不再出现"数百秒"量级 |
+| (4) 无墙钟死线 / 看门狗 | 本系列改动集静态门 = 0（`watchdog\|_TIMEOUT_MS\|_DEADLINE_\|usleep(\|af_msleep(1xx`）；P5 记录同样为 0 | — | 不出现 `deadline hit`、`*_TIMEOUT_MS`、`PENDING_*` 相关日志 |
+| 工程硬约束 | 平台宏只在 L0（本系列 8 命中全在 `framework/codec/Android/**`，**L1 = 0**）；新增配置开关 0；既有类新增虚函数 0；成员只做类型替换/末尾追加；注释 `*/` 混入 0 | `ANDROID-NDK-ASYNC-DECODER.md` §十二 | — |
+| 编译门 | MSVC `media_player`：`error C/warning C/error LNK/warning LNK = 0`；`:cicadaplayer` / `:app` / `:premierlibrary` 均 `BUILD SUCCESSFUL` | 各轮提交记录 | — |
+
+**用法**：真机日志按最右列逐条勾选；任何一条"应看到"缺失或"不应看到"出现，即该条款未通过，
+按中列定位到具体函数再修 —— 这样避免"凭感觉说好了/没好"。
