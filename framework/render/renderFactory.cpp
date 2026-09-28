@@ -67,6 +67,25 @@ void videoRenderFactory::setRenderCreator(RenderCreator creator)
     AF_LOGI("video render creator %s\n", creator != nullptr ? "registered" : "cleared");
 }
 
+bool videoRenderFactory::preferDirectSurfaceForHardwareDecode()
+{
+#if defined(__OHOS__) && defined(GLRENDER)
+    /*
+     * 鸿蒙：GLRender 现在也编进来了（软解 CPU 帧走它上屏），但**硬解仍然必须走
+     * OH_AVCodec 的 surface 直出** —— 解码器直接把画面写进 XComponent 窗口，零拷贝、
+     * 帧不进框架，与开 GLRender 之前完全一致。所以这里告诉上层"硬解时请带上
+     * FLAG_DUMMY"：带上之后渲染器是 DummyVideoRender，SuperMediaPlayer 走
+     * DECFLAG_DIRECT + mSet->mView；软解不加这个标志，渲染器是 GLRender。
+     *
+     * 如果硬解创建失败，SuperMediaPlayer::SetUpVideoPath 本来就会去掉 FLAG_DUMMY
+     * 重建一次渲染器再退软解，那条既有路径会自动把渲染器切成 GLRender。
+     */
+    return true;
+#else
+    return false;
+#endif
+}
+
 std::unique_ptr<IAudioRender> AudioRenderFactory::create()
 {
     std::unique_ptr<IAudioRender> render = audioRenderPrototype::create(AF_CODEC_ID_NONE);

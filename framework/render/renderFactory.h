@@ -35,6 +35,19 @@ namespace Cicada {
         static void setRenderCreator(RenderCreator creator);
 
         static std::unique_ptr<IVideoRender> create(uint64_t flags = 0);
+
+        /*
+         * 平台是否要求"硬解直出、框架不参与渲染"。
+         *
+         * 默认 false（＝ 今天所有平台的行为：渲染器完全由 flags 决定）。鸿蒙返回 true：
+         * 那里的硬解是 OH_AVCodec 的 surface 直出（解码器直接把画面写进 XComponent
+         * 窗口，零拷贝、帧不进框架），只有让上层带上 FLAG_DUMMY 才会走这条零拷贝路径；
+         * 而软解（CPU 帧）由 GLRender 上屏。
+         *
+         * 判据本身写在平台分发文件 renderFactory.cpp 里，所以 L1 核心只问这个函数、
+         * 不需要引入任何平台宏。
+         */
+        static bool preferDirectSurfaceForHardwareDecode();
     };
 }// namespace Cicada
 

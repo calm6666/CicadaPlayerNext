@@ -8,11 +8,13 @@
 
 import cicada from 'libcicadaplayer.so';
 import {
+  CacheConfig,
   CicadaPlayerListener,
   DecoderType,
   CicadaDrmCallback,
   MediaInfo,
   MirrorMode,
+  PlayerEventCode,
   PlayerEventName,
   PlayerStatus,
   PropertyKey,
@@ -472,6 +474,33 @@ export class CicadaPlayer {
     }
     return cicada.setDrmRequestCallback(this.id, callback);
   }
+
+  // ------------------------------------------------------------ 播放缓存
+  /**
+   * 设置播放缓存配置；**必须在 setDataSource() 之前调用**（缓存代理 URL 是那一刻
+   * 算出来的）。传 null 关闭缓存。
+   *
+   * 字段见 CacheConfig；未给出的字段在内核侧取默认值（enable 默认 false）。
+   * JSON 畸形时内核不改动当前配置（这时不会有任何异常抛出，只是不生效）。
+   */
+  setCacheConfig(config: CacheConfig | null): void {
+    if (this.id < 0) {
+      return;
+    }
+    cicada.setCacheConfig(this.id, config === null ? null : JSON.stringify(config));
+  }
+
+  /**
+   * 取某个**源 URL** 按当前缓存配置对应的缓存文件路径；未开启缓存 / 算不出路径时
+   * 返回空串。只看配置，不看文件是否已经存在。
+   */
+  getCachePath(url: string): string {
+    if (this.id < 0) {
+      return '';
+    }
+    return cicada.getCachePath(this.id, url);
+  }
+
   // ------------------------------------------------------------- events
   private handleEvent(name: string, a: number, b: number, payload: string | ArrayBuffer): void {
     const listener = this.listener;
@@ -509,6 +538,23 @@ export class CicadaPlayer {
         }
         break;
       case PlayerEventName.INFO:
+        /*
+         * 缓存的两条事件走的就是内核 EventCallback 这条既有通道（NAPI 桥统一取名为
+         * 'event'，所以这里只能在 INFO 分支里按 code 分辨）。code 见 PlayerEventCode
+         * 与 media_player_error_def.h。
+         */
+        if (a === PlayerEventCode.CACHE_SUCCESS) {
+          if (listener.onCacheSuccess) {
+            listener.onCacheSuccess();
+          }
+          break;
+        }
+        if (a === PlayerEventCode.CACHE_ERROR) {
+          if (listener.onCacheError) {
+            listener.onCacheError(payload as string);
+          }
+          break;
+        }
         if (listener.onInfo) {
           listener.onInfo(a, payload as string);
         }

@@ -114,6 +114,10 @@ static napi_value Init(napi_env env, napi_value exports)
 
         // ---- DRM ----
         {"setDrmRequestCallback", nullptr, cicada_ohos::SetDrmRequestCallback, nullptr, nullptr, nullptr, napi_default, nullptr},
+
+        // ---- 播放缓存 play-and-cache ----
+        {"setCacheConfig", nullptr, cicada_ohos::SetCacheConfig, nullptr, nullptr, nullptr, napi_default, nullptr},
+        {"getCachePath", nullptr, cicada_ohos::GetCachePath, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     napi_define_properties(env, exports, sizeof(desc) / sizeof(desc[0]), desc);
     return exports;

@@ -191,6 +191,12 @@ namespace cicada_ohos {
 
     // ---- DRM ----
     napi_value SetDrmRequestCallback(napi_env env, napi_callback_info info);
+
+    // ---- 播放缓存 play-and-cache ----
+    // setCacheConfig(id, json | null)：json 契约见 media_player_api.h，传 null 关闭缓存。
+    // getCachePath(id, url)：返回该源 URL 对应的缓存文件路径（未开启返回空串）。
+    napi_value SetCacheConfig(napi_env env, napi_callback_info info);
+    napi_value GetCachePath(napi_env env, napi_callback_info info);
 } // namespace cicada_ohos
 
 #endif // CICADA_OHOS_NAPI_PLAYER_H

@@ -146,6 +146,30 @@ export class PlayerEventName {
   static readonly SUBTITLE_EXT_ADD: string = 'subtitleExtAdd';
   static readonly VIDEO_QUALITY_SWITCH: string = 'videoQualitySwitch';
   static readonly SUBTITLE_HEADER: string = 'subtitleHeader';
+  /** 播放缓存写成（内核 MEDIA_PLAYER_EVENT_CACHE_SUCCESS）。 */
+  static readonly CACHE_SUCCESS: string = 'cacheSuccess';
+  /** 播放缓存失败（内核 MEDIA_PLAYER_EVENT_CACHE_ERROR）。 */
+  static readonly CACHE_ERROR: string = 'cacheError';
+}
+
+/**
+ * 内核 MediaPlayerEventType 的数值（mediaPlayer/media_player_error_def.h）。
+ *
+ * 缓存这两条事件是走既有的 EventCallback 通道上报的，在 NAPI 桥上它的名字统一是
+ * 'event'（对应 PlayerEventName.INFO），**事件身份只有一个数字 code**，所以这里
+ * 必须按 code 分辨，不能按名字分辨。
+ *
+ * 数值推导（枚举在 media_player_error_def.h 里是隐式递增的，起点是
+ * MEDIA_PLAYER_EVENT_START = 0，且 SW_VIDEO_DECODER 与 START 同值）：
+ *   0 START/SW_VIDEO_DECODER, 1 AUDIO_CODEC_NOT_SUPPORT, 2 AUDIO_DECODER_DEVICE_ERROR,
+ *   3 VIDEO_CODEC_NOT_SUPPORT, 4 VIDEO_DECODER_DEVICE_ERROR, 5 VIDEO_RENDER_INIT_ERROR,
+ *   6 DEMUXER_TRACE_ID, 7 DEMUXER_EOF, 8 NETWORK_RETRY, 9 NETWORK_RETRY_SUCCESS,
+ *   10 CACHE_SUCCESS, 11 CACHE_ERROR, 12 SYSTEM_LOW_MEMORY, ...
+ * 与本文件里其它"镜像内核枚举"的写法一致，改内核那份枚举时这里要同步。
+ */
+export class PlayerEventCode {
+  static readonly CACHE_SUCCESS: number = 10;
+  static readonly CACHE_ERROR: number = 11;
 }
 
 /**
@@ -179,6 +203,10 @@ export interface CicadaPlayerListener {
   onSubtitleHide?: (id: number) => void;
   onSubtitleExtAdd?: (index: number, url: string) => void;
   onVideoQualitySwitch?: (status: number, streamIndex: number, desc: string) => void;
+  /** 播放缓存写成（内核 MEDIA_PLAYER_EVENT_CACHE_SUCCESS，code = 10）。 */
+  onCacheSuccess?: () => void;
+  /** 播放缓存失败（内核 MEDIA_PLAYER_EVENT_CACHE_ERROR，code = 11），msg 是失败原因。 */
+  onCacheError?: (msg: string) => void;
 }
 
 /** 清晰度切换状态（native: player_quality_switch_status）。 */
@@ -256,4 +284,28 @@ export interface StreamMeta {
   lang: string;
   title: string;
   description: string;
+}
+
+/**
+ * 播放缓存配置（native: cacheModule/cache/CacheConfig.h 的成员，字段一一对应）。
+ *
+ * 对应 NAPI 的 setCacheConfig(id, json)，json 就是本接口的 JSON.stringify；
+ * 字段名与内核 CacheConfig 的成员同名，**不要另造名字**。
+ *
+ * 用法：必须在 setDataSource() 之前调 setCacheConfig()，否则对本次播放无效
+ * （缓存代理 URL 是 setDataSource 那一刻算出来的）。
+ */
+export interface CacheConfig {
+  /** 是否开启播放缓存；false 或整体传 null = 关闭。 */
+  enable: boolean;
+  /** 只缓存不超过这个时长的媒体（秒）；0 = 不按这条限制。 */
+  maxDurationS: number;
+  /** 缓存目录容量上限（MB），也是"只在缓存目录内腾空间"的判据。 */
+  maxDirSizeMB: number;
+  /** 缓存目录（必填，否则算不出缓存文件路径）。 */
+  cacheDir: string;
+  /** 缓存文件名；留空则按源 URL 的 MD5 生成。 */
+  cacheFileName: string;
+  /** 源文件大小（字节）；内核拿不到 Content-Length 时用它做容量判断。 */
+  sourceSize: number;
 }

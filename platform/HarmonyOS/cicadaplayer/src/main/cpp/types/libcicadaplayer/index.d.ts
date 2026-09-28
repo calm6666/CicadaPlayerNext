@@ -121,6 +121,16 @@ declare namespace cicadaNapi {
 
     // ---- DRM ----
     const setDrmRequestCallback: (id: number, callback: DrmCallback) => boolean;
+
+    // ---- 播放缓存 play-and-cache ----
+    /**
+     * 设置播放缓存（必须在 setDataSource 之前调用）。
+     * json 是 CacheConfig 的 JSON（字段：enable / maxDurationS / maxDirSizeMB /
+     * cacheDir / cacheFileName / sourceSize），传 null 关闭缓存。
+     */
+    const setCacheConfig: (id: number, json: string | null) => void;
+    /** 取某个源 URL 对应的缓存文件路径；未命中/未开启返回空串。 */
+    const getCachePath: (id: number, url: string) => string;
 }
 
 export default cicadaNapi;

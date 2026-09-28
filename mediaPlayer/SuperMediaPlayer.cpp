@@ -330,6 +330,84 @@ const int64_t SuperMediaPlayer::SEEK_ACCURATE_MAX = 11 * 1000 * 1000;
 #define HAVE_AUDIO (mCurrentAudioIndex >= 0)
 #define HAVE_SUBTITLE (mCurrentSubtitleIndex >= 0)
 
+#ifdef ENABLE_CACHE_MODULE
+/*
+ * ==================== 【播放缓存 play-and-cache】====================
+ *
+ * 缓存模块（framework/cacheModule）用 ICacheDataSource 反过来问播放器三个问题：
+ * 媒体总大小、时长、某类流的元数据 —— 它要在写成缓存文件之前把这些填进 remuxer。
+ * 这就是"把播放器当数据源"的适配器。
+ *
+ * 位置很关键：它必须在 SuperMediaPlayer 的**完整定义之后**（本文件第 35-36 行才
+ * include "SuperMediaPlayer.h"，而这里是成员函数区，类已完整），所以可以直接
+ * 调用本类的公开接口，不需要 playerHandle 也不经过任何 C API —— 这条路径是 C API
+ * 句柄那条路，绕回 C API 会形成"缓存为了知道时长去调播放器、播放器又在等缓存"
+ * 的同线程回环。
+ *
+ * 生命周期：本对象由 CacheManager 拥有（CacheManager 的析构函数 delete mDataSource），
+ * 而 CacheManager 由 SuperMediaPlayer::mCacheManager（shared_ptr）持有（只在
+ * SetDataSource 里创建，在 Stop()/析构里停掉并释放）。所以"数据源对象活着 ⇒ 它引用的
+ * SuperMediaPlayer 一定活着"这条不变式由成员拥有关系 + 析构里先停播放线程来保证。
+ *
+ * 只读：三个函数都不改播放器任何状态（GetOption 里读 mediaStreamSize 会取一次
+ * mCreateMutex，与其它读取方同序）。
+ */
+class SuperMediaPlayerCacheDataSource : public ICacheDataSource {
+public:
+    explicit SuperMediaPlayerCacheDataSource(SuperMediaPlayer &player) : mPlayer(player)
+    {}
+
+    ~SuperMediaPlayerCacheDataSource() override = default;
+
+    int64_t getStreamSize() override
+    {
+        char streamSizeStr[MAX_OPT_VALUE_LENGTH] = {0};
+        mPlayer.GetOption("mediaStreamSize", streamSizeStr);
+        return atoll(streamSizeStr);
+    }
+
+    int64_t getDuration() override
+    {
+        /* 与 PlayerCacheDataSource 同口径：CicadaGetDuration 就是 GetDuration()。 */
+        return mPlayer.GetDuration();
+    }
+
+    int getStreamMeta(Stream_meta *ptr, StreamType type) override
+    {
+        return mPlayer.getCurrentStreamMeta(ptr, type);
+    }
+
+private:
+    SuperMediaPlayer &mPlayer;
+};
+
+std::shared_ptr<CacheManager> SuperMediaPlayer::cacheManagerOrNull()
+{
+    /*
+     * 只做一次拷贝就放锁：拿到的 shared_ptr 保证这一包喂完之前管理器不会析构，
+     * 而临界区里不做任何 I/O ⇒ 不会与 mCreateMutex 形成锁序。
+     */
+    std::lock_guard<std::mutex> lock(mCacheMutex);
+    return mCacheManager;
+}
+
+void SuperMediaPlayer::ReleaseCacheManager()
+{
+    std::shared_ptr<CacheManager> manager;
+    {
+        std::lock_guard<std::mutex> lock(mCacheMutex);
+        manager = std::move(mCacheManager);
+        mCacheManager = nullptr;
+    }
+
+    if (manager != nullptr) {
+        manager->stop("cache stopped by release");
+        /* 交回 shared_ptr：若此刻播放线程正拿着同一份快照喂包，真正的析构会晚一步
+         * 发生在他放掉那份快照之后（CacheManager 析构里会 delete 掉数据源对象）。 */
+    }
+}
+#endif
+
 SuperMediaPlayer::SuperMediaPlayer()
 {
     AF_LOGD("SuperMediaPlayer()");
@@ -450,9 +528,96 @@ void SuperMediaPlayer::setBitStreamCb(readCB read, seekCB seek, void *arg)
 
 void SuperMediaPlayer::SetDataSource(const char *url)
 {
+    /*
+     * ==================== 【播放缓存 play-and-cache 的挂载点】====================
+     *
+     * 缓存的全部动作都发生在这一个函数里，位置与 C++ 门面
+     * MediaPlayer::SetDataSource(const char *) 逐字一致 —— 因为这里正是
+     * "C API 句柄那条路"的同一层（CicadaSetDataSourceWithUrl → ICicadaPlayer::
+     * SetDataSource(const char *)），也就是说 MediaPlayer::SetDataSource 原来做的
+     * 那套缓存流程被原样搬到了内核这一层，C API / NAPI / ArkTS 不需要各自再实现一遍。
+     *
+     * 为什么必须挂在这一层、而不是挂在底下 openUrl()/ProcessSetDataSourceMsg()：
+     *   1) 缓存代理 URL 是在**发出 MSG_SETDATASOURCE 之前**就要算出来的 ——
+     *      CacheManager::init() 只有在"缓存文件已经存在"时才返回本地文件路径，
+     *      其余情况返回源 URL。换句话说"这次到底播哪个 URL"是一个**同步**决定，
+     *      它决定了下游 MSG_SETDATASOURCE 里该放什么。挂到消息处理线程上就变成
+     *      "消息已入队、再改 URL"，位置不对。
+     *   2) 缓存的帧喂入需要 mCacheManager 在播放前就存在（播放线程每一帧都要查它）。
+     *
+     * 下游确实用的是代理 URL：mSet->url 由 ProcessSetDataSourceMsg() 落盘
+     * （SMPMessageControllerListener.cpp:833-840），openUrl() 再用它建数据源
+     * （同文件 :1715 `dataSourcePrototype::create(mPlayer.mSet->url, …)`）。
+     * 所以这里把 proxyUrl 塞进那条通路就是"真正用在了 demuxer/数据源上"。
+     *
+     * 生效范围（本文件另外两个重载为什么不加）：
+     *   · SetDataSource(const Manifest::MediaManifest &) 与 SetDataSource(const
+     *     std::string &jsonManifest) 走的是"清单对象模式"，播放地址在清单**内部**，
+     *     这一层拿不到最终 URL，缓存配置了一个 URL 也对不上；因此这两个重载保持原样。
+     *   · 应用层若用清单模式，缓存不参与 —— 这是既有能力的边界，不是新增开关。
+     */
+    string playUrl = url ? url : "";
+#ifdef ENABLE_CACHE_MODULE
+    {
+        /*
+         * 换片源 ⇒ 上一份缓存管理器必须先停掉并释放（它记着旧 URL 与旧配置），
+         * 否则新的 setSourceUrl 会落在旧对象上。stop 只停内部 remuxer 线程。
+         */
+        ReleaseCacheManager();
+        mCacheSuccess = false;
+
+        if (mCacheConfig.mEnable) {
+            /* shared_ptr：喂包线程可能正拿着同一份快照（见 .h 里 mCacheManager 那段）。 */
+            std::shared_ptr<CacheManager> manager(new CacheManager());
+            manager->setCacheConfig(mCacheConfig);
+            manager->setSourceUrl(playUrl);
+            /*
+             * description 原来由 C++ 门面从 C API 的 option 里取（CicadaGetOption），
+             * 这里直接读同一份 option（SetOption("description", …) 的落点），
+             * 少绕一层、语义完全相同；缓存文件里的 description 元数据就取它。
+             */
+            manager->setDescription(mSet->mOptions.get("description"));
+            manager->setCacheFailCallback([this](int code, string msg) -> void {
+                AF_LOGE("Cache fail : code = %d , msg = %s", code, msg.c_str());
+                if (mPNotifier != nullptr) {
+                    mPNotifier->NotifyEvent(MEDIA_PLAYER_EVENT_CACHE_ERROR, msg.c_str());
+                }
+            });
+            manager->setCacheSuccessCallback([this]() -> void {
+                mCacheSuccess = true;
+                /*
+                 * 缓存文件已经写成、而应用层要循环播放：把循环交给"播完之后重新
+                 * setDataSource"那条既有路径（与 C++ 门面 MediaPlayer 的做法一致），
+                 * 这样下一次播放直接命中缓存文件，不会把同一份内容再写一遍。
+                 * 注意这里改的是内核的 mSet->bLooping（不是再调 SetLooping()，
+                 * 那会再触发一次本类的循环处理）。
+                 */
+                if (isLooping()) {
+                    mSet->bLooping = false;
+                }
+
+                if (mPNotifier != nullptr) {
+                    /*
+                     * 事件描述必须是**非空**字符串：PlayerNotifier::NotifyEvent 里是
+                     * `strdup(desc)`，传 nullptr 会直接解引用空指针。成功事件没有
+                     * 原因可讲，就发空串（应用层拿到的 payload 是空字符串）。
+                     */
+                    mPNotifier->NotifyEvent(MEDIA_PLAYER_EVENT_CACHE_SUCCESS, "");
+                }
+            });
+            manager->setDataSource(new SuperMediaPlayerCacheDataSource(*this));
+            playUrl = manager->init();
+            {
+                std::lock_guard<std::mutex> lock(mCacheMutex);
+                mCacheManager = manager;
+            }
+        }
+    }
+#endif
+
     MsgParam param;
     MsgDataSourceParam dataSourceParam = {nullptr};
-    dataSourceParam.url = new string(url ? url : "");
+    dataSourceParam.url = new string(playUrl);
     param.dataSourceParam = dataSourceParam;
     putMsg(MSG_SETDATASOURCE, param);
 }
@@ -756,6 +921,16 @@ int SuperMediaPlayer::Stop()
 {
     if ((afThread::THREAD_STATUS_RUNNING != mApsaraThread->getStatus()) &&
         ((mPlayStatus == PLAYER_IDLE) || (mPlayStatus == PLAYER_STOPPED))) {
+#ifdef ENABLE_CACHE_MODULE
+        /*
+         * 【播放缓存】早退这条路上也要把缓存管理器收掉：析构函数就是调 Stop()，
+         * 而"已经处于 STOPPED/IDLE"的实例会走到这个 return —— 漏掉这里会在析构
+         * 路径上留下一份没人释放的缓存管理器（连带它挂着的 ICacheDataSource）。
+         * ReleaseCacheManager() 幂等，重复调用没有副作用。
+         */
+        mCacheSuccess = false;
+        ReleaseCacheManager();
+#endif
         return 0;
     }
 
@@ -768,6 +943,24 @@ int SuperMediaPlayer::Stop()
     mCanceled = true;
     mPNotifier->Clean();
     mPNotifier->Enable(false);
+
+#ifdef ENABLE_CACHE_MODULE
+    /*
+     * 【播放缓存】停播即停缓存：把缓存管理器停掉并释放。
+     *
+     * 位置在 mPNotifier->Enable(false) **之后**是有意的：停止缓存时 remuxer 线程会
+     * 以"没写完"收尾并回调失败（CacheFileRemuxer 在 interrupt/wantStop 时
+     * mResultCallback(false)，CacheManager 再把它转成失败回调）。notifier 此刻已经
+     * 关掉，所以这次"被停止"不会作为 MEDIA_PLAYER_EVENT_CACHE_ERROR 抛给应用层 ——
+     * 用户主动停播不是缓存错误。
+     *
+     * 停在这里也早于下面 flush 视频/音频路与关数据源：缓存 remuxer 收到的是包的副本
+     * （CacheFileRemuxer::addFrame 里 frame->clone()），先停它就不会再有喂入。
+     * stop() 只置状态并停内部线程，不做任何按时间判定的等待。
+     */
+    mCacheSuccess = false;
+    ReleaseCacheManager();
+#endif
 
     // video render use a dispatch_sync to main thread, to avoid dead lock,release the thread to deal dispatch_sync job
     // FIXME: create render in setView api in main thread on apple platform
@@ -919,6 +1112,17 @@ void SuperMediaPlayer::SetDropBufferThreshold(int dropValue)
 void SuperMediaPlayer::SetLooping(bool looping)
 {
     mSet->bLooping = looping;
+#ifdef ENABLE_CACHE_MODULE
+    /*
+     * 与 C++ 门面 MediaPlayer::SetLooping 里那段对称：缓存**已经写成**之后应用层
+     * 才打开循环，就把循环交给"播完之后重新 setDataSource"那条既有路径
+     * （播循环时不再写第二遍缓存）。缓存还没写成时不动 —— 这次播放该写完。
+     * 没有任何按时间判定的分支，两个条件都是状态读数。
+     */
+    if (mCacheSuccess.load() && isLooping()) {
+        mSet->bLooping = false;
+    }
+#endif
 }
 
 bool SuperMediaPlayer::isLooping()
@@ -2203,6 +2407,18 @@ void SuperMediaPlayer::doReadPacket()
             AF_LOGE("Player ReadPacket EOF");
 
             if (!mEof) {
+#ifdef ENABLE_CACHE_MODULE
+                /*
+                 * 【播放缓存】码流读完 = 缓存文件可以收尾了（CacheModule::streamEnd
+                 * 把 remuxer 收干净并触发成功/失败回调），与 C++ 门面
+                 * MediaPlayer::eventCallback 里处理 MEDIA_PLAYER_EVENT_DEMUXER_EOF
+                 * 的做法一致 —— 那里调的就是 CacheManager::complete()。
+                 * 要在 NotifyEvent 之前调：应用层收到 EOF 之后可能立刻换源/停止。
+                 */
+                if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
+                    cacheManager->complete();
+                }
+#endif
                 mPNotifier->NotifyEvent(MEDIA_PLAYER_EVENT_DEMUXER_EOF, "Demuxer End of File");
             }
 
@@ -5748,6 +5964,22 @@ int SuperMediaPlayer::ReadPacket()
     if (pFrame->getInfo().streamIndex == mCurrentVideoIndex ||
         (mVideoSwitchInFlight && pFrame->getInfo().streamIndex == mVideoSwitchTargetIndex)) {
         mHaveVideoPkt = true;
+#ifdef ENABLE_CACHE_MODULE
+        /*
+         * 【播放缓存】编码视频包直接喂给缓存管理器。
+         *
+         * 这里（读包路径）才是**编码包**，而 SendVideoFrameToRender() 拿到的是已解码帧 ——
+         * 缓存要把原始码流重新封装成缓存文件，所以必须在这一层喂。位置紧跟既有的
+         * mMediaFrameCb 之后、AddPacket 之前，与 C++ 门面 MediaPlayer::mediaFrameCallback
+         * （它就是把 onMediaFrameCallback 的包转给 sendMediaFrame）同一条数据流。
+         *
+         * 不挂在 mMediaFrameCb 上：那条回调是应用层用来出帧的，应用层不注册它就为空，
+         * 缓存不能依赖应用层注册（C API 句柄这条路本来就不注册）。
+         */
+        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
+            cacheManager->sendMediaFrame(pMedia_Frame.get(), ST_TYPE_VIDEO);
+        }
+#endif
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_VIDEO);
         }
@@ -5862,6 +6094,12 @@ int SuperMediaPlayer::ReadPacket()
             }
         }
 
+#ifdef ENABLE_CACHE_MODULE
+        /* 【播放缓存】音频编码包，同上。 */
+        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
+            cacheManager->sendMediaFrame(pMedia_Frame.get(), ST_TYPE_AUDIO);
+        }
+#endif
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_AUDIO);
         }
@@ -5869,6 +6107,12 @@ int SuperMediaPlayer::ReadPacket()
         mBufferController->AddPacket(std::move(pMedia_Frame), BUFFER_TYPE_AUDIO);
         mDemuxerService->SetOption("A_FRAME_RECEIVE", pFrame->getInfo().pts);
     } else if (pFrame->getInfo().streamIndex == mCurrentSubtitleIndex || pFrame->getInfo().streamIndex == mWillChangedSubtitleStreamIndex) {
+#ifdef ENABLE_CACHE_MODULE
+        /* 【播放缓存】字幕包（缓存文件里的字幕轨），同上。 */
+        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
+            cacheManager->sendMediaFrame(pMedia_Frame.get(), ST_TYPE_SUB);
+        }
+#endif
         if (mMediaFrameCb && (!pMedia_Frame->isProtected() || mDrmKeyValid)) {
             mMediaFrameCb(mMediaFrameCbArg, pMedia_Frame.get(), ST_TYPE_SUB);
         }
@@ -6973,6 +7217,18 @@ int SuperMediaPlayer::SetUpVideoPath()
         || isWideVine
 #endif
     ) {
+        flags |= IVideoRender::FLAG_DUMMY;
+    }
+
+    /*
+     * 【硬解直出 / 软解上屏的分流】平台要求"硬解直出"时补上 FLAG_DUMMY：
+     * 鸿蒙的硬解是 OH_AVCodec 把画面直接写进 XComponent 窗口（零拷贝、帧不进框架），
+     * 带上这个标志才会走那条路，行为与开 GLRender 之前一字不差；软解（bHW == false）
+     * 不加，渲染器就是 GLRender，CPU 帧能上屏。其它平台这个函数返回 false，
+     * flags 与今天完全一致。硬解创建失败时下面会去掉 FLAG_DUMMY 重建渲染器，
+     * 于是"硬解失败退软解"这条既有路径会自动切到 GLRender。
+     */
+    if (bHW && videoRenderFactory::preferDirectSurfaceForHardwareDecode()) {
         flags |= IVideoRender::FLAG_DUMMY;
     }
 
@@ -8414,4 +8670,57 @@ int SuperMediaPlayer::SetVideoCodecSupportJson(const std::string &json)
             (int) parsed->hwDecode.size(), (int) parsed->preference.size(),
             parsed->preferred.empty() ? "(auto)" : parsed->preferred.c_str());
     return 0;
+}
+
+/*
+ * ==================== 【播放缓存 play-and-cache】实现 ====================
+ *
+ * 契约见 ICicadaPlayer.h；配置字段见 cacheModule/cache/CacheConfig.h；
+ * 真正"接上播放"的地方在 SetDataSource(const char *)（见那个函数里的长注释）。
+ * 这两个函数与 media_player_api.cpp 里的 C API 一一对应：
+ *   CicadaSetCacheConfig() -> SetCacheConfig()
+ *   CicadaGetCachePath()   -> GetCachePathByURL()
+ *
+ * 两个定义都**不带平台宏、也不整体包在 ENABLE_CACHE_MODULE 里**：ICicadaPlayer 无条件
+ * 声明了它们，关掉缓存模块的构建里也必须存在这两个 override（那时是空操作 / 返回空串），
+ * 与 MediaPlayer::SetCacheConfig / GetCachePathByURL 的既有写法完全一致。
+ */
+void SuperMediaPlayer::SetCacheConfig(const CacheConfig &config)
+{
+#ifdef ENABLE_CACHE_MODULE
+    /*
+     * 配置没变就什么都不做（CacheConfig::isSame 逐字段比较），语义与 C++ 门面
+     * MediaPlayer::SetCacheConfig 一致。变了才：先停掉已在跑的缓存管理器（它是按旧
+     * 配置建的，接着写会落到旧 cacheDir / 旧文件名上），再存下新配置 ——
+     * 下一次 SetDataSource 会照新配置重建。
+     *
+     * 只 stop、不从成员上摘掉：管理器本体与它挂着的 ICacheDataSource 由下一次
+     * SetDataSource 的 ReleaseCacheManager() 统一释放；这里留着对象是为了让
+     * "停止写缓存"这件事立刻生效，而不用等下一次换源。
+     */
+    if (!mCacheConfig.isSame(config)) {
+        if (std::shared_ptr<CacheManager> cacheManager = cacheManagerOrNull()) {
+            cacheManager->stop("cache stopped by change config");
+        }
+
+        mCacheConfig = config;
+    }
+#else
+    (void) config;
+#endif
+}
+
+std::string SuperMediaPlayer::GetCachePathByURL(const std::string &url)
+{
+#ifdef ENABLE_CACHE_MODULE
+    /*
+     * 纯计算：命中与否、文件在不在都不看，只按"当前配置 + 这个源 URL"给出路径
+     * （静态函数，不依赖 mCacheManager 是否存在）。未开启缓存 / cacheDir 为空 /
+     * URL 为空时 CachePath 自己会返回空串。
+     */
+    return CacheManager::getCachePath(url, mCacheConfig);
+#else
+    (void) url;
+    return "";
+#endif
 }

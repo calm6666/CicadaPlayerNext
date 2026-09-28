@@ -109,6 +109,8 @@ hvigorw assembleHap --mode module -p product=default
 | 能力 | 实现 | 关键 API |
 |---|---|---|
 | 视频硬解 | `OhosAVCodecDecoder`（surface mode 零拷贝） | `OH_AVCapability_GetHardwareDecoderName` → `OH_AVCodec_CreateByName` → `OH_AVCodec_SetSurface` → `RenderOutputBuffer`；buffer mode（NV12）兜底 |
+| 视频软解上屏 | 框架自带 `GLRender`（与安卓软解**同一套 YUV 着色器**：缩放/旋转/镜像/色觉矩阵都在里面），平台层是 EGL + GLES3 + `OHNativeWindow` | `framework/render/video/glRender/platform/ohos/{ohos_native_window,ohos_egl_context}`；`ENABLE_GLRENDER=ON`、`libEGL.so` / `libGLESv3.so`；节拍走 `OHOSVSync`（`OH_NativeVSync`） |
+| 硬解/软解分流 | `videoRenderFactory::preferDirectSurfaceForHardwareDecode()`：硬解仍带 `FLAG_DUMMY` 走 surface 直出（与开 GLRender 之前一字不差），软解才落 GLRender | `mediaPlayer/SuperMediaPlayer.cpp` 的 `SetUpVideoPath()`（L1 核心只问函数、不含平台宏） |
 | 音频输出 | `OhosAudioRender`（回调拉流） | `OH_AudioStreamBuilder`/`OH_AudioRenderer_OnWriteData` |
 | 上屏 | ArkTS `XComponentController.getXComponentSurfaceId()` → NAPI → `OH_NativeWindow_CreateNativeWindowFromSurfaceId` → `CicadaSetView` | `libnative_window.so` |
 | DRM | `OhosDrmHandler`（DRM Kit） | `OH_MediaKeySystem_Create(uuid)` → `OH_MediaKeySession_Create` → `GenerateMediaKeyRequest` → license 回调 → `ProcessMediaKeyResponse` → `OH_AVCodec_SetMediakeySessionConfig` |
@@ -226,6 +228,8 @@ CicadaVideo({ controller: this.controller, listener: this.listener })
 - 网络：`setTimeout` / `setDropBufferThreshold` / `setReferer` / `setUserAgent` /
   `addCustomHttpHeader` / `removeAllCustomHttpHeader`
 - 截图：`snapshot`
+- 缓存：`setCacheConfig(config)` / `getCachePath(url)`（事件 `onCacheSuccess` / `onCacheError`；
+  必须在 `setDataSource` 之前设置，缓存代理 URL 是那一刻算出来的；清单/对象模式不参与缓存）
 - DRM：`setDrmCallback` / `setDataSourceWithManifest`
 - 诊断：`setOption` / `getOption` / `getPropertyLong` / `getPropertyString` / `getPlayerName` /
   `getVideoRenderFps` / `getVideoDecodeFps` / `invokeComponent` / `getCurrentStreamMeta`
@@ -243,12 +247,15 @@ CicadaVideo({ controller: this.controller, listener: this.listener })
   `CicadaSetErrorConverter` / `CicadaSetComponentCb`（C++ 对象注入，后者 header 里已标
   `attribute_deprecated`）、`CicadaSetDataSourceWithManifestObject`（结构体版，应用侧走 JSON 版
   `setDataSourceWithManifest`）、`CicadaFree`（`CicadaFreeString` 的同义函数，已绑后者）。
-- **播放缓存（play-and-cache）**：缓存配置落在 C++ `MediaPlayer` 门面上，C API 句柄
-  （`ICicadaPlayer` / `SuperMediaPlayer`）这条路径还没有 CacheConfig 入口，因此 HAR 暂不提供
-  `setCacheConfig`；Demo 的缓存页保持原样（只记录缺口）。
-- **软件解码上屏**：OHOS 侧 `videoRenderFactory` 对非 surface 路径返回 `DummyVideoRender`，
-  即软解帧不出画（硬解直出不受影响）。**显示节拍这一半已经就位**：`VSyncFactory` 在鸿蒙返回
-  `OHOSVSync`（系统 `OH_NativeVSync`，周期用 `OH_NativeVSync_GetPeriod` 读回来，取不到才退回
-  `timedVSync`）；还差的只是渲染器本身 —— 经 `videoRenderFactory::setRenderCreator()` 注入一个
-  基于 EGL/GLES 的渲染器（复用 `framework/render/video/glRender`），属独立一件事。
+- **播放缓存（play-and-cache）**：已在 `ICicadaPlayer` / C API 路径上实现（见 §6.4 与 README），
+  配置字段与内核 `CacheConfig` 同名；清单/对象模式两个 `SetDataSource` 重载不参与缓存
+  （最终 URL 在清单内部，这一层对不上）。
+- **软件解码上屏：已实现**。框架自带的 `glRender` 在 OHOS 上编进来了
+  （`ENABLE_GLRENDER=ON` + `platform/ohos/` 的 EGL/原生窗口平台层 + `libEGL.so`/`libGLESv3.so`），
+  缩放/旋转/镜像/色觉矩阵走与安卓**同一套着色器**；硬解**不**走它 —— 平台通过
+  `videoRenderFactory::preferDirectSurfaceForHardwareDecode()` 让硬解继续带 `FLAG_DUMMY`
+  走 `OH_AVCodec` 的 surface 零拷贝直出，软解与"硬解失败退软解"两条路才落 GLRender。
+  真机待验：`eglCreateWindowSurface` 与窗口缓冲几何。
+- **播放器 UI：已与 Compose 安卓版对齐**（`cicadaplayer/src/main/ets/component/compose/**`，
+  资源在 `resources/rawfile/{lottie-icon,icons}`，三个 lottie JSON 与 Compose 源字节一致）。
 - **播放器级 ASS 字幕渲染**：内核给事件与文本，渲染由应用层负责。

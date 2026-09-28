@@ -23,7 +23,11 @@ struct SourceInputUrlPage {
 
   private toast(message: string): void {
     try {
-      promptAction.showToast({ message: message, duration: 2000 });
+      // promptAction.showToast({ message: message, duration: 2000 });
+      this.getUIContext().getPromptAction().showToast({
+        message: message,
+        duration: 2000
+      });
     } catch (error) {
       // TODO: Implement error handling.
     }
@@ -40,7 +44,7 @@ struct SourceInputUrlPage {
    */
   private async scanQrCode(): Promise<void> {
     try {
-      const context = getContext(this) as common.UIAbilityContext;
+      const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
       // scanTypes keeps its default (all formats), which covers the Android
       // format set (ONE_D + QR_CODE + DATA_MATRIX).
       const options: scanBarcode.ScanOptions = { enableAlbum: true };
@@ -69,7 +73,10 @@ struct SourceInputUrlPage {
       return;
     }
     const params: PlayerRouteParams = { url: target, playType: SourceType.URL };
-    router.pushUrl({ url: 'pages/AvPlayerPage', params: params });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/AvPlayerPage',
+      params: params
+    });
   }
 
   private playUrl(url: string, playType: string): void {
@@ -78,7 +85,10 @@ struct SourceInputUrlPage {
       return;
     }
     const params: PlayerRouteParams = { url: url, playType: playType };
-    router.pushUrl({ url: 'pages/Index', params: params });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/Index',
+      params: params
+    });
   }
 
   /** Falls back to the field's hint, matching the Android behaviour. */
@@ -93,7 +103,10 @@ struct SourceInputUrlPage {
       return;
     }
     const params: PlayerRouteParams = { url: json, playType: SourceType.MANIFEST };
-    router.pushUrl({ url: 'pages/Index', params: params });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/Index',
+      params: params
+    });
   }
 
   build() {

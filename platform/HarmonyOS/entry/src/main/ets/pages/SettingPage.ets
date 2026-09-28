@@ -32,7 +32,7 @@ struct SettingPage {
   @State selectedPlayer: string = 'CicadaPlayer';
 
   aboutToAppear(): void {
-    const context = getContext(this) as common.UIAbilityContext;
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     Settings.init(context);
     this.hardwareDecoder = Settings.isHardwareDecoderEnabled();
     this.selectedPlayer = Settings.getPlayerType();
@@ -55,7 +55,10 @@ struct SettingPage {
   }
 
   private toast(message: string): void {
-    promptAction.showToast({ message: message, duration: 2000 });
+    this.getUIContext().getPromptAction().showToast({
+      message: message,
+      duration: 2000
+    });
   }
 
   private onHardwareDecoderChange(checked: boolean): void {

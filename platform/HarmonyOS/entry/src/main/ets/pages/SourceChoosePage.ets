@@ -30,26 +30,36 @@ struct SourceChoosePage {
   @State pickedPath: string = '';
 
   aboutToAppear(): void {
-    const context = getContext(this) as common.UIAbilityContext;
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext;
     this.groups = SourceListParser.parse(context);
     this.groupNames = SourceListParser.groupNames(this.groups);
   }
 
   private toast(message: string): void {
-    promptAction.showToast({ message: message, duration: 2000 });
+    this.getUIContext().getPromptAction().showToast({
+      message: message,
+      duration: 2000
+    });
   }
 
   private openGroup(groupName: string): void {
     const params: SourceGroupParams = { groupName: groupName };
-    router.pushUrl({ url: 'pages/SourceChooseListPage', params: params });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/SourceChooseListPage',
+      params: params
+    });
   }
 
   private openInputUrl(): void {
-    router.pushUrl({ url: 'pages/SourceInputUrlPage' });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/SourceInputUrlPage'
+    });
   }
 
   private openSetting(): void {
-    router.pushUrl({ url: 'pages/SettingPage' });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/SettingPage'
+    });
   }
 
   /**
@@ -83,7 +93,7 @@ struct SourceChoosePage {
     // is handed over and the page opens the fd itself — no copy, no path
     // resolution needed.
     if (Settings.getPlayerType() === PLAYER_TYPE_AVPLAYER) {
-      router.pushUrl({
+      this.getUIContext().getRouter().pushUrl({
         url: 'pages/AvPlayerPage',
         params: { url: uri, playType: SourceType.LOCAL, groupName: 'Local' }
       });
@@ -99,7 +109,7 @@ struct SourceChoosePage {
     }
 
     this.pickedPath = localPath;
-    router.pushUrl({
+    this.getUIContext().getRouter().pushUrl({
       url: 'pages/Index',
       params: { url: this.pickedPath, playType: SourceType.LOCAL, groupName: 'Local' }
     });

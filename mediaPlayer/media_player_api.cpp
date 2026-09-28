@@ -884,3 +884,98 @@ void CicadaFree(const char *str)
 {
     free((void *) str);
 }
+
+/*
+ * ==================== 【播放缓存 play-and-cache】C 接口实现 ====================
+ *
+ * JSON 契约、事件码、字符串所有权见 media_player_api.h；内核语义见 ICicadaPlayer.h；
+ * 真正把缓存接上播放的地方在 SuperMediaPlayer::SetDataSource(const char *)。
+ *
+ * 与上面那一对"硬解能力"接口一样，这两个函数刻意不用 GET_PLAYER 宏：那个宏直接
+ * 解引用 pHandle，而这两个是给 JNI/Qt/NAPI 的新入口，句柄为空时应该安全返回，
+ * 而不是先崩一下。
+ */
+namespace {
+    /*
+     * 解析一份缓存配置 JSON。成功返回 true 并写满 out；失败返回 false（调用方
+     * 保持当前状态不变）。缺字段用 CacheConfig 的默认值 —— 也就是
+     * CacheConfig config{} 的初值（false / 0 / 0 / "" / "" / 0），只在 JSON 里
+     * 明确给出的字段上覆盖。
+     *
+     * 顶层必须是 JSON 对象：先看第一个非空白字符是不是 '{'。这一步不是多余 ——
+     * cJSON_Parse() 对 "[1,2]" 这类合法但非对象的文本也会成功，而那不是一份配置，
+     * 按"解析失败"处理比按"全部取默认值（=关闭缓存）"处理更安全：后者会**悄悄
+     * 关掉**用户已经开着的缓存。
+     */
+    bool parseCacheConfigJson(const char *json, CacheConfig &out)
+    {
+        const char *cursor = json;
+
+        while (*cursor == ' ' || *cursor == '\t' || *cursor == '\n' || *cursor == '\r') {
+            ++cursor;
+        }
+
+        if (*cursor != '{') {
+            return false;
+        }
+
+        CicadaJSONItem item{std::string(json)};
+
+        if (!item.isValid()) {
+            return false;
+        }
+
+        out.mEnable = item.getBool("enable", false);
+        out.mMaxDurationS = item.getInt64("maxDurationS", 0);
+        out.mMaxDirSizeMB = item.getInt64("maxDirSizeMB", 0);
+        out.mCacheDir = item.getString("cacheDir", "");
+        out.mCacheFileName = item.getString("cacheFileName", "");
+        out.mSourceSize = item.getInt64("sourceSize", 0);
+        return true;
+    }
+} // namespace
+
+void CicadaSetCacheConfig(playerHandle *pHandle, const char *json)
+{
+    ICicadaPlayer *player = (pHandle != nullptr) ? pHandle->pPlayer : nullptr;
+
+    if (player == nullptr) {
+        return;
+    }
+
+    /*
+     * NULL / 空串 = 关闭缓存：CacheConfig 的默认构造就是"全默认"（mEnable = false），
+     * 直接把它交下去即可，不需要单独的关闭分支。
+     */
+    CacheConfig config{};
+
+    if (json != nullptr && json[0] != '\0') {
+        if (!parseCacheConfigJson(json, config)) {
+            AF_LOGE("CicadaSetCacheConfig: malformed json, the current cache config is unchanged");
+            return;
+        }
+    }
+
+    player->SetCacheConfig(config);
+}
+
+const char *CicadaGetCachePath(playerHandle *pHandle, const char *url)
+{
+    ICicadaPlayer *player = (pHandle != nullptr) ? pHandle->pPlayer : nullptr;
+
+    if (player == nullptr) {
+        return nullptr;
+    }
+
+    const std::string path = player->GetCachePathByURL(std::string(url != nullptr ? url : ""));
+
+    /* malloc 出来的是**副本**，调用方用 CicadaFreeString() / CicadaFree() 释放。 */
+    char *buffer = (char *) malloc(path.size() + 1);
+
+    if (buffer == nullptr) {
+        return nullptr;
+    }
+
+    memcpy(buffer, path.c_str(), path.size() + 1);
+    return buffer;
+}

@@ -391,6 +391,37 @@ namespace Cicada {
             return false;
         }
 
+        /*
+         * ==================== 【播放缓存 play-and-cache】C 接口 ====================
+         *
+         * 这两个是播放缓存的两个落点，对应 C API 的 CicadaSetCacheConfig /
+         * CicadaGetCachePath（media_player_api.h），也是鸿蒙 NAPI 层
+         * setCacheConfig / getCachePath 唯一的向下出口。
+         *
+         * 语义：
+         *   · SetCacheConfig(config)：设置本实例的缓存配置（字段见 CacheConfig.h：
+         *     mEnable / mMaxDurationS / mMaxDirSizeMB / mCacheDir / mCacheFileName /
+         *     mSourceSize）。**必须在 SetDataSource 之前调用** —— 缓存代理 URL 是在
+         *     SetDataSource 那一刻算出来的，之后改配置对已经开始的这次播放不起作用。
+         *     配置与当前值相同（CacheConfig::isSame）时不动任何状态；不同时把已建好的
+         *     缓存管理器停掉（下一句注释里那条 stop 理由），再存下新配置。
+         *   · GetCachePathByURL(url)：给定一个**源 URL**，返回它按当前配置对应的
+         *     缓存文件路径；未开启缓存 / 没有 cacheDir / URL 为空时返回空串。
+         *     它只是"算路径"，不看文件是否存在（存在性判断在内核的 getCachedFilePath 里）。
+         *
+         * 两个都是**带默认实现**的虚函数，且**追加在 vtable 末尾**（本工程硬规则：
+         * 既有实现的槽位编号不变）。默认实现不参与任何状态，所以只有
+         * SuperMediaPlayer 需要覆盖它们，AppleAVPlayer / JavaExternalPlayer /
+         * MediaPlayer 等实现类一行都不用改（它们保持默认实现：set 无操作、get 返回空串）。
+         */
+        virtual void SetCacheConfig(const CacheConfig &config)
+        {}
+
+        virtual std::string GetCachePathByURL(const std::string &url)
+        {
+            return "";
+        }
+
 
     protected:
         playerMediaFrameCb mMediaFrameCb = nullptr;

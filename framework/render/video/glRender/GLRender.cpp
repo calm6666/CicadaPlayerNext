@@ -95,7 +95,7 @@ int GLRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
     }
 
     std::unique_lock<std::mutex> locker(mFrameMutex);
-    mInputQueue.push(move(frame));
+    mInputQueue.push(std::move(frame));
     return 0;
 }
 
@@ -409,7 +409,7 @@ bool GLRender::renderActually()
         std::unique_lock<std::mutex> locker(mFrameMutex);
 
         if (!mInputQueue.empty()) {
-            frame = move(mInputQueue.front());
+            frame = std::move(mInputQueue.front());
             mInputQueue.pop();
         } else {
             rendered = false;
@@ -702,7 +702,7 @@ IProgramContext *GLRender::getProgram(int frameFormat, IAFFrame *frame)
         if (mContext != nullptr) {
             targetProgram->setGLContext(mContext->GetContext());
         }
-        mPrograms[frameFormat] = move(targetProgram);
+        mPrograms[frameFormat] = std::move(targetProgram);
         return mPrograms[frameFormat].get();
     } else {
         return nullptr;

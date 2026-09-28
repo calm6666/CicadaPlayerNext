@@ -154,7 +154,7 @@ namespace Cicada {
             mOutputInfo.nb_samples = (int) ((float) frame->getInfo().audio.nb_samples / rate);
         }
 
-        mFrameQue.push(move(frame));
+        mFrameQue.push(std::move(frame));
         return 0;
     }
 
@@ -342,7 +342,7 @@ namespace Cicada {
             unique_lock<mutex> lock(mFrameQueMutex);
 
             if (!mFrameQue.empty()) {
-                filter_frame = move(mFrameQue.front());
+                filter_frame = std::move(mFrameQue.front());
                 mFrameQue.pop();
             }
         }

@@ -63,7 +63,10 @@ set(TARGET_LIBRARY_TYPE STATIC)
 set(ENABLE_OHOS_AVCODEC_DECODER ON CACHE BOOL
         "enable OpenHarmony OH_AVCodec hardware decoder" FORCE)
 set(ENABLE_OHOS_AUDIO_RENDER ON)
-set(ENABLE_GLRENDER OFF)
+# GLRender 在鸿蒙上打开：硬解仍走 OH_AVCodec 的 surface 直出（零拷贝，见
+# videoRenderFactory::preferDirectSurfaceForHardwareDecode），软解 CPU 帧由 GLRender
+# 上屏 —— 与 Android 软解同一条着色器通路（缩放/旋转/镜像/色觉矩阵都在里面）。
+set(ENABLE_GLRENDER ON)
 
 # NDK multimedia system libraries (stub libs resolved at runtime on device).
 # NOTE: the audio-codec stub is libnative_media_acodec.so -- there is no
@@ -79,4 +82,7 @@ set(OHOS_SYSTEM_LIBS
         libnative_media_core.so
         libohaudio.so
         libnative_drm.so
+        # GLRender 的平台层：EGL + GLES3（sysroot 里两个 ABI 的桩库都在）。
+        libEGL.so
+        libGLESv3.so
         )

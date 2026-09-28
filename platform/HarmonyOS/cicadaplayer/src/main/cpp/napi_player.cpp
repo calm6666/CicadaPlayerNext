@@ -1439,4 +1439,45 @@ namespace cicada_ohos {
         }
         return makeString(env, streamMetaToJson(meta));
     }
+
+    // ---------------------------------------------------------------------
+    // 播放缓存 play-and-cache
+    //
+    // 这两个是 C API CicadaSetCacheConfig / CicadaGetCachePath 的薄封装，
+    // 语义（JSON 契约、调用时机、事件码）见 media_player_api.h。
+    // ---------------------------------------------------------------------
+    napi_value SetCacheConfig(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 2) {
+            return makeUndefined(env);
+        }
+        /*
+         * null / undefined = 关闭缓存（内核把空指针当"取默认配置"处理）；
+         * ArkTS 侧传对象时统一 JSON.stringify 成契约里的那六个字段名。
+         */
+        napi_valuetype type = napi_undefined;
+        napi_typeof(env, a.argv[1], &type);
+        const bool clear = (type == napi_null || type == napi_undefined);
+        const std::string json = clear ? std::string() : argString(env, a.argv[1]);
+        CicadaSetCacheConfig(a.player->handle, json.empty() ? nullptr : json.c_str());
+        return makeUndefined(env);
+    }
+
+    napi_value GetCachePath(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        if (!unpack(env, info, a) || a.argc < 2) {
+            return makeString(env, "");
+        }
+        const std::string url = argString(env, a.argv[1]);
+        const char *path = CicadaGetCachePath(a.player->handle, url.c_str());
+        if (path == nullptr) {
+            return makeString(env, "");
+        }
+        // 内核返回的是 malloc 出来的副本，必须交回内核释放。
+        const std::string out(path);
+        CicadaFreeString(path);
+        return makeString(env, out);
+    }
 } // namespace cicada_ohos

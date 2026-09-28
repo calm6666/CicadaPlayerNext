@@ -425,4 +425,50 @@ void CicadaFreeString(const char *str);
 /* CicadaFreeString() 的同义函数（名字更短），两者完全等价。 */
 void CicadaFree(const char *str);
 
+/*
+ * ==================== 【播放缓存 play-and-cache】====================
+ *
+ * 这是 C API 句柄这条路（CicadaCreatePlayer → playerHandle*）上的播放缓存入口，
+ * 与 C++ 门面 MediaPlayer::SetCacheConfig / GetCachePathByURL 是同一份能力、
+ * 同一层语义（内核落点都在 ICicadaPlayer::SetCacheConfig / GetCachePathByURL，
+ * 只有 SuperMediaPlayer 实现它）。原来缓存只存在于 C++ 门面，句柄这条路拿不到；
+ * 这两个函数把它补上。
+ *
+ * 配置 JSON 契约（字段名与 cacheModule/cache/CacheConfig.h 的成员一一对应，
+ * **不要另造字段名**）：
+ *
+ *   {"enable":true,"maxDurationS":3600,"maxDirSizeMB":2048,
+ *    "cacheDir":"/data/.../cache","cacheFileName":"xxx","sourceSize":0}
+ *
+ *   · enable        bool  → CacheConfig::mEnable      ；默认 false（缺省=不开）
+ *   · maxDurationS  int64 → CacheConfig::mMaxDurationS ；默认 0
+ *   · maxDirSizeMB  int64 → CacheConfig::mMaxDirSizeMB ；默认 0
+ *   · cacheDir      string→ CacheConfig::mCacheDir     ；默认 ""
+ *   · cacheFileName string→ CacheConfig::mCacheFileName；默认 ""
+ *   · sourceSize    int64 → CacheConfig::mSourceSize   ；默认 0
+ *
+ *   缺字段一律取上表默认值；多余字段忽略。**必须在使用同一个 player 调
+ *   CicadaSetDataSourceWithUrl() 之前调用** —— 缓存代理 URL 是那一刻算出来的
+ *   （见 SuperMediaPlayer::SetDataSource），之后再改对本次播放无效。
+ *   json 传 NULL 或空串 = 关闭缓存（等价于所有字段取默认值）。
+ *   解析失败（畸形 JSON / 顶层不是对象）**不改变当前配置**，只打一条日志。
+ *
+ * 缓存事件：启用后内核会通过已注册的 listener 的 EventCallback 上报两条事件
+ *   MEDIA_PLAYER_EVENT_CACHE_SUCCESS（code = 11，msg 为 NULL）
+ *   MEDIA_PLAYER_EVENT_CACHE_ERROR  （code = 12，msg 为失败原因）
+ * 数值见 mediaPlayer/media_player_error_def.h 的 MediaPlayerEventType 枚举顺序。
+ */
+void CicadaSetCacheConfig(playerHandle *player, const char *json);
+
+/*
+ * 取某个**源 URL** 按当前缓存配置对应的缓存文件路径（未命中/未开启返回空串）。
+ *
+ * 返回的是 malloc 出来的、以 '\0' 结尾的**副本**，调用方必须用
+ * CicadaFreeString() / CicadaFree() 释放（与 CicadaGetVideoCodecSupport 同一个约定；
+ * 返回空串时也是一个可释放的有效指针，不是 NULL —— 绝不返回 NULL，只有内存不足才可能）。
+ * 传 url == NULL 视为空串。这个函数只"算路径"，不看文件在不在（存在与否由内核
+ * 在 SetDataSource 时判断：命中就直接播缓存文件）。
+ */
+const char *CicadaGetCachePath(playerHandle *player, const char *url);
+
 #endif // CICADA_PLAYER_H_

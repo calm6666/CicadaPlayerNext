@@ -57,10 +57,22 @@ cicadaplayer/                     SDK 模块（HAR）
   src/main/ets/
     api/CicadaTypes.ets           枚举 / 结构 / 事件名 / 监听器
     api/CicadaPlayer.ets          播放器封装
-    component/CicadaVideo.ets     XComponent + 生命周期 + 播放器装配
-    component/Player*.ets         控制条、手势层、轨道面板、选项面板、提示浮层
+    component/CicadaVideo.ets     极简视图（XComponent + 生命周期 + 播放器装配）
+    component/theme/PlayerTheme.ets  与 Compose 安卓版 1:1 的主题（颜色/尺寸/字号/圆角）
+    component/compose/            播放器 UI（逐项对齐 Compose 安卓版）
+      CicadaComposePlayer.ets     总装：画面 + 控制层 + 面板 + 手势 + 弹幕 + 浮层
+      PlayerControls.ets          顶部栏 / 底部栏 / 进度条 / 细进度条 / seek 预览 / 弹幕输入条
+      PlayerIcons.ets             图标与图标按钮（SVG path 复刻）
+      LottieIcon.ets              播放暂停 Lottie 按钮、进度条 dot
+      PlayerPanels.ets            清晰度 / 倍速 / 字幕 / 弹幕 / 音量 / 信息 六个浮层面板
+      PlayerStats.ets             信息统计与清晰度、字幕列表的派生
+      PlayerDanmakuLayer.ets      弹幕层（轨道引擎 + 滚动）
+      PlayerGestureLayer.ets      亮度 / 音量 / 横滑 seek / 双击 / 长按倍速
     util/Strings.ets              UI 文案
     util/TimeFormater.ets         时间/速率格式化
+  src/main/resources/rawfile/
+    lottie-icon/                  play-to-pause / pause-to-play / Thumb 三个动画 JSON（与 Compose 源**字节一致**）
+    icons/                        6 个 SVG 图标（pathData 与 Android vector 一致）
 entry/                            Demo 模块（HAP，无 native）
   src/main/ets/
     model/AppTypes.ets            本 App 自己的类型（sourceList、路由参数）
@@ -168,12 +180,23 @@ callbacks the pages implement。
 
 ## Known gaps
 
-1. **Play-and-cache config is not wired.** `CacheConfig` lives on the
-   `MediaPlayer` C++ facade, which the Android SDK's JNI binds directly; the C
-   API handle is an `ICicadaPlayer` (`SuperMediaPlayer`) with no cache-config
-   method and no cache implementation. The HAR therefore exposes no
-   `setCacheConfig`; the demo's cache tab is kept for parity and logs the gap.
-   Wiring it means implementing caching on the `ICicadaPlayer` path.
+1. **Play-and-cache is now wired on the `ICicadaPlayer` / C API path.**
+   `CacheConfig` used to live only on the `MediaPlayer` C++ facade; the C API
+   handle (`SuperMediaPlayer`) had no cache entry point at all. It now does:
+   `ICicadaPlayer::SetCacheConfig` / `GetCachePathByURL` (appended at the end of
+   the vtable with empty default bodies, so no other platform changed a line),
+   implemented in `SuperMediaPlayer` on top of the very same
+   `CacheManager` + `ICacheDataSource` machinery the facade uses
+   (`SuperMediaPlayerCacheDataSource`; the manager is held by `shared_ptr` so a
+   player thread that took a snapshot can never touch a freed manager), plus
+   `CicadaSetCacheConfig` / `CicadaGetCachePath` in the C API, the NAPI functions
+   `setCacheConfig` / `getCachePath` (JSON contract, field names identical to
+   `CacheConfig`'s members) and the ArkTS `setCacheConfig(config)` /
+   `getCachePath(url)` with `onCacheSuccess` / `onCacheError` events
+   (`MEDIA_PLAYER_EVENT_CACHE_SUCCESS` = 10, `_CACHE_ERROR` = 11).
+   Boundary: the two manifest (object-mode) `SetDataSource` overloads do **not**
+   take part — the final URL lives inside the manifest, so this layer cannot match
+   a cache entry to it.
 2. **DRM licence callback: exposed, with a thread contract.** `setDrmCallback`
    is now on the SDK. The kernel asks for the licence **synchronously on a player
    thread**, so the callback must return immediately (`ArrayBuffer` or base64
@@ -196,16 +219,18 @@ callbacks the pages implement。
    into the device while holding the queue lock: `OH_AudioRenderer_Flush` waits
    for the in-flight write callback, which needs that same lock, so the old order
    was a guaranteed self-deadlock on every seek.
-5. **Software-decoded video has no on-screen path.** `videoRenderFactory` returns
-   `DummyVideoRender` on OHOS for anything that is not surface-mode hardware
-   decode, so software frames are dropped instead of displayed (hardware decode
-   is unaffected). The remaining work is the renderer itself: register one through
-   `videoRenderFactory::setRenderCreator()` — an EGL/GLES renderer reusing
-   `framework/render/video/glRender`. The display-tick half is already in place:
-   `VSyncFactory` now returns `OHOSVSync` (system `OH_NativeVSync`, period read
-   back from `OH_NativeVSync_GetPeriod`) and falls back to `timedVSync` only when
-   `OH_NativeVSync_Create` fails. Deliberately not shipping an untested renderer:
-   it is on the render path.
+5. **Software-decoded video now has an on-screen path** (was: `DummyVideoRender`
+   dropped the frames). The framework's own `glRender` — the same renderer the
+   Android software path uses — is compiled in for OHOS
+   (`framework/render/video/glRender/platform/ohos/{ohos_native_window,ohos_egl_context}`,
+   `ENABLE_GLRENDER=ON`, links `libEGL.so`/`libGLESv3.so`), so scaling, rotation,
+   mirror and the colour-vision matrix all go through the same shaders as Android.
+   Hardware decode is deliberately **not** moved onto GLRender: the platform
+   reports `videoRenderFactory::preferDirectSurfaceForHardwareDecode() == true`,
+   so a hardware stream still carries `FLAG_DUMMY` and keeps today's zero-copy
+   `OH_AVCodec` surface-direct path; only software frames (and the existing
+   "hardware failed ⇒ software" fallback) land on GLRender. Untestable here: the
+   EGL window-surface creation and buffer geometry on a real device.
 6. **Compile-verified only.** There is no HarmonyOS device or emulator available
    here, so nothing has been run: gestures, window brightness, orientation
    switching, hardware decoding, audio output, DRM and ScanKit all compile and

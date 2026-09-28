@@ -34,6 +34,15 @@ using namespace std;
 #include "CicadaPlayerPrototype.h"
 #include <cacheModule/CacheModule.h>
 #include <cacheModule/cache/CacheConfig.h>
+/*
+ * 播放缓存的管理器类型（CacheManager 的**完整定义**，不是 CacheModule 的前向声明）。
+ * 本类末尾那几个缓存成员是指针，本来只靠前向声明也能声明；但 SetCacheConfig /
+ * GetCachePathByURL 的 override 与 .cpp 里对 CacheManager 成员函数的调用都需要
+ * 完整类型，照 MediaPlayer.h 的既有写法在这里一并包含（同一个头，同一份来源）。
+ */
+#ifdef ENABLE_CACHE_MODULE
+#include <cacheModule/CacheManager.h>
+#endif
 #include <codec/IDecoder.h>
 /*
  * 应用层传入的"设备硬解能力 + 编码偏好"覆盖值的类型
@@ -395,6 +404,28 @@ namespace Cicada {
         std::string GetVideoCodecSupportJson() override;
 
         int SetVideoCodecSupportJson(const std::string &json) override;
+
+        /*
+         * ==================== 【播放缓存 play-and-cache】====================
+         *
+         * 见 ICicadaPlayer.h 里那一段契约说明。这里只补本类的实现要点：
+         *
+         * SetCacheConfig()：只有配置真的变了（CacheConfig::isSame 为假）才动状态，
+         *   并且先把已在跑的那个缓存管理器 stop 掉 —— 理由与 C++ 门面
+         *   MediaPlayer::SetCacheConfig 逐字一致（那份缓存是按旧配置写的，接着写会
+         *   混进旧目录/旧文件名）。stop 只置状态并停掉内部 remuxer 线程，不删管理器
+         *   本体（下一次 SetDataSource 才重建）。
+         *
+         * GetCachePathByURL()：纯计算，转发到 CacheManager::getCachePath(url, config)
+         *   （静态函数，不需要管理器实例存在）。
+         *
+         * 缓存真正"接上"的位置在 SetDataSource(const char *)：那里算出代理 URL 并交给
+         * 既有的 MSG_SETDATASOURCE 通路（见 .cpp 里的长注释）。那个"把播放器当数据源"
+         * 的 ICacheDataSource 适配器由 CacheManager 拥有并在它析构时 delete。
+         */
+        void SetCacheConfig(const CacheConfig &config) override;
+
+        std::string GetCachePathByURL(const std::string &url) override;
 
     private:
         void NotifyPosition(int64_t position);
@@ -1522,6 +1553,59 @@ namespace Cicada {
          * 追加在成员列表**最末尾**（本工程硬规则：只有追加才是增量 ABI 安全的）。
          */
         int mVideoLandingDropLoggedGen{-1};
+
+        /*
+         * ==================== 【播放缓存 play-and-cache 的状态】====================
+         *
+         * 三者都**追加在成员列表最末尾**（本文件硬规则：只有追加才是增量 ABI 安全的，
+         * 见文件顶部那段说明）。
+         *
+         * 【必须用 ENABLE_CACHE_MODULE 包起来】缓存模块整体由 CMake 的
+         * ENABLE_CACHE_MODULE 控制（mediaPlayer/CMakeLists.txt:54-55，值来自
+         * framework/module_config.cmake），关掉它的构建里连 CacheManager 类型都不存在，
+         * 不留条件地把成员写在这里会直接编不过（MediaPlayer.cpp 里那些 #ifdef
+         * ENABLE_CACHE_MODULE 就是同一件事在实现层的写法）。
+         * 上面两个虚函数的**声明**不受影响：它们由 ICicadaPlayer 无条件声明、默认实现是
+         * 空操作，所以关掉缓存模块时它们照样存在（实现里的 #ifdef 只让函数体变空）。
+         *
+         * 关于成员布局：SuperMediaPlayer.h 只被 mediaPlayer 目录下的 TU 包含
+         * （SuperMediaPlayer.cpp / CicadaPlayerPrototype.cpp /
+         * SuperMediaPlayerDataSourceListener.cpp / SMPMessageControllerListener.cpp /
+         * SMP_DCAManager.cpp，都在同一个 media_player 目标里），它们看到的
+         * ENABLE_CACHE_MODULE 一定一致，所以这里的条件成员不会造成"不同 TU 看到不同
+         * 布局"。反过来，如果以后有别的 CMake 目标直接包含本头文件，必须保证那个目标
+         * 上的 ENABLE_CACHE_MODULE 取值与本目标一致。
+         *
+         * mCacheConfig   应用层通过 SetCacheConfig 传进来的那一份（字段见 CacheConfig.h）。
+         *                默认 mEnable = false ⇒ 不开缓存时下面两行完全不参与任何行为。
+         * mCacheManager  本实例的缓存管理器；**只在 SetDataSource(const char *) 里创建**，
+         *                在 Stop() / 析构里 stop + 释放。它同时持有那个把播放器当数据源
+         *                的 ICacheDataSource 对象（CacheManager 析构时 delete），所以它的
+         *                生命周期必须覆盖整个播放期 —— 见 .cpp 里
+         *                SuperMediaPlayerCacheDataSource 的说明。
+         *
+         *                用 shared_ptr 而不是裸指针是有理由的：喂包发生在**播放线程**
+         *                （读包路径每一包一次），而缓存管理器是**API 线程**在
+         *                SetDataSource / Stop 里换掉并释放的。播放线程只取一份
+         *                shared_ptr 快照（cacheManagerOrNull()），拿着这份快照喂完这一包
+         *                才可能让管理器析构 —— 于是"拿到指针之后、用之前被换掉"这条
+         *                use-after-free 在类型上就不可能发生（换成裸指针时它要靠调用
+         *                时序去保证）。取快照的临界区只有一次拷贝，不持锁做任何 I/O，
+         *                因此与 mCreateMutex 之间不存在锁序问题。
+         * mCacheSuccess  缓存文件已经写成（CacheManager 的成功回调触发过）。只用于
+         *                "循环播放时不再写第二遍"这一个判断；Stop() 里复位。
+         *
+         * mCacheMutex    只保护 mCacheManager 这一个 shared_ptr 的读写（换入/换出/取
+         *                快照），不保护管理器内部状态（它自己有一套锁）。
+         */
+#ifdef ENABLE_CACHE_MODULE
+        CacheConfig mCacheConfig{};
+        std::shared_ptr<CacheManager> mCacheManager{};
+        std::atomic<bool> mCacheSuccess{false};
+        std::mutex mCacheMutex{};
+        std::shared_ptr<CacheManager> cacheManagerOrNull();
+        void ReleaseCacheManager();
+#endif
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

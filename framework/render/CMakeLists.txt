@@ -105,11 +105,19 @@ endif ()
 
 if (ENABLE_GLRENDER)
     add_definitions(-DGLRENDER)
+    # renderFactory.cpp 的鸿蒙兜底判据用的是这个宏（不是 CMake 变量）：
+    # `#if defined(__OHOS__) && !defined(ENABLE_GLRENDER)` —— 只开变量会让鸿蒙
+    # 继续返回 DummyVideoRender，等于白开。
+    add_definitions(-DENABLE_GLRENDER)
 
     file(GLOB FilesPlatformBase video/glRender/platform/*.*)
     # TODO
     if (ANDROID)
         file(GLOB FilesPlatform video/glRender/platform/android/*.*)
+    endif ()
+
+    if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
+        file(GLOB FilesPlatform video/glRender/platform/ohos/*.*)
     endif ()
 
     if (IOS)

@@ -94,7 +94,7 @@ int SMPAVDeviceManager::setUpDecoder(uint64_t decFlag, const Stream_meta *meta, 
         return gen_framework_errno(error_class_codec, codec_error_video_not_support);
     }
     decoderHandle->decoder->setRequireDrmHandlerCallback(
-            [this](const DrmInfo &info) -> std::shared_ptr<DrmHandler> { return move(mDrmManager->require(info)); });
+            [this](const DrmInfo &info) -> std::shared_ptr<DrmHandler> { return std::move(mDrmManager->require(info)); });
     int ret;
     if (dstFormat) {
 #ifdef __APPLE__

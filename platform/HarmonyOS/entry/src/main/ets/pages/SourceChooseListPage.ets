@@ -54,7 +54,10 @@ struct SourceChooseListPage {
       // Android falls back to scanning the external-storage root for media
       // files. There is no shared storage root on HarmonyOS; use the picker
       // from the launcher page instead.
-      promptAction.showToast({ message: S.noneMediaInfo, duration: 2000 });
+      this.getUIContext().getPromptAction().showToast({
+        message: S.noneMediaInfo,
+        duration: 2000
+      });
     }
   }
 
@@ -81,7 +84,10 @@ struct SourceChooseListPage {
     const target: string = Settings.getPlayerType() === PLAYER_TYPE_AVPLAYER
       ? 'pages/AvPlayerPage'
       : 'pages/Index';
-    router.pushUrl({ url: target, params: params });
+    this.getUIContext().getRouter().pushUrl({
+      url: target,
+      params: params
+    });
   }
 
   private collectChecked(): SourceSample[] {
@@ -97,7 +103,10 @@ struct SourceChooseListPage {
   private openMultiPlayer(): void {
     const chosen: SourceSample[] = this.collectChecked();
     if (chosen.length === 0) {
-      promptAction.showToast({ message: S.noneMediaInfo, duration: 2000 });
+      this.getUIContext().getPromptAction().showToast({
+        message: S.noneMediaInfo,
+        duration: 2000
+      });
       return;
     }
     // Android pushes every checked TypeInfo into a static list on the activity;
@@ -107,7 +116,9 @@ struct SourceChooseListPage {
       selections.push({ url: sample.url, name: sample.name });
     }
     AppStorage.setOrCreate(MULTI_PLAYER_KEY, JSON.stringify(selections));
-    router.pushUrl({ url: 'pages/MultiPlayerPage' });
+    this.getUIContext().getRouter().pushUrl({
+      url: 'pages/MultiPlayerPage'
+    });
   }
 
   build() {

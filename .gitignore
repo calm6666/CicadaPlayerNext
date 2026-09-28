@@ -143,3 +143,4 @@ platform/HarmonyOS/cicadaplayer/BuildProfile.ets
 platform/HarmonyOS/entry/oh_modules/
 platform/HarmonyOS/.hvigor/report/
 platform/HarmonyOS/.hvigor/cache/
+platform/HarmonyOS/.hvigor/outputs/build-logs/
