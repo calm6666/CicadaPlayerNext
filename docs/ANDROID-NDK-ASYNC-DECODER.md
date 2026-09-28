@@ -392,3 +392,20 @@ adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso,symbol | Sel
 
 **仍缺的证据（只能由真机给出，见 §十一）**：seek 落点帧是否就是"包含目标的那一帧"、位置是否
 单调不回退、切档成功率与耗时、音画同步；以及 `ndk-async` 下"每帧 0 JNI"的 simpleperf 数字。
+
+**顺带完成的残留审计（objective 里"占位面 B2/B2' 交接不得残留"）**：
+`DECFLAG_PLACEHOLDER_SURFACE`（`framework/utils/AFMediaType.h:567`）经全仓核实
+**没有任何生产点** —— 只有定义、`mediaCodecDecoder.cpp:213-214` 的防御性拷贝、以及 `:862`
+把它传给 `configureVideo`（该注释自己就写着"DECFLAG_PLACEHOLDER_SURFACE 从来没有进过 mFlags"，
+写它的 pending 路径已在 P3 删除）。B2 的**交接本体**（pending 解码器 + 提交时换面）确已清零，
+§五 32 模式扫描 = 0。这条惰性管道本次**故意保留**，理由两条：
+
+1. 它是 `dec_flag_*` 位域枚举的一员，删除会**重编号后续位值**（flags 语义跨 JNI/跨平台使用），
+   风险远大于收益；
+2. 去掉 `configureVideo(..., usePlaceholderSurface)` 参数会改动 **JNI 方法签名**
+   （`(…Ljava/lang/Object;Z)I` → `(…Ljava/lang/Object;)I`），而签名不匹配只在**运行期**暴露
+   （`GetMethodID` 返回 null → configure 失败）—— 正好卡在真机验证前夕。
+   ⇒ 与下一次"必然要改 JNI 签名"的改动合并处理。
+
+NDK 绑定对它的处理是"复用 Java 那块 1×1 DummySurface"，所以这条惰性管道即便将来被重新启用，
+语义也是对的（不会退化成 byte-buffer 模式）。

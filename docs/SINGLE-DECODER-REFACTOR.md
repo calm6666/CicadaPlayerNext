@@ -961,3 +961,33 @@ ffmpeg 的 `(1 << 10)` —— MSVC 比较的是记号序列而非取值）、`C4
 **对本重构的影响：无。** 迁移只替换 L0 实现与平台绑定：`IDecoder` 接口、单解码器模型、
 落点过滤、`Discontinuity` 成员与 §5 验收命令全部不变。迁移完成后，`sAsyncBroken`
 （"下个实例降级轮询"）作为轮询路径的一部分一并删除。
+
+---
+
+## 十六、帧队列上限按"实际硬解/软解"赋值（2026-09-27：补一个从未被赋值的成员）
+
+**事实核查**：`mPictureCacheType`（`SuperMediaPlayer.h:721`，声明处默认
+`picture_cache_type_cannot`）在全仓**只有声明与 `doDeCode()` 的一处读**
+（`SuperMediaPlayer.cpp:3435`），**没有任何赋值点** ⇒ `doDeCode()` 恒取 `max_cache_size = 1`，
+连软解也被迫"解一帧→渲染一帧"，丢掉了 `VIDEO_PICTURE_MAX_CACHE_SIZE`(=2) 本意提供的
+解码/渲染重叠（既有文档 `platform/QtPlayer/docs/ANALYSIS-QUALITY-SWITCH-FREEZE.md:358`
+把它列为待确认问题："决定帧队列上限是 1 还是 2"）。
+
+**修法**（唯一视频解码器创建点 `CreateVideoDecoder()`，紧跟 `setUpDecoder()` 成功之后）：
+
+```cpp
+mPictureCacheType = IsVideoDecoderHardware() ? picture_cache_type_cannot : picture_cache_type_soft;
+```
+
+- 用 `IsVideoDecoderHardware()`（问**活动解码器对象** `IDecoder::isHardwareDecoderInUse()`，
+  含 FFmpeg 运行期降级）而不是请求参数 `bHW`：请求硬解但实际落软解时，也必须按"实际是软解"
+  放行流水线；
+- **硬解侧行为完全不变**（仍是上限 1）：硬解交出去的每一帧都持有平台 buffer index，必须尽快
+  release —— B5-4 的"释放代"机制正是按"至多一帧在飞"设计的。这是**正确性优先**，不是性能妥协；
+- 软解侧帧是深拷贝（`AVAFFrame`，`AVAFPacket.cpp:188-193`），多预放 1 帧安全；落点过滤仍逐帧
+  判定，**不改变**"首个上屏帧 = 包含目标的那一帧"这条精度契约（属"加流水线"，不是"精度换流畅"）；
+- 新增一条 INFO 便于真机核对取值与理由：
+  `video frame queue cap: pictureCacheType=… maxCacheSize=… (hardware=…)`。
+
+**为什么现在才动**：Android NDK 数据面迁移的真机验证即将进行，本次只改软解侧，
+硬解（被测路径）零变化，避免把两个变量混在一次验证里。
