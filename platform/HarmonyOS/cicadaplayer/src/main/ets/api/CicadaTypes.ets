@@ -213,3 +213,47 @@ export interface VideoCodecSupport {
  */
 export type CicadaDrmCallback =
   (drmType: string, requestType: string, url: string, data: ArrayBuffer) => ArrayBuffer | string | null;
+
+/**
+ * 一个流的原始元数据（native: Stream_meta）。
+ *
+ * 与 StreamInfo 的分工：StreamInfo 是展示用字段（码率/分辨率/语言…），这里是内核
+ * 原样数值，排查"这个流到底被解成了什么"时用它。codec 是内核 AFCodecID 的枚举值；
+ * 编码短名（H.264 / H.265 / AV1 …）统一从 getVideoCodecSupport() 取，内核里那份
+ * 短名表只有一份。
+ */
+export interface StreamMeta {
+  index: number;
+  /** video / audio / subtitle / mixed / unknown。 */
+  type: string;
+  /** 内核 AFCodecID 枚举值。 */
+  codec: number;
+  codecTag: number;
+  duration: number;
+  bitrate: number;
+  bandwidth: number;
+  width: number;
+  height: number;
+  displayWidth: number;
+  displayHeight: number;
+  rotate: number;
+  avgFps: number;
+  /** InterlacedType 枚举值。 */
+  interlaced: number;
+  /** AFPixelFormat 枚举值。 */
+  pixelFormat: number;
+  channels: number;
+  sampleRate: number;
+  frameSize: number;
+  profile: number;
+  /** AFSampleFormat 枚举值。 */
+  sampleFormat: number;
+  bitsPerCodedSample: number;
+  ptsTimeBase: number;
+  extradataSize: number;
+  /** 该流是否带独立密钥 URL（标准 DRM）。 */
+  hasKeyUrl: boolean;
+  lang: string;
+  title: string;
+  description: string;
+}

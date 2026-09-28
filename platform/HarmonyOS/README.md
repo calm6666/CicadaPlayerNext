@@ -108,7 +108,7 @@ callbacks the pages implement。
 | ExoPlayerActivity (ExoPlayer kernel) | **deleted** | no HarmonyOS counterpart |
 | system-player kernel (Android `MediaPlayer`) | `AvPlayerPage` | built on HarmonyOS AVPlayer |
 | zxing CaptureActivity | `@kit.ScanKit` | |
-| premierlibrary JNI | `napi_*` | 26 events + ~60 functions |
+| premierlibrary JNI | `napi_*` in the SDK module | 27 events + 70 functions |
 
 ## Deliberate deviations
 
@@ -199,11 +199,13 @@ callbacks the pages implement。
 5. **Software-decoded video has no on-screen path.** `videoRenderFactory` returns
    `DummyVideoRender` on OHOS for anything that is not surface-mode hardware
    decode, so software frames are dropped instead of displayed (hardware decode
-   is unaffected). The fix is to register a renderer through
+   is unaffected). The remaining work is the renderer itself: register one through
    `videoRenderFactory::setRenderCreator()` — an EGL/GLES renderer reusing
-   `framework/render/video/glRender`, plus an OHOS native-vsync implementation in
-   `VSyncFactory` (`native_vsync` is available in the public SDK). Deliberately
-   not shipped untested: it is on the render path.
+   `framework/render/video/glRender`. The display-tick half is already in place:
+   `VSyncFactory` now returns `OHOSVSync` (system `OH_NativeVSync`, period read
+   back from `OH_NativeVSync_GetPeriod`) and falls back to `timedVSync` only when
+   `OH_NativeVSync_Create` fails. Deliberately not shipping an untested renderer:
+   it is on the render path.
 6. **Compile-verified only.** There is no HarmonyOS device or emulator available
    here, so nothing has been run: gestures, window brightness, orientation
    switching, hardware decoding, audio output, DRM and ScanKit all compile and

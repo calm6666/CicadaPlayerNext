@@ -228,7 +228,9 @@ CicadaVideo({ controller: this.controller, listener: this.listener })
 - 截图：`snapshot`
 - DRM：`setDrmCallback` / `setDataSourceWithManifest`
 - 诊断：`setOption` / `getOption` / `getPropertyLong` / `getPropertyString` / `getPlayerName` /
-  `getVideoRenderFps` / `getVideoDecodeFps` / `invokeComponent`
+  `getVideoRenderFps` / `getVideoDecodeFps` / `invokeComponent` / `getCurrentStreamMeta`
+  （内核 `Stream_meta` 原样字段：profile / frame_size / sample_fmt / extradata 大小 /
+  ptsTimeBase / interlaced…，`codec` 是内核 `AFCodecID` 的数值）
 - 事件：27 个回调，含 `onVideoQualitySwitch`（STARTED / READY / FAILED / CANCELED）
 
 ### 6.5 尚未覆盖的能力（如实记录）
@@ -237,6 +239,8 @@ CicadaVideo({ controller: this.controller, listener: this.listener })
   （`ICicadaPlayer` / `SuperMediaPlayer`）这条路径还没有 CacheConfig 入口，因此 HAR 暂不提供
   `setCacheConfig`；Demo 的缓存页保持原样（只记录缺口）。
 - **软件解码上屏**：OHOS 侧 `videoRenderFactory` 对非 surface 路径返回 `DummyVideoRender`，
-  即软解帧不出画（硬解直出不受影响）。补法是接 `videoRenderFactory::setRenderCreator()` 注入
-  一个基于 EGL/GLES 的渲染器（复用 `framework/render/video/glRender`），属独立一件事。
+  即软解帧不出画（硬解直出不受影响）。**显示节拍这一半已经就位**：`VSyncFactory` 在鸿蒙返回
+  `OHOSVSync`（系统 `OH_NativeVSync`，周期用 `OH_NativeVSync_GetPeriod` 读回来，取不到才退回
+  `timedVSync`）；还差的只是渲染器本身 —— 经 `videoRenderFactory::setRenderCreator()` 注入一个
+  基于 EGL/GLES 的渲染器（复用 `framework/render/video/glRender`），属独立一件事。
 - **播放器级 ASS 字幕渲染**：内核给事件与文本，渲染由应用层负责。

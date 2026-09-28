@@ -28,6 +28,7 @@ export {
 } from './src/main/ets/api/CicadaTypes';
 export type {
   StreamInfo,
+  StreamMeta,
   MediaInfo,
   CicadaPlayerListener,
   CicadaDrmCallback,

@@ -116,6 +116,8 @@ declare namespace cicadaNapi {
 
     // ---- 字符串属性 ----
     const getPropertyString: (id: number, key: number, paramJson: string) => string;
+    // ---- 流元数据（Stream_meta 原样字段；取不到返回空串） ----
+    const getCurrentStreamMeta: (id: number, streamType: number) => string;
 
     // ---- DRM ----
     const setDrmRequestCallback: (id: number, callback: DrmCallback) => boolean;

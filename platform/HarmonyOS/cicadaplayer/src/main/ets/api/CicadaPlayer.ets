@@ -20,6 +20,7 @@ import {
   ScaleMode,
   StreamInfo,
   StreamType,
+  StreamMeta,
   VideoCodecSupport,
   VideoResolution
 } from './CicadaTypes';
@@ -443,6 +444,20 @@ export class CicadaPlayer {
     return cicada.setVideoCodecSupport(this.id, support === null ? null : JSON.stringify(support));
   }
 
+  /**
+   * 取某个流的原始元数据；取不到返回 null。
+   * 展示用字段请优先用 getCurrentStreamInfo()。
+   */
+  getCurrentStreamMeta(type: StreamType): StreamMeta | null {
+    if (this.id < 0) {
+      return null;
+    }
+    const json: string = cicada.getCurrentStreamMeta(this.id, type);
+    if (json.length === 0 || json === 'null') {
+      return null;
+    }
+    return JSON.parse(json) as StreamMeta;
+  }
   // -------------------------------------------------------------- 属性
   /** 字符串属性（PropertyKey 见 CicadaTypes），paramJson 视属性而定，可为空串。 */
   getPropertyString(key: PropertyKey, paramJson: string): string {

@@ -186,6 +186,8 @@ namespace cicada_ohos {
 
     // ---- 属性字符串 ----
     napi_value GetPropertyString(napi_env env, napi_callback_info info);
+    // ---- 流元数据 ----
+    napi_value GetCurrentStreamMeta(napi_env env, napi_callback_info info);
 
     // ---- DRM ----
     napi_value SetDrmRequestCallback(napi_env env, napi_callback_info info);

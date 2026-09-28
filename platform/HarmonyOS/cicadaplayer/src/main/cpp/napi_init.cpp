@@ -109,6 +109,8 @@ static napi_value Init(napi_env env, napi_value exports)
 
         // ---- 字符串属性 ----
         {"getPropertyString", nullptr, cicada_ohos::GetPropertyString, nullptr, nullptr, nullptr, napi_default, nullptr},
+        // ---- 流元数据 ----
+        {"getCurrentStreamMeta", nullptr, cicada_ohos::GetCurrentStreamMeta, nullptr, nullptr, nullptr, napi_default, nullptr},
 
         // ---- DRM ----
         {"setDrmRequestCallback", nullptr, cicada_ohos::SetDrmRequestCallback, nullptr, nullptr, nullptr, napi_default, nullptr},

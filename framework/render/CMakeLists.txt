@@ -67,6 +67,9 @@ if (OHOS OR TARGET_PLATFORM STREQUAL "HarmonyOS")
     list(APPEND SRC_FILES
             audio/OHOS/OhosAudioRender.cpp
             audio/OHOS/OhosAudioRender.h
+            # 系统原生 VSync（显示节拍）；拿不到时 VSyncFactory 退回 timedVSync。
+            video/vsync/OHOSVSync.cpp
+            video/vsync/OHOSVSync.h
             )
 endif ()
 

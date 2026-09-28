@@ -1141,8 +1141,8 @@ namespace cicada_ohos {
     // 语义与 Android 侧 NativeBase 的同步 JNI 调用一致：内核在播放线程上调用
     // drmCallback，必须当场拿到许可证响应才能继续。这里用一条可阻塞的
     // threadsafe function 把请求投到 JS 线程，播放线程在条件变量上等 JS 的
-    // 返回值 —— 没有超时兜底，只有确定性的两条出口：JS 回调返回、或 JS 环境
-    // 拆除（finalize 把在途请求全部标记为 aborted）。
+    // 返回值 —— 放行只有两条确定性路径：JS 回调返回，或 JS 环境拆除
+    // （finalize 把在途请求全部标记为 aborted），不引入任何按时间判定的分支。
     // ---------------------------------------------------------------------
     struct DrmHandshake {
         std::mutex mutex;
@@ -1362,5 +1362,81 @@ namespace cicada_ohos {
                                                        static_cast<int>(handshake->response.size()));
                 });
         return makeBool(env, true);
+    }
+    // ---------------------------------------------------------------------
+    // 流元数据（Stream_meta 的原始字段）
+    //
+    // 与 getCurrentStreamInfo 的分工：那个给的是 StreamInfo（码率/分辨率/语言等
+    // 展示用字段），这里给的是内核 Stream_meta 的原样数值（profile、frame_size、
+    // sample_fmt、extradata 大小、ptsTimeBase、interlaced…），排查"某个流到底被
+    // 解成了什么"时用它。codec 是内核的 AFCodecID 枚举值，编码短名（H.264/H.265…）
+    // 统一走 getVideoCodecSupport()，内核里那份短名表只有一份。
+    // ---------------------------------------------------------------------
+    namespace {
+        const char *streamMetaTypeName(Stream_type type)
+        {
+            switch (type) {
+                case STREAM_TYPE_VIDEO:
+                    return "video";
+                case STREAM_TYPE_AUDIO:
+                    return "audio";
+                case STREAM_TYPE_SUB:
+                    return "subtitle";
+                case STREAM_TYPE_MIXED:
+                    return "mixed";
+                default:
+                    return "unknown";
+            }
+        }
+
+        std::string streamMetaToJson(const Stream_meta &meta)
+        {
+            std::string out = "{";
+            out += "\"index\":" + std::to_string(meta.index);
+            out += ",\"type\":\"" + std::string(streamMetaTypeName(meta.type)) + "\"";
+            out += ",\"codec\":" + std::to_string(static_cast<int>(meta.codec));
+            out += ",\"codecTag\":" + std::to_string(meta.codec_tag);
+            out += ",\"duration\":" + std::to_string(meta.duration);
+            out += ",\"bitrate\":" + std::to_string(meta.bitrate);
+            out += ",\"bandwidth\":" + std::to_string(meta.bandwidth);
+            out += ",\"width\":" + std::to_string(meta.width);
+            out += ",\"height\":" + std::to_string(meta.height);
+            out += ",\"displayWidth\":" + std::to_string(meta.displayWidth);
+            out += ",\"displayHeight\":" + std::to_string(meta.displayHeight);
+            out += ",\"rotate\":" + std::to_string(meta.rotate);
+            out += ",\"avgFps\":" + std::to_string(meta.avg_fps);
+            out += ",\"interlaced\":" + std::to_string(static_cast<int>(meta.interlaced));
+            out += ",\"pixelFormat\":" + std::to_string(static_cast<int>(meta.pixel_fmt));
+            out += ",\"channels\":" + std::to_string(meta.channels);
+            out += ",\"sampleRate\":" + std::to_string(meta.samplerate);
+            out += ",\"frameSize\":" + std::to_string(meta.frame_size);
+            out += ",\"profile\":" + std::to_string(meta.profile);
+            out += ",\"sampleFormat\":" + std::to_string(static_cast<int>(meta.sample_fmt));
+            out += ",\"bitsPerCodedSample\":" + std::to_string(meta.bits_per_coded_sample);
+            out += ",\"ptsTimeBase\":" + std::to_string(meta.ptsTimeBase);
+            out += ",\"extradataSize\":" + std::to_string(meta.extradata_size);
+            out += ",\"hasKeyUrl\":";
+            out += (meta.keyUrl != nullptr ? "true" : "false");
+            out += ",\"lang\":\"";
+            out += jsonEscape(meta.lang != nullptr ? meta.lang : meta.language);
+            out += "\",\"title\":\"" + jsonEscape(meta.title);
+            out += "\",\"description\":\"" + jsonEscape(meta.description);
+            out += "\"}";
+            return out;
+        }
+    } // namespace
+
+    napi_value GetCurrentStreamMeta(napi_env env, napi_callback_info info)
+    {
+        CallArgs a;
+        int32_t type = 0;
+        if (!unpack(env, info, a) || a.argc < 2 || !argInt32(env, a.argv[1], type)) {
+            return makeString(env, "");
+        }
+        Stream_meta meta{};
+        if (CicadaGetCurrentStreamMeta(a.player->handle, &meta, static_cast<StreamType>(type)) != 0) {
+            return makeString(env, "");
+        }
+        return makeString(env, streamMetaToJson(meta));
     }
 } // namespace cicada_ohos
