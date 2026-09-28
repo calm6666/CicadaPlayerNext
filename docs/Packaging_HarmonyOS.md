@@ -235,6 +235,14 @@ CicadaVideo({ controller: this.controller, listener: this.listener })
 
 ### 6.5 尚未覆盖的能力（如实记录）
 
+- **C API 覆盖率：67 / 79**。剩下的 12 个都是"C++ 回调 / 对象注入"类，NAPI 表达不了，
+  且都不是应用侧接口：`CicadaSetOnRenderCallBack` / `CicadaSetAudioRenderingCallBack` /
+  `CicadaSetVideoRenderingCallBack` / `CicadaSetMediaFrameCb`（裸帧回调，鸿蒙侧走 surface 直出）、
+  `CicadaSetBitStreamCb`（自定义数据源的 read/seek C 回调）、`CicadaSetUpdateViewCallback` /
+  `CicadaSetUrlHashCallback` / `CicadaSetClockRefer`（平台内部回调，鸿蒙侧改用 `setSurface`）、
+  `CicadaSetErrorConverter` / `CicadaSetComponentCb`（C++ 对象注入，后者 header 里已标
+  `attribute_deprecated`）、`CicadaSetDataSourceWithManifestObject`（结构体版，应用侧走 JSON 版
+  `setDataSourceWithManifest`）、`CicadaFree`（`CicadaFreeString` 的同义函数，已绑后者）。
 - **播放缓存（play-and-cache）**：缓存配置落在 C++ `MediaPlayer` 门面上，C API 句柄
   （`ICicadaPlayer` / `SuperMediaPlayer`）这条路径还没有 CacheConfig 入口，因此 HAR 暂不提供
   `setCacheConfig`；Demo 的缓存页保持原样（只记录缺口）。

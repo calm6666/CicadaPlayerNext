@@ -210,6 +210,13 @@ callbacks the pages implement。
    here, so nothing has been run: gestures, window brightness, orientation
    switching, hardware decoding, audio output, DRM and ScanKit all compile and
    link but are unverified at runtime.
+7. **C API coverage is 67 / 79.** The 12 unbound entry points are all C++ callback
+   or object injections that NAPI cannot express and that no application calls
+   (raw-frame render callbacks, a custom data source, platform-internal view/url/
+   clock callbacks, `ErrorConverter`/component-factory injection, the struct
+   variant of the manifest setter, and the `CicadaFree` alias of
+   `CicadaFreeString`) — the full list is in
+   `docs/Packaging_HarmonyOS.md` §6.5.
 
 ## Framework note: never re-set the listener on a running player
 
