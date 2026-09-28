@@ -796,6 +796,24 @@ namespace Cicada {
                                               }));
                 pFrame->getInfo().video.width = width;
                 pFrame->getInfo().video.height = height;
+
+                /*
+                 * ============ 【落点判据要的帧长，硬解路必须由我们补上】============
+                 *
+                 * AFMediaCodecFrame 不带 duration（framework/base/media/AFMediaCodecFrame.h 里
+                 * 只有 index / pts 这类成员），而 renderer 的落点判据是
+                 *     framePos + frameDur > target   ⇒ 这一帧包含目标
+                 * 帧长为 0 时判据只能用"标称帧率"兜底；一旦流里也读不到帧率，
+                 * 兜底就会退化成一个荒唐的大帧长，把目标之前的前缀帧判成落点
+                 * （详见 SuperMediaPlayer 里那段"帧率也拿不到时不猜"的说明）。
+                 *
+                 * 因此在**帧的出生地**把流自己的帧率换算成帧长写进去，让判据走精确分支；
+                 * CFR 内容下它等于真实帧长（本工程的片源都是 CFR）。只填 0 值，
+                 * 绝不覆盖解码器已经给出的时长（软解路是 FFmpeg 给的真值）。
+                 */
+                if (pFrame->getInfo().duration <= 0 && mMeta.avg_fps > 1.0) {
+                    pFrame->getInfo().duration = (int64_t) (1000000.0 / (double) mMeta.avg_fps + 0.5);
+                }
             } else if (codecType == CODEC_AUDIO) {
 
                 assert(out.buf.p_ptr != nullptr);

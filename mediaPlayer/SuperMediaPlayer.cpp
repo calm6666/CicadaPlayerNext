@@ -4910,16 +4910,28 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
 
         if (seekFrameDurUs <= 0) {
             /*
-             * 帧自带时长为空时用**标称帧率**折算。必须用浮点：DASH 的 frameRate 是
-             * "24000/1001"（= 23.976），按整型截断会变成 23 ⇒ 帧长算成 43478us，
-             * 比真实的 41708us 大 4.2%（日志 `seek landing filter: ... dur=43478` 就是这么来的）。
-             * 判据 "framePos + 帧长 <= target ⇒ 还在目标之前" 直接用这个值，帧长偏大就会
-             * 在离帧边界 1.8ms 以内的极端情况下把上一帧当成"包含目标"（落点早一帧）。
+             * 帧自带时长为空时，用**标称帧率**折算（必须浮点：DASH 的 frameRate 是
+             * "24000/1001"=23.976，按整型截断会变成 23 ⇒ 43478us，比真实 41708us 大 4.2%）。
+             *
+             * 【2026-09-27 修：帧率也拿不到时**不猜**】
+             * 兜底原来把 fps 下限钳到 1.0 ⇒ 帧长 1 秒。那不是"保守"，而是**会错**：
+             * 判据 `framePos + 帧长 <= target ⇒ 还在目标之前` 一旦用上 1 秒，目标前
+             * 近 1 秒的**前缀帧**就会被判成"包含目标"而上屏，直接违反
+             * "首个上屏帧必须是包含目标时刻的那一帧"。
+             * 现在两者都拿不到时取 0：判据退化成一个**有界**行为 —— 丢掉所有
+             * `framePos <= target` 的帧、接受第一个 `framePos > target` 的帧，最坏只晚一帧，
+             * 绝不会把 1 秒前的前缀帧当成落点。这一档会由下面那条一次性落点日志的
+             * `dur=0` 直接暴露出来（真机一看就知道有没有走到这里）。
              */
             const double seekFps = (mCurrentVideoMeta != nullptr)
-                                   ? std::max(1.0, (double) (mCurrentVideoMeta->operator Stream_meta *()->avg_fps))
-                                   : 25.0;
-            seekFrameDurUs = (int64_t) (1000000.0 / seekFps + 0.5);
+                                   ? (double) (mCurrentVideoMeta->operator Stream_meta *()->avg_fps)
+                                   : 0.0;
+
+            if (seekFps > 1.0) {
+                seekFrameDurUs = (int64_t) (1000000.0 / seekFps + 0.5);
+            } else {
+                seekFrameDurUs = 0;
+            }
         }
 
         /*

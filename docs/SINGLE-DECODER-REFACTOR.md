@@ -991,3 +991,34 @@ mPictureCacheType = IsVideoDecoderHardware() ? picture_cache_type_cannot : pictu
 
 **为什么现在才动**：Android NDK 数据面迁移的真机验证即将进行，本次只改软解侧，
 硬解（被测路径）零变化，避免把两个变量混在一次验证里。
+
+---
+
+## 十七、硬解帧的帧长（落点判据的输入）必须由解码器补上（2026-09-27）
+
+**事实核查**：落点判据是 `framePos + frameDur > target ⇒ 这一帧包含目标`
+（`shouldDropForDiscontinuity()`）。帧长的来源按解码器分两类：
+
+- 软解（FFmpeg）：`framework/base/media/AVAFPacket.cpp:225` `mInfo.duration = mAvFrame->duration`
+  ⇒ **有真值**；
+- 硬解（Android `AFMediaCodecFrame`）：全仓 `.duration =` 的赋值点里**没有它**
+  （`framework/base/media/AFMediaCodecFrame.h` 只有 index/pts 类成员）⇒ **帧长恒 0**。
+
+⇒ 硬解路一直走 `SuperMediaPlayer` 的"标称帧率"兜底；而兜底原先把 fps 钳到 ≥1.0，
+fps 也拿不到时帧长 = 1 秒，会把目标前近 1 秒的**前缀帧**判成"包含目标"而上屏 ——
+直接违反"首个上屏帧必须是包含目标时刻的那一帧"（P1–P4 一直在治的那类症状）。
+
+**两处修**：
+
+1. **帧的出生地补真值**（`framework/codec/Android/mediaCodecDecoder.cpp`，视频分支）：
+   `if (duration <= 0 && mMeta.avg_fps > 1.0) duration = 1000000 / avg_fps`
+   —— 只填 0 值、**不覆盖**解码器给的真值；CFR 内容下等于真实帧长，判据因此走**精确分支**；
+2. **兜底不再猜**（`SuperMediaPlayer.cpp` 落点帧长段）：fps 拿到就换算；两者都拿不到时取 **0** ⇒
+   判据退化为"丢掉所有 `framePos <= target` 的帧、接受第一个 `framePos > target` 的帧"，
+   **最坏只晚一帧**，绝不会把 1 秒前的前缀帧当落点。这一档会由既有的**一次性**落点日志
+   以 `dur=0` 直接暴露（真机一看就知道有没有走到）。
+
+**已知残量（写明以便后面收口）**：帧长与帧率**都**拿不到时，合同要求的
+"取不晚于目标的最后一帧"需要**前瞻一帧**（把落点候选按住到下一帧到达再决定）。
+本轮**故意不动**落点过滤的状态机（它刚在 P1–P4 定稿、正等真机验证）：
+等真机日志确认 `dur=0` 这档是否真会出现，再决定是否实现"落点窗口内按住一帧"。
