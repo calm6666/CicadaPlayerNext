@@ -409,3 +409,30 @@ adb shell simpleperf report -i /data/local/tmp/perf.data --sort dso,symbol | Sel
 
 NDK 绑定对它的处理是"复用 Java 那块 1×1 DummySurface"，所以这条惰性管道即便将来被重新启用，
 语义也是对的（不会退化成 byte-buffer 模式）。
+
+## 十三、解码器创建的"C 化边界"（2026-09-27 核实）
+
+用户要求"解码器的创建也换成 C API，其它为兼容仍用 JNI"。核实后的边界如下。
+
+**已经是纯 C 的部分**（本次迁移完成，见 §九）：`AMediaCodec_createCodecByName`(API 21) /
+`configure` / `start` / `stop` / `flush` / `getInputBuffer`+`queueInputBuffer` /
+`getOutputBuffer`+`releaseOutputBuffer` / `setOutputSurface` / `setParameters`(dlsym, API 26) /
+`setAsyncNotifyCallback`(dlsym, API 28)。⇒ **"创建"这个动作本身早就是纯 C 了**。
+
+**NDK 没有 C 接口、只能保留 JNI 的部分：codec 的枚举与能力查询**（即"选哪颗"）。两条独立证据：
+
+1. 本机 NDK r25 的 `…\sysroot\usr\include\media\**` 里 `AMediaCodecList` / `AMediaCodecInfo`
+   **零命中**（对整个 media 头目录 grep）⇒ NDK 不提供这条 API；
+2. 连 FFmpeg 也如此：`external/external/ffmpeg/libavcodec/mediacodec_wrapper.c` 的
+   `ff_AMediaCodecList_getCodecNameByType()`（`:470`）是**用 JNI 反射 `android/media/MediaCodecList`**
+   实现的（`getCodecCount` / `getCodecInfoAt` / `findDecoderForFormat`，见 `:38-70`）——
+   尽管它的 codec 对象走的是 NDK 后端。**枚举只能靠 Java。**
+
+⇒ 结论：把枚举也"自研成 C"的唯一办法是"硬编码候选名 + 逐个 `createCodecByName` 试探"，
+那会丢掉 `isHardwareAccelerated` / `codecMax` / profile-level / secure 判定 —— 直接破坏本工程
+现有的硬解优选、黑名单与能力门，而且更脆弱。**保留 JNI 做选择、其余全 C** 已是平台允许的最大程度。
+
+另外两处平台缺口同样保留 JNI（不是"为了兼容"，而是没有 C 等价物）：
+
+- `getDummySurface()`：1×1 `SurfaceTexture`/`Surface` 是 Java 类；
+- `ANativeWindow_fromSurface()`：需要 Java `Surface` 对象（每次建解码器一次 JNI）。
