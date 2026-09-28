@@ -75,6 +75,10 @@ namespace Cicada {
                                         OH_AudioInterrupt_ForceType type, OH_AudioInterrupt_Hint hint);
         static int32_t onError(OH_AudioRenderer *renderer, void *userData, OH_AudioStream_Result error);
 
+        // 读设备"已播出帧数"：优先 API 15 的 GetAudioTimestampInfo（运行期解析），
+        // 退回 API 10 的 GetTimestamp。成功返回 true。
+        bool readDeviceFramePosition(int64_t &frames, int64_t &timestampNs);
+
     private:
         OH_AudioRenderer *mRenderer{nullptr};
         int mSampleRate{48000};
@@ -91,6 +95,14 @@ namespace Cicada {
         std::atomic<float> mVolume{1.0f};
         std::atomic<float> mSpeed{1.0f};
         int64_t mPlayedBytes{0};
+
+        /*
+         * 【音频时钟的基线】getPosition() =（设备已播出帧 - 本基线）换算成微秒。
+         * 基线在每次 flush 之后重钉，因此位置语义与 Android 侧完全一致：
+         * "自上一次 flush 起设备真正播出去的时长"；设备时间戳拿不到时返回
+         * INT64_MIN（表示不可用），绝不返回负值、也不拿"写出去多少"冒充"播了多少"。
+         */
+        std::atomic<int64_t> mPresentedFrameBase{0};
     };
 } // namespace Cicada
 

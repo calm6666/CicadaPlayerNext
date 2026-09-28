@@ -263,6 +263,25 @@ namespace Cicada {
             // output sample format instead of relying on the default.
             OH_AVFormat_SetIntValue(format, OH_MD_KEY_AUDIO_SAMPLE_FORMAT, SAMPLE_S16LE);
             OH_AVFormat_SetIntValue(format, OH_MD_KEY_MAX_INPUT_SIZE, 16 * 1024);
+            /*
+             * AAC 的两个键必须成对给对（判据与 Android 侧逐字一致，
+             * 见 framework/codec/Android/mediaCodecDecoder.cpp:337-374）：
+             *   · 没有 extradata ⇒ 码流自带 ADTS 头 ⇒ IS_ADTS = 1，不需要 CSD；
+             *   · 有 extradata ⇒ raw AAC ⇒ IS_ADTS 必须显式置 0，并把
+             *     AudioSpecificConfig 作为 CSD 交下去。
+             * 只置其中一个的场景（尤其 raw AAC 缺 CSD）会让解码器按 ADTS 解析裸帧，
+             * 表现为"有日志没声音"。
+             */
+            if (meta->codec == AF_CODEC_ID_AAC) {
+                const bool isADTS = (meta->extradata == nullptr || meta->extradata_size <= 0);
+                OH_AVFormat_SetIntValue(format, OH_MD_KEY_AAC_IS_ADTS, isADTS ? 1 : 0);
+                if (!isADTS) {
+                    OH_AVFormat_SetBuffer(format, OH_MD_KEY_CODEC_CONFIG, meta->extradata,
+                                          static_cast<size_t>(meta->extradata_size));
+                }
+                AF_LOGI("OHOS AAC configure: adts=%d csd=%d\n", isADTS ? 1 : 0,
+                        isADTS ? 0 : meta->extradata_size);
+            }
         } else {
             OH_AVFormat_SetIntValue(format, OH_MD_KEY_WIDTH, mWidth);
             OH_AVFormat_SetIntValue(format, OH_MD_KEY_HEIGHT, mHeight);

@@ -17,10 +17,35 @@
 #include <ohaudio/native_audiostream_base.h>
 
 #include <cstring>
+#include <ctime>
+#include <dlfcn.h>
+#include <mutex>
 
 using namespace std;
 
 namespace Cicada {
+
+    namespace {
+        /*
+         * OH_AudioRenderer_GetAudioTimestampInfo 是 API 15 才引入的符号，而本 SDK 的
+         * compatibleSdkVersion 是 5.0.0(12)：直接调用会让 12~14 的设备在**加载期**就
+         * 找不到符号。所以按"能力路由"在运行期解析（与 Android 侧解析 API 28 的异步
+         * 回调同一手法，见 docs/ANDROID-NDK-ASYNC-DECODER.md），拿不到就退回 API 10
+         * 起就存在的 OH_AudioRenderer_GetTimestamp。
+         */
+        using GetAudioTimestampInfoFn = OH_AudioStream_Result (*)(OH_AudioRenderer *, int64_t *, int64_t *);
+
+        GetAudioTimestampInfoFn resolveGetAudioTimestampInfo()
+        {
+            static std::once_flag once;
+            static GetAudioTimestampInfoFn fn = nullptr;
+            std::call_once(once, []() {
+                fn = reinterpret_cast<GetAudioTimestampInfoFn>(
+                        dlsym(RTLD_DEFAULT, "OH_AudioRenderer_GetAudioTimestampInfo"));
+            });
+            return fn;
+        }
+    } // namespace
 
     OhosAudioRender::OhosAudioRender() = default;
 
@@ -78,6 +103,7 @@ namespace Cicada {
         mRenderer = renderer;
         mPaused = false;
         mPlayedBytes = 0;
+        mPresentedFrameBase.store(0);
         return OH_AudioRenderer_Start(mRenderer) == AUDIOSTREAM_SUCCESS ? 0 : OPEN_AUDIO_DEVICE_FAILED;
     }
 
@@ -116,11 +142,48 @@ namespace Cicada {
 
     int64_t OhosAudioRender::getPosition()
     {
-        if (mRenderer == nullptr) {
+        if (mRenderer == nullptr || mSampleRate <= 0) {
             return INT64_MIN;
         }
-        return mPlayedBytes / static_cast<int64_t>(mChannels * mBytesPerSample)
-               * 1000000LL / static_cast<int64_t>(mSampleRate);
+
+        int64_t presentedFrames = 0;
+        int64_t timestampNs = 0;
+        if (!readDeviceFramePosition(presentedFrames, timestampNs)) {
+            // 设备时间戳拿不到：宁可报"不可用"，也不要拿"写出去多少"冒充"播了多少"。
+            return INT64_MIN;
+        }
+
+        int64_t base = mPresentedFrameBase.load();
+        if (presentedFrames < base) {
+            // 设备侧计数被重置（重新起流 / 换输出设备）：就地重钉基线，绝不返回负值。
+            mPresentedFrameBase.store(presentedFrames);
+            base = presentedFrames;
+        }
+        const int64_t frames = presentedFrames - base;
+        return frames * 1000000LL / static_cast<int64_t>(mSampleRate);
+    }
+
+    bool OhosAudioRender::readDeviceFramePosition(int64_t &frames, int64_t &timestampNs)
+    {
+        if (mRenderer == nullptr) {
+            return false;
+        }
+
+        int64_t framePosition = 0;
+        int64_t timestamp = 0;
+        const GetAudioTimestampInfoFn getInfo = resolveGetAudioTimestampInfo();
+        if (getInfo != nullptr && getInfo(mRenderer, &framePosition, &timestamp) == AUDIOSTREAM_SUCCESS) {
+            frames = framePosition;
+            timestampNs = timestamp;
+            return true;
+        }
+        if (OH_AudioRenderer_GetTimestamp(mRenderer, CLOCK_MONOTONIC, &framePosition, &timestamp) ==
+            AUDIOSTREAM_SUCCESS) {
+            frames = framePosition;
+            timestampNs = timestamp;
+            return true;
+        }
+        return false;
     }
 
     void OhosAudioRender::mute(bool bMute)
@@ -164,14 +227,46 @@ namespace Cicada {
 
     void OhosAudioRender::flush()
     {
-        std::lock_guard<std::mutex> lock(mQueueMutex);
-        mPcmQueue.clear();
-        mQueueReadPos = 0;
-        mQueuedBytes = 0;
-        mPlayedBytes = 0;
+        /*
+         * 顺序有纪律，四步都不能换（与 Android 侧 flush 同一套）：
+         *   1) 先暂停设备 —— 在途的 OnWriteData 返回后不会再拉新数据，
+         *      否则清完队列马上又被回调送进旧数据；
+         *   2) 清本地队列（拿队列锁），但**不持锁**调用设备接口：
+         *      OH_AudioRenderer_Flush 要等在途的写回调返回，而写回调要拿同一把
+         *      队列锁，持锁调用就是必然自锁（表现为 seek/切档后整条音频卡死）；
+         *   3) 清设备缓冲，并重钉"已播出帧"基线，让 getPosition() 从 0 重新开始；
+         *   4) 恢复原先的运行态。
+         */
+        const bool wasPaused = mPaused.load();
+        if (mRenderer != nullptr && !wasPaused) {
+            OH_AudioRenderer_Pause(mRenderer);
+            mPaused = true;
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mQueueMutex);
+            mPcmQueue.clear();
+            mQueueReadPos = 0;
+            mQueuedBytes = 0;
+            mPlayedBytes = 0;
+        }
+
         if (mRenderer != nullptr) {
             OH_AudioRenderer_Flush(mRenderer);
+            int64_t presentedFrames = 0;
+            int64_t timestampNs = 0;
+            mPresentedFrameBase.store(readDeviceFramePosition(presentedFrames, timestampNs)
+                                              ? presentedFrames
+                                              : 0);
+        } else {
+            mPresentedFrameBase.store(0);
         }
+
+        if (mRenderer != nullptr && !wasPaused) {
+            OH_AudioRenderer_Start(mRenderer);
+            mPaused = false;
+        }
+        mQueueCond.notify_all();
     }
 
     uint64_t OhosAudioRender::getQueDuration()
