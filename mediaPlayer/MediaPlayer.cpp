@@ -342,7 +342,19 @@ namespace Cicada {
             }
         }
 
-        if (enableAbr && mOldPlayStatus == PLAYER_PLAYING) {
+        /*
+         * 【2026-09-27 修：这里必须看**当前**状态，不能看 mOldPlayStatus】
+         *
+         * 原判据是 `mOldPlayStatus == PLAYER_PLAYING`，而 mOldPlayStatus 存的是
+         * "上一次状态迁移的**旧**状态"（见 PlayerStatusChanged）：例如"暂停→播放"之后
+         * 它是 PLAYER_PAUSED。于是用户"手动选一档 → 再切回自动"时，这个条件常常不成立
+         * ⇒ 不调用 mAbrManager->Start()，ABR 线程继续停着（AbrAdjustFun 要求 mRunning）
+         * ⇒ 界面显示"自动"、行为完全不动 —— 正是用户报的"切不回自动"。
+         *
+         * 改为看 mPlayStatus（本次新增的"当前状态"）。暂停态仍然不硬拉线程（ABR 不该在
+         * 暂停时自己切档），等用户按播放时 MediaPlayer::Start() 把它起来 —— 语义不变。
+         */
+        if (enableAbr && mPlayStatus == PLAYER_PLAYING) {
             mAbrManager->Start();
         }
     }
@@ -1143,6 +1155,11 @@ namespace Cicada {
     {
         GET_MEDIA_PLAYER
         player->mOldPlayStatus = static_cast<PlayerStatus>(oldStatus);
+        /*
+         * 【当前状态】新成员 mPlayStatus（追加在类末尾）：`SelectTrack(AUTO)` 判断
+         * "现在是否正在播放"必须用它，不能用 mOldPlayStatus —— 后者是迁移的**旧**状态。
+         */
+        player->mPlayStatus = static_cast<PlayerStatus>(newStatus);
 
         if (player->mListener.StatusChanged) {
             player->mListener.StatusChanged(oldStatus, newStatus, player->mListener.userData);

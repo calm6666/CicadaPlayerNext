@@ -528,6 +528,23 @@ namespace Cicada {
         function<void(const string &)> mPlayUrlChangedCallback{nullptr};
         std::string mPlayerSessionId{};
         bool mFirstPrepared{false};
+
+        /*
+         * ============ 【2026-09-27 新增，按规则追加在类末尾】当前播放状态 ============
+         *
+         * 存 `PlayerStatusChanged()` 的 **newStatus**。
+         *
+         * 为什么必须单独存一个：`mOldPlayStatus`（上面那个）存的是"上一次状态迁移的**旧**状态"
+         * —— 例如"暂停→播放"之后它是 `PLAYER_PAUSED`。任何"现在是否正在播放"的判断用它都会错：
+         * `SelectTrack(SELECT_TRACK_VIDEO_AUTO)` 就曾因为 `mOldPlayStatus == PLAYER_PLAYING`
+         * 这个条件不成立而不调用 `mAbrManager->Start()`，于是 ABR 线程继续停着
+         * （`AbrManager::AbrAdjustFun` 要求 `mRunning`），界面显示"自动"、行为完全不动
+         * —— 用户报的"切到手动清晰度后无法再切回自动"就是这条。
+         *
+         * 语义边界：暂停态仍然**不**硬拉 ABR 线程（ABR 不该在暂停时自己切档），
+         * 等用户按播放时 `MediaPlayer::Start()` 会把它起来 —— 与原有设计一致。
+         */
+        PlayerStatus mPlayStatus{PLAYER_IDLE};
     };
 }// namespace Cicada
 
