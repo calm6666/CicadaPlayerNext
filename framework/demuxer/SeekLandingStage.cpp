@@ -110,10 +110,25 @@ namespace Cicada {
         mTargetUs = keepTarget;
         mStreamType = keepStreamType;
 
-        AF_LOGI("[seekLanding] %s host reopen of the SEEK at the segment boundary: target=%lld KEPT "
-                "(the segment opened next is the one that contains the target; clearing it here is exactly "
-                "why the stage used to stay un-engaged and the decoder restarted at the segment head)\n",
-                mWhat, (long long) keepTarget);
+        if (keepTarget == INT64_MIN) {
+            /*
+             * 到这里目标已经是 INT64_MIN：本次 seek 的落点刚刚在 filter() 里 RELEASE 过
+             * （RELEASE -> flush() -> reset() 会把目标清掉），所以"保留"的其实是一个空目标。
+             * 旧日志在这条分支上照样打 KEPT，还断言"下一个打开的分片就是含目标的那个" ——
+             * 打的是假话，排查时会被带偏（2026-09-28 那次切档冻屏就被它误导过一轮）。
+             * 真实语义：下一个分片由 tracker 当前的 curSegNum 推进决定，这里既没有可保留的
+             * 也没有可清的目标；行为与旧代码完全一致，只有措辞变真。
+             */
+            AF_LOGI("[seekLanding] %s host reopen of the SEEK at the segment boundary: no live target "
+                    "(target=%lld — this seek's landing was already released, so there is nothing to keep or "
+                    "clear); the segment opened next is picked by the tracker's current segment number\n",
+                    mWhat, (long long) keepTarget);
+        } else {
+            AF_LOGI("[seekLanding] %s host reopen of the SEEK at the segment boundary: target=%lld KEPT "
+                    "(the segment opened next is the one that contains the target; clearing it here is exactly "
+                    "why the stage used to stay un-engaged and the decoder restarted at the segment head)\n",
+                    mWhat, (long long) keepTarget);
+        }
     }
 
     void SeekLandingStage::dropStageOnHostReopen()

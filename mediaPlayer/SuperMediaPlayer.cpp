@@ -4167,6 +4167,65 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
             mSeekDecodeStartIsKey = true;
         }
 
+        /*
+         * ============ 【新解码器与包形态对齐（不变量，见成员说明）】============
+         *
+         * 解码器刚被建出来（切档重建 / 错误恢复 / 起播），而"包是长度前缀还是 Annex B"
+         * 由内层 demuxer 的 bitstream filter 决定 —— 那个 filter 是懒创建的，它一建就把
+         * demuxer 的 codecpar 从 hvcC 改写成 Annex B（`avFormatDemuxer.cpp:353-356` +
+         * `AVBSF.cpp:52`）。ffmpeg 的解码器则按打开时 extradata 的形态把拆包方式定死
+         * （hvcC 就 is_nalff=1 按长度拆，Annex B 就按起始码拆）。
+         *
+         * 这里在包**真正交给解码器之前**补一次"该流此刻的 extradata"：
+         *   * 这个包已经由 demuxer 产出 ⇒ 它的 filter 一定已经跑过 ⇒ 这一刻的
+         *     `GetStreamMeta()` 与这些包同源（都是同一个 codecpar），形态必然一致；
+         *   * ffmpeg 收到 `AV_PKT_DATA_NEW_EXTRADATA` 会在 `decode_nal_units()` **之前**
+         *     重新解析它（`hevc/hevcdec.c` 的 hevc_receive_frame 开头；h264 同形），
+         *     于是 is_nalff / nal_length_size 被重新定到与包一致的值。
+         * 没有计时器、没有阈值、没有重试：一次重建只对齐一次，消费即清零。
+         *
+         * meta 里没有参数集（TS 这类原生 Annex B 片源）时整块空转，行为与以前一字不差。
+         */
+        if (pVideoPacket->getInfo().flags != 0 && mVideoDecoderNeedsExtraData.load()) {
+            mVideoDecoderNeedsExtraData.store(false);
+
+            if (mDemuxerService != nullptr) {
+                unique_ptr<streamMeta> pMeta;
+
+                if (mDemuxerService->GetStreamMeta(pMeta, pVideoPacket->getInfo().streamIndex, false) >= 0 &&
+                    pMeta != nullptr) {
+                    auto *meta = (Stream_meta *) (*pMeta);
+
+                    if (meta->extradata != nullptr && meta->extradata_size > 0) {
+                        pVideoPacket->setExtraData(meta->extradata, meta->extradata_size);
+
+                        /*
+                         * 顺手把参数集的"形态"打出来（前 4 字节）：这是判定
+                         * "解码器与包是否同形态"的唯一权威读数 ——
+                         * 首字节 01 表示 hvcC（is_nalff=1，包按 4 字节长度前缀），
+                         * 00 00 00 01 表示 Annex B（is_nalff=0，包按起始码）。
+                         * 只读，不改任何行为；不足 4 字节时不打形态。
+                         */
+                        if (meta->extradata_size >= 4) {
+                            const uint8_t *ed = meta->extradata;
+                            AF_LOGI("re-asserted the codec parameter sets on the first key frame after the video decoder "
+                                    "was (re)built: stream=%d pts=%lld extradata=%d bytes leading=%02x %02x %02x %02x "
+                                    "(01.. = hvcC/length prefixed, 00 00 00 01 = Annex B) — the decoder's NAL format has "
+                                    "to match the packets the demuxer actually produces\n",
+                                    pVideoPacket->getInfo().streamIndex, (long long) pVideoPacket->getInfo().pts,
+                                    meta->extradata_size, (unsigned) ed[0], (unsigned) ed[1],
+                                    (unsigned) ed[2], (unsigned) ed[3]);
+                        } else {
+                            AF_LOGI("re-asserted the codec parameter sets on the first key frame after the video decoder "
+                                    "was (re)built: stream=%d pts=%lld extradata=%d bytes\n",
+                                    pVideoPacket->getInfo().streamIndex, (long long) pVideoPacket->getInfo().pts,
+                                    meta->extradata_size);
+                        }
+                    }
+                }
+            }
+        }
+
         if (!mRecorderSet->decodeFirstVideoFrameInfo.isFirstPacketSendToDecoder) {
             DecodeFirstFrameInfo &info = mRecorderSet->decodeFirstVideoFrameInfo;
             info.isFirstPacketSendToDecoder = true;
@@ -7505,6 +7564,31 @@ int SuperMediaPlayer::CreateVideoDecoder(bool bHW, Stream_meta &meta)
      * MediaCodec init）。与 ActiveDecoder::flush() 里复位 bDecoderEOS 同一个道理。
      */
     videoDecoderEOS = false;
+
+    /*
+     * 【本次重建的解码器必须被"告知"它将要收到的包是什么形态】
+     *
+     * 这里是视频解码器**唯一**的创建点（起播的 setUpDecoder、切档 / 错误恢复的
+     * rebuildVideoDecoder、surface 热切换的 RestartVideoDecoder 都走它）。置上这个标记，
+     * `DecodeVideoPacket()` 就会给喂进新解码器的**第一个关键帧包**补一份"该流此刻的
+     * codec 参数集"，让 ffmpeg 在拆包之前重新判定 NAL 形态（hvcC/长度前缀 vs Annex B）。
+     *
+     * 为什么需要它（完整因果见 SuperMediaPlayer.h 里该成员的说明）：
+     * 内层 demuxer 的 bitstream filter 是**懒创建**的（第一个包上才建，
+     * `avFormatDemuxer.cpp:353-356`），而它会把 codecpar 里的参数集从 hvcC 改写成 Annex B
+     * （`AVBSF.cpp:52`）。于是"打开解码器时用的 meta"和"解码器实际收到的包"可能落在
+     * 这次改写的前后两侧 —— 2026-09-28 21:20 的日志里就是这么坏掉的：
+     * 目标流刚 OpenStream/建好 demuxer、还没产出第一个包时切换线程就取了 meta，
+     * 解码器按 hvcC（is_nalff=1）打开，而包随后被 bsf 转成了 Annex B（起始码），
+     * 于是每个包都在 ff_h2645_packet_split() 里失败（1002 条
+     * `Error while decoding frame -1094995529`），一帧不出、画面冻住。
+     *
+     * 同一个现象在 `mSoughtVideoPos == INT64_MIN` 那条路上早就有对策（见
+     * ProcessVideoPacket 里"seek would clean the packet which have ExtraData …"那段），
+     * 但它的门槛是"一次播放 / 一次 seek 只触发一次"，**切档路径永远轮不到它**，
+     * 所以这里把它变成"每次重建解码器都要重新对齐一次"的不变量。
+     */
+    mVideoDecoderNeedsExtraData.store(true);
 
     {
         std::lock_guard<std::mutex> lock(mAppStatusMutex);

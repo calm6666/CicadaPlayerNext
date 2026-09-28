@@ -1613,6 +1613,60 @@ namespace Cicada {
         void sendMediaFrameToCache(const IAFPacket *frame, StreamType type);
         void ReleaseCacheManager();
 #endif
+
+        /*
+         * ============ 【新解码器必须和"它将要收到的包"是同一形态】============
+         *
+         * 现象（2026-09-28 21:20 那份日志，HLS 分段片源，854x480 -> 1920x1080 切档）：
+         *   14.528 关闭旧流、打开目标流、Seek(1066000)   （目标流的 tracker 还没 init，
+         *          Seek 只把目标记进 mSeekPendingUs，真正的定位发生在读线程的 open_internal）
+         *   14.545 读线程刚建好目标分片的 demuxer（`file have 1 streams` + `DAR 1920:1080`），
+         *          切换线程就在这一刻取了 meta 并重建解码器（`needs an in-place decoder rebuild`）
+         *   14.571 `seek decode starts at a keyframe: pts=0 flags=1`
+         *   14.613 起 3 秒内 1002 条 `Error while decoding frame -1094995529 :Invalid data found`
+         *          （每一条都是 AVERROR_INVALIDDATA，且这一段时间**一帧都没解出来**）
+         *   17.649 错误驱动的 rebuildVideoDecoder 重新取了一次 meta 之后，同一批包立刻解出来了
+         *          （17.735 `seek landing frame accepted: pts=42042000`）
+         * 而之后两次**一模一样的切档**（21:20:28、21:20:57）0 条错误 —— 差别只有一个：
+         * 那两次取 meta 之前，目标流的 demuxer **已经产出过包**。
+         *
+         * 根因：视频包是"原始 mp4 样本（长度前缀 / hvcC 参数集在 extradata 里）"还是
+         * "Annex B（起始码）"**不是稳定的**，而解码器打开时按 meta 里的 extradata 把
+         * NAL 拆包方式定死（ffmpeg `ff_hevc_decode_extradata()`：extradata 是 hvcC 就
+         * is_nalff=1、按 4 字节长度拆包；是 Annex B 或没有就 is_nalff=0、按起始码拆包）。
+         *
+         * 让这件事变得可变的，是 bitstream filter 的**懒创建**：
+         * `framework/demuxer/avFormatDemuxer.cpp:353-356` 在**第一个包**上才调 `createBsf()`，
+         * 而 `framework/demuxer/AVBSF.cpp:52` 会把 bsf 的输出参数集**写回 demuxer 的
+         * codecpar**（hvcC -> Annex B）。于是同一个已打开的 demuxer 上，
+         * `GetStreamMeta()` 拿到的 extradata **先 hvcC、读过第一个包之后变成 Annex B**。
+         * 取 meta 的时刻只要落在"demuxer 建好"和"它产出第一个包"之间，重建出来的解码器
+         * 就是 hvcC 形态（is_nalff=1），而它随后收到的包已经被 bsf 转成 Annex B 了
+         * （bsf 就在同一个函数里、在这个包被交出去之前跑），拆包方式与字节流不一致
+         * ⇒ `ff_h2645_packet_split()` 每个包都失败 ⇒ 逐包 AVERROR_INVALIDDATA，
+         * 一帧不出、帧队列/包队列从此错位（画面不动、音频照常）。
+         * 反过来（`header_type_extract`、HLS 的 fMP4 走 Annex B -> xVCC）同样会错位。
+         *
+         * 处置：把这件事做成**不变量**，不靠时序 ——
+         * 视频解码器每建一次（`CreateVideoDecoder()`，切档重建 / 错误恢复 / 起播共用同一个
+         * 入口）就把本标记置真；`DecodeVideoPacket()` 在**把包交给解码器之前**看到标记，
+         * 就给"第一个关键帧包"补上**该流此刻的** extradata（`AV_PKT_DATA_NEW_EXTRADATA`，
+         * 由 `avcodecDecoder::enqueue_decoder()` 落到包上，ffmpeg 在拆包**之前**
+         * 重新解析它并据此重定 is_nalff / nal_length_size），然后清零。
+         *
+         * 为什么这是确定性的（不是"再试一次"）：
+         *   能走到 `DecodeVideoPacket()` 的包，必然已经由内层 demuxer 产出过，
+         *   也就必然已经跑过 `createBsf()`；所以这一刻 `GetStreamMeta()` 给出的 extradata
+         *   与这些包的字节形态**同源、同刻**（都来自同一个 codecpar），
+         *   把这份 extradata 交给解码器，拆包方式就与包的实际形态一致。
+         *   没有计时器、没有阈值、没有重试、没有配置开关。
+         *
+         * 只动视频路；音频/字幕/DRM 路径一行不碰。meta 里没有参数集（TS 这类原生
+         * Annex B 片源）时整块空转 —— 那种片源本来就不存在形态不一致。
+         *
+         * 追加在成员列表**最末尾**（本工程硬规则：只有追加才是增量 ABI 安全的）。
+         */
+        std::atomic<bool> mVideoDecoderNeedsExtraData{false};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H
