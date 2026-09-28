@@ -7,6 +7,7 @@
 
 
 #include "../audioRenderPrototype.h"
+#include "AaudioRender.h"
 #include <atomic>
 #include <base/media/spsc_queue.h>
 #include <jni.h>
@@ -55,9 +56,30 @@ private:
         addPrototype(this);
     }
 
+    /*
+     * ============ 【AAudio 优先：默认 AAudio、能力不可用自动回退 AudioTrack】============
+     *
+     * audioRenderPrototype::create() 取"注册顺序中第一个 is_supported 为真的实现"
+     * （audioRenderPrototype.cpp:15-21），而注册发生在各 .cpp 的静态对象构造里
+     * （本文件的 AudioTrackRender::se 与 AaudioRender.cpp 的 AaudioRender::se）。
+     * **两个不同翻译单元的静态对象构造顺序是未定义的**（静态初始化顺序问题），
+     * 所以"把 AAudio 写在前面"这件事靠注册顺序无法保证。
+     *
+     * 这里改用**能力互斥**表达同一条产品要求，与顺序完全无关：
+     *   · AAudio 可用（libaaudio.so 能 dlopen 且必需符号齐全）⇒ 本实现返回 false，
+     *     create() 无论先注册谁都会选中 AaudioRender；
+     *   · AAudio 不可用（API < 26 / 符号缺失）⇒ 返回 true，AudioTrack 接管 = 回退。
+     * 这不是配置开关，判据只是"这台设备有没有这个能力"（AaudioRender::isAvailable()）。
+     *
+     * 顺带解决一个链接期问题：这个调用使 AaudioRender.cpp 成为 AudioTrackRender.cpp 的
+     * 必需依赖 —— 静态库在把 AudioTrackRender.o 拉进来时**一定**也会把 AaudioRender.o 拉进来。
+     * 否则仅靠"静态对象自注册"，AaudioRender.o 有可能被链接器整个丢掉（没有任何符号被引用），
+     * AAudio 就会静默地永远不被注册，而那不会有任何编译/链接错误提示。
+     */
     bool is_supported(AFCodecID codec) override
     {
-        return true;
+        (void) codec;
+        return !AaudioRender::isAvailable();
     }
 
     Cicada::IAudioRender *clone() override

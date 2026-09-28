@@ -56,6 +56,10 @@ if (ANDROID)
             audio/filterAudioRender.h
             audio/Android/AudioTrackRender.cpp
             audio/Android/AudioTrackRender.h
+            # AAudio 渲染器（默认走它；能力不可用时由 AudioTrackRender::is_supported() 接管 = 回退）。
+            # 与 AudioTrackRender 的结构：src/framework/render/audio/Android/AaudioRender.cpp:1。
+            audio/Android/AaudioRender.cpp
+            audio/Android/AaudioRender.h
             )
 endif ()
 

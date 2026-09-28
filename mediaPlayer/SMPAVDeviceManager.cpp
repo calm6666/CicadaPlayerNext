@@ -261,10 +261,12 @@ void SMPAVDeviceManager::pauseAudioRender(bool pause)
 int SMPAVDeviceManager::setUpAudioRender(const IAFFrame::audioInfo &info)
 {
     std::lock_guard<std::mutex> uMutex(mMutex);
+
     if (mAudioRenderValid) {
         assert(mAudioRender != nullptr);
         return 0;
     }
+
     if (mAudioRender) {
         mAudioRender->flush();
         mAudioRender->mute(mMute);
@@ -272,21 +274,74 @@ int SMPAVDeviceManager::setUpAudioRender(const IAFFrame::audioInfo &info)
         mAudioRenderValid = true;
         return 0;
     }
-    if (mAudioRender == nullptr) {
-        mAudioRender = AudioRenderFactory::create();
+
+    /*
+     * ============ 【init 失败就换一个实现再试一次（最多 1 次重试）】============
+     *
+     * 背景：Android 上有两套音频输出实现（AaudioRender 优先、AudioTrackRender 兜底），
+     * 由 audioRenderPrototype::create() 按"设备能力"选出第一个（见 framework/render/audio/
+     * Android/AudioTrackRender.h 里 is_supported() 的说明）。但**能力判定只能在 create() 时
+     * 用"平台库/符号/系统版本"完成，真正的设备操作要等到 init(info)**（那时才有采样率/声道）。
+     * 于是存在一个窄缝：判定说"AAudio 可用"，可真到建流时设备/ROM 打不开。
+     *
+     * 那一次 AaudioRender 会把失败记成一个进程级 sticky 标记
+     * （framework/render/audio/Android/AaudioRender.cpp 的 s_streamOpenFailed 与 isAvailable()），
+     * 于是**下一次 create() 必然落到 AudioTrack**。本函数就是那个"下一次"：失败后销毁实例、
+     * 重新 create、再 init 一次 —— 这样"存在但打不开"的设备也能当场回退，而不是让整次播放
+     * 直接报 MEDIA_PLAYER_ERROR_RENDER_AUDIO_OPEN_DEVICE_FAILED。
+     *
+     * 三条工程约束都满足：
+     *   · **状态判据**：只看"这一次 init 成不成功"，失败方已经把自己标成不可用；
+     *   · **没有计时器/看门狗**：重试次数是编译期常量 2（= 初始 + 1 次重试），不是时间预算；
+     *   · **必须换实例**：filterAudioRender::init() 对同一个实例只允许一次
+     *     （mInputInfo.sample_rate != 0 就返回 -EINVAL），所以换实现必须换对象。
+     */
+    int audioInitRet = -1;
+
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        if (mAudioRender == nullptr) {
+            mAudioRender = AudioRenderFactory::create();
+        }
+
+        if (mAudioRender == nullptr) {
+            AF_LOGE("no audio render implementation is available (attempt %d/2)", attempt + 1);
+            return -1;
+        }
+
+        audioInitRet = mAudioRender->init(&info);
+
+        if (audioInitRet >= 0) {
+            if (attempt > 0) {
+                AF_LOGW("audio output fell back to another render implementation after the first one could not "
+                        "open its device (succeeded on attempt %d/2) — playback continues on the fallback\n",
+                        attempt + 1);
+            }
+
+            mAudioRenderInfo = info;
+            mAudioRenderValid = true;
+            /*
+             * 新建出来的实例不知道播放器当前的静音状态（filterAudioRender::mute 只写它自己的成员）。
+             * 复用旧实例的那条分支一直是显式 `mute(mMute)` 的，这里补上同一步，否则
+             * "先在静音状态下起播"或"回退到另一个实现"之后会突然出声。
+             * 只调一个既有接口，不改任何默认值。
+             */
+            mAudioRender->mute(mMute);
+            return 0;
+        }
+
+        AF_LOGE("audio render init failed (attempt %d/2, ret=%d) — destroying that instance and trying the next "
+                "implementation (the failed one marks itself unavailable, so create() will not pick it again)\n",
+                attempt + 1, audioInitRet);
+
+        /* 销毁失败的实例：析构会停掉它自己的渲染线程并释放设备资源
+         * （AaudioRender 的析构会关掉已打开的流）。留着它没有意义 ——
+         * 它的 init 已经被调用过，同一个对象再也 init 不起来。 */
+        mAudioRender = nullptr;
+        mAudioRenderValid = false;
     }
 
-    assert(mAudioRender);
-    int audioInitRet = mAudioRender->init(&info);
-
-    if (audioInitRet < 0) {
-        AF_LOGE("AudioOutHandle Init Error is %d", audioInitRet);
-        return -1;
-    } else {
-        mAudioRenderInfo = info;
-        mAudioRenderValid = true;
-        return 0;
-    }
+    AF_LOGE("AudioOutHandle Init Error is %d", audioInitRet);
+    return -1;
 }
 int SMPAVDeviceManager::setSpeed(float speed)
 {

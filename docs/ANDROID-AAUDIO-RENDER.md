@@ -71,10 +71,75 @@ mpv 是"纯 native 播放器"派（音频路径里没有 JVM），它的 AAudio 
 
 | 风险 | 对策 |
 |---|---|
-| 低延迟模式在个别设备上不可用/爆音 | `setPerformanceMode` 失败即退 `NONE`；`setBufferCapacityInFrames` 用平台给的推荐值起步 |
-| 时间戳在个别设备上不可靠 | 与 mpv 同法：取不到沿用上次值；必要时回退"已写帧数 - 缓冲深度"估算 |
+| 低延迟模式在个别设备上不可用/爆音 | `setPerformanceMode` 失败即退 `NONE`（实现里是"先试 LOW_LATENCY，openStream 失败就以 NONE 重开一次"，见 `AaudioRender.cpp` 的 openStream）；`setBufferCapacityInFrames` 用约 50ms 的期望值起步，设备会自行夹取 |
+| 时间戳在个别设备上不可靠 | 与 mpv 同法：**取不到就返回 INT64_MIN**（上层 `SuperMediaPlayer::getAudioPlayTimeStamp()` 把它当"音频时钟暂不可用"退回自走时钟）；设备把 flush 后的帧计数归零时，用"presented < baseline 就地重钉基线"自愈 |
 | 双实现（AAudio + AudioTrack）与工程偏好冲突 | 短期必要（minSdk 24）；**AAudio 在真机验证稳定后，把 minSdk 提到 26 并删除 AudioTrack 那份**，回到单一实现 |
 | 回退判定错（明明支持却判定不支持） | `is_supported()` 只看"必需符号是否全部解析成功"，不做版本号判断（与 mpv 一致，最稳） |
+| 注册顺序不确定（两个 .cpp 的静态对象构造顺序未定义） | **不依赖注册顺序**：`AudioTrackRender::is_supported()` 返回 `!AaudioRender::isAvailable()`，AAudio 可用时它自己让位 ⇒ 与顺序无关的"默认 AAudio、失败回退"。附带收益：这条调用使 `AaudioRender.o` 成为必需依赖，不会被静态库链接器丢掉 |
 
 **回退**：`audioRenderPrototype` 的注册顺序把 AudioTrackRender 保留在 AAudio 之后；
-如需整块撤销，删除新文件 + 注册行 + `aaudio` 链接即可（不影响其它平台）。
+如需整块撤销，删除新文件 + 注册行即可（不影响其它平台）。
+
+## 五、构建接入的实测结论（2026-09-27）
+
+已改：`framework/render/CMakeLists.txt` 的 Android 段（`audio/Android/AaudioRender.{cpp,h}`）。
+
+**有意未改**：`platform/Android/ComposePlayer/cicadaplayer/src/main/cpp/CMakeLists.txt` 与
+`platform/Android/source/premierlibrary/CMakeLists.txt` 的 `target_link_libraries` **没有加 `aaudio`**。
+理由（两条，都指向"加了可能更糟"）：
+
+1. **本实现不需要任何链接期符号**：不 include `<aaudio/AAudio.h>`、不调用任何 `AAudio*` 函数，
+   全部符号都是运行时 `dlopen("libaaudio.so") + dlsym` 得到的。写成函数指针调用之后，
+   链接期没有未定义符号需要 `-laaudio` 去补。
+2. **`-laaudio` 在 minSdk 24 上有两个真实风险**（本工程 `minSdk = 24`：ComposePlayer 的
+   `app/build.gradle.kts:54`、`cicadaplayer/build.gradle.kts:71`、`premierlibrary/build.gradle:16`；
+   NDK `25.2.9519653`）：
+   - **链接期**：AAudio 是 API 26 才有的库，API 24 的 sysroot 里不一定有它的 stub ⇒
+     `cannot find -laaudio`，直接编不过；
+   - **运行期更严重**：若链接器把 `libaaudio.so` 记成 DT_NEEDED，那么装到 **API 24/25** 设备上
+     时动态链接器会因找不到该库而**让整个 `libCicadaPlayer.so` 加载失败** —— 那是启动即崩，
+     比"这台设备没有 AAudio"严重得多。
+   而 API ≥ 26 的设备上 `libaaudio.so` 是系统库，`dlopen("libaaudio.so")` 按 soname 一定能找到，
+   **所以不加链接行不会让 AAudio 少用上**。
+
+⇒ 结论：**保持不链接**。若将来把 minSdk 抬到 26（那时也该删掉 AudioTrack 那份），
+或你确认 NDK 25 在 API 24 的 sysroot 里提供了 stub 且不会产生 DT_NEEDED，
+就在那两处 `target_link_libraries` 里各加一行 `aaudio` 即可 —— 这一条需要**编译/真机验证**，见文末清单。
+
+## 六、最终决策：高版本安卓用 AAudio、其余回退 AudioTrack，minSdk 保持 24
+
+产品要求：**"支持 AAudio 的必须用 AAudio，不支持才回退 AudioTrack"** ——
+新设备拿 AAudio 的性能，旧设备照样能正常播。落地方案：
+
+| 项 | 决定 | 理由 |
+|---|---|---|
+| minSdk | **保持 24（Android 7.0）** | "支持就用 AAudio"是**运行期能力判定**，与安装门槛无关；抬 minSdk 只会缩小安装面（24 → 27 丢 1.6%，→ 28 丢 3.9%），换不到"更优先地用上 AAudio" |
+| 用 AAudio 的门槛 | **API ≥ 27（Android 8.1）** | AAudio 核心符号是 `__INTRODUCED_IN(26)`，但 Google 的 Oboe 明确写着 "AAudio is not recommended for Android 8.0 or earlier versions" ⇒ "支持"按"推荐"算。门槛定义在 `AaudioRender.cpp` 的 `AAUDIO_MIN_RECOMMENDED_API`，**只有这一处**，要挪到 26/28 改一个常量 |
+| 26 与更早 | **AudioTrack** | 8.0 的 AAudio 在但不推荐；7.x 根本没有 `libaaudio.so` |
+| "存在但打不开" | **sticky 自降级到 AudioTrack** | 符号齐全不等于能用；真实建流失败后置进程级标记，后续 `create()` 直接选 AudioTrack（无计时器、无重试循环） |
+| 建流失败时 | 先做 **3 轮**降级尝试（低延迟+期望缓冲 → 普通+期望缓冲 → 普通+不指定缓冲），3 轮都失败才认"这台设备用不了 AAudio" | 把"能建起来"的概率做满，减少真正需要回退的情形 |
+| "存在但打不开"如何**当场**回退 | `mediaPlayer/SMPAVDeviceManager.cpp` 的 `setUpAudioRender()`：`init()` 失败 ⇒ 销毁该实例 → `AudioRenderFactory::create()` 再建一个 → 再 `init()` 一次（**最多 1 次重试**；纯状态判据，无计时器） | 失败方已经把自己标成不可用（sticky），所以第二次 `create()` 必然选到 AudioTrack ⇒ **第一次音频 setup 就能回退**，而不是让整次播放报 `MEDIA_PLAYER_ERROR_RENDER_AUDIO_OPEN_DEVICE_FAILED` |
+
+### 版本支持矩阵（minSdk 24 不变）
+
+| Android | API | 走哪条路 | 说明 |
+|---|---|---|---|
+| 5.0 ~ 6.0 | 21 ~ 23 | 不覆盖 | 低于 minSdk 24 |
+| 7.0 / 7.1 | 24 / 25 | AudioTrack | 无 `libaaudio.so` |
+| 8.0 | 26 | **AudioTrack** | AAudio 在、符号也齐，但 Google 不推荐（"not recommended for Android 8.0 or earlier"） |
+| 8.1 | 27 | **AAudio** | 推荐门槛（Oboe 同值） |
+| 9 ~ 16 | 28 ~ 36 | **AAudio** | `setUsage` 等齐全（API 28），行为最稳 |
+| 12+ | 31+ | AAudio | 只多一个本实现未使用的 `setChannelMask`(32) |
+
+覆盖率（Google 2025-12 分布）：minSdk 24 ⇒ 可装 **99.1%**；其中走 AAudio 的 ≥27 段为 **97.5%**。
+
+### 这一步新增的验收标记（真机一眼判定）
+
+- 用上 AAudio：`[aaudio] output=aaudio stream opened: performanceMode=… rate=… channels=… bufferCapacityFrames=… ringBytes=…`
+- 因系统版本回退：`[aaudio] not used on this device (API level=26 < 27) ⇒ fall back to AudioTrack …`
+- 因符号缺失回退：`[aaudio] libaaudio unavailable ⇒ fall back to AudioTrack …`
+- 因"打不开"自降级：`[aaudio] openStream failed (attempt N/3 …)` 之后
+  `[aaudio] cannot open an output stream after 3 attempts … AAudio disabled for the rest of this process`
+  （下一次音频 setup 会是 AudioTrack）
+
+
