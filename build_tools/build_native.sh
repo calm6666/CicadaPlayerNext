@@ -40,6 +40,39 @@ function create_cmake_config(){
 
 #build to ffmpeg
 function build_shared_framework(){
+    #
+    # 这一步要用 cmake 生成 Xcode 工程、再调 xcodebuild。**两个都必须先检查**：
+    # 脚本没有 set -e，缺了 cmake 时以前会一路跑到 xcodebuild，然后报一句
+    #     xcodebuild: error: The directory .../install/ffmpeg/Darwin/Xcode does not
+    #     contain an Xcode project.
+    # 那是"假象"—— 真因是上面那次 cmake 直接 `command not found` 了。这里先报清楚。
+    #
+    if ! command -v cmake >/dev/null 2>&1; then
+        # brew 装好的 cmake 可能在 /opt/homebrew/bin（Apple Silicon）或 /usr/local/bin，
+        # 而非交互式 shell 的 PATH 里未必有 —— 先补一次再判。
+        local prefix
+        for prefix in /opt/homebrew/bin /usr/local/bin; do
+            if [ -x "${prefix}/cmake" ]; then
+                PATH="${prefix}:${PATH}"
+                export PATH
+                break
+            fi
+        done
+    fi
+
+    if ! command -v cmake >/dev/null 2>&1; then
+        echo "ERROR: cmake not found —— 这一步要用它生成 Xcode 工程（紧接着会调 xcodebuild）。" >&2
+        echo "       装好再重跑： brew install cmake" >&2
+        echo "       （只给 Qt 播放器编静态库的话，也可以 BUILD_SHARED_LIB=FALSE 跳过这一步；" >&2
+        echo "         这一步产出的是给 iOS/macOS 框架用的 libffmpeg.dylib。）" >&2
+        exit 1
+    fi
+
+    if ! command -v xcodebuild >/dev/null 2>&1; then
+        echo "ERROR: xcodebuild not found —— 装 Xcode 命令行工具： xcode-select --install" >&2
+        exit 1
+    fi
+
     if [ -z "${LIB_NAME}" ];then
         export LIB_NAME=ffmpeg
     fi

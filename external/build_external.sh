@@ -181,6 +181,20 @@ function apply_config() {
 }
 
 function check_cmake(){
+    # brew 装好的 cmake 在 Apple Silicon 上是 /opt/homebrew/bin/cmake、Intel 上是
+    # /usr/local/bin/cmake，而**非交互式 shell 的 PATH 里未必有**（脚本从终端/IDE/CI
+    # 里被调起时很常见）。先补 PATH 再判断，否则会出现"明明装了却 command not found"
+    # —— 那会让后面 xcodebuild 报一句完全不相关的 "does not contain an Xcode project"。
+    local prefix
+    for prefix in /opt/homebrew/bin /usr/local/bin; do
+        if [ -x "${prefix}/cmake" ]; then
+            case ":${PATH}:" in
+                *":${prefix}:"*) ;;
+                *) PATH="${prefix}:${PATH}"; export PATH ;;
+            esac
+        fi
+    done
+
     if [ ! `which cmake` ]
     then
         echo 'cmake not found'
@@ -307,12 +321,17 @@ elif [[ "$1" == "iOS" ]];then
     check_dav1d
     bash ${REPO_ROOT}/build_tools/build_iOS.sh
 elif [[ "$1" == "macOS" ]];then
+    # macOS 这条同样要用 cmake（build_native.sh 最后那步 build_shared_framework 会用
+    # `cmake -G Xcode` 生成工程再调 xcodebuild）。以前只有 iOS 分支调了 check_cmake，
+    # 于是没装 cmake 的机器会在那一步静默失败、最后报成"目录里没有 Xcode 工程"。
+    check_cmake
     bash ${REPO_ROOT}/build_tools/build_native.sh
 elif [[ "$1" == "Linux" ]];then
     bash ${REPO_ROOT}/build_tools/build_native.sh
 elif [[ "$1" == "Windows" ]];then
     bash ${REPO_ROOT}/build_tools/build_win32.sh
 elif [[ "$1" == "maccatalyst" ]];then
+    check_cmake
     bash ${REPO_ROOT}/build_tools/build_maccatalyst.sh
 elif [[ "$1" == "OHOS" ]];then
     bash ${REPO_ROOT}/build_tools/build_ohos.sh
