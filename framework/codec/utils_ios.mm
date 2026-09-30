@@ -15,7 +15,19 @@ namespace Cicada{
 
     void CFBridging_Release(void *data)
     {
+        if (data == nullptr) {
+            return;
+        }
+#if __has_feature(objc_arc)
         CFBridgingRelease(data);
+#else
+        /*
+         * 没有 ARC 时 CFBridgingRelease 等价于 __bridge_transfer, 会被编译成空操作:
+         * 调用方(mediaPlayer 的 releaseAppleImage)以为图已经释放, 实际上每张截图都
+         * 泄漏一份。这里显式 release, 两种编译模式下语义一致。
+         */
+        [(__bridge id) data release];
+#endif
     }
 
     void PixelBuffer_Retain(void *pixelBuffer)
