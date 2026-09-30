@@ -27,7 +27,7 @@
 // 线程约定：本文件所有函数只能在 Qt 的**渲染线程**上调用（updatePaintNode 里）。
 //
 #ifndef CICADA_QT_CICADATEXTUREMETAL_H
-#define CICADA_QT_CICADATETEXTUREMETAL_H
+#define CICADA_QT_CICADATEXTUREMETAL_H
 
 #include <QtCore/QString>
 

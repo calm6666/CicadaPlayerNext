@@ -25,6 +25,13 @@
 #else
   #if __GNUC__ >= 4
     #define CICADA_CPLUS_EXTERN __attribute__((visibility ("default")))
+    /*
+     * 取值保持工程原样：ffmpeg 自己的两份头文件对 attribute_deprecated 的取值都不同
+     * （external/install/.../attributes.h 在 C++ 下用 [[deprecated]]，而 vendored 的
+     * external/external/ffmpeg/... 用编译器原生写法），我们跟着任何一边改都会让另一边
+     * 报"宏重定义"。这是既有的、来自第三方头的告警（Windows C4005 / macOS
+     * -Wmacro-redefined），不作为本工程的代码问题处理。
+     */
     #ifndef attribute_deprecated
     #define attribute_deprecated __attribute__((deprecated))
     #endif

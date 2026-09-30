@@ -13,7 +13,7 @@
 #include <QtCore/QDebug>
 
 /* 框架日志：抽帧失败必须留下原因。本轮"首页卡片没有封面"就是空缓存目录 + 这几行日志定位的，
-   全项目其它 src/*.cpp 也都用同一套宏（AF_LOGE/AF_LOGW/...）。 */
+   全项目其它 src 下的 .cpp 也都用同一套宏（AF_LOGE/AF_LOGW/...）。 */
 #include <utils/frame_work_log.h>
 
 extern "C" {

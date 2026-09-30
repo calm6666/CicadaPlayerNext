@@ -906,9 +906,13 @@ namespace {
         action.sa_flags = SA_SIGINFO | SA_RESETHAND;
         sigemptyset(&action.sa_mask);
 
-        const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+        /*
+         * 变量名不能叫 signals —— Qt 把 `signals` 定义成了宏（→ Q_SIGNALS），
+         * 在本文件里用它会直接编译失败（qtmetamacros.h:44）。
+         */
+        const int fatalSignals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
 
-        for (int sig : signals) {
+        for (int sig : fatalSignals) {
             sigaction(sig, &action, nullptr);
         }
 
