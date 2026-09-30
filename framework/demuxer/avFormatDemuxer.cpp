@@ -15,6 +15,8 @@ extern "C" {
 #include "base/media/AVAFPacket.h"
 #include "AVBSF.h"
 #include <mutex>
+/* 存活计数探针用的原子量（见文件里 logLiveEntitySnapshot() 的说明）。 */
+#include <atomic>
 #include <utils/CicadaUtils.h>
 #include <cassert>
 #include <utils/timer.h>
@@ -26,12 +28,47 @@ using namespace std;
 namespace Cicada {
     static const int INITIAL_BUFFER_SIZE = 32768;
 
+    /*
+     * 【存活计数探针·2026-09-30】分片边界上的"谁还活着"快照。
+     *
+     * 背景：D3D11VA 表面池已经用引用计数证明会随解码器释放（见
+     * docs/ANALYSIS-D3D11VA-POOL-RELEASE.md），而关窗后每轮内存仍然上涨 ——
+     * 于是必须逐类归因，而不是继续猜。这里统计的是**框架自己拥有的**那几类对象：
+     *
+     *   * avFormatDemuxer：每个分片都会重建一次（HLS 尤其频繁：实测 15s 内 30 次），
+     *     是"每轮泄漏"的头号嫌疑；
+     *   * AVFormatContext：ffmpeg 的容器上下文（含内部缓冲、probe 缓冲、AVIOContext），
+     *     alloc/close 必须配平；
+     *   * AVAFFrame / AVAFPacket：框架唯一的帧/包包装（见 AVAFPacket.h 里的说明）。
+     *
+     * 打印点选在 open 成功与 Close：那是分片边界，天然的时间轴 ——
+     * 内存坡度跟不跟这些计数走，同一份日志里就能对齐。
+     */
+    static std::atomic<long long> g_afDemuxerCreated{0};
+    static std::atomic<long long> g_afDemuxerDestroyed{0};
+    static std::atomic<long long> g_afFmtCtxAllocated{0};
+    static std::atomic<long long> g_afFmtCtxClosed{0};
+
+    static void logLiveEntitySnapshot(const char *where, const void *self, const char *path)
+    {
+        AF_LOGI("[mem] live entities @%s (this=%p %s): avFormatDemuxer=%lld (created=%lld "
+                "destroyed=%lld) AVFormatContext live=%lld (alloc=%lld close=%lld) | "
+                "AVAFFrame=%lld AVAFPacket=%lld\n",
+                where, self, (path != nullptr) ? path : "?",
+                g_afDemuxerCreated.load() - g_afDemuxerDestroyed.load(),
+                g_afDemuxerCreated.load(), g_afDemuxerDestroyed.load(),
+                g_afFmtCtxAllocated.load() - g_afFmtCtxClosed.load(),
+                g_afFmtCtxAllocated.load(), g_afFmtCtxClosed.load(),
+                afLiveAvafFrames(), afLiveAvafPackets());
+    }
+
     avFormatDemuxer avFormatDemuxer::se(0);
 
     void avFormatDemuxer::init()
     {
         mName = LOG_TAG;
         mCtx = avformat_alloc_context();
+        g_afFmtCtxAllocated++;
         mCtx->interrupt_callback.callback = interrupt_cb;
         mCtx->interrupt_callback.opaque = this;
         // AVFMT_FLAG_KEEP_SIDE_DATA removed in FFmpeg 6.0（5.0 起即 no-op，
@@ -43,12 +80,14 @@ namespace Cicada {
 
     avFormatDemuxer::avFormatDemuxer()
     {
+        g_afDemuxerCreated++;
         init();
     }
 
     avFormatDemuxer::avFormatDemuxer(const string &path) : IDemuxer(path)
     {
         AF_TRACE;
+        g_afDemuxerCreated++;
         init();
     }
 
@@ -65,6 +104,8 @@ namespace Cicada {
         delete mPthread;
         mPthread = nullptr;
 #endif
+        /* 计数放在 Close() 之后：Close 那条快照要看到"这个对象还活着"。 */
+        g_afDemuxerDestroyed++;
     }
 
     int avFormatDemuxer::Open()
@@ -219,6 +260,7 @@ namespace Cicada {
         }
 
         bOpened = true;
+        logLiveEntitySnapshot("open ok", this, mPath.c_str());
         int64_t used = af_getsteady_ms() - startTime;
         CicadaJSONItem json;
         json.addValue("cost", (int) used);
@@ -244,6 +286,7 @@ namespace Cicada {
 
         if (mCtx) {
             avformat_close_input(&mCtx);
+            g_afFmtCtxClosed++;
         }
 
         if (mPInPutPb) {
@@ -259,6 +302,8 @@ namespace Cicada {
         if (mInputOpts) {
             av_dict_free(&mInputOpts);
         }
+
+        logLiveEntitySnapshot("close", this, mPath.c_str());
     }
 
     int avFormatDemuxer::ReadPacketInternal(unique_ptr<IAFPacket> &packet)

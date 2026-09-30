@@ -50,6 +50,19 @@ public:
 
     int renderFrame(std::unique_ptr<IAFFrame> &frame) override;
 
+    /*
+     * 【同步释放】把 mInputQueue 里还没上屏的帧全部丢掉。
+     *
+     * 为什么本渲染器要单独覆写：clearScreen() 在这条路上只置了两个标志
+     * （mClearScreenOn / bFlushAsync），真正的清空发生在渲染线程下一次循环里 ——
+     * 而调用方要的是"关解码器之前帧就已经放掉"（硬解帧钉着解码器输出缓冲 /
+     * 表面池，见 IVideoRender::releaseFrames() 的契约）。
+     *
+     * 队列由 mFrameMutex 保护，渲染线程 pop 时拿的是同一把锁，所以在这里
+     * （播放线程）同步清空不会和渲染线程抢队列。
+     */
+    void releaseFrames() override;
+
     int setRotate(Rotate rotate) override;
 
     int setFlip(Flip flip) override;

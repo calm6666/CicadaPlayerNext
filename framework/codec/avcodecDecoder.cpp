@@ -289,11 +289,153 @@ namespace Cicada {
         // Must go before avcodec_free_context(): the codec context holds its own
         // reference and releases it on free.
         if (mPDecoder->hwDeviceRef != nullptr) {
+            /*
+             * ============ 【探针修正·2026-09-30：原来那两条读数恒为常量】============
+             *
+             * 这里原来用 av_buffer_is_writable() 判断"还有没有别人拿着"，
+             * 那是**恒为 0** 的，原因在 FFmpeg 源码里：
+             *   * av_hwdevice_ctx_alloc() / av_hwframe_ctx_alloc() 建 buffer 时都带了
+             *     AV_BUFFER_FLAG_READONLY（libavutil/hwcontext.c:204-206 与 :286-288）；
+             *   * av_buffer_is_writable() 对带 READONLY 的 buffer **直接返回 0**
+             *     （libavutil/buffer.c:147-153），与引用计数完全无关。
+             *
+             * 所以旧日志里 `exclusively owned=0`（设备那条）和 `externally pinned=1`
+             * （池那条）是**常量**，不是结论 —— 拿它们当"池被钉住"的证据是错的。
+             * 真正有信息量的是引用计数：此处持有者 = 解码器自己(1) + 我们的探针(1)
+             * + 其它还活着的帧(N)。
+             */
+            AF_LOGI("[mem] hw device ref: holders outside this object=%d "
+                    "(refcount uses the same READONLY-buffer caveat as the pool probe)\n",
+                    av_buffer_get_ref_count(mPDecoder->hwDeviceRef) - 1);
+
             av_buffer_unref(&mPDecoder->hwDeviceRef);
         }
 #endif
 
+        /*
+         * 探针要用的解码器名字（下面会把 mPDecoder->codec 清空，所以先取）。
+         * 一轮关窗会看到**两个**解码器实例的这套日志：视频一个、音频一个 ——
+         * 音频那个没有 hw frames ctx（日志里显示 `none`），带池的是视频这个。
+         * 名字打在日志里，就不必再靠顺序猜哪个是哪个。
+         */
+        const char *probeCodecName = (mPDecoder->codec != nullptr) ? mPDecoder->codec->name : "?";
+
+        /*
+         * ============ 【顺序修复·本轮】先放解码器自己那只复用帧，再 free codec context ============
+         *
+         * 为什么必须换顺序：`dequeue_decoder()` 里那句
+         * `avcodec_receive_frame(codecCont, mPDecoder->avFrame)` 会把**最近解出的那一帧**
+         * 留在 mPDecoder->avFrame 里（FFmpeg 只先 unref 再填，不会替我们放掉），
+         * 而零拷贝帧的 buf[] 里握着的正是 hw frames 上下文（= 那张 20 片表面数组）。
+         *
+         * 原来的顺序是 `avcodec_free_context()` 在前、`av_frame_free(&mPDecoder->avFrame)`
+         * 在后，于是"池还被谁钉着"这个读数里**永远混着我们自己这一份** —— 无条件
+         * writable=0，根本看不出外部是否还有帧（上一轮那条 `=0` 就是这么来的，
+         * 它并不能证明"有外部帧"）。
+         *
+         * 换到前面之后，紧跟着那条 hw frames ctx 探针才第一次**有信息量**：
+         * 它报的"外部持有者数"归零才真的意味着池会随解码器一起走。
+         */
+        av_frame_free(&mPDecoder->avFrame);
+
+        AVBufferRef *poolProbeRef = nullptr;
+
         if (mPDecoder->codecCont != nullptr) {
+            /*
+             * 【释放探针·表面池】hw frames 上下文就是那张表面数组（1080p 20 片 ≈62MB）。
+             *
+             * 走到这里时，"我们自己这边"只剩 codec context 这一份引用（上面 avFrame 已放），
+             * 所以引用计数 = 1 + 外部还活着的帧数。**判据是引用计数**，
+             * 不是 av_buffer_is_writable()（后者对这个 READONLY 的 buffer 恒为 0，
+             * 见函数开头那段修正说明）。
+             */
+            if (mPDecoder->codecCont->hw_frames_ctx != nullptr) {
+                auto *framesCtx = reinterpret_cast<AVHWFramesContext *>(
+                                      mPDecoder->codecCont->hw_frames_ctx->data);
+
+                /*
+                 * 引用计数才是判据（av_buffer_is_writable 对 READONLY 的 hw frames ctx
+                 * 恒为 0，见上面的修正说明）：此刻 = 解码器自己(1) + 外部帧(N)。
+                 */
+                const int poolRefCount = av_buffer_get_ref_count(mPDecoder->codecCont->hw_frames_ctx);
+
+                AF_LOGI("[mem] hw frames ctx (the surface pool) refcount=%d before our probe ref: "
+                        "holders outside the codec context=%d (codec %s)\n",
+                        poolRefCount, poolRefCount - 1, probeCodecName);
+
+                /*
+                 * 池有多大，让日志自己说清楚（不然"到底是多少 MB 没回来"只能靠猜）。
+                 * NV12 = 1.5 字节/像素；P010 的每个分量装在 16 位里 = 3 字节/像素。
+                 */
+                if (framesCtx != nullptr && framesCtx->initial_pool_size > 0) {
+                    const long long pixels = (long long) framesCtx->width * framesCtx->height;
+                    const char *formatName = av_get_pix_fmt_name(framesCtx->sw_format);
+                    long long bytesPerSlice = 0;
+
+                    if (framesCtx->sw_format == AV_PIX_FMT_NV12) {
+                        bytesPerSlice = pixels * 3 / 2;
+                    } else if (framesCtx->sw_format == AV_PIX_FMT_P010) {
+                        bytesPerSlice = pixels * 3;
+                    }
+
+                    if (formatName == nullptr) {
+                        formatName = "?";
+                    }
+
+                    if (bytesPerSlice > 0) {
+                        AF_LOGI("[mem] pool geometry: %dx%d %s x %d slice(s) -> about %lld MB\n",
+                                framesCtx->width, framesCtx->height, formatName,
+                                framesCtx->initial_pool_size,
+                                bytesPerSlice * framesCtx->initial_pool_size / (1024 * 1024));
+                    } else {
+                        AF_LOGI("[mem] pool geometry: %dx%d %s x %d slice(s) (no size estimate for "
+                                "this pixel format)\n", framesCtx->width, framesCtx->height,
+                                formatName, framesCtx->initial_pool_size);
+                    }
+                }
+
+                /* 取一份临时引用，供下面"我们全放完之后再看一次"用。 */
+                poolProbeRef = av_buffer_ref(mPDecoder->codecCont->hw_frames_ctx);
+            } else {
+                AF_LOGI("[mem] hw frames ctx: none (codec %s; software decoding, or the pool was never created)\n",
+                        probeCodecName);
+            }
+
+            /*
+             * ============ 【顺序：先放掉表面池的那一份引用，再销毁解码器】============
+             *
+             * 用户要求把顺序写死成"先释放 d3d11va，再销毁解码器"，这里就是那一步：
+             * codec context 自己持有的 hw_frames_ctx 引用（= 表面池本体）在
+             * `avcodec_free_context()` **之前**显式放掉，池的生死因此不再取决于
+             * avcodec_free_context() 内部的时序。
+             *
+             * 为什么这样做是安全的、且不是"重复释放"：
+             *   * avcodec_free_context() -> avcodec_close() -> ff_hwaccel_uninit()
+             *     本来也会 unref 这一份（本仓库自带源码：libavcodec/decode.c:1226），
+             *     而 av_buffer_unref() 对 nullptr 是空操作，所以这里先放一次之后
+             *     内部那次就是无事发生；
+             *   * 本仓库自带的 libavcodec/d3d11va.c 全程不读 hw_frames_ctx，
+             *     hwaccel 的 uninit 不需要它非空。
+             *
+             * 注意：**这一份引用归零并不等于池就释放了** —— 只要解码器之外还有一帧
+             * 活着，池就活着（就是下面那条 externally pinned 探针要报的东西）。
+             * 所以真正让池回收的动作有两个，都在别处：
+             *   1. 渲染器/呈现方在解码器关闭之前同步放帧（IVideoRender::releaseFrames()，
+             *      由 SuperMediaPlayer::FlushVideoPath()/rebuildVideoDecoder()/CreateVideoDecoder()
+             *      调用）；
+             *   2. D3D11 那一层还要 Flush 一次立即上下文 —— 官方文档写明 D3D11
+             *      **默认延迟销毁**对象，引用计数归零只代表"可以销毁"
+             *      （见 platform/QtPlayer/src/CicadaTextureD3D11.h 里引的原文）。
+             */
+            if (mPDecoder->codecCont->hw_frames_ctx != nullptr) {
+                AF_LOGI("[mem] dropping the codec context's own reference to the pool "
+                        "(refcount %d before, codec %s)\n",
+                        av_buffer_get_ref_count(mPDecoder->codecCont->hw_frames_ctx),
+                        probeCodecName);
+
+                av_buffer_unref(&mPDecoder->codecCont->hw_frames_ctx);
+            }
+
             // avcodec_close was removed in FFmpeg 6.0; avcodec_free_context()
             // closes and frees the context in one call.
             avcodec_free_context(&mPDecoder->codecCont);
@@ -301,9 +443,66 @@ namespace Cicada {
         }
 
         mPDecoder->codec = nullptr;
-        av_frame_free(&mPDecoder->avFrame);
         delete mPDecoder;
         mPDecoder = nullptr;
+
+        /*
+         * 【释放探针·决定性的一条】我们（复用帧 + codec context）**全放完之后**再问一次：
+         * 这张池在外面还有没有人拿着？
+         *
+         * 这一条不受"我们自己的 avFrame / codec context"干扰，是"表面池到底有没有被
+         * 外部帧钉住"的最终判据：
+         *   * `externally pinned=0` ⇒ 池随解码器一起走了（关窗就该这样）；
+         *   * `=1` ⇒ **解码器之外确实还有帧活着**，62MB 的账记在它头上，
+         *     下一步就是按 frames ctx 的引用链找那一帧是谁（Qt 侧 m_currentFrame /
+         *     渲染线程那一帧 / 框架侧队列里还没放掉的帧）。
+         */
+        if (poolProbeRef != nullptr) {
+            /*
+             * 我们自己的探针引用占 1，剩下几就是"解码器之外还活着的持有者"。
+             * 0 ⇒ 池随解码器一起释放（这是期望值）。
+             */
+            const int outsideHolders = av_buffer_get_ref_count(poolProbeRef) - 1;
+
+            AF_LOGI("[mem] surface pool after decoder teardown (codec %s): holders outside the "
+                    "decoder=%d (0 = freed together with the decoder)\n",
+                    probeCodecName, outsideHolders);
+
+            if (outsideHolders > 0) {
+                /*
+                 * 报 1 的时候把"已经排除了谁"写清楚，免得下一轮又从同一批嫌疑里重新找：
+                 * 走到这条日志时，下面这些都已经在**解码器之前**放掉了 ——
+                 *   * 播放器侧帧队列（SuperMediaPlayer::mVideoFrameQue，FlushVideoPath 清）；
+                 *   * 渲染器队列 / 正在渲染的那一帧 / 上屏后备帧 / 截屏缓存
+                 *     （IVideoRender::releaseFrames()，同步）；
+                 *   * 解码器自己的复用帧与 codec context 的那一份引用（本函数上面）。
+                 * 所以还剩的那一帧只可能在**呈现方自己手上**（Qt 组件 m_currentFrame 或
+                 * m_pendingFrame 的克隆、TextureFrame 等），它会在下一帧到达时被顶掉；
+                 * 若要"立刻"放掉，需要呈现方在收到"解码代际结束"通知后主动放
+                 * （Qt 侧已经接了：见 CicadaVideoRender::releaseFrames() 与 QML 组件里
+                 * m_decoderGenerationEnded 那一段）。
+                 */
+                AF_LOGW("[mem] the pool is still pinned by a decoded frame outside the decoder: "
+                        "the player queue, the renderer queue/back frame and the capture cache were "
+                        "already released before this point, so what is left is the presenter's own "
+                        "current frame (Qt item) -- it goes away when the next frame replaces it, or "
+                        "immediately if the presenter handles the decoder-generation-ended hook\n");
+            }
+
+            av_buffer_unref(&poolProbeRef);
+        }
+
+        /*
+         * 【释放探针】解码器关闭的完成点。
+         *
+         * 走到这里意味着：codec context 已 free（它拥有的 hw_frames_ctx 一起走）、
+         * 硬解设备引用已 unref、copy-back 的下载帧池（swFrames[]，见上面那个循环）
+         * 已逐个释放。**D3D11VA 那 20 片 surface 的整张纹理数组就是在这里失去最后一个
+         * 引用的**（1080p NV12 约 62MB、4K 约 249MB），所以这一行日志是"关窗后表面池
+         * 真的还回去了"的直接判据。
+         */
+        AF_LOGI("decoder closed: codec context freed, hardware device reference released, "
+                "copy-back frame pool freed (the hardware surface pool goes away with them)\n");
     }
 
     int avcodecDecoder::init_decoder(const Stream_meta *meta, void *wnd, uint64_t flags,
@@ -814,6 +1013,19 @@ namespace Cicada {
     avcodecDecoder::~avcodecDecoder()
     {
         close();
+
+        /*
+         * 【释放探针】解码器**对象**销毁的完成点（无条件打印，每个解码器实例一次：
+         * 正常一轮退出 = 视频 1 次 + 音频 1 次）。
+         *
+         * 为什么还要这一条：close_decoder() 开头有 `if (mPDecoder == nullptr) return;`
+         * 的早退分支，**早退时不打印** —— 所以日志里没有 `decoder closed` 只说明
+         * "这一次没有活着的 codec context"，**不能**据此断定解码器没死。
+         * 这一条放在析构里、无条件打印，才是"解码器对象（连同它的 hw frames 上下文与
+         * 硬件表面池）确实死了"的判据。**没有这一行 = 有东西还在持有解码器。**
+         */
+        AF_LOGI("[mem] avcodecDecoder object destroyed (its codec context, hardware frames "
+                "context and surface pool are gone with it)\n");
     }
 
     bool avcodecDecoder::is_supported(enum AFCodecID codec)

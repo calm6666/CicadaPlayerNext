@@ -584,6 +584,13 @@ void AaudioRender::closeStream()
 
         if (a->streamClose != nullptr) {
             a->streamClose(mStream);
+
+            /*
+             * 【释放探针】AAudio 输出流真的被关掉了。
+             * 放在 streamClose 成功调用之后：没有这个符号时不打，日志不会说谎。
+             * 安卓侧每退出一次播放页，这条应该出现一次（音频侧不留打开的输出流）。
+             */
+            AF_LOGI("[mem] AAudio output stream closed\n");
         }
     }
 
@@ -947,8 +954,10 @@ int AaudioRender::device_write(unique_ptr<IAFFrame> &frame)
     }
 
     if (mRenderingCb != nullptr) {
-        /* 与 AudioTrackRender 同一约定：把"这一帧已经交给设备"上报给播放器
-         * （它据此更新音频时钟/位置）。返回值在本路径没有语义，只在需要时用于诊断。 */
+        /* 这是**应用自定义渲染**回调（`IAudioRender::setRenderingCb`）：应用想自己把这一帧
+         * 交给别处渲染时注册，没注册就是 nullptr —— 它**不是**"这一帧已经交给设备"那条上报，
+         * 播放器侧的位置/统计不能靠它（那条上报在下面 ring 写入成功之后）。
+         * 返回值在本路径没有语义，只在需要时用于诊断。 */
         (void) mRenderingCb(mRenderingCbUserData, frame.get());
     }
 
@@ -958,6 +967,36 @@ int AaudioRender::device_write(unique_ptr<IAFFrame> &frame)
         /* ringWrite 已经做过 free 检查，这里只可能出现在与回调并发消费的极端交错下。 */
         AF_LOGW("[aaudio] short ring write: %u of %d bytes\n", (unsigned) written, len);
         return -EAGAIN;
+    }
+
+    /*
+     * ============ 【必须上报"这一帧已经交给设备"（与 AudioTrackRender 同一约定）】============
+     *
+     * 上面那个 mRenderingCb 是**应用自己渲染这一帧**的可选回调（没注册就是 nullptr），
+     * 它顶替不了这条上报 —— 语义不同，而且本工程（以及任何没注册它的应用）根本不走。
+     * 位置/统计要的是"这一帧真的进了设备"，那只有 onFrameInfoUpdate 表达得了。
+     *
+     * 为什么缺了它进度条会不动（有音轨的片源）：
+     *   播放器侧唯一会在普通播放里推进内容位置的，就是这条链 ——
+     *     AaudioRender::device_write
+     *     → IAudioRenderListener::onFrameInfoUpdate(info, true)
+     *     → SuperMediaPlayer::ApsaraAudioRenderCallback::onFrameInfoUpdate
+     *     → RenderCallback(ST_TYPE_AUDIO, true, info) → MSG_INTERNAL_RENDERED
+     *     → SMPMessageControllerListener::ProcessRenderedMsg(ST_TYPE_AUDIO, …) 里的
+     *       `mCurrentPos = info.timePosition`（见该函数里 audio 分支）。
+     *   而 getCurrentPosition() 在"还没建立过不连续点"（起播后没 seek 过，或 Reset 之后）
+     *   时**逐字返回 mCurrentPos**；视频那一路在"有音轨且音频没 EOS"时被
+     *   `mCurrentAudioIndex < 0 || mAudioEOS` 挡住、同样不写它。
+     *   ⇒ 少了这条上报，mCurrentPos 就一直是它的初值 0：每 500ms 一次的
+     *   NotifyPosition 推给界面的都是 0，进度条不动；用户手动 seek 一次之后，
+     *   seek 会建立不连续点，getCurrentPosition() 改从 mMasterClock 读（那根轴由
+     *   设备的 presented 帧数驱动，与本回调无关），进度条才开始走。
+     *
+     * 放置位置与口径都对齐 AudioTrackRender：**整帧真的被设备接收之后**才报，
+     * 参数恒为 true（本接口的返回值没有语义，与 AudioTrackRender 的处理一致）。
+     */
+    if (mListener != nullptr) {
+        mListener->onFrameInfoUpdate(frame->getInfo(), true);
     }
 
     return 0;

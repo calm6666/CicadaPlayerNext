@@ -497,6 +497,22 @@ namespace Cicada {
             // 2. seek video first ,get the seekedUs
             type = STREAM_TYPE_VIDEO;
             // TODO type use bit or
+            /*
+             * 【P0-B（与 DashManager::seek 同一口径）：其余每一路的 seek 目标必须是"用户请求值"】
+             *
+             * 本函数原来在第 3 步给其余每一路喂的是 `us`，而 `us` 在这里被改写成**视频 seek()
+             * 的返回值**。HLSStream::seek() 末尾返回的 `usSought` 并**不是**请求值：
+             * SegmentList::getSegmentNumberByTime 把入参 time 就地改写成该片的 startTime
+             * （play_list/SegmentList.cpp 里 `time = i->startTime;`），所以它同样是"视频分片
+             * 起点"。于是音频的读位置由视频的分片网格决定 —— 与 DASH 完全同一个形状，只是
+             * 两边的分片网格不同。DASH 侧已按同一口径修正（见 DashManager::seek 里那段说明：
+             * 为什么必须解耦、为什么落点精度不会因此变差、为什么视频侧一字不变），这里保持一致。
+             *
+             * 视频侧行为一字不变：仍然用请求值 seek 视频、仍然取回它的返回值，返回值照旧只用于
+             * 诊断日志与"视频 seek 失败 ⇒ 整次 seek 失败"这条既有终态；视频的落点对齐与落点
+             * 延迟线都在 HLSStream::seek() 内部，本函数既不参与也不影响它们。
+             */
+            const int64_t requestedUs = us;
 
             for (auto &i : mStreamInfoList) {
                 if (i->selected) {
@@ -504,14 +520,32 @@ namespace Cicada {
                         type = i->mPStream->getStreamType();
                         int64_t seekedUs = i->mPStream->seek(us, flags);
                         AF_LOGD("first seeked time is %lld --> %lld", us, seekedUs);
-                        us = seekedUs;
+
+                        if (seekedUs < 0) {
+                            /* 视频 seek 失败：把这个负值留在 us 里，第 3 步拿它 seek 其余流并返回 -1。 */
+                            us = seekedUs;
+                        } else {
+                            /* 视频 seek 成功：第 3 步的目标回到请求值，不吃"视频分片起点"。 */
+                            us = requestedUs;
+                        }
+
+                        /*
+                         * 本次改动的验收读数：video_return 仍是视频的分片起点（视频侧一字未变），
+                         * 而 other_seek_target 与 user 相同 ⇒ 音频及其它每一路不再被视频的网格拽走。
+                         * 一次 seek 一条，天然有界，不需要限频。
+                         */
+                        AF_LOGI("[hlsseek] user=%lld video_return=%lld -> other_seek_target=%lld (stream=%d type=%d): "
+                                "every stream is positioned by the SAME request value and lands on its own segment "
+                                "grid; only the VOD video path stages its landing\n",
+                                (long long) requestedUs, (long long) seekedUs, (long long) us,
+                                i->mPStream->getId(), (int) type);
                         i->eos = false;
                         break;
                     }
                 }
             }
 
-            // 3. use the seekedUs to seek all other streams opened
+            // 3. use the request value to seek all other streams opened (each on its own segment grid)
 
             for (auto &i : mStreamInfoList) {
                 if (i->selected && i->mPStream->getStreamType() != type) {

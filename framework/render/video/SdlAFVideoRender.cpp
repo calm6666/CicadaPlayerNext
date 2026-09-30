@@ -154,9 +154,67 @@ int SdlAFVideoRender::clearScreen()
         SDL_RenderClear(mVideoRender);
         SDL_RenderPresent(mVideoRender);
     }
+
+    /*
+     * 【本轮修：这里原来只放 mBackFrame，不放 mLastVideoFrame —— 与 Qt 侧同一个形状】
+     *
+     * mLastVideoFrame 是"停在屏上的最后一帧"（见 renderFrame 里那句
+     * `mLastVideoFrame = std::move(frame)`）。它一直握着那一帧的 buf[]，而硬解帧的
+     * buf[] 里握着**解码器的输出缓冲/表面池**。原来的写法只有 `mBackFrame = nullptr`，
+     * 于是"调用方要求清屏（停播 / 换源 / 关闭）"之后，最后一帧连同它钉着的解码输出
+     * 仍然活着，一直等到**下一次播放**换掉它、或者渲染器析构才放 —— 这就是 Qt 侧
+     * `externally pinned=1`、释放被推迟到下一轮那个缺陷的同一形状。
+     *
+     * 清屏的语义本来就是"屏上不要留东西"，留着最后一帧是自相矛盾的，所以在这里放掉它
+     * 既符合语义、又让释放点变成**调用方一要求就放**（确定性）。
+     *
+     * 为什么不会 use-after-free：mLastVideoFrame 的所有读者/写者
+     * （renderFrame / onVSync / 本函数）都在 mRenderMutex 之下，本函数已经持锁，
+     * 所以不存在与渲染/VSync 线程的竞争。
+     */
+    if (mLastVideoFrame) {
+        mLastVideoFrame->setDiscard(true);
+        mLastVideoFrame = nullptr;
+    }
+
     mBackFrame = nullptr;
 
     return 0;
+}
+
+void SdlAFVideoRender::releaseFrames()
+{
+    /*
+     * 只做一件事：把对解码帧的两处引用放下（mLastVideoFrame = 还没上屏的那一帧，
+     * mBackFrame = 上过屏、留着给 refreshScreen() 复用的那一帧）。
+     *
+     * 为什么不直接调 clearScreen()：本函数被调用的时刻是"解码器马上要关/重建"，
+     * 那时清屏（SDL_RenderClear + Present）会在切档 / seek 上闪一下黑，而这一帧的
+     * 引用是**必须**在解码器之前放掉的（硬解帧钉着整池 surface，见
+     * IVideoRender::releaseFrames()）。两件事分开，调用方各取所需。
+     *
+     * 线程安全：与 renderFrame / onVSync / clearScreen 同一把 mRenderMutex；
+     * 这里不需要暂停 VSync —— 只是把两处 unique_ptr 置空，任何时刻做都安全
+     * （onVSync 取帧时会发现 mLastVideoFrame 为空，直接返回不渲染）。
+     */
+    std::unique_lock<std::mutex> lock(mRenderMutex);
+
+    unsigned long long dropped = 0;
+
+    if (mLastVideoFrame) {
+        mLastVideoFrame->setDiscard(true);
+        mLastVideoFrame = nullptr;
+        dropped++;
+    }
+
+    if (mBackFrame) {
+        mBackFrame->setDiscard(true);
+        mBackFrame = nullptr;
+        dropped++;
+    }
+
+    AF_LOGI("[mem] releaseFrames: dropped %llu decoded frame(s) held by the renderer "
+            "(last + back frame)\n", dropped);
 }
 
 int SdlAFVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
@@ -164,9 +222,11 @@ int SdlAFVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
     {
 
         bool paused = false;
+        bool flushRequested = false;
         if (frame == nullptr) {
             mVSync->pause();
             paused = true;
+            flushRequested = true;
         }
         {
             std::unique_lock<std::mutex> lock(mRenderMutex);
@@ -177,6 +237,24 @@ int SdlAFVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
                 }
             }
             mLastVideoFrame = std::move(frame);
+
+            /*
+             * 【flush 必须把手上的帧放干净】frame == nullptr 就是"清空视频路"这个
+             * 既有语义（flushVideoRender() 用的就是它），而 mBackFrame 是**比
+             * mLastVideoFrame 活得久**的那一份（onVSyncInner 末尾
+             * `mBackFrame = move(frame)`）—— 原来那次 flush 只放 mLastVideoFrame，
+             * 于是"放完"之后渲染器手里还留着一帧旧解码器的输出：切档时它钉着旧池，
+             * 关窗时它钉到渲染器析构为止。既然是 flush，就把两帧一起放掉。
+             *
+             * 副作用（刻意）：flush 之后 refreshScreen()/delayRefreshScreen() 不再
+             * "把最后一帧重新贴回屏上" —— flush 的语义本来就是屏上不留旧内容
+             * （clearScreen() 早就同时放这两帧了）。
+             */
+            if (flushRequested && mBackFrame) {
+                mBackFrame->setDiscard(true);
+                mBackFrame = nullptr;
+            }
+
             if (mLastVideoFrame && mVideoRotate != getRotate(mLastVideoFrame->getInfo().video.rotate)) {
                 mVideoRotate = getRotate(mLastVideoFrame->getInfo().video.rotate);
             }

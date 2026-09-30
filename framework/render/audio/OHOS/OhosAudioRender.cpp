@@ -137,6 +137,44 @@ namespace Cicada {
             mQueuedBytes += bytes;
         }
         mQueueCond.notify_all();
+
+        /*
+         * ============ 【整帧已经交给设备：上报 + 交出所有权（两个都必须有）】============
+         *
+         * 走到这里，这一帧的 PCM 已经**整段**进了设备的取数队列（OnWriteData 正是从这里拉），
+         * 这就是本渲染器上"整帧真的被设备消费"的那一点，判据是纯结构性的：
+         *   · 队列放不下时上面直接 return -EAGAIN，一个字节都没写进去 ⇒ 这里只剩"整帧成功"；
+         *   · 写进去的字节数恒等于整帧的 PCM 长度（本路径没有"部分写入"的语义）。
+         * 因此它与 Android 的 AudioTrackRender（:691-693，设备接收整帧之后才报）和
+         * AaudioRender（整帧进设备环之后才报）是同一口径；**不能**在"写尝试"处上报，
+         * 那会让播放位置超前于真正送出去的音频。
+         *
+         * 【为什么必须上报】播放器侧唯一会在普通播放里推进内容位置 mCurrentPos 的写点就是
+         *   onFrameInfoUpdate → ApsaraAudioRenderCallback → RenderCallback(ST_TYPE_AUDIO, true,
+         *   info) → MSG_INTERNAL_RENDERED → ProcessRenderedMsg 里的
+         *   `mCurrentPos = info.timePosition`；
+         * 而 getCurrentPosition() 在"还没建立过不连续点"（起播后没 seek 过、或 Reset 之后）
+         * 时逐字返回 mCurrentPos，视频那一路在有音轨时又被
+         * `mCurrentAudioIndex < 0 || mAudioEOS` 挡住不写它 ⇒ 少了这条上报，位置恒为初值 0，
+         * 进度条不动，直到用户手动 seek 一次（那时位置改从 mMasterClock 读）才开始走。
+         *
+         * 【为什么必须交出所有权】`IAudioRender::renderFrame` 的约定是"返回成功即接走这一帧"：
+         * 基类 filterAudioRender 用 `mFrameQue.push(std::move(frame))`（filterAudioRender.cpp:157），
+         * 另一个直接实现 SdlAFAudioRender 用 `frame = nullptr`（SdlAFAudioRender.cpp:152）。
+         * 播放器就是按"回到自己手里时那个 unique_ptr 已经为空"来判断该出队的
+         * （SuperMediaPlayer.cpp:4729-4734）。这里以前既不置空也不上报，于是：
+         *   ① 播放器每次 render() 都拿**同一帧**再调一次 renderFrame，同一段 PCM 被反复灌进
+         *      设备队列（直到队列满），音频实际上是在循环这一帧；
+         *   ② 出队之后才会执行的音频记账（mPlayedAudioPts / mAudioTime 建立、纯音频片源的
+         *      NotifyFirstFrame、音频切流通知、seek 窗口内的 mCurrentPos 兜底）在这条路上
+         *      从不执行。
+         * 两个后果都与本次"位置不动"同源，所以一起修；上报必须在置空之前（要读帧自己的 info）。
+         */
+        if (mListener != nullptr) {
+            mListener->onFrameInfoUpdate(frame->getInfo(), true);
+        }
+
+        frame = nullptr;
         return 0;
     }
 

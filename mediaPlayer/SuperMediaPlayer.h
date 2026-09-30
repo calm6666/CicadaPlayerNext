@@ -154,6 +154,47 @@ namespace Cicada {
         std::atomic<int64_t> acceptedFramePos{INT64_MIN};
 
         /*
+         * ---- 音频落点地板：音频路自己的"目标点闸门"（不共用视频的 filterActive）----
+         *
+         * 为什么必须与 filterActive 分开：filterActive 是一个**全局**闩，而它的关闭点是
+         * "**视频**落点帧被采纳"（RenderVideo -> shouldDropForDiscontinuity ->
+         * acceptDiscontinuityLandingFrame）。视频与音频跑在**内核工作线程的同一个
+         * render() 之内、但是两次独立调用**（render() 先 RenderAudio() 再 RenderVideo()），
+         * 于是存在一个真实的一帧级竞态：某次 render() 里 RenderVideo() 采纳了视频落点帧
+         * 并把 filterActive 清成假，而**下一次** render() 的 RenderAudio() 才去处理
+         * 那一帧音频 —— 此时闸门已经不在了，落在目标点**之前**的音频帧就被直接推给了
+         * 音频设备。
+         *
+         * 真机日志（本地文件 "新建文本文档.txt"，Android，2026-09-29 12:14:51 那次 seek）：
+         *   seek 目标 557028000，视频落点 pts=557000000（偏移 -28 ms，正确）；
+         *   同一次 seek 紧接着的音频首帧是
+         *   `audio first frame after seek: pts=555885714 target=557028000 ... consumed=340000`
+         *   —— 音频首帧落在目标点**之前 1.14 秒**。
+         *
+         * 危害不是"声音晚一会儿响"，而是它把音频时钟带偏：音频时钟模型的唯一不变量是
+         *   audioPosition = audioBaseUs(target) + 设备已消费量
+         * 一旦设备里被塞进 [落点, 目标) 这段陈旧音频，设备消费的每一微秒都被算成
+         * "走在目标点之后"，音频参考就**超前内容**，RenderVideo 随即判视频"迟到"、
+         * 丢帧甚至跳到关键帧 —— 这就是 seek 之后长期存在的音画错位。
+         * 代码里这条危害本来就写在 RenderAudio 的落点丢弃判据上方（"若把这些帧推给设备，
+         * 时钟就会比内容超前"），只是它依赖的那个闩会被视频提前关掉。
+         *
+         * 语义：audioLandingPending 为真 = 音频路尚未走到本次不连续点的目标点，
+         * 落在目标点之前的音频帧一律不上设备。**只有 seek 会重新锚定音频时间轴**
+         * （FlushAudioPath -> pinAudioClockBase(targetUs)），所以它只由 seek 臂上；
+         * 换档（switchVideo）不 flush 音频、时间轴连续，绝不能臂上它（否则音频会被
+         * 永久闸住）。关闭只有两个出口，都是纯状态判据，没有计时器：
+         *   · 音频队首真的到达/越过目标点（RenderAudio 的落点丢弃判据里就地清假）；
+         *   · 音频解码器已 EOS（此后不会再有更晚的帧，否则会把音频闷死）。
+         * 下一次 beginDiscontinuity（新的不连续点）会无条件重新判定它，这也是一条出口。
+         *
+         * 并发：与 filterActive 同族 —— 写侧是 seek 所在的消息线程，读侧是内核工作线程的
+         * 音频渲染路径，所以取 atomic；targetUs 的读取仍沿用本结构体既有的约定
+         * （读侧先 load generation 建立配对关系，再读非原子字段）。
+         */
+        std::atomic<bool> audioLandingPending{false};
+
+        /*
          * ---- P2：音频时钟基准（唯一来源 = 设备已消费量，ijkplayer / ExoPlayer 模型）----
          *
          * audioBaseUs         音频时钟的**内容位置**基准。不连续点上由 FlushAudioPath()
@@ -1489,11 +1530,14 @@ namespace Cicada {
         void pinAudioClockBase(int64_t baseUs);
 
         /*
-         * 【P2 诊断限频】"音频落点丢弃"日志已经为哪个代际打过。
+         * 【音频落点地板诊断限频】"落点地板丢掉一帧音频"的日志已经为哪个代际打过。
          *
-         * RenderAudio 在落点过滤激活时会丢掉完全落在目标点之前的音频帧；那条日志按
-         * **代际**限频（纯状态比较，不是计时器），于是用户能把"音频被正确地丢到目标点"
-         * 与"音频根本没来"区分开，又不会刷屏。
+         * RenderAudio 在音频落点地板激活时（audioLandingPending 为真，或视频的落点过滤
+         * filterActive 仍为真）会丢掉完全落在目标点之前的音频帧；那条日志按**代际**限频
+         * （纯状态比较，不是计时器），于是用户能把"音频被正确地丢到目标点"与
+         * "音频根本没来"区分开，又不会刷屏（本地文件一次 seek 实测前缀音频约 49 个
+         * AAC 帧 = 1.14 s，逐帧记会淹掉真正重要的行）。每次新的不连续点在
+         * beginDiscontinuity() 里复位成 -1。
          * 追加在成员列表末尾（本文件约定：只有追加才是增量 ABI 安全的）。
          */
         int mAudioLandingDropLoggedGen{-1};
@@ -1553,6 +1597,24 @@ namespace Cicada {
          * 追加在成员列表**最末尾**（本工程硬规则：只有追加才是增量 ABI 安全的）。
          */
         int mVideoLandingDropLoggedGen{-1};
+
+        /*
+         * 【本次 seek 是否需要重新臂上音频落点地板】—— SeekTo() 置真，
+         * beginDiscontinuity() 消费一次即清。
+         *
+         * 为什么不直接在 beginDiscontinuity() 里按 targetUs 判断：beginDiscontinuity()
+         * 也被**换档**（switchVideo -> beginDiscontinuity(switchPos)）和 Reset 调用，
+         * 而换档不 flush 音频、音频时间轴连续，臂上地板会把音频永久闸住。
+         * 只有 SeekTo() 这条路（以及经由它派发到 ProcessSeekToMsg 的同一次 seek）
+         * 会调 FlushAudioPath() -> pinAudioClockBase(targetUs) 重新锚定音频时间轴，
+         * 所以"要不要臂地板"这件事只能由 seek 入口自己声明。
+         *
+         * 并发：写侧是 API 线程（SeekTo），读侧是消息线程（beginDiscontinuity），
+         * 与 mSeekAudioAlignDone / mSeekDecodeStartIsKey 同一组、同一个访问节奏
+         * （seek 派发前后各一次），沿用本工程既有的写法，不新增同步原语。
+         * 追加在成员列表**最末尾**（本工程硬规则：只有追加才是增量 ABI 安全的）。
+         */
+        bool mSeekAudioLandingReset{false};
 
         /*
          * ==================== 【播放缓存 play-and-cache 的状态】====================

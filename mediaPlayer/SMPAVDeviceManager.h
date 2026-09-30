@@ -147,6 +147,19 @@ namespace Cicada {
         }
         void flushVideoRender();
 
+        /*
+         * 【同步释放】让视频渲染器把手上的解码帧全部放掉（同步，返回即已放掉）。
+         *
+         * 与 flushVideoRender() 的区别：后者调 renderFrame(nullptr)，而这在
+         * AFActiveVideoRender 里只是**登记**一次 flush（mNeedFlushSize），真正的丢帧
+         * 发生在下一次 VSync 回调 —— 对"关解码器之前必须没有帧钉着表面池"来说太晚。
+         * 本函数直接走 IVideoRender::releaseFrames()，由渲染器自己同步完成。
+         *
+         * 调用点只有一个语义要求：**必须在关闭/重建视频解码器之前调用**
+         * （SuperMediaPlayer::FlushVideoPath() / rebuildVideoDecoder()）。
+         */
+        void releaseVideoRenderFrames();
+
         int renderVideoFrame(std::unique_ptr<IAFFrame> &frame);
 
         void setDrmRequestCallback(const std::function<DrmResponseData *(const DrmRequestParam &drmRequestParam)> &drmCallback);

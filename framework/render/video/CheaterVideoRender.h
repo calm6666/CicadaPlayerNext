@@ -23,6 +23,12 @@ namespace Cicada {
 
         int clearScreen() override;
 
+        /*
+         * 【同步释放】放掉 mLastVideoFrame（本渲染器唯一持有的解码帧）。
+         * 契约见 IVideoRender::releaseFrames()：调用方在关解码器之前要它同步放完。
+         */
+        void releaseFrames() override;
+
         int renderFrame(std::unique_ptr<IAFFrame> &frame) override;
 
         int setRotate(Rotate rotate) override;

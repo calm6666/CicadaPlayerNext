@@ -9,9 +9,36 @@
 
 #include <utils/frame_work_log.h>
 
+#include <atomic>
 #include <cmath>
 
+#if defined(Q_OS_WIN)
+/*
+ * "一张纹理原地更新"那条路要直接碰 D3D11 设备/上下文，并把原生纹理包成 QSGTexture。
+ * d3d11_1.h 必须先以 **C++** 链接进来：否则 libavutil/hwcontext_d3d11va.h 之类的
+ * extern "C" 包含会让 D3D11_VIEWPORT / D3D11_RECT / D3D11_BOX 的 C++ 比较运算符
+ * 拿到 C 链接，MSVC 报一片 C2733（理由与 CicadaTextureD3D11.cpp 开头那段一模一样）。
+ */
+#include "CicadaQtTextureWrap.h"
+#include <QtQuick/QSGRendererInterface>
+#include <d3d11_1.h>
+#endif
+
 namespace cicadaqt {
+
+    /* 见 DanmakuAtlas.h 里那两个取值的说明：只做计数，不参与任何逻辑。 */
+    static std::atomic<long long> g_atlasTexturesCreated{0};
+    static std::atomic<long long> g_atlasTexturesDeleted{0};
+
+    long long danmakuAtlasTexturesCreated()
+    {
+        return g_atlasTexturesCreated.load();
+    }
+
+    long long danmakuAtlasTexturesDeleted()
+    {
+        return g_atlasTexturesDeleted.load();
+    }
 
     namespace {
 
@@ -45,12 +72,122 @@ namespace cicadaqt {
     DanmakuAtlas::~DanmakuAtlas()
     {
         releaseTexture();
+#if defined(Q_OS_WIN)
+        /* 正常路径上 forgetTexture()（场景图失效）已经先把指针清掉了。 */
+        releaseD3D11Atlas();
+#endif
     }
+
+#if defined(Q_OS_WIN)
+
+    void DanmakuAtlas::releaseD3D11Atlas()
+    {
+        if (m_d3dTexture != nullptr) {
+            static_cast<ID3D11Texture2D *>(m_d3dTexture)->Release();
+            m_d3dTexture = nullptr;
+        }
+
+        /* m_d3dDevice / m_d3dContext 是 Qt 场景图的，只丢指针，不做 Release。 */
+        m_d3dDevice = nullptr;
+        m_d3dContext = nullptr;
+        m_d3dWidth = 0;
+        m_d3dHeight = 0;
+        m_d3dDirty = false;
+    }
+
+    QSGTexture *DanmakuAtlas::textureViaD3D11(QQuickWindow *window)
+    {
+        auto *rif = window->rendererInterface();
+
+        if (rif == nullptr || rif->graphicsApi() != QSGRendererInterface::Direct3D11) {
+            return nullptr;   /* 不是 D3D11 后端：交给调用方的通用路径 */
+        }
+
+        auto *device = static_cast<ID3D11Device *>(
+                           rif->getResource(window, QSGRendererInterface::DeviceResource));
+        auto *context = static_cast<ID3D11DeviceContext *>(
+                            rif->getResource(window, QSGRendererInterface::DeviceContextResource));
+
+        if (device == nullptr || context == nullptr) {
+            return nullptr;
+        }
+
+        /*
+         * 第一次（或尺寸变了 / 场景图重建过）：建一张 D3D11 纹理 + **只包一次** QSGTexture。
+         * 这是整条路上唯一一次新建 D3D11 纹理 —— 之后每次内容变化都只是
+         * UpdateSubresource 往同一张纹理里写（不产生任何新的 D3D11 分配）。
+         */
+        if (m_d3dTexture == nullptr || m_texture == nullptr ||
+            m_d3dWidth != m_image.width() || m_d3dHeight != m_image.height()) {
+            releaseTexture();       /* 旧的 QSGTexture 包装（可能是旧尺寸的）先放掉 */
+            releaseD3D11Atlas();
+
+            D3D11_TEXTURE2D_DESC desc = {};
+            desc.Width = static_cast<UINT>(m_image.width());
+            desc.Height = static_cast<UINT>(m_image.height());
+            desc.MipLevels = 1;
+            desc.ArraySize = 1;
+            /*
+             * **必须是 R8G8B8A8_UNORM**：包给 Qt 之后这张纹理是按场景图的约定（RGBA8）
+             * 采样的（和 CicadaTextureD3D11 那条视频输出纹理同一个理由）。所以下面
+             * UpdateSubresource 之前要把 QImage 转成 RGBA 字节序 —— QImage 的 ARGB32
+             * 在内存里是 BGRA，直接塞进去会红蓝互换。
+             */
+            desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.Usage = D3D11_USAGE_DEFAULT;
+            desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+            ID3D11Texture2D *d3dTexture = nullptr;
+
+            if (FAILED(device->CreateTexture2D(&desc, nullptr, &d3dTexture)) || d3dTexture == nullptr) {
+                AF_LOGW("danmaku atlas: CreateTexture2D(%ux%u) failed; falling back to one "
+                        "createTextureFromImage per upload\n", desc.Width, desc.Height);
+                return nullptr;
+            }
+
+            m_d3dTexture = d3dTexture;
+            m_d3dDevice = device;
+            m_d3dContext = context;
+            m_d3dWidth = m_image.width();
+            m_d3dHeight = m_image.height();
+            m_texture = wrapD3D11Texture(window, d3dTexture, m_image.size(), /* hasAlpha = */ true);
+
+            if (m_texture == nullptr) {
+                releaseD3D11Atlas();
+                return nullptr;
+            }
+
+            m_d3dDirty = true;
+
+            AF_LOGI("danmaku atlas: created ONE D3D11 texture (%dx%d) and wrapped it once; "
+                    "all further updates go through UpdateSubresource (no new allocations)\n",
+                    m_d3dWidth, m_d3dHeight);
+        }
+
+        if (m_d3dDirty) {
+            const QImage rgba =
+                (m_image.format() == QImage::Format_RGBA8888_Premultiplied)
+                    ? m_image
+                    : m_image.convertToFormat(QImage::Format_RGBA8888_Premultiplied);
+
+            context->UpdateSubresource(static_cast<ID3D11Texture2D *>(m_d3dTexture), 0, nullptr,
+                                       rgba.constBits(), static_cast<UINT>(rgba.bytesPerLine()), 0);
+            m_d3dDirty = false;
+        }
+
+        return m_texture;
+    }
+
+#endif// Q_OS_WIN
 
     void DanmakuAtlas::releaseTexture()
     {
-        delete m_texture;
-        m_texture = nullptr;
+        if (m_texture != nullptr) {
+            delete m_texture;
+            m_texture = nullptr;
+            g_atlasTexturesDeleted++;
+        }
     }
 
     bool DanmakuAtlas::allocate(int w, int h, QRect *out)
@@ -277,15 +414,31 @@ namespace cicadaqt {
         m_forceUpload = false;
 
         /*
-         * 重建整张纹理。QQuickWindow::createTextureFromImage 只能在渲染线程调用
-         * （我们就在 updatePaintNode 里），它会新建一个 QSGTexture。
+         * ============ 【2026-09-30 回退：图集走回 createTextureFromImage】============
          *
-         * 【为什么整张重传而不是局部更新】局部更新要走 QSGTexture 的子类 +
-         * 后端的纹理子资源上传，跨 D3D11/Metal/GL 三套写法都不一样。
-         * 靠上面的合并上传把频率压下来之后，代价已经可以接受。
+         * 中间试过"一张 D3D11 纹理 + UpdateSubresource 原地更新"（见 textureViaD3D11()），
+         * 目的是省掉"每次上传新建 4MB 纹理"。两条实测结论让它**不值得保留**：
+         *
+         *   1. **它没有解决泄漏**：改成原地更新之后，日志里 `danmaku atlas textures:
+         *      created=0 deleted=0`（旧的建/删完全消失）、驱动线程与私有提交的**每轮增量
+         *      一模一样**（nvwgf2umx.dll 仍是 +18 条/轮、commit 仍是 +46MB/轮）——
+         *      也就是说那 176 张/轮的纹理本来就被 Qt/D3D 完整回收了，它不是漏的那一项；
+         *   2. **它引入了两个新问题**：包装原生纹理时必须声明
+         *      `QQuickWindow::TextureHasAlphaChannel`（否则透明区被当不透明画，整条弹幕糊上
+         *      黑色背景），而加了那个声明之后，紧接着的构建**开窗即闪退**（日志停在视频解码器
+         *      刚打开那一行）。
+         *
+         * 所以回到 Qt 自己的 `createTextureFromImage()`：它建出来的 QSGTexture 由 Qt 决定
+         * alpha 语义（我们不用声明、也就不会声明错），并且已被证明不会泄漏。
+         * 那 176 张/轮的分配是**可回收的 churn**，不是泄漏 —— 不该为它冒险。
          */
-        delete m_texture;
+        /* 旧的先还掉（走 releaseTexture()：删掉并计数），再建新的。 */
+        releaseTexture();
         m_texture = window->createTextureFromImage(m_image);
+
+        if (m_texture != nullptr) {
+            g_atlasTexturesCreated++;
+        }
 
         /*
          * 【不要再写 setFlag(QSGTexture::TextureHasAlphaChannel) —— 那是 Qt 5 的 API】

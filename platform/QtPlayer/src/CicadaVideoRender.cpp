@@ -76,6 +76,14 @@ namespace cicadaqt {
         return hz;
     }
 
+    /*
+     * 见头文件 setDecoderGenerationEndedHook()：进程内单槽（同一时刻只有一个播放器
+     * 窗口）。用可变函数 + 互斥保护，因为"注册/注销"在 GUI 线程发生，而
+     * releaseFrames() 可能跑在播放器线程或 VSync 线程上。
+     */
+    static std::function<void()> g_decoderGenerationEndedHook{};
+    static std::mutex g_decoderGenerationEndedHookMutex{};
+
     CicadaVideoRender::CicadaVideoRender()
         : AFActiveVideoRender(renderHzFromSettings())
     {
@@ -91,7 +99,57 @@ namespace cicadaqt {
 
     CicadaVideoRender::~CicadaVideoRender()
     {
+        /*
+         * 注销"解码代际结束"的通知：本类可能比 QML 组件活得久（析构顺序不受我们控制），
+         * 留着一个指向已死组件的回调就是在赌运气。
+         */
+        setDecoderGenerationEndedHook(nullptr);
         AF_LOGD("CicadaVideoRender destroyed\n");
+    }
+
+    void CicadaVideoRender::releaseFrames()
+    {
+        /*
+         * 第 0 步：基类先把 VSync 线程停下来，把 mInputQueue 里排队的帧和
+         * mRendingFrame 逐帧放掉（那一步是同步的：afThread::pause 会等到安全点）。
+         */
+        AFActiveVideoRender::releaseFrames();
+
+        /* 第 1 步：截屏缓存的那一帧。本函数的契约是"返回时本渲染器不再持有任何解码帧"。 */
+        {
+            std::lock_guard<std::mutex> lock(m_lastFrameMutex);
+            m_lastFrame.reset();
+        }
+
+        /*
+         * 第 2 步：通知 QML 组件"这一代解码器结束了"。
+         *
+         * 为什么还要通知它：第 0/1 步之后，播放器/渲染器这一侧已经没有解码帧了，
+         * 但组件那边还有两个持有者 —— m_currentFrame（正在显示的那一帧的克隆）与
+         * D3D11 的输入视图（对解码纹理持有 D3D11 引用）。而那两个只能在 Qt 的
+         * **渲染线程**上放（它们住在场景图的 RHI 设备那边），所以这里只发通知：
+         * 组件收到后置一个原子标志 + 请求重绘，真正的"放视图 + Flush 立即上下文"
+         * 在 updatePaintNode() 里做（见 CicadaPlayerItem 里那一处）。
+         *
+         * 回调先拷贝出来再调，绝不持 g_decoderGenerationEndedHookMutex ——
+         * 回调里会去碰 QML 组件。
+         */
+        std::function<void()> hook;
+
+        {
+            std::lock_guard<std::mutex> lock(g_decoderGenerationEndedHookMutex);
+            hook = g_decoderGenerationEndedHook;
+        }
+
+        if (hook) {
+            hook();
+        }
+    }
+
+    void setDecoderGenerationEndedHook(std::function<void()> hook)
+    {
+        std::lock_guard<std::mutex> lock(g_decoderGenerationEndedHookMutex);
+        g_decoderGenerationEndedHook = std::move(hook);
     }
 
     bool CicadaVideoRender::deviceRenderFrame(IAFFrame *frame)

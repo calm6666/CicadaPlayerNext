@@ -38,6 +38,19 @@ QT_END_NAMESPACE
 
 namespace cicadaqt {
 
+    /*
+     * 【churn 计数·2026-09-30】图集纹理建了几张、删了几张（进程级，只增不减）。
+     *
+     * 为什么要它：每次图集内容变化都会 delete 旧的 QSGTexture、再
+     * createTextureFromImage 新建一张 1024x1024 RGBA（4MB）。如果后面的内存读数里
+     * 1-8MB 那一档每轮在涨、而这两个数**相等**，说明我们这一侧是配平的 ——
+     * 真正没还回来的是被推迟到 Qt/D3D11 的延迟销毁那一份（和当初 D3D11VA 表面池
+     * 同一个形状），修法就得改成"一张纹理原地更新"。打印点见 CicadaPlayerItem 的内存探针。
+     */
+    long long danmakuAtlasTexturesCreated();
+
+    long long danmakuAtlasTexturesDeleted();
+
     /* 一条弹幕在图集里占的位置 */
     struct DanmakuAtlasEntry {
         /* 归一化 UV 矩形（左上角 + 宽高，都是 0~1） */
@@ -144,8 +157,24 @@ namespace cicadaqt {
          */
         void forgetTexture()
         {
+            /*
+             * 场景图没了：包装纹理的指针作废。
+             *
+             * Windows 上还要把"我们自己那张 D3D11 图集纹理"的记录一起清掉：它建在 Qt
+             * 的设备上，而设备随窗口一起销毁 —— D3D 会把子资源一并释放，所以这里
+             * **只丢指针、不 Release**（此刻设备正在拆，去碰它没有意义，也会和
+             * CicadaTextureD3D11 那边"析构时不一定还在渲染线程"的约定冲突）。
+             */
             m_texture = nullptr;
             m_dirty = true;
+#if defined(Q_OS_WIN)
+            m_d3dTexture = nullptr;
+            m_d3dDevice = nullptr;
+            m_d3dContext = nullptr;
+            m_d3dWidth = 0;
+            m_d3dHeight = 0;
+            m_d3dDirty = true;
+#endif
         }
 
         /* 诊断用：当前缓存了多少条、图集用了多大 */
@@ -171,6 +200,30 @@ namespace cicadaqt {
 
         /* 图集满了：清空缓存、从头开始 */
         void resetPacking();
+
+#if defined(Q_OS_WIN)
+        /*
+         * ============ 【一张纹理原地更新（Windows / D3D11）·2026-09-30】============
+         *
+         * 原来每次上传都是 `delete m_texture; m_texture = window->createTextureFromImage(m_image);`
+         * —— 也就是**每 100ms 新建一张 1024x1024 RGBA 的 D3D11 纹理**。实测代价（真机日志）：
+         *   * 弹幕图集纹理创建数 176 张/轮；
+         *   * 同一轮里 `nvwgf2umx.dll`（NVIDIA D3D11 用户态驱动）的线程 **+18 条/轮**，
+         *     句柄 +~100、私有提交 +~50MB —— 驱动是跟着"新建纹理"起工作线程的，
+         *     这些线程/资源在窗口关掉之后并不随纹理一起还回来。
+         *
+         * 所以 Windows 上改成：**自己建一张 D3D11 纹理，只建一次，之后用
+         * ID3D11DeviceContext::UpdateSubresource 往同一张纹理里写新内容**；
+         * QSGTexture 包装也只做一次，整条路不再产生任何新的 D3D11 分配。
+         *
+         * 拿设备/上下文用的是 QSGRendererInterface::DeviceResource / DeviceContextResource
+         * （和 CicadaTextureD3D11 那条零拷贝路同一个来源，渲染线程上取）。
+         * 任何一步拿不到（非 D3D11 后端、换过图形后端、Qt 变脸）就**自动退回**原来的
+         * createTextureFromImage 路径 —— 功能不受影响，只是回到旧的 churn 行为。
+         */
+        QSGTexture *textureViaD3D11(QQuickWindow *window);
+        void releaseD3D11Atlas();
+#endif
 
         QImage m_image;
         QHash<QString, DanmakuAtlasEntry> m_cache;
@@ -198,6 +251,22 @@ namespace cicadaqt {
 
         /* 整体重烤的次数（见 generation()） */
         quint32 m_generation = 0;
+
+#if defined(Q_OS_WIN)
+        /*
+         * 【新增·追加在成员表末尾（D3D11 原地更新那条路用）】
+         * 用 void* 而不是 ID3D11Texture2D*：本头文件是平台中立的，不想把 d3d11.h
+         * 拉进所有包含它的 TU（那会牵出 D3D11_VIEWPORT 的 C/C++ 链接问题，见
+         * CicadaTextureD3D11.cpp 开头那段）。
+         */
+        void *m_d3dTexture = nullptr;       /* 我们自己那张图集纹理，只建一次 */
+        void *m_d3dDevice = nullptr;        /* 建它用的设备（Qt 场景图的，只是借用） */
+        void *m_d3dContext = nullptr;       /* 立即上下文（UpdateSubresource 用它） */
+        int m_d3dWidth = 0;
+        int m_d3dHeight = 0;
+        /* 纹理内容是不是落后于 m_image（置真 = 下次 texture() 要 UpdateSubresource 一次） */
+        bool m_d3dDirty = false;
+#endif
     };
 
 }// namespace cicadaqt

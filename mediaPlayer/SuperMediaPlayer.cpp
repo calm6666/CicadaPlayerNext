@@ -780,6 +780,17 @@ void SuperMediaPlayer::SeekTo(int64_t pos, bool bAccurate)
     }
 
     /*
+     * 【音频落点地板 / 声明的时机】必须在下面那次 beginDiscontinuity() **之前**声明
+     * "本次 seek 会把音频时间轴重新锚到 seekTargetUs" —— 这次分支里的
+     * beginDiscontinuity() 就会据此臂上 mDiscontinuity.audioLandingPending，
+     * 让落在目标点之前的音频帧一律不上设备（见该字段的说明）。
+     * 之后 ProcessSeekToMsg() 还会走一次 beginDiscontinuity(seekPos)，那时闩已被消费、
+     * 但它会用同一个 targetUs 重新算出同样的结果（幂等，不会把地板丢掉）。
+     * 它是"这次 seek 的属性"，所以由 seek 入口声明；换档 / Reset 走
+     * beginDiscontinuity 时这个闩保持假，音频地板的臂上条件不成立。
+     */
+    mSeekAudioLandingReset = true;
+    /*
      * 【P0】立刻开启新代际。必须在 putMsg 之前 —— 内核工作线程一旦被唤醒就可能
      * 读到 mDiscontinuity，它看到的新代际就是"这一次 seek"，晚置会让这一小段
      * 时间窗内的包/帧被算到上一次代际上。
@@ -4585,8 +4596,28 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
      * 返回 RENDER_NONE（与上面 pts==INT64_MIN 的丢弃一致），**不能**返回 RENDER_FULL：
      * 后者会让 render() 把本轮当成"渲染成功"（audioRendered=true），而 doRender()
      * 用 rendered 判定 seek 完成 —— 纯丢帧绝不能冒充"有帧上屏"。
+     *
+     * ============ 【音频落点地板：为什么它不能只挂在 filterActive 上】============
+     *
+     * filterActive 的关闭点是"**视频**落点帧被采纳"，而视频与音频在 render() 里是
+     * **两次独立调用**（先 RenderAudio()、再 RenderVideo()）。于是存在一帧级竞态：
+     * 某次 render() 里视频落点帧被采纳、全局闸门关闭，而下一次 render() 才轮到
+     * 那帧落在目标点**之前**的音频 —— 闸门已经不在，它就被直接推进了音频设备。
+     *
+     * 真机日志（本地文件，2026-09-29 12:14:51 seek 目标 557028000）：
+     *   `seek landing frame accepted: pts=557000000, offsetFromTarget=-28 ms`
+     *   `audio first frame after seek: pts=555885714 target=557028000 ... consumed=340000`
+     * 音频首帧比目标早 **1.14 秒**。危害写在上面那段注释里、也被音频时钟模型钉死：
+     * 设备里一旦混进 [落点, 目标) 的陈旧音频，`audioBase(target) + 设备已消费量` 就会
+     * 超前内容，视频随即被判"迟到"、丢帧甚至跳关键帧 —— 这正是 seek 之后长期存在的
+     * 音画错位。所以音频需要**自己**的地板：只要本次不连续点重新锚定过音频时间轴
+     * （audioLandingPending，由 SeekTo 声明、beginDiscontinuity 臂上），就一直丢到
+     * 音频队首真的到达目标点为止。
+     *
+     * 关闭点与 filterActive 一样是纯状态判据（到达目标 / 音频 EOS / 下一次
+     * beginDiscontinuity），没有计时器、没有阈值、不引入任何配置开关。
      */
-    if (mDiscontinuity.filterActive.load()) {
+    if (mDiscontinuity.filterActive.load() || mDiscontinuity.audioLandingPending.load()) {
         const int64_t targetUs = mDiscontinuity.targetUs;
 
         if (targetUs != INT64_MIN) {
@@ -4615,6 +4646,31 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
                         "so frames before it are never sent to the device)\n",
                         droppedBeforeTarget, (long long) firstDroppedUs,
                         (long long) targetUs, mAudioLandingDropLoggedGen);
+            }
+
+            /*
+             * 地板的关闭点（纯状态判据，两个出口）：
+             *   · 队首到达/越过目标点（`headPts >= targetUs` 让上面的 while 正常退出，
+             *     或队首 pts 未知）⇒ 音频路已经走到本次不连续点的目标点，地板使命结束；
+             *   · 音频解码器已 EOS ⇒ 不会再有更晚的帧，再闸下去只会把音频闷死。
+             * 换档不臂地板，所以这里对"音频时间轴连续"的那些路径是空操作。
+             */
+            if (mDiscontinuity.audioLandingPending.load()) {
+                const bool headReachedTarget =
+                        mAudioFrameQue.empty() || mAudioFrameQue.front() == nullptr ||
+                        mAudioFrameQue.front()->getInfo().pts == INT64_MIN ||
+                        mAudioFrameQue.front()->getInfo().pts >= targetUs;
+
+                if (headReachedTarget || audioDecoderEOS) {
+                    mDiscontinuity.audioLandingPending = false;
+                    AF_LOGI("audio landing reached: head=%lld target=%lld eos=%d droppedBeforeTarget=%d "
+                            "generation=%d (the audio path is now at the same target point the video landing "
+                            "filter and the audio clock base use, so it is handed to the device from here on)\n",
+                            (long long) (mAudioFrameQue.empty() || mAudioFrameQue.front() == nullptr
+                                         ? INT64_MIN : mAudioFrameQue.front()->getInfo().pts),
+                            (long long) targetUs, (int) audioDecoderEOS, droppedBeforeTarget,
+                            mDiscontinuity.generation.load());
+                }
             }
 
             if (mAudioFrameQue.empty()) {
@@ -4686,9 +4742,59 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
     }
 
     if (mPlayedAudioPts == INT64_MIN) {
-        mAudioTime.startTime = pts;
-        mAudioTime.deltaTime = 0;
-        mAudioTime.deltaTimeTmp = 0;
+        /*
+         * ============ 【音频时间轴的建立点：必须问一句"这一帧在窗口里吗"】============
+         *
+         * 下面这三行（startTime = pts / 清两个纠偏累加器）是音频时间轴的**建立点**。
+         * 旧写法无条件执行，于是"时间轴起点"取的是**这一帧自己的 pts** —— 只要
+         * 首帧不是落点帧，整条音频时间轴就从窗口外起算。
+         *
+         * 真机日志（本地文件，2026-09-29 12:14:51，seek 目标 557028000）：
+         *   `audio first frame after seek: pts=555885714 target=557028000 ... consumed=340000`
+         *   `correct audio and master clock offset is 766275, frameDuration :23219`
+         *   `audio clock drift: correction deltaTime=300000 us (capped at +-300000) ...`
+         * 首帧比目标早 1.14 s ⇒ 下一帧算出的 offset 直接是 76 万微秒（正常值应该是 0），
+         * 纠偏累加器被一次性填满并顶到 +300 ms 的限幅上。此后每帧算出的 offset 都是
+         * 一个"因为起点错了而恒定偏移"的大值，`> 1s` 那条 re-anchor 分支就会反复触发
+         * （日志里 `audio timeline re-anchored (offset 1811173 > 1s)` 等 4 条），
+         * 而 re-anchor 分支**只记录事实、不移动时钟**，于是这个错误起点会一直留在
+         * `mPlayedAudioPts / mAudioTime.startTime` 上，位置与时钟的参照永远差着一截。
+         *
+         * 处置：与视频落点判据**同一个形状**（framePos + 帧长 <= target ⇒ 完全落在
+         * 目标之前）。落在窗口之外的首帧不参与建立时间轴，时间轴直接按目标点建立；
+         * 判据里留一个帧长的余量，避免边界的舍入把正好包含目标的那一帧判到窗口外
+         * （视频侧的判据也是"完全落在目标之前才算窗口外"）。
+         *
+         * 前置说明：这不是新机制，而是与上面 `audioLandingPending` 那条地板**互补**的兜底。
+         * 地板负责"别把窗口外的帧送出去"，这里负责"万一还是送到了（EOS 提前解除地板、
+         * 或解码器在窗口外吐帧），时间轴的参照点也不会跟着错"。两者判据同源、都不带计时器。
+         */
+        const int64_t targetUs = mDiscontinuity.targetUs;
+        const int64_t frameDurationUs = (duration > 0) ? duration
+                                       : ((mLastAudioFrameDuration > 0) ? mLastAudioFrameDuration : 0);
+        const bool firstFrameBeforeSeekTarget =
+                (targetUs != INT64_MIN) && (pts != INT64_MIN) && (pts + frameDurationUs <= targetUs);
+
+        if (firstFrameBeforeSeekTarget) {
+            /*
+             * 窗口外首帧：这是"落点地板放行了它"或"解码器在窗口外吐帧"的兜底。
+             * 时间轴按**目标点**建立（与音频时钟基准 pinAudioClockBase(targetUs) 同一个值），
+             * 而不是按这一帧的 pts —— 保证"时间轴的起点"与"时钟的基准"是同一个点。
+             * 本帧仍会照常推给设备（不在这里丢帧：丢帧职责只有一个地方，上面的落点地板），
+             * 所以不会引入任何新的等待或阈值。
+             */
+            mAudioTime.startTime = targetUs;
+            mAudioTime.deltaTime = 0;
+            mAudioTime.deltaTimeTmp = 0;
+            AF_LOGI("audio first frame after seek is OUTSIDE the seek window: frame=%lld frameDuration=%lld "
+                    "target=%lld — the audio timeline is started on the TARGET point instead of on this frame, "
+                    "so the offset bookkeeping cannot inherit an out-of-window start\n",
+                    (long long) pts, (long long) frameDurationUs, (long long) targetUs);
+        } else {
+            mAudioTime.startTime = pts;
+            mAudioTime.deltaTime = 0;
+            mAudioTime.deltaTimeTmp = 0;
+        }
 
         /*
          * 诊断（每次 seek 后第一帧音频只打一条，天然限频 —— 因为 1b 会把 mPlayedAudioPts
@@ -6355,6 +6461,29 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
             (int) mSeekFlag, (int) mSeekNeedCatch);
 
     /*
+     * ============ 【释放顺序·本轮修：先放渲染侧的帧，再动解码器】============
+     *
+     * 这一步必须排在本函数最前面（在任何 decoder->flush() / flushDevice() 之前），
+     * 因为它是"解码器被关掉/重建时，表面池能不能跟着回收"的前提：
+     *
+     *   · 硬解帧的 buf[] 里握着解码器的输出缓冲。D3D11VA 更极端 —— 整池 surface 装在
+     *     **同一张** ID3D11Texture2D 里（1080p 20 片 NV12 约 62MB、4K 约 249MB），
+     *     只要还有**一帧**活着，整张纹理数组就释放不掉（关窗时日志里那条
+     *     `surface pool after decoder teardown: externally pinned=1` 就是它）；
+     *   · 原来的顺序是"解码器先死、渲染侧后放"：切档内部那次 flush 传 flushRender=0，
+     *     连 flushVideoRender() 都不走，于是渲染器手上的帧（正在渲染的那一帧、
+     *     队列里排队的帧、给截屏留的那一份克隆）**没有任何同步释放点**，
+     *     全指望"下一帧来顶掉它"；管线一停就永远顶不掉；
+     *   · releaseVideoRenderFrames() 是同步的（AFActiveVideoRender 会先 pause VSync
+     *     线程再逐帧放，afThread::pause 会等到安全点，无超时），所以走到下面那句
+     *     flush 时，渲染器已经不再持有任何解码帧。
+     *
+     * 放在最前面而不是 flushRender 分支里：seek / stop / 换源 / 切档 四条路都要它，
+     * 而 flushRender 只区分"要不要连设备一起 flush"，与"帧引用归谁"无关。
+     */
+    mAVDeviceManager->releaseVideoRenderFrames();
+
+    /*
      * 【入口快照：这一次 flush 是不是"外力中止了一次在途切档"】
      * 单解码器模型下切档只有一个在途闩，所以下面那条终态出口与这个快照同源；
      * 记成局部量是为了在函数末尾（所有状态清干净之后）补做被推迟的 PFR / 用户 seek。
@@ -6365,10 +6494,17 @@ void SuperMediaPlayer::FlushVideoPath(bool flushRender, bool cancelPendingSwitch
         mAVDeviceManager->flushDevice(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
     } else {
         /*
-         * 只清解码器。flushDevice() 最后会 flushVideoRender()，那会
-         * pause/start VSync 线程；seek 这种一次性“原地重启视频”没必要每次都去
-         * 碰 afThread 的 pause/start 状态机——渲染器里缓存的旧帧下一帧本来
-         * 就会被覆盖。
+         * 只清解码器。flushDevice() 还会顺带 flushVideoRender()，那条路我们已经不需要了 ——
+         * 帧引用在函数最上面那句 releaseVideoRenderFrames() 里就同步放干净了。
+         *
+         * 【与旧注释的关系，别当成矛盾】这里原来写着"seek 这种一次性原地重启视频没必要
+         * 每次都去碰 afThread 的 pause/start 状态机"，那是当时的口径：反正渲染器里缓存的
+         * 旧帧下一帧会被覆盖。现在口径变了 —— 硬解帧钉着解码器的整池表面
+         * （D3D11VA 20 片同一张纹理数组），"下一帧会覆盖"只对"管线一直有帧"成立，
+         * 而 flush 恰恰是管线要断的那一刻。于是我们**刻意**接受每次 flush 多等一个 VSync
+         * 周期（releaseFrames 里 pause 等安全点，≤16ms；放帧本来就是"这一刻没有帧可上屏"，
+         * 所以屏幕上什么都不会变），换来的是"表面池的释放在解码器关掉之前就完成"这条硬约束。
+         * 精度优先于那一点点延迟。
          */
         IDecoder *videoDecoder = mAVDeviceManager->getDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
 
@@ -7415,6 +7551,14 @@ int SuperMediaPlayer::CreateVideoDecoder(bool bHW, Stream_meta &meta)
     /* B4：重建解码器期间先清掉"active 真面"，失败时保持 null ⇒ 切档的占位交接会
      * 退回纯 promote（宁可少一次无缝，也不拿一块过期/已失效的面去 setOutputSurface）。 */
     mActiveVideoSurface = nullptr;
+    /*
+     * 【释放顺序】紧跟着的 setUpDecoder() 就会关掉旧解码器（invalid 槽位上是
+     * `decoder->flush(); decoder->close();`），所以帧引用必须**在这之前**同步放掉，
+     * 否则旧解码器的表面池会被渲染器/呈现方手上的那一帧钉住，一直活到新解码器的第一帧。
+     * 契约与理由见 IVideoRender::releaseFrames()；调用点覆盖"每一条打开视频解码器的路"：
+     * 起播、切档、换源、错误重建。
+     */
+    mAVDeviceManager->releaseVideoRenderFrames();
     mAVDeviceManager->flushVideoRender();
 
     if (bHW) {
@@ -7576,6 +7720,14 @@ int SuperMediaPlayer::rebuildVideoDecoder(bool requireDummyRender)
 
     // 沿用上一次的解码方式（硬解/软解）
     bool bHW = (mAVDeviceManager->getVideoDecoderFlags() & DECFLAG_HW) != 0;
+
+    /*
+     * 重建同样是"关掉旧解码器"：走 invalidateDecoder + CreateVideoDecoder 这条路时，
+     * 旧解码器的表面池若被渲染器手上的帧钉着，就会活到新解码器的第一帧为止
+     * （错误恢复场景下那可能是几百毫秒）。所以和 FlushVideoPath() 一样，
+     * 在动解码器之前先同步放掉渲染侧的帧（契约见 IVideoRender::releaseFrames()）。
+     */
+    mAVDeviceManager->releaseVideoRenderFrames();
 
     // 置无效后 setUpDecoder 才会关掉旧（僵尸）解码器并新建
     mAVDeviceManager->invalidateDecoder(SMPAVDeviceManager::DEVICE_TYPE_VIDEO);
@@ -8479,6 +8631,21 @@ void SuperMediaPlayer::beginDiscontinuity(int64_t targetUs)
      * 于是"没有在途不连续点"的正常播放路径上，过滤判据一行都不参与。
      */
     mDiscontinuity.acceptedFramePos = INT64_MIN;
+    /*
+     * ============ 音频落点地板的臂上点（只有 seek 会臂它）============
+     *
+     * 这里（以及每次新的不连续点）把上一个不连续点可能残留的地板清掉，避免它跨越
+     * 代际活着；随后只在上游明确声明"本次 seek 重新锚定了音频时间轴"
+     * （SeekTo -> mSeekAudioLandingReset）时才重新臂上。
+     *
+     * 消费者与关闭点都只有一个：RenderAudio 的落点丢弃判据（见那里对
+     * audioLandingPending 的说明）。换档与 Reset 传进来时它保持假，
+     * 音频时间轴连续，行为逐字不变。
+     */
+    const bool armAudioLanding = mSeekAudioLandingReset && (targetUs != INT64_MIN);
+    mSeekAudioLandingReset = false;
+    mAudioLandingDropLoggedGen = -1;
+    mDiscontinuity.audioLandingPending = armAudioLanding;
     /*
      * 【P2】音频时钟基准（Discontinuity::audioBase*）**故意不在这里作废**。
      *

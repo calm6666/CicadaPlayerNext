@@ -60,6 +60,47 @@ int AFActiveVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
     return 0;
 }
 
+void AFActiveVideoRender::releaseFrames()
+{
+    /*
+     * 顺序与理由（改这里之前先读 IVideoRender::releaseFrames() 的契约）：
+     *
+     *   1. 先 mVSync->pause()：afThread::pause() 会等到 VSync 线程走到安全点
+     *      （条件变量等待，没有超时）才返回。这之后 mInputQueue 没有消费者，
+     *      播放线程是唯一的操作者 —— 这是能**同步**放帧、且不破坏单生产单消费
+     *      队列不变量的前提。析构函数（:21-31）用的就是同一套办法。
+     *   2. 再放 mRendingFrame（VSync 线程已经取走、但还没交给 deviceRenderFrame 的那一帧）
+     *      和队列里所有排队的帧。这两处就是本渲染器对解码帧的**全部**引用。
+     *   3. 最后 start() 恢复节拍：放帧是"清空手上存货"，不是"停播"，节拍必须继续。
+     *
+     * 为什么不能只依赖 renderFrame(nullptr)：它把 flush 登记成 mNeedFlushSize，
+     * 真正的丢帧在下一次 VSync 回调里发生 —— 而调用方（关解码器）要的是"现在就放完"。
+     */
+    mVSync->pause();
+
+    unsigned long long dropped = 0;
+
+    if (mRendingFrame) {
+        mRendingFrame->setDiscard(true);
+        mRendingFrame = nullptr;
+        dropped++;
+    }
+
+    while (mInputQueue.size() > 0) {
+        dropFrame();
+        dropped++;
+    }
+
+    /* 队列已空，之前登记的 flush 已经没有意义了，一起清掉。 */
+    mNeedFlushSize = 0;
+
+    mVSync->start();
+
+    AF_LOGI("[mem] releaseFrames: dropped %llu decoded frame(s) held by the renderer "
+            "(queued + rendering); the hardware surface pool is nobody's business but the "
+            "decoder's from here on\n", dropped);
+}
+
 void AFActiveVideoRender::dropFrame()
 {
     if(mInputQueue.size() <= 0){

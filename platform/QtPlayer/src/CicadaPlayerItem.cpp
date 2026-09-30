@@ -6,6 +6,13 @@
 
 #include "CicadaPlayerItem.h"
 #include "CicadaVideoTexture.h"
+/* 只为了内存探针里那两行"图集纹理建/删计数"（见 DanmakuAtlas.h）。 */
+#include "DanmakuAtlas.h"
+/*
+ * 只为了 setDecoderGenerationEndedHook()：框架在关/重建视频解码器之前会同步回调它，
+ * 我们借此在渲染线程上放掉 D3D11 输入视图并 Flush（见 updatePaintNode 里那一段）。
+ */
+#include "CicadaVideoRender.h"
 #include "CicadaHardwareDevice.h"
 /* 对象方式入口（setManifest(builder)）需要构造器的定义；头文件里只前向声明。 */
 #include "CicadaManifestBuilder.h"
@@ -685,10 +692,391 @@ namespace cicadaqt {
         }, Qt::QueuedConnection);
     }
 
+    /*
+     * ===========================================================================
+     * 【进程内存读数探针】把"这一刻这个进程占了多少"打进同一份日志。
+     *
+     * 为什么需要它：用户在任务管理器里看到的是"每开/关一轮涨约 25MB"，而我们没法在他
+     * 机器上跑工具；有了这两行（窗口树建立 / 窗口树销毁），"这一轮开关到底留下多少"
+     * 就能在日志里直接读出来，不用来回抄任务管理器，也能和"窗口对象销毁探针"配成对。
+     *
+     * Windows 读数走 kernel32 导出的 `K32GetProcessMemoryInfo`（Win7+），
+     * **用 GetProcAddress 解析、不直接引符号** —— 这样不需要给工程加 psapi.lib
+     * （不动 CMakeLists，也就没有链接期风险）。psapi.h 只是为了拿到
+     * PROCESS_MEMORY_COUNTERS_EX 这个结构体定义。
+     *   * WorkingSetSize —— 任务管理器"内存"列对应的量级；
+     *   * PrivateUsage   —— 私有提交，排查泄漏时更稳的那个读数。
+     *
+     * 其它平台直接跳过：本探针只服务于这台 Windows 机器的复测，不引入平台行为差异。
+     * ===========================================================================
+     */
+#if defined(Q_OS_WIN)
+    #ifndef WIN32_LEAN_AND_MEAN
+        #define WIN32_LEAN_AND_MEAN
+    #endif
+    #include <windows.h>
+    #include <psapi.h>
+    /* THREADENTRY32 / Thread32First：数本进程的线程数（见下面那个探针）。 */
+    #include <tlhelp32.h>
+#endif
+
+    static void logProcessMemoryProbe(const char *where)
+    {
+#if defined(Q_OS_WIN)
+        using GetProcessMemoryInfoFn = BOOL(WINAPI *)(HANDLE, PPROCESS_MEMORY_COUNTERS, DWORD);
+
+        static GetProcessMemoryInfoFn getProcessMemoryInfo = []() -> GetProcessMemoryInfoFn {
+            HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+
+            if (kernel == nullptr) {
+                return nullptr;
+            }
+
+            return reinterpret_cast<GetProcessMemoryInfoFn>(
+                       reinterpret_cast<void *>(GetProcAddress(kernel, "K32GetProcessMemoryInfo")));
+        }();
+
+        /*
+         * 【句柄/线程计数·2026-09-30】内存坡度之外还要看这两条：之前实测每轮大约
+         * "+27 个 Thread 句柄、+116 个无名句柄"，一直没归因。GetProcessHandleCount()
+         * 是 kernel32 文档化的进程级读数；线程数只能靠
+         * CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD) 数（同 main.cpp 里那个探针的用法）。
+         * 两者都不需要任何外部工具/断点。
+         */
+        DWORD handleCount = 0;
+        DWORD threadCount = 0;
+
+        GetProcessHandleCount(GetCurrentProcess(), &handleCount);
+
+        HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+        if (snapshot != INVALID_HANDLE_VALUE) {
+            THREADENTRY32 entry = {};
+            entry.dwSize = sizeof(entry);
+            const DWORD selfPid = GetCurrentProcessId();
+
+            if (Thread32First(snapshot, &entry)) {
+                do {
+                    if (entry.dwSize >= FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) +
+                            sizeof(entry.th32OwnerProcessID) && entry.th32OwnerProcessID == selfPid) {
+                        threadCount++;
+                    }
+                } while (Thread32Next(snapshot, &entry));
+            }
+
+            CloseHandle(snapshot);
+        }
+
+        /*
+         * ============ 【提交内存按区块大小分桶·2026-09-30】============
+         *
+         * 为什么要它：现在已经有两条硬结论 —— ① D3D11VA 表面池会随解码器释放
+         * （引用计数探针）；② 弹幕开着时关窗后残留 185~240MB、弹幕关掉只剩 ~50MB。
+         * 接下来要回答的是"那几十 MB 到底长什么样"，而**尺寸**就能把嫌疑缩到一类对象：
+         *   * 4MB 见方 ⇒ 1024×1024 RGBA（弹幕图集纹理 / 它的 QImage）；
+         *   * 8MB 见方 ⇒ 1920×1080 RGBA（视频那条输出纹理）；
+         *   * 64KB 一批 ⇒ 一堆小对象/小缓冲。
+         * 这是**不需要调试器**就能做的归因：VirtualQuery 走一遍地址空间，
+         * 只统计 MEM_COMMIT + MEM_PRIVATE 的区块，按大小分四档汇总。
+         * 只在 ctor/dtor 调 —— 两行日志相减就是"这一轮涨在哪个档"。
+         */
+        {
+            MEMORY_BASIC_INFORMATION mbi = {};
+            unsigned char *address = nullptr;
+            unsigned long long bucketBytes[4] = {0, 0, 0, 0};
+            unsigned long bucketRegions[4] = {0, 0, 0, 0};
+            unsigned long long totalPrivate = 0;
+            SIZE_T largest = 0;
+
+            while (VirtualQuery(address, &mbi, sizeof(mbi)) == sizeof(mbi)) {
+                auto *base = static_cast<unsigned char *>(mbi.BaseAddress);
+                const SIZE_T regionSize = mbi.RegionSize;
+
+                if (mbi.State == MEM_COMMIT && mbi.Type == MEM_PRIVATE) {
+                    totalPrivate += regionSize;
+
+                    const int index = (regionSize < 64 * 1024) ? 0
+                                      : (regionSize < 1024 * 1024) ? 1
+                                      : (regionSize < 8 * 1024 * 1024) ? 2 : 3;
+                    bucketBytes[index] += regionSize;
+                    bucketRegions[index]++;
+
+                    if (regionSize > largest) {
+                        largest = regionSize;
+                    }
+                }
+
+                unsigned char *next = base + regionSize;
+                /* 溢出保护：地址回卷就停（正常走不到）。 */
+                if (next <= address) {
+                    break;
+                }
+                address = next;
+            }
+
+            AF_LOGI("[mem] private commit by region size: total %.1f MB | <64KB %.1f MB/%lu | "
+                    "64KB-1MB %.1f MB/%lu | 1-8MB %.1f MB/%lu | >=8MB %.1f MB/%lu | largest %.1f MB\n",
+                    double(totalPrivate) / (1024.0 * 1024.0),
+                    double(bucketBytes[0]) / (1024.0 * 1024.0), bucketRegions[0],
+                    double(bucketBytes[1]) / (1024.0 * 1024.0), bucketRegions[1],
+                    double(bucketBytes[2]) / (1024.0 * 1024.0), bucketRegions[2],
+                    double(bucketBytes[3]) / (1024.0 * 1024.0), bucketRegions[3],
+                    double(largest) / (1024.0 * 1024.0));
+
+            /*
+             * 【指纹：≥1MB 的区块按**精确尺寸**归类】
+             *
+             * 分档只能告诉我"漏在 1-8MB 那档"，而尺寸本身才是身份：
+             *   * 4.19MB = 1024x1024x4 ⇒ 弹幕图集那张纹理（或它的 QImage 副本）；
+             *   * 8.29MB = 1920x1080x4 ⇒ 视频那条 RGBA 输出纹理 / 一张 1080p QImage；
+             *   * 3.11MB = 1920x1080x1.5 ⇒ 1080p NV12 回读缓冲；
+             *   * 1.05MB = 512x512x4 ⇒ 小图集/图标；
+             * 每轮 ctor/dtor 的这张直方图相减，就能指名道姓，而不是继续猜。
+             */
+            {
+                QHash<qint64, int> sizes;   /* 尺寸(字节, 取到 4KB 粒度) -> 个数 */
+                unsigned char *scan = nullptr;
+                MEMORY_BASIC_INFORMATION info = {};
+
+                while (VirtualQuery(scan, &info, sizeof(info)) == sizeof(info)) {
+                    auto *base = static_cast<unsigned char *>(info.BaseAddress);
+                    const SIZE_T regionSize = info.RegionSize;
+
+                    if (info.State == MEM_COMMIT && info.Type == MEM_PRIVATE &&
+                        regionSize >= 1024 * 1024) {
+                        const qint64 rounded = qint64((regionSize + 2047) / 4096) * 4096;
+                        sizes[rounded] += 1;
+                    }
+
+                    unsigned char *next = base + regionSize;
+
+                    if (next <= scan) {
+                        break;
+                    }
+
+                    scan = next;
+                }
+
+                QList<QPair<qint64, int>> sorted;
+
+                for (auto it = sizes.constBegin(); it != sizes.constEnd(); ++it) {
+                    sorted.append(qMakePair(it.key(), it.value()));
+                }
+
+                std::sort(sorted.begin(), sorted.end(),
+                          [](const QPair<qint64, int> &a, const QPair<qint64, int> &b) {
+                              return a.second > b.second;
+                          });
+
+                QString fingerprint;
+                int printed = 0;
+
+                for (const auto &entry : sorted) {
+                    if (printed++ >= 10) {
+                        fingerprint += QStringLiteral("... ");
+                        break;
+                    }
+
+                    fingerprint += QStringLiteral("%1MB x%2  ")
+                                   .arg(double(entry.first) / (1024.0 * 1024.0), 0, 'f', 2)
+                                   .arg(entry.second);
+                }
+
+                AF_LOGI("[mem] regions >=1MB by exact size: %s\n",
+                        fingerprint.isEmpty() ? "(none)" : fingerprint.toUtf8().constData());
+            }
+        }
+
+        /*
+         * ============ 【线程名直方图·2026-09-30】============
+         *
+         * 实测每关开一轮涨 ~109 个句柄、~19 条线程（还有 ~39MB 私有提交），而 afThread
+         * 那套计数在退出时是**配平**的（live=0）—— 也就是说漏的线程**不是**框架里的
+         * afThread。这里用 GetThreadDescription()（Win10 1607+）把线程名统计出来：
+         * Qt 会给自己的内部线程起名（渲染线程 / 线程池 / 网络…），我们的 afThread 没起名，
+         * 所以同名成堆出现的那一类就是嫌疑人。
+         *
+         * 输出是"每行一份直方图"，ctor / dtor 两行相减 ⇒ 每轮多出来的是谁，一眼可见。
+         * 拿不到名字的老系统上只会退化成 unnamed=N，不影响其它读数。
+         */
+        {
+            using GetThreadDescriptionFn = HRESULT(WINAPI *)(HANDLE, PWSTR *);
+            /* ntdll!NtQueryInformationThread(ThreadQuerySetWin32StartAddress = 9)：
+               拿线程入口地址，再映射到模块 —— 无名线程只有这样才能"点名"。 */
+            using NtQueryInformationThreadFn = LONG(NTAPI *)(HANDLE, ULONG, PVOID, ULONG, PULONG);
+
+            static GetThreadDescriptionFn getThreadDescription = []() -> GetThreadDescriptionFn {
+                HMODULE kernel = GetModuleHandleW(L"kernel32.dll");
+
+                if (kernel == nullptr) {
+                    return nullptr;
+                }
+
+                return reinterpret_cast<GetThreadDescriptionFn>(
+                           reinterpret_cast<void *>(GetProcAddress(kernel, "GetThreadDescription")));
+            }();
+
+            static NtQueryInformationThreadFn ntQueryInformationThread = []() -> NtQueryInformationThreadFn {
+                HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+
+                if (ntdll == nullptr) {
+                    return nullptr;
+                }
+
+                return reinterpret_cast<NtQueryInformationThreadFn>(
+                           reinterpret_cast<void *>(GetProcAddress(ntdll, "NtQueryInformationThread")));
+            }();
+
+            HANDLE snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
+
+            if (snapshot != INVALID_HANDLE_VALUE) {
+                THREADENTRY32 entry = {};
+                entry.dwSize = sizeof(entry);
+                const DWORD selfPid = GetCurrentProcessId();
+                QHash<QString, int> byName;
+                QHash<QString, int> byModule;
+                int named = 0;
+                int unnamed = 0;
+
+                if (Thread32First(snapshot, &entry)) {
+                    do {
+                        if (entry.dwSize < FIELD_OFFSET(THREADENTRY32, th32OwnerProcessID) +
+                                sizeof(entry.th32OwnerProcessID)) {
+                            continue;
+                        }
+
+                        if (entry.th32OwnerProcessID != selfPid) {
+                            continue;
+                        }
+
+                        QString name;
+                        HANDLE thread = OpenThread(THREAD_QUERY_INFORMATION, FALSE, entry.th32ThreadID);
+
+                        if (thread != nullptr && getThreadDescription != nullptr) {
+                            PWSTR description = nullptr;
+
+                            if (SUCCEEDED(getThreadDescription(thread, &description)) &&
+                                description != nullptr) {
+                                name = QString::fromWCharArray(description);
+                                LocalFree(description);
+                            }
+                        }
+
+                        if (!name.isEmpty()) {
+                            byName[name]++;
+                            named++;
+                        } else {
+                            unnamed++;
+
+                            /*
+                             * 无名线程：用入口地址找到它属于哪个模块。
+                             * 这一步就是"谁创建了这些线程"的答案 —— 驱动（nvwgf2umx/igd*）、
+                             * Qt（Qt6Core/Quick）、FFmpeg（ffmpeg.dll）、还是我们自己的 exe。
+                             */
+                            PVOID startAddress = nullptr;
+
+                            if (thread != nullptr && ntQueryInformationThread != nullptr &&
+                                ntQueryInformationThread(thread, 9 /* ThreadQuerySetWin32StartAddress */,
+                                                         &startAddress, sizeof(startAddress),
+                                                         nullptr) == 0 &&
+                                startAddress != nullptr) {
+                                HMODULE module = nullptr;
+
+                                if (GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS |
+                                                       GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                                       reinterpret_cast<LPCWSTR>(startAddress),
+                                                       &module) && module != nullptr) {
+                                    wchar_t path[MAX_PATH] = {};
+
+                                    if (GetModuleFileNameW(module, path, MAX_PATH) > 0) {
+                                        QString file = QString::fromWCharArray(path);
+                                        const int slash = file.lastIndexOf(QLatin1Char('\\'));
+
+                                        if (slash >= 0) {
+                                            file = file.mid(slash + 1);
+                                        }
+
+                                        byModule[file]++;
+                                    }
+                                }
+                            } else {
+                                byModule[QStringLiteral("(query failed)")]++;
+                            }
+                        }
+
+                        if (thread != nullptr) {
+                            CloseHandle(thread);
+                        }
+                    } while (Thread32Next(snapshot, &entry));
+                }
+
+                CloseHandle(snapshot);
+
+                QString histogram;
+
+                for (auto it = byName.constBegin(); it != byName.constEnd(); ++it) {
+                    histogram += QStringLiteral("%1 x%2  ").arg(it.key()).arg(it.value());
+                }
+
+                QString modules;
+
+                for (auto it = byModule.constBegin(); it != byModule.constEnd(); ++it) {
+                    modules += QStringLiteral("%1 x%2  ").arg(it.key()).arg(it.value());
+                }
+
+                AF_LOGI("[mem] threads by name: named=%d unnamed=%d (%d total) | %s\n",
+                        named, unnamed, named + unnamed,
+                        histogram.isEmpty() ? "(no named thread)" : histogram.toUtf8().constData());
+
+                AF_LOGI("[mem] unnamed threads by module: %s\n",
+                        modules.isEmpty() ? "(none)" : modules.toUtf8().constData());
+            }
+        }
+
+        /*
+         * 【弹幕图集纹理 churn】每次图集内容变都会 delete 旧的、createTextureFromImage
+         * 新建一张 1024x1024 RGBA（4MB）。这里报"建了几张、删了几张"：
+         * 建删相等说明我们这一侧是配平的，那 1-8MB 那档要是还在涨，就说明**回收被推迟
+         * 到了 Qt/D3D11 的延迟销毁**（和当初表面池同一个形状），得改成"一张纹理原地更新"。
+         */
+        AF_LOGI("[mem] danmaku atlas textures: created=%lld deleted=%lld\n",
+                cicadaqt::danmakuAtlasTexturesCreated(), cicadaqt::danmakuAtlasTexturesDeleted());
+
+        if (getProcessMemoryInfo == nullptr) {
+            AF_LOGI("[mem] %s: (process memory query unavailable)\n", where);
+            return;
+        }
+
+        PROCESS_MEMORY_COUNTERS_EX counters = {};
+        counters.cb = sizeof(counters);
+
+        if (getProcessMemoryInfo(GetCurrentProcess(),
+                                 reinterpret_cast<PROCESS_MEMORY_COUNTERS *>(&counters),
+                                 sizeof(counters))) {
+            AF_LOGI("[mem] %s: working set %.1f MB, private commit %.1f MB, top-level windows alive=%d, "
+                    "handles=%lu, threads=%lu\n",
+                    where,
+                    double(counters.WorkingSetSize) / (1024.0 * 1024.0),
+                    double(counters.PrivateUsage) / (1024.0 * 1024.0),
+                    int(QGuiApplication::topLevelWindows().size()),
+                    (unsigned long) handleCount, (unsigned long) threadCount);
+        }
+#else
+        (void) where;
+#endif
+    }
+
     CicadaPlayerItem::CicadaPlayerItem(QQuickItem *parent)
         : QQuickItem(parent)
         , m_textureBackend(new CicadaVideoTexture())
     {
+        /*
+         * 【释放探针】窗口树建立的那一刻的进程内存读数。
+         * 与 ~CicadaPlayerItem 里那一行配成对：两者之差 = 这一轮开关**留下**了多少。
+         * 判据见 docs/ANALYSIS-MEMORY-FOOTPRINT.md 的"每开/关一轮累积清单"。
+         */
+        logProcessMemoryProbe("player window tree created (CicadaPlayerItem ctor)");
+
         /*
          * 画面由我们自己画：这是场景图里的一个普通 item，需要 setFlag(ItemHasContents)。
          */
@@ -723,16 +1111,73 @@ namespace cicadaqt {
     {
         /*
          * 析构顺序很重要：
-         *   1. 先销毁播放器（它会停掉框架的 VSync 线程，之后不会再有帧/位置回调进来）；
+         *   0. **先放掉我们自己持有的解码帧**（本轮新增，见下面那段）；
+         *   1. 再销毁播放器（它会停掉框架的 VSync 线程，之后不会再有帧/位置回调进来）；
          *   2. 最后放掉渲染资源（此时不可能有正在处理的帧）。
          * 反过来就有可能在回调里访问已经析构的对象。
          * （以前这里还要先停一个位置轮询定时器，现在位置只走回调，定时器已经删了。）
          */
+        /*
+         * ============ 【顺序修复·本轮】帧先死，解码器（连同表面池）后死 ============
+         *
+         * 背景：D3D11VA 的整张表面数组（hw frames 上下文，1080p 20 片 ≈62MB）会被
+         * **任何一帧**钉住 —— 解码器析构只是把它自己那一份引用还掉，只要 Qt 侧还有一帧
+         * 活着，62MB 就跟着那一帧活。
+         *
+         * 而本类持有两帧：m_pendingFrame（框架线程 clone 进来、渲染线程取走）与
+         * m_currentFrame（渲染线程当前那一帧）。原来它们是在 destroyPlayer() **之后**、
+         * 成员析构阶段才放掉的（成员按声明逆序析构，两个帧都排在 m_textureBackend 之后），
+         * 于是顺序恰好是"解码器先死、帧后放" —— 池的最后一份引用要等到成员析构阶段才没，
+         * 关窗时"表面池随解码器一起走"这件事就落空了（日志里 hw frames ctx 的读数也因此
+         * 一直混着我们自己的帧）。
+         *
+         * 放到这里（destroyPlayer() 之前）安全吗？安全，依据与下面两行**同源**：
+         * 本函数执行时窗口/场景图已经回收，Qt 不会再调度 updatePaintNode()，
+         * 所以 m_currentFrame 不再有渲染线程读者 —— 既有的
+         * invalidateFrameTextureCache()/releaseResources() 就是建立在同一前提上的。
+         * m_pendingFrame 额外上锁（它由框架线程写），与 destroyPlayer() 里那一句同一把锁。
+         *
+         * 这样在关窗/析构路径上，池的寿命就精确等于解码器的寿命：destroyPlayer() 里
+         * m_player.reset() 一跑，池当场就还回去，不再依赖成员析构顺序。
+         */
+        {
+            QMutexLocker locker(&m_frameMutex);
+            m_pendingFrame.reset();
+        }
+
+        m_currentFrame.reset();
+
         destroyPlayer();
+
+        invalidateFrameTextureCache();
 
         if (m_textureBackend) {
             m_textureBackend->releaseResources();
         }
+
+        /*
+         * 【释放探针】走到这里，播放器侧的东西已经全部放完：
+         *   * 上面两句：我们自己持有的解码帧（m_pendingFrame / m_currentFrame）——
+         *     **它们才是"钉住整池表面纹理"的那两个引用**；
+         *   * destroyPlayer()：播放器（解码器 + 表面池）、包/帧队列、解复用器、
+         *     数据源、挂起帧、挂起快照；
+         *   * m_textureBackend->releaseResources()：D3D11 的输入/输出视图、视频处理器、
+         *     枚举器、输出纹理（8.29MB@1080p / 33.18MB@4K），并归还借来的场景图设备。
+         * 之后没有任何"播放器持有的大块资源"活着 —— 下面只剩 Qt 自己的对象析构。
+         */
+        AF_LOGI("[mem] ~CicadaPlayerItem: player item destroyed, no player-held resource left\n");
+
+        /*
+         * 【释放探针】窗口树销毁之后的进程内存读数。
+         *
+         * 这一行与构造里那行配成对：**"销毁时的读数 - 建立时的读数"就是这一轮开关
+         * 净留下的量**。判据：连开/关 3 轮，每轮这一对数都应该回到"只开主窗口"的水平
+         * （用户实测 25MB 左右），且三轮之间不抬升。
+         *   * 如果每轮销毁读数都比上一轮高 ~25MB → 每轮有东西没回收（窗口树/RHI 一类）；
+         *   * 如果第一轮之后稳定在一个比 25MB 高得多的数 → 有**一次性残留**（例如解码器
+         *     表面池、D3D11 设备/驱动侧分配），要按文档里那张清单逐项查。
+         */
+        logProcessMemoryProbe("player window tree destroyed (~CicadaPlayerItem)");
     }
 
     /* ------------------------------------------------------------------ */
@@ -3075,6 +3520,26 @@ namespace cicadaqt {
             return item->handleVideoFrame(frame);
         }, this);
 
+        /*
+         * 【挂钩：解码代际结束】框架在关闭或重建视频解码器之前会同步调
+         * CicadaVideoRender::releaseFrames()（IVideoRender 的契约，调用点是
+         * SuperMediaPlayer::FlushVideoPath() / rebuildVideoDecoder() /
+         * CreateVideoDecoder()）。它放掉自己那一半（VSync 队列里的帧 + 截屏缓存那一帧）
+         * 之后会回调这里。
+         *
+         * 这里**只置标志 + 请求一次重绘**：真正要放的 D3D11 输入视图和那次 Flush
+         * 只能在渲染线程上做，见 updatePaintNode() 里那一段（连同"为什么不能顺手把
+         * m_currentFrame 也放掉"的说明）。
+         */
+        cicadaqt::setDecoderGenerationEndedHook([this]() {
+            m_decoderGenerationEnded = true;
+            QMetaObject::invokeMethod(this, [this]() {
+                if (window() != nullptr) {
+                    update();
+                }
+            }, Qt::QueuedConnection);
+        });
+
         /* 硬解开关由 QML 侧的设置页控制；解不出来时框架会自己退回软解。 */
         m_player->EnableHardwareDecoder(m_hardwareDecoding);
         m_player->SetAutoPlay(false); /* 由组件在设备就绪后统一 Start() */
@@ -3289,6 +3754,29 @@ namespace cicadaqt {
         }
 
         /*
+         * 截屏快照放掉（停播兜底）。
+         *
+         * 整幅快照（1080p 8.29MB / 4K 33.18MB）的生命周期约定是"按需生成、用完即还"：
+         * 正常路径上 notifySnapshot() 在把缩小版交给 provider 之后**当场**就还掉了
+         * （见那个函数里的"用完即还"那段），所以走到这里它通常是空的。
+         *
+         * 之所以还留这一条：
+         *   * 零成本（空 QImage 的赋值只是引用计数归零）；
+         *   * 它是"停播/换片源就把整幅还掉"的**结构性保证** —— 以后真加了"保存截图"的
+         *     消费者（那时 notifySnapshot 不再当场还、而是交给消费者），这条就是兜底；
+         *   * destroyPlayer() 原来只清 stats / decodeMethod / bufferedPosition，
+         *     确实漏了它，所以这里显式补上并记一行日志（便于关窗后核对）。
+         *
+         * 给 QML 气泡看的那一份是**缩小过的**、存在 SnapshotImageProvider 里
+         * （320 宽，约 230KB），不在这里，所以画面上的行为一点都不变。
+         */
+        const qsizetype releasedSnapshotBytes = m_lastSnapshot.sizeInBytes();
+
+        if (!m_lastSnapshot.isNull()) {
+            m_lastSnapshot = QImage();
+        }
+
+        /*
          * 播放器（连同它的解码器和表面池）马上要被销毁，但渲染线程手里还留着上一帧和
          * D3D11 的输入视图 —— 这两个引用会让上一个解码器的整池表面纹理回收不了
          * （原因写在 CicadaPlayerItem.h 里 m_releaseRenderState 那段）。置个标志，
@@ -3313,6 +3801,12 @@ namespace cicadaqt {
          * 顺序：先清回调（防止析构过程里还有帧回调进来），再销毁。
          */
         m_player->SetVideoRenderingCallback(nullptr, nullptr);
+        /*
+         * 同一个顺序也适用于"解码代际结束"的挂钩：注销掉，避免 Stop()/析构过程里
+         * 还有通知打到本对象上（下面那条 releaseFrames 的通知本来就是给渲染线程
+         * 排活的，此刻 m_releaseRenderState 已经把该放的都放了）。
+         */
+        cicadaqt::setDecoderGenerationEndedHook(nullptr);
         m_player->Stop();
         m_player.reset();
         m_listener.reset();
@@ -3321,6 +3815,26 @@ namespace cicadaqt {
         /* 清掉挂起的帧，避免渲染线程去访问已经释放的解码器缓冲。 */
         QMutexLocker locker(&m_frameMutex);
         m_pendingFrame.reset();
+
+        /*
+         * 【释放探针】一行日志，用来在关窗后核对"播放器侧大块资源是否真的放掉了"。
+         *
+         * 这一句在**同一个调用栈上**执行完上面那些释放动作之后打印：
+         *   * m_player.reset() -> ~MediaPlayer -> CicadaReleasePlayer -> ~SuperMediaPlayer
+         *     -> mAVDeviceManager = nullptr -> 解码器析构 -> avcodecDecoder::close_decoder()
+         *     -> avcodec_free_context + 归还 hw device（**D3D11VA 的 20 片表面池在这里走**，
+         *        1080p 约 62MB、4K 约 249MB）；
+         *   * 帧队列：m_pendingFrame + Stop() 里的 FlushVideoPath/FlushAudioPath 已清；
+         *   * 包队列：Stop() 里的 mBufferController->ClearPacket(BUFFER_TYPE_AV) 已清；
+         *   * 数据源（含 curl 连接与环形缓冲）：Stop() 里的 mDataSource->Close()+delete 已做；
+         *   * 整幅快照：上面那一段已放。
+         * 渲染线程手里的 m_currentFrame 与 D3D11 输入视图是**异步**放的（见下面那个标志），
+         * 它们的释放会在渲染线程的下一帧或 ~CicadaPlayerItem 里留下自己的日志。
+         */
+        AF_LOGI("[mem] destroyPlayer: player stopped and destroyed (decoder + D3D11VA surface pool, "
+                "packet/frame queues, demuxer and data source all released on this stack); "
+                "snapshot %lld bytes released\n",
+                (long long) releasedSnapshotBytes);
     }
 
     void CicadaPlayerItem::startPlaybackWhenReady()
@@ -3395,6 +3909,28 @@ namespace cicadaqt {
         QQuickWindow *w = window();
         CicadaHardwareDevice::instance().captureFromSceneGraph(w);
 
+        /*
+         * ============ 【释放探针】窗口对象自己的销毁通知（C++ 侧，必定进日志）============
+         *
+         * 为什么要这一条：原来判断"播放器窗口对象死没死"靠的是 QML 里的 console.log，
+         * 而它在 Release 构建里**看不到** —— main.cpp 的 qInstallMessageHandler 把
+         * QtDebugMsg 交给 AF_LOGD（main.cpp:402-403），而 Release 下框架日志级别是
+         * AF_LOG_LEVEL_INFO（frame_work_log.c:268-272），__log_print 在 prio 超限时
+         * 直接 return（frame_work_log.c:279）。所以"QML 探针没打"根本不能当判据。
+         *
+         * 这里直接接 QQuickWindow 的 destroyed：它一发就说明**窗口对象真的被删了**
+         * （而不是 hide 了、还活着）。这条走 AF_LOGI，必定和播放器那 6 条进同一份日志。
+         *
+         * 连接以 this 作为 context：item 若比窗口先死，连接自动失效，不会碰已析构对象；
+         * 用一次标志位保证每个 item 只接一次（场景图可能重建多次）。
+         */
+        if (!m_windowDestroyedProbeAttached && w != nullptr) {
+            m_windowDestroyedProbeAttached = true;
+            connect(w, &QObject::destroyed, this, []() {
+                AF_LOGI("[mem] the player window object was destroyed (QQuickWindow::destroyed)\n");
+            });
+        }
+
         if (m_textureBackend) {
             /*
              * 初始决策（走零拷贝还是 CPU 路径）也在渲染线程上做 —— 探测要拿 Qt 的 RHI
@@ -3404,6 +3940,13 @@ namespace cicadaqt {
              */
             const int wanted = m_textureReprobe.exchange(-1);
             m_textureBackend->reset(w, wanted != 0);
+
+            /*
+             * 后端刚被重建：上一次 wrap 出来的 QSGTexture 属于**旧的**处理器/设备状态，
+             * 缓存必须放掉，否则下一帧会把一张旧纹理当成"这一帧的纹理"交出去
+             * （画面冻结/花屏）。见 invalidateFrameTextureCache()。
+             */
+            invalidateFrameTextureCache();
 
             /*
              * 后端刚（重新）探测/重建过：把当前的色彩调整值补一遍。
@@ -3425,6 +3968,54 @@ namespace cicadaqt {
     void CicadaPlayerItem::onSceneGraphInvalidated()
     {
         /* 渲染线程：RHI 资源已经失效，纹理后端持有的东西必须放掉。 */
+        invalidateFrameTextureCache();
+
+        /*
+         * ===========================================================================
+         * 【顺序修复·本轮（最后一刀）】在这里放掉"渲染线程手里那一帧"。
+         *
+         * 【为什么必须是这里】
+         * 关窗路径上，播放器/解码器是在 `onClosing` 的 `source = ""` 里就销毁的
+         * （`CicadaPlayerItem::setSource` → `destroyPlayer()`），而那一帧的释放原来**只**挂在
+         * `updatePaintNode()` 的 `m_releaseRenderState` 分支上 —— 那条分支要等"渲染线程
+         * 再画一帧"才会执行。窗口一关就不再渲染，于是这一帧（连同它 buf[] 里握着的
+         * D3D11VA 表面池，1080p/20 片 ≈62MB）**一直被握到下一轮开窗**才放掉。
+         * 日志证据（用户实测）：
+         *   * `surface pool after decoder teardown (codec hevc): externally pinned=1` —— 每次关窗都是 1；
+         *   * `render thread released the previous frame and the D3D11 input view` 只出现在
+         *     **下一轮开窗**时刻，关窗时刻一次都没有。
+         *
+         * 而本函数是**关窗时一定会在渲染线程上跑一次**的那一跳（同一份日志里那句
+         * `released the captured D3D11 device (its scene graph went away)` 就是它打的）。
+         * 在这里放帧，等于把"等下一次渲染"换成"关窗这一跳"，确定性由事件本身提供，
+         * 不需要任何计时器、重试或等待。
+         *
+         * 【为什么不会 use-after-free】
+         *   * 本函数跑在**渲染线程**，而 `m_currentFrame` 的所有读者/写者
+         *     （`takeFrameForRendering()`、`updatePaintNode()`）都在同一个线程上 ——
+         *     这里放它不存在跨线程竞争；
+         *   * 场景图此刻已经失效，Qt 不会再为这个 item 调度 `updatePaintNode()`，
+         *     所以放掉之后不会再有读者；
+         *   * 同一时刻在 GUI 线程上跑的 `destroyPlayer()`/`~CicadaPlayerItem` 都只碰
+         *     "播放器与后端"，不读 `m_currentFrame`，所以两边不会互相踩。
+         * ===========================================================================
+         */
+        {
+            QMutexLocker locker(&m_frameMutex);
+            m_pendingFrame.reset();
+        }
+
+        m_currentFrame.reset();
+
+        /*
+         * 输入视图（D3D11 video processor input view）对解码表面数组持有一份 D3D11 引用，
+         * 也是"钉住整池"的成员之一。`releaseResources()` 里会 Release 它，
+         * 这里先显式放一次（幂等），把"帧 → 输入视图 → 池"这条链在同一个时刻断干净。
+         */
+        if (m_textureBackend) {
+            m_textureBackend->releaseInputState();
+        }
+
         if (m_textureBackend) {
             m_textureBackend->releaseResources();
         }
@@ -3441,6 +4032,14 @@ namespace cicadaqt {
          * 不会把播放器窗口正在用的设备顺手放掉（两个窗口同时活着）。
          */
         cicadaqt::CicadaHardwareDevice::instance().releaseFromSceneGraph(window());
+
+        /*
+         * 【释放探针】渲染线程的一条：场景图失效（窗口关 / RHI 重建 / 设备丢失）时，
+         * 纹理后端持有的 GPU 资源、"渲染线程手里那一帧"与"借来的场景图设备"都在这一跳还掉。
+         * 正常关窗时它比 ~CicadaPlayerItem 先到（窗口先失效场景图、再析构子对象）。
+         */
+        AF_LOGI("[mem] scene graph invalidated: previous frame + video texture backend released, "
+                "borrowed D3D11 device returned\n");
     }
 
     void CicadaPlayerItem::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry)
@@ -3496,12 +4095,48 @@ namespace cicadaqt {
     {
         QMutexLocker locker(&m_frameMutex);
 
+        /*
+         * ============ 【2026-09-30 回退：不 clone 的那一版会闪退，先退回原行为】============
+         *
+         * 这里曾经改成"没有新帧就返回 nullptr，让调用方沿用 m_currentFrame"，目的是让下面
+         * 那条"同一帧只过一次视频处理器"的缓存**真的命中**（原来每次重绘都 clone 一份、
+         * 指针一变就判不中，于是重绘一次就重跑一趟 VideoProcessorBlt + 新建一个 QSGTexture）。
+         *
+         * 但那一版实测**打开播放窗口后，第一次自动切档（ABR 升档）时直接闪退**，
+         * 日志停在渲染线程打完 `ID3D11DeviceContext::Flush()` 之后的那一瞬：
+         *     …quality switch: target stream 3 seeked → FlushVideoPath(flushRender=0)
+         *     → releaseFrames → Flush() → <进程消失>
+         * 那一版同时还把"查缓存"挪到了"删节点"之前（删节点的四处都会让缓存悬空），
+         * 两处都改了仍然闪退，而现场没有调试器、日志也只能到那一行 —— 所以**先回退**，
+         * 不拿"猜"去换稳定性：
+         *   * 回到"没新帧就 clone 一份当前帧"（下面这版），渲染路径与 09-29 那版逐字一致；
+         *   * 缓存所有权那条修复（节点解析排在查缓存之前、删节点同步作废缓存、
+         *     提前 return 用 resolvedNode）**保留** —— 那是独立成立的正确性修复。
+         *
+         * 【要再做这个优化，前提是把 QSGTexture 的复用语义验证清楚】不能再靠"指针没变"
+         * 推"纹理还能用"：D3D11 这条路每次重绘都会新建 QSGTexture（Qt 6.8 的
+         * QNativeInterface::QSGD3D11Texture::fromNative），而复用它跨帧是否安全、以及
+         * 输出纹理被重建（分辨率变了）时旧包装的失效时机，都必须先用小例子证实。
+         */
         if (m_pendingFrame != nullptr) {
             return std::move(m_pendingFrame);
         }
 
         /* 没有新帧（窗口刚改变尺寸、暂停中）：沿用当前帧重画一遍。 */
         return m_currentFrame != nullptr ? m_currentFrame->clone() : nullptr;
+    }
+
+    void CicadaPlayerItem::invalidateFrameTextureCache()
+    {
+        /*
+         * 只放"缓存引用"，**不 delete**：那张 QSGTexture 归场景图节点/后端管
+         * （节点是 setOwnsTexture(true) 的那个；后端 reset/release 时会自己处理自己的资源）。
+         * 见头文件里 m_cachedTexture 那段说明。
+         */
+        m_cachedTextureFrame = nullptr;
+        m_cachedTexture = nullptr;
+        m_cachedTextureWidth = 0;
+        m_cachedTextureHeight = 0;
     }
 
     QRectF CicadaPlayerItem::fittedRect(bool swapped) const
@@ -3553,6 +4188,28 @@ namespace cicadaqt {
          */
 
         /*
+         * ============ 【纹理缓存的生命周期：**它归节点所有**，节点一没它就得作废】============
+         *
+         * m_cachedTexture 交给的场景图节点是 `setOwnsTexture(true)` 的 —— 也就是说
+         * **节点析构、或者被换成另一张纹理时，Qt 会把那张 QSGTexture 删掉**。
+         * 而本函数有四处会把节点扔掉（见下面每一处的 invalidateFrameTextureCache()）：
+         *   * 进来时 node == nullptr：Qt 自己丢掉了整棵树（关窗/场景图重建/上下文丢失）；
+         *   * 还没有任何一帧 / 拿不到 window()：`delete node`；
+         *   * 旋转方式变了（普通节点 ↔ 变换节点）、节点类型对不上：`delete node; new ...`。
+         *
+         * 这四处之后缓存里那个指针就是**野的**，再拿它去 setTexture() 就是 use-after-free
+         * （Qt 会去采样/析构一块已经释放的纹理）。原来这条路径打不到是因为
+         * `takeFrameForRendering()` 每次重绘都 clone 一份当前帧、帧指针一变缓存必然落空；
+         * 改成"没有新帧就不 clone"之后缓存开始**真的命中**，这个潜在的悬空引用就暴露出来了
+         * （表现：打开播放窗口直接闪退，日志在 `AFActiveDecoder thread started` 之后断掉）。
+         *
+         * 规则写死在这里，以后改这个函数请守住：**缓存只在"拥有它的那个节点还活着"期间有效**。
+         */
+        if (node == nullptr) {
+            invalidateFrameTextureCache();
+        }
+
+        /*
          * 硬解开关刚被改过（GUI 线程只在这里挂了个原子量）：趁本帧还没处理，先把
          * "零拷贝还是 CPU 路径"重新算一遍。
          *
@@ -3569,6 +4226,13 @@ namespace cicadaqt {
 
             if (probeWindow != nullptr) {
                 m_textureBackend->reset(probeWindow, reprobe != 0);
+                /*
+                 * 后端刚被重建：上一次 wrap 出来的 QSGTexture 属于旧的处理/设备状态，
+                 * 缓存必须放掉，否则会把一张旧纹理当成"这一帧的纹理"交给节点。
+                 * （与 onSceneGraphInitialized 里那处同一个理由，见
+                 *   invalidateFrameTextureCache() 的说明。）
+                 */
+                invalidateFrameTextureCache();
 
                 /* 诊断文字绑在 backendChanged 上，切了路径要让界面跟着更新（回 GUI 线程发）。 */
                 QMetaObject::invokeMethod(this, [this]() {
@@ -3584,6 +4248,37 @@ namespace cicadaqt {
                         reloadCurrentSource();
                     }, Qt::QueuedConnection);
                 }
+            }
+        }
+
+        /*
+         * ============ 【解码代际结束：在渲染线程上放掉 D3D11 那一侧并 Flush】============
+         *
+         * 触发链：框架关/重建视频解码器 → SuperMediaPlayer::FlushVideoPath() /
+         * rebuildVideoDecoder() / CreateVideoDecoder() 先调
+         * IVideoRender::releaseFrames()（同步放掉渲染器与播放器侧的帧引用）
+         * → CicadaVideoRender::releaseFrames() 回调这里（播放器线程）→ 置本标志 + 请求重绘
+         * → 我们在渲染线程上做剩下两件事。
+         *
+         * 为什么剩下这两件只能在这里做：
+         *   * releaseInputState()：输入视图（ID3D11VideoProcessorInputView）对解码纹理
+         *     持有 D3D11 引用，而那张解码纹理是解码器整池 surface 所在的数组纹理
+         *     （1080p 20 片约 62MB、4K 约 249MB）—— 一个视图就够把整池钉住；
+         *   * flushDeferredDestruction()：**官方文档点名的最后一环** ——
+         *     "Direct3D 11 defers the destruction of objects... By calling Flush, you
+         *      destroy any objects whose destruction was deferred."
+         *     引用计数归零只代表"可以销毁"，D3D11 默认还会拖；Flush 才让它当场回收。
+         *     这就是"切档/关窗后那几十 MB 不降"最直接的一个成因。
+         *
+         * 刻意**不**放 m_currentFrame：放了之后下面 m_currentFrame == nullptr 那条分支
+         * 会把节点删掉，切档瞬间画面空一下。画面继续由**上一张已经转换好的 RGBA 输出
+         * 纹理**显示（那是我们自己的纹理，不钉解码池），下一帧到达时再重建输入视图。
+         * 这也正是当年"切档那次 flush 的 flushRender 改成 0"要保住的东西。
+         */
+        if (m_decoderGenerationEnded.exchange(false)) {
+            if (m_textureBackend != nullptr) {
+                m_textureBackend->releaseInputState();
+                m_textureBackend->flushDeferredDestruction();
             }
         }
 
@@ -3609,55 +4304,85 @@ namespace cicadaqt {
          */
         if (m_releaseRenderState.exchange(false)) {
             m_currentFrame.reset();
+            /* 帧已经放掉，那张"同一帧复用"的缓存自然作废（放掉引用，见该函数的说明）。 */
+            invalidateFrameTextureCache();
 
             if (m_textureBackend != nullptr) {
                 m_textureBackend->releaseInputState();
             }
+
+            /*
+             * 【释放探针】渲染线程这一条：上一帧（m_currentFrame）与 D3D11 的输入视图
+             * 都在这里放掉 —— 这两个引用就是"钉住整个 D3D11VA 表面池（1080p 约 62MB、
+             * 4K 约 249MB）"的那两个，放掉之后解码器的整池纹理才能真正回收。
+             *
+             * 与关窗的关系：destroyPlayer() 置标志 + update()，所以这一行是
+             * "渲染线程来得及再画一帧"时的释放点；窗口已经不可见、渲染线程不再跑时，
+             * 由 ~CicadaPlayerItem 兜底（那里也有一行 [mem] 日志）。关窗后两条里
+             * **至少有一条必须打印**，否则说明有帧还活着。
+             */
+            AF_LOGI("[mem] render thread released the previous frame and the D3D11 input view "
+                    "(this is what unpins the decoder surface pool)\n");
         }
 
         std::unique_ptr<IAFFrame> frame = takeFrameForRendering();
 
         if (frame != nullptr) {
             m_currentFrame = std::move(frame);
+
+            /*
+             * 【新帧到 = 缓存作废】缓存里那张纹理是**上一帧**过视频处理器烤出来的
+             * （CicadaTextureD3D11 的输出纹理）。这里必须显式作废，不能指望下面那条
+             * "帧指针没变"的判据：上一帧对象已经被 m_currentFrame 的赋值析构掉了，
+             * 而 m_cachedTextureFrame 是个**裸指针** —— 新 clone 分到同一个地址时
+             * 判据会**假命中**，把上一帧的纹理当成这一帧的交出去（画面错帧/更糟）。
+             * 正常流程里这一句让缓存必然落空（每次重绘都 clone 一份新帧），
+             * 这正是 09-29 那版的行为，也是这一轮回退后要保持的行为。
+             */
+            invalidateFrameTextureCache();
         }
 
         if (m_currentFrame == nullptr) {
             /* 还没有任何一帧：什么都不画（保持透明，QML 侧可以放背景图/loading）。 */
+            /* 节点连它拥有的纹理一起没了 —— 缓存必须同时作废（见函数开头那段所有权说明）。 */
+            invalidateFrameTextureCache();
+
+            if (m_textureBackend != nullptr) {
+                m_textureBackend->forgetOutputTextureWrapper();
+            }
+
             delete node;
             return nullptr;
         }
 
-        const int width = m_currentFrame->getInfo().video.width;
-        const int height = m_currentFrame->getInfo().video.height;
+        /* 这一帧自己声明的显示尺寸（尺寸变化判定用它）。 */
+        const int frameWidth = m_currentFrame->getInfo().video.width;
+        const int frameHeight = m_currentFrame->getInfo().video.height;
 
         QQuickWindow *w = window();
 
         if (w == nullptr) {
+            /* 同上：节点连同它的纹理一起被扔掉。 */
+            invalidateFrameTextureCache();
+
+            if (m_textureBackend != nullptr) {
+                m_textureBackend->forgetOutputTextureWrapper();
+            }
+
             delete node;
             return nullptr;
         }
 
-        bool flip = false;
-        QSGTexture *texture = m_textureBackend->textureForFrame(w, m_currentFrame.get(), &flip);
-
-        if (texture == nullptr) {
-            /* 这一帧没能变成纹理（格式不认识之类）：保留上一帧，别把节点删了闪一下。 */
-            return node;
-        }
-
-        /* 只有新尺寸的纹理已经成功创建并交给场景图节点后，才更新尺寸属性。
-         * 这样低清→高清和高清→低清都不会先收到错误的宽高回调。 */
-        if (width > 0 && height > 0 && (width != m_videoWidth || height != m_videoHeight)) {
-            m_videoWidth = width;
-            m_videoHeight = height;
-            QMetaObject::invokeMethod(this, [this]() {
-                emit videoSizeChanged();
-            }, Qt::QueuedConnection);
-        }
-
         /*
-         * 旋转：视频自带旋转元数据（手机竖屏视频）+ QML 的 extraRotation 属性。
+         * ============ 【先把节点定下来，再决定纹理 —— 顺序不能反】============
          *
+         * 节点是 `setOwnsTexture(true)` 的，**缓存里那张 QSGTexture 的生命归它管**。
+         * 所以只要这里把旧节点删掉（旋转方式变了 / 节点类型对不上），缓存里那个指针
+         * 当场就成野的 —— 下面要是还拿它去 setTexture()，就是 use-after-free。
+         * 把节点解析排在"查缓存"之前，下面查缓存时看到的一定是"这个节点真正拥有的
+         * 那张纹理"。这条顺序就是 2026-09-30"打开播放窗口直接闪退"的直接修法。
+         *
+         * 旋转：视频自带旋转元数据（手机竖屏视频）+ QML 的 extraRotation 属性。
          * 90/270 度没法只靠纹理坐标变换实现（Qt 的
          * QSGSimpleTextureNode::TextureCoordinatesTransform 只支持镜像），所以用
          * QSGTransformNode 包一层 —— 这是 Qt 场景图自带的节点类型，旋转矩阵由场景图
@@ -3673,13 +4398,26 @@ namespace cicadaqt {
 
         QSGTransformNode *transformNode = nullptr;
         QSGSimpleTextureNode *textureNode = nullptr;
+        /*
+         * 这一帧真正要返回给场景图的根节点：可能刚刚被重建过（旧的那棵已经 delete）。
+         * 下面所有提前 return 都必须返回它 —— 再 return 原来那个 `node` 就是返回野指针。
+         */
+        QSGNode *resolvedNode = node;
 
         if (rotation != 0) {
             transformNode = dynamic_cast<QSGTransformNode *>(node);
 
             if (transformNode == nullptr) {
+                /* 节点结构要换（删掉旧的 = 连同它拥有的那张纹理一起没）：缓存同时作废。 */
+                invalidateFrameTextureCache();
+
+                if (m_textureBackend != nullptr) {
+                    m_textureBackend->forgetOutputTextureWrapper();
+                }
+
                 delete node;
                 transformNode = new QSGTransformNode();
+                resolvedNode = transformNode;
             }
 
             if (transformNode->childCount() == 0) {
@@ -3694,14 +4432,82 @@ namespace cicadaqt {
             textureNode = dynamic_cast<QSGSimpleTextureNode *>(node);
 
             if (textureNode == nullptr) {
+                /* 同上：旧节点连同它拥有的纹理一起被删，缓存必须同步作废。 */
+                invalidateFrameTextureCache();
+
+                if (m_textureBackend != nullptr) {
+                    m_textureBackend->forgetOutputTextureWrapper();
+                }
+
                 delete node;
                 textureNode = new QSGSimpleTextureNode();
                 textureNode->setOwnsTexture(true);
+                resolvedNode = textureNode;
             }
         }
 
         if (textureNode == nullptr) {
-            return node;
+            return resolvedNode;
+        }
+
+        bool flip = false;
+        QSGTexture *texture = nullptr;
+        /*
+         * 交给场景图节点的那张纹理对应的显示尺寸：新建时 = 当前帧的尺寸，
+         * 命中缓存时 = 缓存里那一份（与那张纹理同源）。见头文件 m_cachedTextureWidth。
+         */
+        int textureWidth = 0;
+        int textureHeight = 0;
+
+        /*
+         * ============ 【同一帧只过一次视频处理器】============
+         *
+         * 场景图每次重绘都会走到这里（弹幕层每帧标脏、暂停时窗口被拖动都会触发），
+         * 而"当前这一帧"在那期间是不变的（takeFrameForRendering() 现在只在真有新帧时
+         * 才交出东西）。帧指针没变就直接复用上一张纹理：只提交一次 quad，
+         * 不再重跑 D3D11 视频处理器的 NV12/P010 → RGBA 转换
+         * （CicadaTextureD3D11.cpp 的 VideoProcessorBlt）、也不再新建 QSGTexture。
+         * 有弹幕时场景图按 60Hz 重绘，这一条把每帧几倍的无效工作直接砍掉。
+         *
+         * 缓存失效点见 invalidateFrameTextureCache()（外加本函数里那几处删节点的地方：
+         * 纹理归节点所有，节点一没缓存就得作废）；帧一变（指针必然变）自然重新取一遍。
+         */
+        if (m_cachedTexture != nullptr && m_cachedTextureFrame == m_currentFrame.get()) {
+            texture = m_cachedTexture;
+            flip = m_flipVertically;
+            /* 尺寸也用缓存里那一份（与这张纹理同源），理由见头文件 m_cachedTextureWidth。 */
+            textureWidth = m_cachedTextureWidth;
+            textureHeight = m_cachedTextureHeight;
+        } else {
+            texture = m_textureBackend->textureForFrame(w, m_currentFrame.get(), &flip);
+
+            if (texture != nullptr) {
+                textureWidth = frameWidth;
+                textureHeight = frameHeight;
+                m_cachedTextureFrame = m_currentFrame.get();
+                m_cachedTexture = texture;
+                m_cachedTextureWidth = textureWidth;
+                m_cachedTextureHeight = textureHeight;
+            } else {
+                /* 这一帧没能变成纹理：别把上一次的缓存留在那里冒充成功。 */
+                invalidateFrameTextureCache();
+            }
+        }
+
+        if (texture == nullptr) {
+            /* 这一帧没能变成纹理（格式不认识之类）：保留上一帧，别把节点删了闪一下。 */
+            return resolvedNode;
+        }
+
+        /* 只有新尺寸的纹理已经成功创建并交给场景图节点后，才更新尺寸属性。
+         * 这样低清→高清和高清→低清都不会先收到错误的宽高回调。 */
+        if (textureWidth > 0 && textureHeight > 0 &&
+            (textureWidth != m_videoWidth || textureHeight != m_videoHeight)) {
+            m_videoWidth = textureWidth;
+            m_videoHeight = textureHeight;
+            QMetaObject::invokeMethod(this, [this]() {
+                emit videoSizeChanged();
+            }, Qt::QueuedConnection);
         }
 
         textureNode->setTexture(texture);
@@ -3763,8 +4569,12 @@ namespace cicadaqt {
         }
 
         m_flipVertically = flip;
-        m_texturePixelWidth = width;
-        m_texturePixelHeight = height;
+        /*
+         * 这两个是"纹理的像素尺寸"（诊断/直通决策读它们），所以取**纹理那一份**，
+         * 不能取当前帧声明的尺寸 —— 命中缓存时两者可能不同（见 m_cachedTextureWidth）。
+         */
+        m_texturePixelWidth = textureWidth;
+        m_texturePixelHeight = textureHeight;
 
         if (!m_firstFrameEmitted.exchange(true)) {
             QMetaObject::invokeMethod(this, [this]() {
@@ -3773,8 +4583,11 @@ namespace cicadaqt {
             }, Qt::QueuedConnection);
         }
 
-        return transformNode != nullptr ? static_cast<QSGNode *>(transformNode)
-               : static_cast<QSGNode *>(textureNode);
+        /*
+         * 返回这一帧真正的根节点。用 resolvedNode 而不是"再判一次 transformNode"：
+         * 上面重建节点时已经把它记好了，两个写法等价但少一处出错的机会。
+         */
+        return resolvedNode;
     }
 
     /* ------------------------------------------------------------------ */
@@ -3897,8 +4710,19 @@ namespace cicadaqt {
         }
 
         /*
-         * m_lastSnapshot 留**整幅**（视频原始分辨率）：它才是"这次截到的那张图"
-         * （以后要做"保存截图"直接用），也让版本号只反映真实收到的结果。
+         * ============ 【整幅快照：按需生成、用完即还】============
+         *
+         * 截屏是**按需触发**的：进度条悬停/拖动 → requestSnapshot() → 框架 CaptureScreen()
+         * → onCaptureScreenCb 每次现做一张整幅 RGBA（1080p = 1920*1080*4 = 8.29MB，
+         * 4K = 3840*2160*4 = 33.18MB，见那个回调）。
+         *
+         * 而这张整幅**唯一的消费者是下面那个 provider，它要的是缩小过的那一份**
+         * （320 宽，约 230KB）。整幅本身目前没有第二个消费者 —— "保存截图"功能还没做。
+         *
+         * 所以：整幅只放进 m_lastSnapshot 当**当次交接**用，函数结束前就还掉；
+         * 它不跨调用存活、更不跨越整场播放。将来真要做"保存截图"，正确做法是在用户
+         * 点存的那一刻现调 requestSnapshot() 拿一张（暂停时也能截，见 requestSnapshot
+         * 的说明），而不是让一整幅位图从第一次悬停一直挂到停播。
          */
         m_lastSnapshot = image;
 
@@ -3926,6 +4750,19 @@ namespace cicadaqt {
          */
         ++m_snapshotRevision;
         emit snapshotChanged();
+
+        /*
+         * 【用完即还】provider 已经拿到它要的缩小版，整幅到这里就放掉。
+         *
+         * QImage 是隐式共享 + 引用计数：这一句把最后一个引用还掉，
+         * 像素缓冲**当场**释放（不等 GC、不等分配器还页）。这样"截一次图"的峰值内存
+         * 只在这一个函数里存在，稳态下播放器不持有任何整幅位图。
+         *
+         * 留 m_lastSnapshot 这个成员而不是用局部量：它是"整幅快照"的**唯一交接点**，
+         * 将来加"保存截图"的消费者时，在这里把 image 交出去即可（那时把这一句删掉、
+         * 改成"交给消费者并在消费者用完时释放"）。生命周期约定见头文件里那个成员的注释。
+         */
+        m_lastSnapshot = QImage();
     }
 
     void CicadaPlayerItem::notifyBufferedPosition(qint64 positionMs)

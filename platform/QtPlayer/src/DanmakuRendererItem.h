@@ -171,6 +171,12 @@ namespace cicadaqt {
         /* 定时器回调：只做一件事 —— 把 item 标记为脏，让下一帧重新走 updatePaintNode */
         void onTick();
 
+        /*
+         * 按"时钟在不在走 / 屏上有没有弹幕"重算定时器间隔（见 .cpp 里 onTick 的说明）。
+         * 只在 GUI 线程调用（属性 setter、onTick、setDrawnCount）。
+         */
+        void refreshTickInterval();
+
         /* 窗口（场景图）变了：接上/断开"每帧标脏"（见 .cpp 里那段说明） */
         void onWindowChanged(QQuickWindow *window);
 
@@ -370,6 +376,50 @@ namespace cicadaqt {
          * 光比条数不够：同一格里换了一条弹幕、或者改了字号，条数不变但 UV 必须重问。
          */
         quint64 m_builtSignature = 0;
+
+        /*
+         * ============ 【暂停后不再每帧标脏：省掉"白烧 GPU"的那条自维持链】============
+         *
+         * 【要修的现象】点暂停之后画面明明不动了，GPU 占用却一直下不来。
+         *
+         * 【根因（两条，缺一条都修不掉）】
+         *   1. m_timer 一直开着，而 onTick() 只看 m_quadCount 决定 60Hz/10Hz ——
+         *      暂停时弹幕冻结在屏上，m_quadCount 仍然是 >0 ⇒ **暂停后照样以 60Hz 标脏**；
+         *   2. onWindowChanged() 里那条 `frameSwapped → update()` 连接是**自维持**的：
+         *      标脏 → 场景图出一帧 → frameSwapped → 再标脏。哪怕把定时器停了，这一条也
+         *      能靠"已经有一帧在画"自己转下去。
+         *   于是场景图**每帧重绘**，连带 CicadaPlayerItem::updatePaintNode() 每帧都要提交
+         *   同一帧（同一帧重跑视频处理器那半由 CicadaPlayerItem 的纹理缓存堵掉了）。
+         *
+         * 【修法】两条链都加同一个闸门：**只有"弹幕时钟在走"时才需要连续标脏**。
+         *   暂停 / 停播时（m_clockRunning == false）位置只在引擎推来新弹幕时变，而那一刻
+         *   QML 会写 timeMs / controller 属性 → 那两个 setter 会 update() 一帧（见 .cpp），
+         *   不需要按帧轮询。暂停那一刻的"最后一帧"由 setClockRunning(false) 自己补。
+         *
+         * 【为什么是节流而不是彻底不标】暂停时留一个**慢心跳**（kPausedTickIntervalMs =
+         *   500ms，frameSwapped 那条 1500ms）只是兜底：万一有哪条状态变化没走到那两个 setter
+         *   （历史上有过"弹幕加载完却不显示"的坑），最多晚 500ms 补上。相比原来的 60Hz，
+         *   无效帧压到 1/30，可以忽略。
+         */
+        qint64 m_frameSwappedTickMonoMs = -1;
+        qint64 m_lastRepaintMonoMs = -1;
+
+        /*
+         * ============ 【"停 → 走"边沿检测：恢复播放的首帧不许外推】============
+         *
+         * 取值：-1 = 还没画过第一帧（状态未知）；0 = 上一帧时钟是停的；1 = 上一帧在走。
+         *
+         * 【为什么需要它】恢复播放时 `clockRunning` 绑定先变真，而引擎恢复后的第一帧
+         * （DanmakuController::update → engine.update）**还没到**。那一帧里引擎时间戳没变，
+         * 于是外推会落到"增量累加"分支，把 `monoNow − m_lastFrameMonoMs` —— 也就是
+         * **整段暂停时长**（被 qBound 钳到 250ms 上限）—— 当成流逝时间加上去：
+         * 屏幕上就是"往前弹一下"，下一帧引擎时间戳一变又缩回去
+         * （用户实测："暂停后再继续会往前弹一下再往后缩最后再滚动"）。
+         * 详见 .cpp 里 updatePaintNode 的 `resumed` 那段。
+         *
+         * 只在渲染线程读写（updatePaintNode 一帧一次），不需要同步。
+         */
+        int m_clockWasRunning = -1;
     };
 
 }// namespace cicadaqt

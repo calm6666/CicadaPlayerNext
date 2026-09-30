@@ -73,6 +73,56 @@ namespace cicadaqt {
         constexpr int kFreshBulkCount = 8;
 
         /*
+         * 弹幕时钟停住（暂停 / 停播）时，定时器退回的间隔（毫秒）。
+         *
+         * 【为什么不是"彻底不标脏"】那是兜底：万一有哪条状态变化没有走到 timeMs /
+         * controller 这两个 setter 上（历史上就有过"弹幕加载完却一条都不显示"的坑），
+         * 暂停时也能在 500ms 内补上一帧。
+         *
+         * 【为什么取 500 而不是沿用空屏那档 100】
+         * 暂停时画面本来就完全静止，这个节拍唯一的作用是"兜住漏掉的状态变化"，
+         * 而 500ms 的补帧在人眼里和立刻补上没有区别（暂停后本来就不期待内容变化）。
+         * 反过来，取 100 就等于暂停期间**恒定 10Hz 重绘整个弹幕层**——虽然比原来的
+         * 60Hz 好，但离"暂停后 GPU 归 0"还差一个数量级。取 500 ⇒ 2Hz，可以忽略。
+         */
+        constexpr int kPausedTickIntervalMs = 500;
+
+        /*
+         * 弹幕时钟在走、但屏上一条弹幕都没有时，定时器退回的间隔（毫秒）。
+         *
+         * 与暂停那档分开：这个 100ms 是"空屏快查"，要保证新弹幕一进屏马上能画出来；
+         * 暂停那档是"兜底心跳"，越慢越好。语义不同，不要合并成一个常量。
+         */
+        constexpr int kIdleTickIntervalMs = 100;
+
+        /*
+         * 暂停时"帧驱动标脏"（onWindowChanged 里那条 frameSwapped → update()）的节流间隔。
+         * 见头文件里 m_frameSwappedTickMonoMs 那段说明：它防的是那条**自维持**重绘链。
+         *
+         * 取的比 kPausedTickIntervalMs（500，定时器那档兜底）**更慢**：两条腿都只是防呆，
+         * 没必要叠成同一节拍；慢的那条被快的那条兜住，同时把"暂停期间的无效帧"压到最低。
+         */
+        constexpr qint64 kPausedFrameSwappedTickMs = 1500;
+
+        /*
+         * 【GUI 线程的一条单调时钟】只用来做上面那两个节流判断（毫秒）。
+         *
+         * 为什么用 QElapsedTimer 而不是 QDateTime/QTime：本文件里的时间比较一律走单调时钟
+         * （见 monotonicMs() 那段），墙上时钟被调整时会让节流窗口莫名其妙地变长/变短。
+         * 这个局部静态量的初始化本身是线程安全的，elapsed() 是 const 纯计算。
+         */
+        qint64 guiMonoMs()
+        {
+            static QElapsedTimer timer = []() {
+                QElapsedTimer t;
+                t.start();
+                return t;
+            }();
+
+            return timer.elapsed();
+        }
+
+        /*
          * 进程内共用的一条**单调**时钟（毫秒）。
          *
          * 【为什么要共用一条】弹幕位置是每帧现算的：now = 锚点 + (现在 − 锚点时间戳) × 倍速。
@@ -108,10 +158,13 @@ namespace cicadaqt {
         m_timer.setInterval(qMax(8, 1000 / qMax(1, m_updateFps)));
         connect(&m_timer, &QTimer::timeout, this, &DanmakuRendererItem::onTick);
         /*
-         * 定时器一直开着，但间隔是自适应的（见 onTick）：屏上有弹幕时按 updateFps
-         * （默认 60Hz），一条都没有时降到 100ms 慢查。
-         * 这一次 tick 做的事情只有一件 —— `update()`，把 item 标记为脏。
+         * 定时器一直开着，但间隔是自适应的（见 refreshTickInterval / onTick）：
+         * 时钟在走时按 updateFps（默认 60Hz）、屏上一条都没有时降到 100ms 慢查、
+         * **时钟停住（暂停/停播）时退到 kPausedTickIntervalMs 兜底** —— 最后这一档是
+         * "暂停后 GPU 还高"那个问题的第一半修法，理由见 onTick 与头文件里
+         * m_frameSwappedTickMonoMs 那段说明。
          */
+        refreshTickInterval();
         m_timer.start();
 
         /* 窗口（场景图）一挂上就接"每帧标脏"，见 onWindowChanged */
@@ -154,7 +207,38 @@ namespace cicadaqt {
          * 定时器保留着当兜底（窗口被遮挡/最小化时不一定有帧）。
          */
         m_frameSwapped = connect(window, &QQuickWindow::frameSwapped, this,
-                                 [this]() { update(); }, Qt::QueuedConnection);
+                                 [this]() {
+                                     /*
+                                      * ====== 【★ 这条连接必须和定时器一样有闸门 ★】======
+                                      *
+                                      * 原来这里是无条件 `update()`，于是它**自维持**：
+                                      * 标脏 → 场景图出一帧 → frameSwapped → 再标脏 …
+                                      * 只要曾经有过一帧在画，它就能自己转下去，和"有没有新内容"
+                                      * 完全无关 —— 这是暂停后 GPU 下不来的第二半（也是更根本的一半，
+                                      * 因为把定时器停掉也拦不住它）。
+                                      *
+                                      * 闸门与 onTick 完全同源：**只有弹幕时钟在走时才需要连续标脏**。
+                                      * 暂停/停播时位置只在引擎推来新弹幕时变，那一刻 QML 会写
+                                      * timeMs / controller 属性 → 那两个 setter 各自 update() 一帧
+                                      * （见 setTimeMs / setController），不需要按帧轮询。
+                                      *
+                                      * 暂停侧留一个慢心跳（kPausedFrameSwappedTickMs，1.5s）：纯粹防
+                                      * "某条状态变化没走到那两个 setter"的历史坑；且只在**真的还有帧
+                                      * 在换**时才触发，窗口被遮挡/最小化时这条连接本来就不来。
+                                      */
+                                     if (!m_clockRunning) {
+                                         const qint64 now = guiMonoMs();
+
+                                         if (m_frameSwappedTickMonoMs >= 0 &&
+                                             now - m_frameSwappedTickMonoMs < kPausedFrameSwappedTickMs) {
+                                             return;
+                                         }
+
+                                         m_frameSwappedTickMonoMs = now;
+                                     }
+
+                                     update();
+                                 }, Qt::QueuedConnection);
 
         /*
          * 【抖动根治：在**换帧时刻**采一次时间戳，供 updatePaintNode 当采样点】
@@ -304,6 +388,11 @@ namespace cicadaqt {
             return;
 
         m_clockRunning = value;
+        /*
+         * 间隔跟着"时钟在不在走"走：开始播放 → 回到 60Hz/10Hz 那两档；
+         * 暂停 → 退到 kPausedTickIntervalMs 兜底（见 refreshTickInterval / onTick）。
+         */
+        refreshTickInterval();
         /* 停下来时补一帧：把弹幕定在当前帧的位置上 */
         update();
         /*
@@ -400,13 +489,29 @@ namespace cicadaqt {
     void DanmakuRendererItem::onTick()
     {
         /*
+         * ============ 【★ 暂停后不再每帧标脏 ★】============
+         *
+         * 这里原来无条件 `update()`，间隔只看 m_quadCount。于是**暂停之后**：
+         *   · 弹幕冻结在屏上 ⇒ m_quadCount 仍然 > 0 ⇒ 定时器继续按 60Hz 标脏；
+         *   · 场景图于是每帧重绘，视频层每帧都要重新走一遍同一个节点的 paint
+         *     （同一帧本来还会再重跑一次视频处理器，那半已经由
+         *      CicadaPlayerItem 的纹理缓存堵掉）。
+         * 用户看到的就是"视频明明停住不动了，GPU 占用一直下不来"。
+         *
+         * 现在：**时钟不在走就直接 return，不标脏。** 暂停那一刻的"最后一帧"由
+         * setClockRunning(false) 自己补（见那个 setter），暂停期间的内容变化由
+         * timeMs / controller 两个 setter 的 update() 负责（QML 在 seek、换弹幕源、
+         * 引擎推新弹幕时都会写它们）。纯状态判据，无计时器语义。
+         */
+        if (!m_clockRunning) {
+            return;
+        }
+
+        /*
          * 自适应间隔：屏上有弹幕就按 updateFps 走（默认 60Hz），
          * 一条都没有就降到 100ms 慢查，别空转。
          */
-        const int wanted = (m_quadCount > 0) ? qMax(8, 1000 / qMax(1, m_updateFps)) : 100;
-
-        if (m_timer.interval() != wanted)
-            m_timer.setInterval(wanted);
+        refreshTickInterval();
 
         /*
          * 这一个 tick 只做一件事：把 item 标脏，让下一帧重新走 updatePaintNode
@@ -420,12 +525,31 @@ namespace cicadaqt {
         update();
     }
 
+    void DanmakuRendererItem::refreshTickInterval()
+    {
+        const int wanted = !m_clockRunning
+                           ? kPausedTickIntervalMs
+                           : (m_quadCount > 0 ? qMax(8, 1000 / qMax(1, m_updateFps))
+                                              : kIdleTickIntervalMs);
+
+        if (m_timer.interval() != wanted) {
+            m_timer.setInterval(wanted);
+        }
+    }
+
     void DanmakuRendererItem::setDrawnCount(int count)
     {
         if (m_quadCount == count)
             return;
 
         m_quadCount = count;
+        /*
+         * 屏上条数变了 ⇒ 定时器该在 60Hz / 100ms 之间换挡。**必须排到 GUI 线程**：
+         * 本函数由 updatePaintNode() 调（渲染线程），而 m_timer 属于 GUI 线程，
+         * 对 QTimer 跨线程调 setInterval() 是不允许的（QObject 的线程亲和性）。
+         * 排队执行还有一个好处：这几行只会"合并成一次"，条数在同一帧里反复变也不会反复设。
+         */
+        QMetaObject::invokeMethod(this, [this]() { refreshTickInterval(); }, Qt::QueuedConnection);
         /*
          * 【★ 信号必须排队到 GUI 线程再发 ★】
          *
@@ -707,8 +831,38 @@ namespace cicadaqt {
 
         qreal extraMs = 0.0;
 
+        /*
+         * ============ 【★ 恢复播放的首帧：外推必须清零，不许把暂停时长算成流逝 ★】============
+         *
+         * 这是用户实测"暂停后再继续会**往前弹一下**、然后**再往后缩**、最后才正常滚动"的根因。
+         *
+         * 恢复的顺序是：QML 的 clockRunning 绑定先变真 → 引擎恢复后的第一帧（engine.update）
+         * **还没到**。所以这一帧里 `engineStampMono` 与上一帧相同，会落到下面的**增量**分支：
+         *     extraMs = m_lastExtraMs + clamp(monoNow − m_lastFrameMonoMs) × rate
+         * 而 `m_lastFrameMonoMs` 上一次被刷新是**暂停之前/暂停早期**那一次重绘
+         * （暂停期间场景图几乎不重绘，m_lastFrameMonoMs 就那么停着）⇒ 这个差值 = 整段暂停
+         * 时长 ⇒ 被 qBound 钳到上限 250ms ⇒ extraMs 突然变成 250ms：
+         * 加上 refSec 就是"往前弹 250ms × 速度"（屏幕上几十像素）。
+         * 下一帧引擎时间戳一变、走"引擎刚推了一帧"那条分支 ⇒ extraMs 归零 ⇒ 弹幕再**缩回去**
+         * 到引擎位置，之后才正常滚动 —— 三个动作与用户描述逐字对应。
+         *
+         * 处置：把"停 → 走"这个边沿认出来，在**恢复的首帧**就把外推源清零
+         * （等价于"引擎刚推了一帧"）。正确性依据：暂停时 QML 侧的时钟与锚点已经冻结在同一
+         * 时间点（DanmakuView.qml 的 _mediaStalled 分支），而引擎那一帧马上就到 ——
+         * 所以恢复首帧就该画在引擎时钟上，**一格都不该外推**。
+         * 这里只清外推量，不动 refSec（引擎时钟），也不引入任何计时器/阈值语义。
+         */
+        const bool resumed = (m_clockWasRunning == 0 && m_clockRunning);
+
         if (m_clockRunning && engineStampMono >= 0) {
-            if (engineStampMono != m_lastEngineStampMono) {
+            if (resumed) {
+                /*
+                 * 恢复播放的**首帧**：一格都不外推，直接画在引擎时钟上。
+                 * `m_lastExtraMs` 会在下面被写成 0，等于把累加器清零 —— 累加重新从零起算，
+                 * 不会把暂停那段（或暂停前攒下的那点）算进来。
+                 */
+                extraMs = 0.0;
+            } else if (engineStampMono != m_lastEngineStampMono) {
                 /*
                  * 引擎刚推了一帧（时间戳变了）→ 直接按"引擎那一刻"重算。
                  * 这是**权威值**：顺带把增量累加攒下的那点误差清掉（不累积漂移）。
@@ -722,9 +876,9 @@ namespace cicadaqt {
                  * 【为什么必须增量、不能每次都拿 monoNow − engineStampMono】
                  * 暂停时引擎不再 update，时间戳就停在**暂停那一刻**；恢复的瞬间
                  * `clockRunning` 先变真（QML 绑定），而引擎恢复后的第一帧还没到 ——
-                 * 这时候做减法就把**整段暂停时长**当成了"流逝时间"，弹幕猛地往前飞一段
-                 * （用户实测："暂停继续会往前弹一下再往后继续"）。增量累加永远只加
-                 * "上一帧→这一帧"这一小段，天然不会跨过任何停止段。
+                 * 这时候做减法就把**整段暂停时长**当成了"流逝时间"，弹幕猛地往前飞一段。
+                 * 增量累加永远只加"上一帧→这一帧"这一小段，天然不会跨过任何停止段
+                 * （"停 → 走"那个边沿已经由上面的 resumed 单独兜住）。
                  */
                 extraMs = m_lastExtraMs
                           + qBound<qreal>(0.0, static_cast<qreal>(monoNowRaw - m_lastFrameMonoMs) / 1000.0,
@@ -739,6 +893,8 @@ namespace cicadaqt {
         m_lastExtraMs = extraMs;
         m_lastFrameMonoMs = monoNowRaw;
         m_lastEngineStampMono = engineStampMono;
+        /* 记住这一帧时钟在不在走：下一帧据此识别"停 → 走"的边沿（见上面 resumed）。 */
+        m_clockWasRunning = m_clockRunning ? 1 : 0;
 
         const qreal refSec = static_cast<qreal>(controller->engineClockMs()) / 1000.0;
         const qreal nowSec = refSec + extraMs / 1000.0;

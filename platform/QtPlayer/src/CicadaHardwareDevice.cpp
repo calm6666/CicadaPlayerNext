@@ -75,12 +75,32 @@ namespace cicadaqt {
      */
     static QMutex g_deviceMutex;
 
+    /*
+     * 【释放探针用】captureFromSceneGraph() **借出的** D3D11 设备引用有几份（进程内计数）。
+     *
+     * 只统计 capture 借的那一份（`g_qtDevice` 自己那一份），**不含** `provideHwDevice()`
+     * 交给 FFmpeg 的那一份 —— 后者的生命周期归 FFmpeg 的 hw device 上下文，
+     * 由"hw frames ctx（表面池）"那条探针来判，无法（也不该）在这里记账。
+     *
+     * 判读：
+     *   * 关窗后 `our device refs now held=0` ⇒ 我们这一侧借还配对，设备没死要找别的持有者
+     *     （FFmpeg 的 hw device 上下文 / Qt 自己）；
+     *   * 关窗后 > 0 且逐轮递增 ⇒ **我们少还了一份**（每轮留一个设备不放）。
+     */
+    static int g_heldDeviceRefs = 0;
+
     /* 调用方必须已经持锁。 */
     static void releaseDeviceLocked(const char *why)
     {
+        const bool hadDevice = (g_qtDevice != nullptr);
+
         if (g_qtDevice != nullptr) {
             g_qtDevice->Release();
             g_qtDevice = nullptr;
+
+            if (g_heldDeviceRefs > 0) {
+                --g_heldDeviceRefs;
+            }
         }
 
         if (g_qtContext != nullptr) {
@@ -89,7 +109,26 @@ namespace cicadaqt {
         }
 
         if (!g_capturedWindow.isNull()) {
-            AF_LOGI("released the captured D3D11 device (%s)\n", why);
+            /*
+             * 带上**借设备的那个窗口的指针**：和 captureFromSceneGraph 里那条
+             * `captured Qt's D3D11 device ... (window %p)` 配成对，就能在日志里数
+             * "借了几次 / 还了几次"。每一轮开关都应该是 1 借 1 还；
+             * 借多于还 ⇒ 有一份引用没还回去（设备连同它名下的驱动分配就不会回收）。
+             */
+            AF_LOGI("released the captured D3D11 device (%s) (window %p) "
+                    "(actually released=%d, our device refs now held=%d)\n", why,
+                    static_cast<void *>(g_capturedWindow.data()), hadDevice ? 1 : 0,
+                    g_heldDeviceRefs);
+        } else {
+            /*
+             * 没有登记窗口 —— 这**不等于"借了没还"**：换设备那条路上会先调一次本函数
+             * 把旧设备放掉，而"上一轮已经正常还过"时 g_qtDevice 本来就是空的，
+             * 于是这次是一次**空操作**（actually released=0）。下面把这两个数都打出来，
+             * 免得把空操作误读成配对失败。
+             */
+            AF_LOGI("released the captured D3D11 device (%s) (no window recorded) "
+                    "(actually released=%d, our device refs now held=%d)\n", why,
+                    hadDevice ? 1 : 0, g_heldDeviceRefs);
         }
 
         g_capturedWindow = nullptr;
@@ -322,9 +361,23 @@ namespace cicadaqt {
             if (device == g_qtDevice) {
                 /*
                  * 同一个窗口又初始化了一次场景图（或者 Qt 在多个窗口之间共用同一个设备）：
-                 * 手里这套就是对的，什么都不用动。
+                 * 手里这套就是对的，**什么都不用动**（包括不重新 AddRef）。
+                 *
+                 * 【本轮修：不再把 g_capturedWindow 覆盖成"最后来的那个窗口"】
+                 * 原来这里无条件 `g_capturedWindow = window`。这会把"我们持有这份引用"
+                 * 这件事记在**最后一个**窗口名下，于是：
+                 *   * 真正借到设备的那个窗口（例如首页窗口）场景图回收时，
+                 *     releaseFromSceneGraph 会因为"不是记录里那个窗口"而**跳过释放**
+                 *     ⇒ 我们那份 AddRef 再也没人还 —— 设备（连同它名下的驱动分配、
+                 *     着色器/管线缓存）就一直活着；
+                 *   * 反过来，最后一个窗口的回收又可能把我们**仍需要**的引用放掉。
+                 * 现在只在"当前没有持有者"时才记名 ⇒ 借一次、还一次，与窗口数量无关。
+                 * 持有者还活着时，设备本来就活着（Qt 自己持有一份），所以不会 UAF。
                  */
-                g_capturedWindow = window;
+                if (g_capturedWindow.isNull()) {
+                    g_capturedWindow = window;
+                }
+
                 m_ready = true;
                 return true;
             }
@@ -338,6 +391,17 @@ namespace cicadaqt {
 
             g_qtDevice = device;
             g_qtDevice->AddRef();
+
+            /*
+             * 【释放探针】记上这一份借用，并在日志里打出来。
+             * 注意这里**只统计 capture 借的这一份**：`provideHwDevice()` 交给 FFmpeg 的
+             * 那一份引用由 FFmpeg 的 hw device 上下文销毁时 Release，不经过本文件的记账
+             * （它的生命周期由"表面池/hw frames 上下文"那条探针来判）。
+             * 所以关窗之后 `our device refs now held` 必须回到 0；逐轮递增 = 我们少还了。
+             */
+            ++g_heldDeviceRefs;
+            AF_LOGI("captured Qt's D3D11 device (window %p): our device refs now held=%d\n",
+                    static_cast<void *>(window), g_heldDeviceRefs);
 
             if (context != nullptr) {
                 g_qtContext = context;

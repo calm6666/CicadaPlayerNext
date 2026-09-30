@@ -984,6 +984,16 @@ namespace cicadaqt {
         /* 主线程：把挂起的帧取出来（没有就用上一帧）。 */
         std::unique_ptr<IAFFrame> takeFrameForRendering();
 
+        /*
+         * 放掉"同一帧 → 同一个 QSGTexture"的缓存引用（渲染线程）。
+         *
+         * 【什么时候必须调】纹理后端被 reset()/releaseResources()、或者场景图整个没了的时候：
+         * 那张 QSGTexture 是某个场景图/设备的产物，换了场景图它就是野指针。
+         * 调用点：onSceneGraphInitialized / onSceneGraphInvalidated / updatePaintNode 里
+         * 硬解重算那次 reset()。见 m_cachedTexture 的说明。
+         */
+        void invalidateFrameTextureCache();
+
         QUrl m_source;
         Status m_status = Null;
         qint64 m_position = 0;
@@ -1116,11 +1126,25 @@ namespace cicadaqt {
         bool m_listenerAttached = false;
 
         /*
-         * 最近一张快照（GUI 线程独占：只在 notifySnapshot() 里写）。
+         * 最近一张**整幅**快照（GUI 线程独占：只在 notifySnapshot() 里写）。
          *
-         * 分辨率 = 视频原始画布（快照就是整幅画面，例如 4K 是 3840x2160x4 = 33MB）。
-         * 只有一张、每来一张换一张，所以内存是有界的；留给"以后再做个存截图的功能"直接用。
-         * **给 QML 气泡看的那一份是缩小过的**（见 notifySnapshot() 里的说明）。
+         * ============ 【生命周期：按需生成、用完即还，不常驻】============
+         *
+         * 分辨率 = 视频原始画布（1080p = 1920*1080*4 = 8.29MB，4K = 3840*2160*4 = 33.18MB）。
+         *
+         * 三个时间点，一个都不能含糊：
+         *   * **生成**：按需。进度条悬停/拖动 → requestSnapshot() → 框架 CaptureScreen()
+         *     → onCaptureScreenCb（那里现做一张整幅）；
+         *   * **用完即还**：notifySnapshot() 把**缩小版**（320 宽，约 230KB）交给
+         *     SnapshotImageProvider 之后，整幅当场放掉。所以稳态下（不悬停时）
+         *     本成员是**空的**，播放器不持有任何整幅位图；
+         *   * **停播兜底**：destroyPlayer()（停播 / 换片源 / 关窗 / 析构）里再放一次，
+         *     并为"以后加了保存截图消费者"那种改法留好退路。
+         *
+         * 【本成员是"整幅快照"的唯一交接点，不是缓存】将来做"保存截图"时，正确做法是
+         * 在用户点存的那一刻现调 requestSnapshot() 取一张（暂停时也能截），并在这里
+         * 把 image 交给消费者、由消费者用完释放 —— 不要让它跨越整场播放常驻。
+         * **给 QML 气泡看的那一份是缩小过的、存在 provider 里**，不是这一份。
          */
         QImage m_lastSnapshot;
         /*
@@ -1225,6 +1249,78 @@ namespace cicadaqt {
          * 中间插成员会和已有偏移量对不上。
          */
         int m_qualitySwitchingStreamIndex = -1;
+
+        /*
+         * ============ 【同一帧 → 同一个 QSGTexture 的缓存】============
+         *
+         * 【为什么需要】场景图**每次**重绘都会调 updatePaintNode()，而它无条件地把
+         * "当前这一帧"交给纹理后端（takeFrameForRendering() 在没有新帧时会 clone
+         * 当前帧再交一次，见 .cpp 里那句注释）。于是同一张帧被反复送进
+         * CicadaTextureD3D11::textureForFrame()：那里每次都要
+         * ensureInputView + CreateVideoProcessorOutputView + **VideoProcessorBlt**
+         * （NV12/P010 → RGBA 的一次完整视频处理器转换），再 wrap 一个 QSGTexture。
+         * 4K 上这一趟就是实打实的 GPU 负载。
+         *
+         * 【为什么以前看不出来】因为以前"没有新帧就不会重绘"；现在弹幕层在暂停时
+         * 仍按帧率要求重绘（那是它自己的需求），视频层不该跟着把同一张帧重新过一遍
+         * 视频处理器。缓存之后：帧指针没变 ⇒ 直接复用上一张纹理，只提交 quad。
+         *
+         * 【为什么缓存是安全的】缓存持有的那个 QSGTexture 由场景图节点接管着
+         * （updatePaintNode 里 setOwnsTexture(true)），只要这个 item 还在场景图里、
+         * 缓存没被 invalidate，它就有效 —— 复用同一个指针交给同一个节点是允许的
+         * （与 node->setTexture() 文档一致）。三条失效点见 invalidateFrameTextureCache()。
+         *
+         * 【只在渲染线程读写】updatePaintNode 与那两个场景图回调都是渲染线程，
+         * 所以不需要同步。
+         *
+         * 【成员一律加在最后】理由同上面几条：QML 引擎按 sizeof 分配本对象。
+         */
+        IAFFrame *m_cachedTextureFrame = nullptr;
+        QSGTexture *m_cachedTexture = nullptr;
+        /*
+         * 那张缓存纹理对应的**显示尺寸**（= 建它时那一帧的宽高）。
+         *
+         * 【为什么要连尺寸一起缓存】不能"命中缓存就沿用当前帧的 width/height"：
+         * 那两个数取自 m_currentFrame->getInfo()，而同一帧对象被改写、或
+         * takeFrameForRendering() 交出来的 clone 尺寸不同时，**指针可以相同而尺寸已经变了**。
+         * 那时拿新尺寸去配旧纹理，等比适配（fittedRect）会按错的宽高比排版，
+         * 还会白上报一次 videoSizeChanged（QML 那边跟着重排）。
+         * 缓存里存着"这张纹理是多少像素"，命中时两个数就一定同源。
+         */
+        int m_cachedTextureWidth = 0;
+        int m_cachedTextureHeight = 0;
+
+        /*
+         * 【释放探针用】"已经给这个 item 接上 QQuickWindow::destroyed 探针"的一次性标志。
+         *
+         * 背景：判断"播放器窗口对象到底有没有被销毁"必须走 C++ 侧日志 —— QML 的
+         * console.log 在 Release 构建里是看不到的（见 .cpp 里那段的完整推导）。
+         * 连接在 onSceneGraphInitialized() 里建立，而场景图可能重建多次，
+         * 所以用这个标志保证只接一次。
+         *
+         * **追加在成员表末尾**：本类是 QML_ELEMENT，Qt 按 sizeof 分配对象内存，
+         * 中间插入会移动偏移、破坏增量构建。
+         */
+        bool m_windowDestroyedProbeAttached = false;
+
+        /*
+         * 【新增·追加在成员表末尾】"解码代际结束"的标志：框架关闭/重建视频解码器之前
+         * 会同步放掉渲染器那一侧的帧（IVideoRender::releaseFrames()），我们收到通知后
+         * 只置这个原子量 + 请求一次重绘；真正要做的两件事在渲染线程的 updatePaintNode()
+         * 里完成：
+         *   * m_textureBackend->releaseInputState()：放掉 D3D11 输入视图（它对解码纹理
+         *     持有 D3D11 引用，而那是解码器整池 surface 所在的数组纹理）；
+         *   * m_textureBackend->flushDeferredDestruction()：Flush 一次立即上下文 ——
+         *     官方文档写明 D3D11 **默认延迟销毁**对象，"引用计数归零"不等于"已经回收"，
+         *     必须 Flush 才当场销毁（1080p 一池约 62MB、4K 约 249MB）。
+         *
+         * 【为什么不能在这里（播放器线程）顺手做】那两个动作要碰 Qt 场景图的 RHI
+         * 设备与立即上下文，只能在渲染线程做；而且**不能**顺手把 m_currentFrame 也放掉 ——
+         * 放了之后 updatePaintNode 会删掉节点，切档瞬间画面会空一下（这正是当年把切档
+         * 那次 flush 的 flushRender 改成 0 要避免的事）。画面由"上一张已转换好的 RGBA
+         * 输出纹理"继续显示，与解码池无关。
+         */
+        std::atomic<bool> m_decoderGenerationEnded{false};
     };
 
 }// namespace cicadaqt

@@ -82,6 +82,24 @@ int GLRender::clearScreen()
     return 0;
 }
 
+void GLRender::releaseFrames()
+{
+    std::unique_lock<std::mutex> locker(mFrameMutex);
+
+    unsigned long long dropped = 0;
+
+    while (!mInputQueue.empty()) {
+        if (mInputQueue.front() != nullptr) {
+            mInputQueue.front()->setDiscard(true);
+        }
+        mInputQueue.pop();
+        dropped++;
+    }
+
+    AF_LOGI("[mem] releaseFrames: dropped %llu decoded frame(s) held by the renderer queue\n",
+            dropped);
+}
+
 int GLRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
 {
 //    AF_LOGD("-----> renderFrame");

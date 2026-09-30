@@ -957,6 +957,16 @@ void SMPMessageControllerListener::ProcessSeekToMsg(int64_t seekPos, bool bAccur
      * 值完全一致；代际多推一格没有副作用（它只是归属判据）。
      * 目标为 0（循环重开）时 filterActive 同样为真，行为与旧地板对 0 的语义一致。
      */
+    /*
+     * 【音频落点地板】这是"seek 真正开始"的收口处，所以在这里再声明一次：
+     * 本次 seek 会（在下面的 FlushAudioPath 里）把音频时间轴重新锚到 seekPos，
+     * 于是 beginDiscontinuity() 会臂上音频自己的落点地板 —— 落在目标点之前的音频帧
+     * 一律不上设备（理由见 Discontinuity::audioLandingPending 的说明）。
+     * SeekTo() 那次 beginDiscontinuity() 已经臂过一次，这里用同一个 seekPos 重算，
+     * 结果相同；显式再声明是为了覆盖"绕过 SeekTo、直接派发 MSG_SEEKTO"的两条入口
+     * （playCompleted() 的循环重开、ProcessPrepareMsg() 的 prepare 前 seek）。
+     */
+    mPlayer.mSeekAudioLandingReset = true;
     mPlayer.beginDiscontinuity(seekPos);
 
     // 暂停帧恢复的渲染门只在"恢复专用 seek"期间保持；用户自己发起的

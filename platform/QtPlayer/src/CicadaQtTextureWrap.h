@@ -54,7 +54,7 @@ namespace cicadaqt {
      * 而 D3D11/GL 的实现和这里共用同一份兜底代码。
      */
     QSGTexture *wrapNativeTextureWithRhi(QQuickWindow *window, quint64 object, int layout,
-                                         const QSize &size);
+                                         const QSize &size, bool hasAlpha = false);
 
 #if defined(Q_OS_WIN)
     /*
@@ -66,8 +66,15 @@ namespace cicadaqt {
      *     不允许给有类型的纹理建"另一种格式"的视图，格式不一致就是 E_INVALIDARG
      *     （日志里的 "Failed to create srv"），表现为画面全黑。
      * 详见 CicadaTextureD3D11.cpp 的 CICADA_QT_D3D11_OUTPUT_FORMAT。
+     *
+     * hasAlpha 必须如实传：QSGTexture 的 alpha 通道信息是靠
+     * QQuickWindow::TextureHasAlphaChannel 声明的（包装这条路没有别的渠道）。
+     * 声明错了会怎样 —— 弹幕图集那张带透明区的纹理漏传过一次：Qt 按"不透明"处理，
+     * 透明像素的 RGB 是 0，于是**整条弹幕后面糊上一块黑色背景**。
+     * 视频那条路始终传 false（RGBA 输出纹理是整幅不透明的）。
      */
-    QSGTexture *wrapD3D11Texture(QQuickWindow *window, void *texture, const QSize &size);
+    QSGTexture *wrapD3D11Texture(QQuickWindow *window, void *texture, const QSize &size,
+                                 bool hasAlpha = false);
 #endif
 
 #if defined(Q_OS_MACOS)

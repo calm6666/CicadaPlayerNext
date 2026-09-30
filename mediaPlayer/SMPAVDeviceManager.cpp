@@ -430,6 +430,12 @@ void SMPAVDeviceManager::flushVideoRender()
         mVideoRender->renderFrame(frame);
     }
 }
+void SMPAVDeviceManager::releaseVideoRenderFrames()
+{
+    if (mVideoRender) {
+        mVideoRender->releaseFrames();
+    }
+}
 int SMPAVDeviceManager::renderVideoFrame(unique_ptr<IAFFrame> &frame)
 {
     if (mVideoRender) {

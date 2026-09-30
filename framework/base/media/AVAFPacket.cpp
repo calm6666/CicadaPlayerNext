@@ -6,11 +6,32 @@
 #include "utils/ffmpeg_utils.h"
 #include <cassert>
 #include <utils/frame_work_log.h>
+/* 存活计数探针（见 AVAFPacket.h 里那两个取值的说明）：计数本身只用原子量，不碰锁。 */
+#include <atomic>
 #ifdef __APPLE__
 #include "PBAFFrame.h"
 #endif
 
 using namespace std;
+
+/*
+ * 【存活计数】只统计"对象个数"，不统计字节数 —— 一个硬解 AVAFFrame 可能钉着几十 MB，
+ * 所以个数增长就已经足够定性。四个计数器只在构造/析构里 +/-1。
+ */
+static std::atomic<long long> g_avafPacketCreated{0};
+static std::atomic<long long> g_avafPacketDestroyed{0};
+static std::atomic<long long> g_avafFrameCreated{0};
+static std::atomic<long long> g_avafFrameDestroyed{0};
+
+long long afLiveAvafFrames()
+{
+    return g_avafFrameCreated.load() - g_avafFrameDestroyed.load();
+}
+
+long long afLiveAvafPackets()
+{
+    return g_avafPacketCreated.load() - g_avafPacketDestroyed.load();
+}
 
 void AVAFPacket::copyInfo()
 {
@@ -36,6 +57,7 @@ void AVAFPacket::copyInfo()
 
 AVAFPacket::AVAFPacket(AVPacket &pkt, bool isProtected) : mIsProtected(isProtected)
 {
+    g_avafPacketCreated++;
     mpkt = av_packet_alloc();
     av_packet_ref(mpkt, &pkt);
     copyInfo();
@@ -43,6 +65,7 @@ AVAFPacket::AVAFPacket(AVPacket &pkt, bool isProtected) : mIsProtected(isProtect
 
 AVAFPacket::AVAFPacket(AVPacket *pkt, bool isProtected) : mIsProtected(isProtected)
 {
+    g_avafPacketCreated++;
     mpkt = av_packet_alloc();
     av_packet_ref(mpkt, pkt);
     copyInfo();
@@ -50,6 +73,7 @@ AVAFPacket::AVAFPacket(AVPacket *pkt, bool isProtected) : mIsProtected(isProtect
 
 AVAFPacket::AVAFPacket(AVPacket **pkt, bool isProtected) : mIsProtected(isProtected)
 {
+    g_avafPacketCreated++;
     mpkt = *pkt;
     *pkt = nullptr;
     copyInfo();
@@ -57,6 +81,7 @@ AVAFPacket::AVAFPacket(AVPacket **pkt, bool isProtected) : mIsProtected(isProtec
 
 AVAFPacket::~AVAFPacket()
 {
+    g_avafPacketDestroyed++;
     if (mAVEncryptionInfo != nullptr) {
         av_encryption_info_free(mAVEncryptionInfo);
     }
@@ -159,6 +184,7 @@ bool AVAFPacket::getEncryptionInfo(IAFPacket::EncryptionInfo *dst)
 }
 AVAFPacket::AVAFPacket(const AVAFPacket &pkt) : IAFPacket(pkt)
 {
+    g_avafPacketCreated++;
     mpkt = av_packet_alloc();
     av_packet_ref(mpkt, pkt.mpkt);
     copyInfo();
@@ -170,6 +196,7 @@ AVAFPacket::AVAFPacket(const AVAFPacket &pkt) : IAFPacket(pkt)
 AVAFFrame::AVAFFrame(const IAFFrame::AFFrameInfo &info, const uint8_t **data, const int *lineSize, int lineNums, IAFFrame::FrameType type)
     : mType(type)
 {
+    g_avafFrameCreated++;
     AVFrame *avFrame = av_frame_alloc();
     if (type == FrameType::FrameTypeAudio) {
         audioInfo aInfo = info.audio;
@@ -198,6 +225,7 @@ AVAFFrame::AVAFFrame(const IAFFrame::AFFrameInfo &info, const uint8_t **data, co
 
 AVAFFrame::AVAFFrame(AVFrame **frame, IAFFrame::FrameType type) : mType(type)
 {
+    g_avafFrameCreated++;
     assert(*frame != nullptr);
     mAvFrame = *frame;
     *frame = nullptr;
@@ -207,6 +235,7 @@ AVAFFrame::AVAFFrame(AVFrame **frame, IAFFrame::FrameType type) : mType(type)
 
 AVAFFrame::AVAFFrame(AVFrame *frame, FrameType type) : mAvFrame(av_frame_clone(frame)), mType(type)
 {
+    g_avafFrameCreated++;
     assert(mAvFrame != nullptr);
     copyInfo();
 }
@@ -247,6 +276,7 @@ void AVAFFrame::copyInfo()
 
 AVAFFrame::~AVAFFrame()
 {
+    g_avafFrameDestroyed++;
     av_frame_free(&mAvFrame);
 }
 

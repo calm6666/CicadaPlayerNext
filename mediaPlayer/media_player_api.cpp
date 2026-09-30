@@ -7,6 +7,11 @@
 #include <utils/af_string.h>
 #include <utils/frame_work_log.h>
 
+/* 本文件的日志 tag（AF_LOGI 需要它；统一用文件名，和框架其它 .cpp 一个写法）。 */
+#ifndef LOG_TAG
+    #define LOG_TAG "media_player_api"
+#endif
+
 using namespace Cicada;
 
 typedef struct playerHandle_t {
@@ -39,6 +44,20 @@ playerHandle *CicadaCreatePlayer(const char *opts)
 
 void CicadaReleasePlayer(playerHandle **pHandle)
 {
+    /*
+     * 【释放探针】播放器对象被销毁的**唯一收口点**（桌面与安卓共用这一条）。
+     *
+     * 这里 `delete` 掉 MediaPlayer 门面 -> ~SuperMediaPlayer：
+     *   * Stop() 同步释放包队列 / 帧队列 / 解复用器 / 数据源（含 http 连接）；
+     *   * mAVDeviceManager = nullptr -> **解码器与它的表面池在这里失去最后一个引用**。
+     * 安卓侧"返回键 / 关闭播放器"两条入口最终都走到这一行
+     * （Java `release()` -> JNI `NativeBase::java_Release` -> `delete player`），
+     * 桌面侧走到 `CicadaPlayerItem::destroyPlayer()` 里的 `m_player.reset()`。
+     * 所以这一行是"资源到底有没有全放"的第一判据：**每个关闭入口都应该出现一次**。
+     */
+    AF_LOGI("[mem] CicadaReleasePlayer: destroying the player object "
+            "(decoder, hardware surface pool, packet/frame queues, demuxer and data source)\n");
+
     delete (*pHandle)->pPlayer;
     delete *pHandle;
     *pHandle = nullptr;

@@ -327,6 +327,37 @@ namespace cicadaqt {
          */
     }
 
+    void CicadaVideoTexture::flushDeferredDestruction()
+    {
+#if defined(Q_OS_WIN)
+        if (m_d3d11) {
+            m_d3d11->flushDeferredDestruction();
+        }
+#endif
+
+        /*
+         * macOS / Linux / CPU 回退是**有意为空**的：这三个后端没有"D3D11 延迟销毁"
+         * 这件事 —— Metal 的纹理释放是即时的，VAAPI/CPU 根本没有 D3D 对象，所以没有
+         * 任何"再推一把"的动作可做。以后哪个后端真量到"引用放了、内存不降"，
+         * 在它自己的后端里补同名动作，而不是在这里瞎放东西。
+         */
+    }
+
+    void CicadaVideoTexture::forgetOutputTextureWrapper()
+    {
+#if defined(Q_OS_WIN)
+        if (m_d3d11) {
+            m_d3d11->forgetOutputTextureWrapper();
+        }
+#endif
+
+        /*
+         * macOS / Linux 是有意的空实现：那两条路上没有"输出纹理包装"这个中间层
+         * （Metal 那条直接包解码纹理、VAAPI 那条是 EGLImage 绑定的 GL 纹理，
+         * 生命周期各自在自己的后端里管），所以没有需要"忘掉"的记录。
+         */
+    }
+
     void CicadaVideoTexture::releaseResources()
     {
 #if defined(Q_OS_WIN)
@@ -343,9 +374,54 @@ namespace cicadaqt {
         }
 #endif
 
+        /*
+         * CPU 回退那两件大东西也一起放掉。
+         *
+         *   * m_bgraImage 是 swscale 的目标位图，尺寸 = 视频原始画布：
+         *     1080p = 1920*1080*4 = 8.29MB，4K = 3840*2160*4 = 33.18MB；
+         *   * m_sws 是 swscale 上下文，里面挂着它自己的转换表。
+         *
+         * 两个都是**纯缓存**：下一帧 textureForFrameCpu() 会按需重新分配
+         * （它本来就是"分辨率变了才重新分配"的写法），所以在这里释放不影响任何行为、
+         * 也不影响精度（同一套 sws 参数，重建出来的转换完全一样）。
+         *
+         * 为什么放这里而不是只靠析构：原来它们**只在 ~CicadaVideoTexture() 里**释放，
+         * 而本函数才是"这一套渲染资源不要了"的既有落点（场景图失效 / 后端重建 /
+         * item 析构都会走到）。窗口关掉到 item 析构之间有一段时间，这期间
+         * 零拷贝失败退回 CPU 路径的那些会话就会白挂着这块整幅位图。
+         *
+         * 只碰内存、不碰任何 GPU / COM 对象，所以放在这个函数里对线程没有新要求
+         *（它本来就在渲染线程与析构路径上被调用）。
+         */
+
+        if (m_sws != nullptr) {
+            sws_freeContext(m_sws);
+            m_sws = nullptr;
+        }
+
+        m_swsSrcWidth = 0;
+        m_swsSrcHeight = 0;
+        m_swsSrcFormat = 0;
+
+        /* 记下"放掉了多大一张目标位图"用于日志（下一句就把它删掉）。 */
+        const qsizetype releasedBgraBytes = (m_bgraImage != nullptr) ? m_bgraImage->sizeInBytes() : 0;
+
+        delete m_bgraImage;
+        m_bgraImage = nullptr;
+
         /* 下一次 prepare() 重新探测一遍（例如窗口换了图形后端）。 */
         m_prepared = false;
         m_zeroCopyActive = false;
+
+        /*
+         * 【释放探针】CPU 回退路径那两件大东西的释放记录：目标位图是**整幅** BGRA
+         * （1080p = 1920*1080*4 = 8.29MB，4K = 3840*2160*4 = 33.18MB）。零拷贝会话里
+         * 它从来没被分配过，所以这里打印 0 是正常的。
+         * 场景图失效 / 后端重建 / item 析构三条路都会走到这一句。
+         */
+        AF_LOGI("[mem] video texture backend released: CPU fallback bitmap %lld bytes, "
+                "swscale context freed (platform backend released above)\n",
+                (long long) releasedBgraBytes);
     }
 
     QString CicadaVideoTexture::backendName() const

@@ -14,6 +14,8 @@
  * 拿到 C 链接（否则 MSVC 会报一片 C2733）。
  */
 #include <d3d11_1.h>
+/* IDXGIDevice3::Trim：逼 D3D 立刻销毁延迟销毁的对象（见 trimVideoMemory 的说明）。 */
+#include <dxgi1_3.h>
 
 extern "C" {
 #include <libavutil/frame.h>
@@ -158,6 +160,9 @@ namespace cicadaqt {
             return false;
         }
 
+        /* 记下渲染线程：Flush / Trim 只能在同一条线程上做（立即上下文不是自由线程的）。 */
+        m_renderThreadId = std::this_thread::get_id();
+
         /*
          * 视频处理需要 ID3D11VideoDevice / ID3D11VideoContext。
          *
@@ -222,8 +227,86 @@ namespace cicadaqt {
         m_inputSlice = -1;
     }
 
+    void CicadaTextureD3D11::flushDeferredDestruction()
+    {
+        if (m_context == nullptr) {
+            return;
+        }
+
+        /*
+         * 立即上下文不是自由线程的：只允许在 prepare() 那条（Qt 渲染）线程上碰它。
+         * releaseResources() 有一条路径跑在 GUI 线程（~CicadaPlayerItem），那里只做
+         * Release（引用计数本身线程安全），Flush 到下面 trimVideoMemory() 也一样被挡。
+         */
+        if (std::this_thread::get_id() != m_renderThreadId) {
+            AF_LOGW("[mem] skip ID3D11DeviceContext::Flush(): this is not the Qt render thread, "
+                    "and the immediate context is not free-threaded (the deferred objects will be "
+                    "destroyed by the render thread's own Flush, or by the runtime)\n");
+            return;
+        }
+
+        /*
+         * 只 Flush，不 ClearState。理由（官方文档原文与取舍）全部写在头文件
+         * CicadaTextureD3D11.h 的 flushDeferredDestruction() 上：Flush 只"把排队的
+         * 命令推给 GPU"，并借此销毁被**延迟销毁**的对象；ClearState 会把 Qt 场景图
+         * 正在用的管线绑定全清成 NULL，和 Qt RHI 自己的状态跟踪对不上。
+         *
+         * 这一步是"pool 释放不掉"的最后一环：引用计数归零只代表我们要放的东西"可以"
+         * 销毁了，D3D11 默认还要拖一段时间；Flush 才让它当场消失。
+         */
+        m_context->Flush();
+
+        AF_LOGI("[mem] ID3D11DeviceContext::Flush() after the decoder frames were dropped: "
+                "Direct3D destroys the deferred objects now (the D3D11VA surface array is one "
+                "of them)\n");
+    }
+
+    void CicadaTextureD3D11::trimVideoMemory()
+    {
+        if (m_device == nullptr) {
+            return;
+        }
+
+        /* 同 flushDeferredDestruction()：Trim 也要驱动去动上下文/设备，只在渲染线程做。 */
+        if (std::this_thread::get_id() != m_renderThreadId) {
+            AF_LOGW("[mem] skip IDXGIDevice3::Trim(): this is not the Qt render thread "
+                    "(the driver-internal buffers stay allocated until the next trim)\n");
+            return;
+        }
+
+        IDXGIDevice3 *dxgiDevice3 = nullptr;
+        IDXGIDevice *dxgiDevice = nullptr;
+
+        HRESULT hr = m_device->QueryInterface(IID_PPV_ARGS(&dxgiDevice));
+
+        if (SUCCEEDED(hr) && dxgiDevice != nullptr) {
+            hr = dxgiDevice->QueryInterface(IID_PPV_ARGS(&dxgiDevice3));
+            dxgiDevice->Release();
+        }
+
+        if (FAILED(hr) || dxgiDevice3 == nullptr) {
+            AF_LOGW("[mem] the D3D11 device exposes no IDXGIDevice3 (hr=0x%08lx): the "
+                    "driver-internal graphics memory cannot be trimmed on this system\n", (long) hr);
+            return;
+        }
+
+        dxgiDevice3->Trim();
+        dxgiDevice3->Release();
+
+        AF_LOGI("[mem] IDXGIDevice3::Trim() done: Direct3D destroyed the deferred objects "
+                "immediately and the driver handed its internal buffers back (these buffers "
+                "count against the app's memory usage)\n");
+    }
+
     void CicadaTextureD3D11::releaseResources()
     {
+        /*
+         * 记下"放掉了多大一张输出纹理"用于日志（函数末尾会把这两个数清零）。
+         * 输出纹理是整幅 RGBA：1080p = 1920*1080*4 = 8.29MB，4K = 3840*2160*4 = 33.18MB。
+         */
+        const int releasedOutputWidth = m_outputTextureWidth;
+        const int releasedOutputHeight = m_outputTextureHeight;
+
         if (m_outputView != nullptr) {
             m_outputView->Release();
             m_outputView = nullptr;
@@ -249,6 +332,10 @@ namespace cicadaqt {
             m_outputTexture = nullptr;
         }
 
+        /* 包装那张 QSGTexture 也一起忘掉（它归节点所有，节点马上就会被场景图删掉）。 */
+        m_outputQsTexture = nullptr;
+        m_outputQsTextureGeneration = -1;
+
         if (m_videoContext != nullptr) {
             m_videoContext->Release();
             m_videoContext = nullptr;
@@ -263,6 +350,42 @@ namespace cicadaqt {
             m_videoDevice->Release();
             m_videoDevice = nullptr;
         }
+
+        /*
+         * ============ 【官方文档给的最后一步：逼 D3D 现在就把对象销毁掉】============
+         *
+         * 上面那 8 个 COM 对象都已经 Release 了，但"Release 完就回收了"是错的。
+         * ID3D11DeviceContext::Flush 的文档原文：
+         *   "Direct3D 11 defers the destruction of objects. Therefore, an application
+         *    can't rely upon objects immediately being destroyed. By calling Flush, you
+         *    destroy any objects whose destruction was deferred."
+         * 也就是说**引用计数归零只代表"可以销毁"**，真正回收要等运行时愿意 —— 这正是
+         * "关窗/切档之后显存与内存迟迟不降"最容易被忽略的一环。
+         *
+         * 第二步 Trim 是给**空闲**时刻的（场景图失效 / 关窗 / 销毁播放器都属于）。
+         * IDXGIDevice3::Trim 的文档：它让 D3D 立刻销毁延迟销毁的对象，并把**驱动内部
+         * 缓存的内存**还给系统，而那些缓冲 "count against the app's memory usage" ——
+         * 关窗后不降的那几十 MB 里就有它一份。
+         *
+         * 顺序按文档来：先 Release（上面全部）→ 再 Flush（逼延迟销毁的对象当场销毁）
+         * → 再 Trim（连驱动内部缓冲一起还）。Trim 的文档另外要求
+         * "release references on middleware before calling Trim" —— FFmpeg 就是这个
+         * middleware，它的表面池在 close_decoder() 里已经放掉了。
+         *
+         * 为什么**不**在这里调 ClearState：官方那条"同步销毁"配方里的 ClearState 会把
+         * 所有资源槽 / shaders / viewport 置 NULL，而 m_context 是 **Qt 场景图的立即
+         * 上下文**，清了就和 Qt RHI 自己的状态记账对不上（完整取舍见头文件里
+         * flushDeferredDestruction() 的说明）。
+         */
+        /*
+         * 走 flushDeferredDestruction() 而不是直接 m_context->Flush()：本函数有一条调用
+         * 路径在 GUI 线程上（~CicadaPlayerItem），而立即上下文不是自由线程的 ——
+         * 那条路会在里面被线程检查挡掉并打一条日志（Release 本身不需要挡，
+         * 引用计数是线程安全的）。
+         */
+        flushDeferredDestruction();
+
+        trimVideoMemory();
 
         /*
          * m_device / m_context 是 Qt（场景图）的，不是我们的：这里只是丢掉指针，
@@ -281,6 +404,20 @@ namespace cicadaqt {
         m_outputTextureWidth = 0;
         m_outputTextureHeight = 0;
         m_inputColorSpace = 0;
+
+        /*
+         * 【释放探针】零拷贝那 8 个 COM 对象（输入/输出视图、视频处理器、枚举器、
+         * 输出纹理、VideoDevice/VideoContext/VideoContext1）都已经 Release。
+         *
+         * 这条日志也是"~CicadaTextureD3D11 那个故意不 Release 的空析构"的判据：
+         * 正常关窗路径上本函数一定先被调用（场景图失效，或 ~CicadaPlayerItem 里那一句），
+         * 析构时所有成员都已经是 nullptr，所以不存在"析构时还有纹理没回收"。
+         */
+        AF_LOGI("[mem] D3D11 zero-copy resources released: RGBA output texture %dx%d "
+                "(%lld bytes), output/input views + video processor + enumerator + "
+                "video device/context released\n",
+                releasedOutputWidth, releasedOutputHeight,
+                (long long) releasedOutputWidth * releasedOutputHeight * 4);
     }
 
     bool CicadaTextureD3D11::ensureProcessor(int textureWidth, int textureHeight,
@@ -507,6 +644,14 @@ namespace cicadaqt {
             m_outputTexture = nullptr;
         }
 
+        /*
+         * 输出纹理要换新的了：**旧包装（如果还在）包的是旧纹理**，作废。
+         * 只丢指针不 delete —— 那张 QSGTexture 归场景图节点所有。
+         * 世代 +1，下面的 textureForFrame() 会重新包一次（每次重建只包一次）。
+         */
+        m_outputQsTexture = nullptr;
+        ++m_outputTextureGeneration;
+
         D3D11_TEXTURE2D_DESC desc = {};
         desc.Width = static_cast<UINT>(width);
         desc.Height = static_cast<UINT>(height);
@@ -720,8 +865,14 @@ namespace cicadaqt {
         }
 
         /*
-         * 把 RGBA 纹理包成 QSGTexture 交给 Qt 场景图（具体的包装方式按 Qt 版本
-         * 分两条路，见 CicadaQtTextureWrap）。
+         * 把 RGBA 纹理包成 QSGTexture 交给 Qt 场景图。
+         *
+         * 【2026-09-30 回退：不要跨帧复用这张包装 —— 实测两次都闪退】
+         * 曾经为了省掉"每次重绘新建一个 QSGTexture + SRV"而按输出纹理世代缓存过这张包装，
+         * 结果**打开播放窗口后不久就闪退**（日志停在渲染线程里，和更早那次"帧指针命中缓存"
+         * 的崩法一模一样）。两次的共同点是：**同一张 QSGD3D11Texture 包装被连续多帧复用**。
+         * Qt 自己的视频管线也是每帧重新 fromNative 一次，所以这里回到"每次调用都新建"，
+         * 那块 churn 只能从"重绘频率"这一侧去解决，不能从这里省。
          *
          * 注意：QSGTexture 的创建必须在渲染线程上（我们现在就在 updatePaintNode 里），
          * 而且返回的对象归调用方所有（纹理本身仍归我们，见 releaseResources）。
@@ -734,6 +885,16 @@ namespace cicadaqt {
         }
 
         return qsTexture;
+    }
+
+    void CicadaTextureD3D11::forgetOutputTextureWrapper()
+    {
+        /*
+         * 回退之后不再缓存包装，这个函数只剩"清记录"的作用（保留调用点：
+         * 一旦以后再尝试缓存，节点重建那四处必须同步忘掉，否则就是 use-after-free）。
+         */
+        m_outputQsTexture = nullptr;
+        m_outputQsTextureGeneration = -1;
     }
 
 }// namespace cicadaqt

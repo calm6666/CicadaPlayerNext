@@ -444,6 +444,16 @@ namespace Cicada {
             mDecoder->stop();
             releaseDecoder();
             mbInit = false;
+
+            /*
+             * 【释放探针】MediaCodec 解码器与它绑定的输出 Surface/解码器实例都已 stop + release。
+             *
+             * 为什么在 if (mbInit) 里面打：只有"真的关了一个活着的解码器"才说明这一步发生了；
+             * 重复调用（mbInit 已经是 false）不再打，日志里一轮退出只应出现一次。
+             * 安卓侧"返回键 / 关闭播放器"两条入口最终都要能看到这一行。
+             */
+            AF_LOGI("[mem] MediaCodec decoder closed: codec stopped and released "
+                    "(its output surface reference goes with it)\n");
         }
 
         mInputFrameCount = 0;

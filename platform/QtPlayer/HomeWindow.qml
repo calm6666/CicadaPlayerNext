@@ -1241,6 +1241,17 @@ Window {
     property var playerWindow: null
 
     /*
+     * Main.qml 的组件对象，**只建一次、进程内复用**。
+     *
+     * 原来每次 ensurePlayerWindow() 都现调一次 Qt.createComponent()：它返回的对象是
+     * **JavaScript 所有权**（只被一个局部 var 引用），函数返回后只剩 GC 管 ——
+     * 于是每开/关一轮都可能留下一个"没有显式释放点、等 GC"的 QQmlComponent
+     * （连同它引用的编译单元）。这类"每轮新建但从不显式释放"的东西正是本轮要清掉的。
+     * 缓存一份之后每轮只建窗口实例；代价是一份组件常驻（KB 量级）。
+     */
+    property var playerComponent: null
+
+    /*
      * 建（或复用）播放器窗口，返回它；失败返回 null。
      *
      * 点卡片和点 DASH/HLS 按钮走的是**同一套**：窗口只有一个、开着就复用、
@@ -1248,25 +1259,52 @@ Window {
      */
     function ensurePlayerWindow() {
         if (playerWindow === null) {
-            var component = Qt.createComponent("qrc:/qt/qml/QtPlayer/Main.qml")
+            if (playerComponent === null)
+                playerComponent = Qt.createComponent("qrc:/qt/qml/QtPlayer/Main.qml")
 
-            if (component.status !== Component.Ready) {
-                console.warn("[home] 播放器窗口创建失败：" + component.errorString())
+            if (playerComponent === null || playerComponent.status !== Component.Ready) {
+                console.warn("[home] 播放器窗口创建失败："
+                             + (playerComponent === null ? "组件为空" : playerComponent.errorString()))
                 return null
             }
 
             /* parent 用 contentItem，不是 home、也不是 null —— 两条理由见上面那段 */
-            playerWindow = component.createObject(home.contentItem)
+            playerWindow = playerComponent.createObject(home.contentItem)
 
             if (playerWindow !== null) {
                 /*
-                 * 关掉之后（visible 变假）销毁。用 visibleChanged 而不是 closing：
-                 * closing 是"正在关"，visible=false 才是"已经关完了"。
-                 * 这里用 home.playerWindow 而不是闭包捕获，保证永远操作当前那一个。
+                 * ============ 【关窗即销毁：两个触发点，汇进同一个幂等函数】============
+                 *
+                 * 1) **主触发点：窗口自己发的 closeCommitted**（在 Main.qml 的 onClosing 里发）。
+                 *    这是确定性的：`closing` 是 Qt 在关闭事件里必然发出的信号（✕ / Alt+F4 /
+                 *    系统菜单关闭都会走），**不依赖 `visible` 这个平台相关的读数**。
+                 *
+                 *    为什么原来那条路不可靠：原来**只有** visibleChanged 一个触发点，而 ✕
+                 *    走原生关闭时 `visible` 不保证会变成 false（同一个坑在本文件上面的文件
+                 *    对话框那段注释里已经记过一次："它的 visible 可能一直停在 true"）。
+                 *    visibleChanged 不来 ⇒ reapPlayerWindow 永远不被调用 ⇒ 窗口对象和它
+                 *    整棵 QML 树留到进程退出 ⇒ 表现为"每开/关一轮涨约一个窗口树的量"。
+                 *
+                 * 2) **兜底：visibleChanged**。万一有别的路径让窗口不可见（hide()、平台行为、
+                 *    以后新增的调用方），也走同一个函数。它**不再带 visible 判断**，
+                 *    所以不会出现"两条触发点都不动手"的空档。
+                 *
+                 * 两者都只做一件事：`Qt.callLater(home.reapPlayerWindow)` —— 推迟到
+                 * **本次事件处理之后**（那时 close 已经走完、场景图也收完），与原设计
+                 * "等 close 走完再销毁"的时序保证完全一致，只是不再依赖那个控制不了的布尔量。
+                 * reapPlayerWindow() 自己幂等（先置空引用再销毁），所以两个触发点重复到达
+                 * 也不会重复销毁。
                  */
+                playerWindow.closeCommitted.connect(function () {
+                    console.warn("[mem] player window reported closeCommitted -> scheduling reap")
+                    Qt.callLater(home.reapPlayerWindow)
+                })
+
                 playerWindow.visibleChanged.connect(function () {
-                    if (home.playerWindow !== null && !home.playerWindow.visible)
+                    if (home.playerWindow !== null && !home.playerWindow.visible) {
+                        console.warn("[mem] player window became invisible -> scheduling reap")
                         Qt.callLater(home.reapPlayerWindow)
+                    }
                 })
             }
         }
@@ -1534,22 +1572,34 @@ Window {
     /*
      * 销毁那个**已经关掉**的播放器窗口对象。
      *
-     * 两道保险：
-     *   * 还可见就什么都不做 —— 说明用户又打开了（或者根本没关成），不能销毁；
-     *   * 先把引用置空再 destroy —— 断掉所有指向它的绑定，之后它才是"没人引用"的。
+     * 三道保险：
+     *   * `playerWindow === null` 就直接返回 —— 这是**唯一的**幂等判据，
+     *     两个触发点（closeCommitted / visibleChanged）重复到达也不会重复销毁；
+     *   * 先把引用置空再 destroy —— 断掉所有指向它的绑定，之后它才是"没人引用"的；
+     *   * **不再看 `visible`** —— 见下面那段说明。
      *
      * 资源其实在 Main.qml 的 onClosing 里就已经还回去了（清空片源 → destroyPlayer()
      * → 解码器/帧/输入视图/表面池），这里销毁的是窗口和它那棵 QML 对象树本身。
+     *
+     * 【2026 本轮修：删掉原来的 `if (playerWindow.visible) return` 那道闸】
+     * 原来这一跳是"必须 visible == false 才销毁"，理由是"visible=false 才是关完了"。
+     * 问题在于 **visible 是平台相关的读数**：✕ 走原生关闭时它不保证变成 false
+     * （同一个坑见本文件上面文件对话框那段注释："它的 visible 可能一直停在 true"）。
+     * 一旦 visible 没变，visibleChanged 不会来、这个函数根本不会被调用 ——
+     * 窗口对象和它整棵 QML 树就留到进程退出，表现正是用户实测的"每开/关一轮涨一块"。
+     *
+     * 现在"关完了才销毁"这个时序保证由**事件循环**提供，而不是靠读一个布尔量：
+     * 两个触发点都只做 `Qt.callLater(home.reapPlayerWindow)`，而 Qt.callLater 是
+     * "本次事件循环迭代结束之后"执行 —— 那时 close 早已走完（隐藏/原生窗口收尾都做完了），
+     * 场景图也收完了，所以销毁既不会撞上 closing，也不会撞上 RHI 收尾。
      */
     function reapPlayerWindow() {
         if (playerWindow === null)
             return
 
-        if (playerWindow.visible)
-            return
-
         var w = playerWindow
         playerWindow = null
+        console.warn("[mem] reapPlayerWindow: destroying the player window object")
         w.destroy()
     }
 

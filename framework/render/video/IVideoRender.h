@@ -236,6 +236,31 @@ public:
         mProcessTextureCb = cb;
     }
 
+    /*
+     * 【新增·vtable 末尾】放掉本渲染器手上**所有的解码帧**，同步完成（返回即已放掉）。
+     *
+     * 为什么必须单独有这么一个动作，现有两条路都不够：
+     *   · renderFrame(nullptr) 只是**登记**一次 flush —— AFActiveVideoRender 把它记成
+     *     mNeedFlushSize，真正的丢帧发生在**下一次 VSync 回调**里（onVSync 开头那段
+     *     while）。于是"解码器已经关了、渲染器手里那一帧还钉着解码器的输出缓冲"
+     *     这个顺序一直存在；
+     *   · clearScreen() 会把画布清黑（SDL 路径真的清屏），切档/seek 上用不了。
+     *
+     * 为什么这一帧如此要紧：硬解帧的 buf[] 里握着解码器的输出缓冲，D3D11VA 更极端 ——
+     * 整池 surface 装在**同一张** ID3D11Texture2D 里（1080p 20 片 NV12 约 62MB、
+     * 4K 约 249MB），只要还有**一帧**活着，整张纹理数组就释放不掉。所以
+     * "关解码器之前先把手上的帧全放掉"是表面池能否随解码器一起回收的前提。
+     *
+     * 调用契约：播放器在**关闭或重建视频解码器之前**调用它
+     * （SuperMediaPlayer::FlushVideoPath() / rebuildVideoDecoder()），实现里因此
+     * **不得**把放帧推迟到别的线程、别的时机；返回时本渲染器不得再持有任何解码帧。
+     *
+     * 默认空实现：压根不用帧的渲染器（dummy / tunnel / 只拿 surface 的那些）
+     * 一行都不用改，也不需要任何平台分支。
+     */
+    virtual void releaseFrames()
+    {}
+
 protected:
     bool mInvalid{false};
     IVideoRenderListener *mListener{nullptr};

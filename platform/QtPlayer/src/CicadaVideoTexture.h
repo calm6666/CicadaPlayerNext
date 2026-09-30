@@ -91,6 +91,25 @@ namespace cicadaqt {
          */
         void releaseInputState();
 
+        /*
+         * 渲染线程：忘掉"输出纹理那张 QSGTexture 包装"的记录（只丢指针，不 delete）。
+         *
+         * 只在**场景图节点被删掉/重建**的那一刻调用：那张 QSGTexture 归节点所有，
+         * 节点一没它就没了（见 CicadaTextureD3D11.h 里 m_outputQsTexture 那段）。
+         * 非 D3D11 后端空实现。
+         */
+        void forgetOutputTextureWrapper();
+
+        /*
+         * 渲染线程：逼 D3D11 立刻销毁"被延迟销毁"的对象（内部就是
+         * ID3D11DeviceContext::Flush）。
+         *
+         * 调用时机：**刚放掉解码帧/输入视图之后** —— 引用计数归零只是"可以销毁了"，
+         * D3D11 默认还会拖一段时间；Flush 才让它当场消失（官方文档原文见
+         * CicadaTextureD3D11.h 里同名函数）。非 D3D11 后端是空实现。
+         */
+        void flushDeferredDestruction();
+
         /* 诊断：当前实际走的路径，界面上可以直接显示。 */
         QString backendName() const;
 

@@ -27,6 +27,16 @@ public:
 
     int clearScreen() override;
 
+    /*
+     * 【同步释放】放掉停在这里的两帧（mLastVideoFrame / mBackFrame）。
+     *
+     * 与 clearScreen() 的区别：**不清屏、不碰 SDL、不动 VSync**，只把对解码帧的引用
+     * 放下 —— 因为调用它的场合是"解码器马上要被关掉/重建"，此刻清屏会黑一下，而
+     * 硬解帧的引用必须在解码器之前放掉（整池 surface 被一帧钉住，见
+     * IVideoRender::releaseFrames() 的说明）。
+     */
+    void releaseFrames() override;
+
     int renderFrame(std::unique_ptr<IAFFrame> &frame) override;
 
     int setRotate(Rotate rotate) override;

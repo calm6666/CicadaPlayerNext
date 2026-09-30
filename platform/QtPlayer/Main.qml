@@ -121,10 +121,52 @@ Window {
      * 该释放的（解码器、渲染线程手里的帧、D3D11 输入视图、整张表面池）全都释放，
      * 而**窗口对象留着**：下次点卡片直接复用，没有任何生命周期上的花样。
      */
+    /*
+     * 【关窗即销毁的触发点】这个信号由本窗口在 `onClosing` 里发出，由创建它的
+     * HomeWindow 接住并**推迟到本次事件处理之后**销毁本窗口对象（见那个文件里
+     * ensurePlayerWindow / reapPlayerWindow 的说明）。
+     *
+     * 【为什么必须由 closing 驱动，而不是看 visible】
+     * ✕ 走的是原生关闭，Qt 的 `visible` 标志在平台/QWindowKit 这一层**不保证**会在
+     * close 之后变成 false（本仓 `Main.qml` 文件对话框那一段就吃过同一个坑：
+     * "它的 visible 可能一直停在 true"）。而 `visibleChanged` 是本工程原来唯一的销毁触发点，
+     * 于是只要 visible 不变，销毁那一跳**永远不会被调用**，窗口对象和它整棵 QML 树
+     * 就留到进程退出 —— 这是实打实的"每开/关一轮涨一块"的形状。
+     * `closing` 是 Qt 在关闭事件里必然发出的（✕、Alt+F4、系统菜单关闭都会走），
+     * 所以拿它当触发点是**确定性**的，不依赖任何平台读数。
+     */
+    signal closeCommitted()
+
     onClosing: {
         player.stop()
         playerView.source = ""
+
+        /*
+         * 释放已在上面的 `source = ""` 里做完（destroyPlayer()：解码器 + 表面池 +
+         * 队列 + demuxer/数据源 + 纹理）。这里再发一个信号，让**窗口对象自己**
+         * 也被销毁 —— 只销毁播放器窗口，首页/主窗口与进程都留着。
+         *
+         * 只发信号、不在这里 destroy()：closing 正在处理中，此刻销毁 QQuickWindow
+         * 会撞上还在收尾的场景图/RHI（本文件上面那段注释解释过）。接线方会把它
+         * 推迟到本次事件处理结束之后（Qt.callLater），那时 close 已经走完。
+         */
+        root.closeCommitted()
     }
+
+    /*
+     * 【释放探针】整棵播放器窗口的 QML 对象树被销毁的那一刻。
+     *
+     * 用 `console.warn` 而不是 `console.log`：**Release 构建里 console.log 看不到**。
+     * 链路是 main.cpp:842 `qInstallMessageHandler` → cicadaQtMessageHandler：
+     *   QtDebugMsg -> AF_LOGD（main.cpp:402-403），而 Release 下框架日志级别是
+     *   AF_LOG_LEVEL_INFO（frame_work_log.c:268-272），`__log_print` 在 prio > level 时
+     *   直接 return（frame_work_log.c:279）⇒ **D 级被丢掉**。
+     *   QtWarningMsg -> AF_LOGW（main.cpp:410-411），24 <= 32，**必然进日志**。
+     * 这一条只是辅助；"窗口对象到底死没死"以 C++ 侧那条
+     * `[mem] the player window object was destroyed`（CicadaPlayerItem 里接的
+     * QQuickWindow::destroyed）为准 —— 那条走 AF_LOGI，必定进同一份日志。
+     */
+    Component.onDestruction: console.warn("[mem] Main.qml: player window QML tree destroyed")
     /*
      * 窗口底色分两种状态（这就是"深浅色只作用于没选片子时那块 UI"的落点）：
      *   * 没选片子：主题色 windowBg —— 中间的提示文字、控制条、设置页都在这块底上，

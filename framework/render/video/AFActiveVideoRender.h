@@ -25,6 +25,19 @@ public:
 
     int renderFrame(std::unique_ptr<IAFFrame> &frame) final;
 
+    /*
+     * 【同步释放】放掉 mRendingFrame 与 mInputQueue 里所有还没上屏的帧。
+     *
+     * 为什么必须暂停 VSync 线程才能放：mInputQueue 是**单生产单消费**队列
+     * （renderFrame() 在播放线程 push，onVSync() 在 VSync 线程 pop），从播放线程
+     * 直接去 pop 会和消费者抢同一个队列。所以这里的做法与析构函数完全一致 ——
+     * 先 mVSync->pause()（afThread::pause 会**等到**线程走到安全点才返回，无超时），
+     * 此时播放线程是队列唯一的操作者，逐帧 delete，然后再 start() 恢复节拍。
+     *
+     * 调用契约见 IVideoRender::releaseFrames()：必须在关解码器之前同步放完。
+     */
+    void releaseFrames() override;
+
     float getRenderFPS() final
     {
         return mFps;

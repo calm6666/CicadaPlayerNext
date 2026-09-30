@@ -40,7 +40,7 @@
 namespace cicadaqt {
 
     QSGTexture *wrapNativeTextureWithRhi(QQuickWindow *window, quint64 object, int layout,
-                                         const QSize &size)
+                                         const QSize &size, bool hasAlpha)
     {
         if (window == nullptr || object == 0 || size.isEmpty()) {
             return nullptr;
@@ -113,8 +113,12 @@ namespace cicadaqt {
             return nullptr;
         }
 
-        /* createTextureFromRhiTexture() 成功之后，纹理的所有权归 QSGTexture。 */
-        QSGTexture *qsTexture = window->createTextureFromRhiTexture(texture);
+        /* createTextureFromRhiTexture() 成功之后，纹理的所有权归 QSGTexture。
+         * hasAlpha 必须如实声明：这条兜底路上它是唯一能告诉 Qt"这张纹理有透明区"的渠道。 */
+        const QQuickWindow::CreateTextureOptions options =
+            hasAlpha ? QQuickWindow::CreateTextureOptions(QQuickWindow::TextureHasAlphaChannel)
+                     : QQuickWindow::CreateTextureOptions();
+        QSGTexture *qsTexture = window->createTextureFromRhiTexture(texture, options);
 
         if (qsTexture == nullptr) {
             AF_LOGW("createTextureFromRhiTexture failed\n");
@@ -128,15 +132,21 @@ namespace cicadaqt {
 
 #if defined(Q_OS_WIN)
 
-    QSGTexture *wrapD3D11Texture(QQuickWindow *window, void *texture, const QSize &size)
+    QSGTexture *wrapD3D11Texture(QQuickWindow *window, void *texture, const QSize &size,
+                                 bool hasAlpha)
     {
         if (window == nullptr || texture == nullptr || size.isEmpty()) {
             return nullptr;
         }
 
+        const QQuickWindow::CreateTextureOptions options =
+            hasAlpha ? QQuickWindow::CreateTextureOptions(QQuickWindow::TextureHasAlphaChannel)
+                     : QQuickWindow::CreateTextureOptions();
+
 #if QT_VERSION >= QT_VERSION_CHECK(6, 8, 0)
         /* Qt 6.8+：官方接口，Qt 自己从纹理建 SRV 并组装 QSGTexture。 */
-        QSGTexture *qsTexture = QNativeInterface::QSGD3D11Texture::fromNative(texture, window, size);
+        QSGTexture *qsTexture = QNativeInterface::QSGD3D11Texture::fromNative(texture, window, size,
+                                                                              options);
 #else
         /*
          * Qt 6.5 ~ 6.7：包成 QRhi 纹理再交给场景图。
@@ -144,7 +154,7 @@ namespace cicadaqt {
          * 资源视图来用这张纹理，不需要我们指定状态。
          */
         QSGTexture *qsTexture = wrapNativeTextureWithRhi(
-                                    window, reinterpret_cast<quint64>(texture), 0, size);
+                                    window, reinterpret_cast<quint64>(texture), 0, size, hasAlpha);
 #endif
 
         if (qsTexture == nullptr) {

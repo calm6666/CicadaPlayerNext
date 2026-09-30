@@ -53,6 +53,20 @@ namespace cicadaqt {
      */
     std::unique_ptr<IVideoRender> createCicadaVideoRender();
 
+    /*
+     * "解码代际结束"的通知入口（同一时刻只有一个播放器窗口，所以用进程内单槽）。
+     *
+     * 谁注册：QML 组件（CicadaPlayerItem）在建立播放器时；谁触发：
+     * CicadaVideoRender::releaseFrames()，也就是框架在**关闭/重建视频解码器之前**
+     * 调的那一下。为什么要绕这么一圈：真正需要做的事（放掉 D3D11 输入视图 +
+     * Flush 立即上下文）只能在 Qt 的**渲染线程**上做，而这个通知是从播放器线程
+     * 发出来的 —— 组件收到后只置一个原子标志 + 请求重绘，实际动作在
+     * updatePaintNode() 里完成（详见 CicadaPlayerItem 里那一处的说明）。
+     *
+     * 传 nullptr 表示注销（组件析构时必须注销，否则会打到已经死掉的对象上）。
+     */
+    void setDecoderGenerationEndedHook(std::function<void()> hook);
+
     /* 把当前的视频渲染回调转交给 QML 组件的那个渲染器实现。 */
     class CicadaVideoRender : public AFActiveVideoRender {
     public:
@@ -90,6 +104,23 @@ namespace cicadaqt {
         {
             (void) color;
         }
+
+        /*
+         * 【同步释放】框架在**关闭/重建视频解码器之前**会调这里
+         * （IVideoRender::releaseFrames() 的契约）。本类做两件事：
+         *
+         *   1. 放掉截屏缓存的那一帧（m_lastFrame）—— 它是本类唯一持有的解码帧，
+         *      而硬解帧的克隆会把解码器整池 surface 钉住（D3D11VA 的 20 片 surface
+         *      在同一张 ID3D11Texture2D 里：1080p 约 62MB、4K 约 249MB）；
+         *   2. 通知 QML 组件"这一代解码器结束了"，让它在**渲染线程**上放掉 D3D11
+         *      输入视图并 Flush 一次立即上下文（官方文档：D3D11 默认延迟销毁，
+         *      Flush 才真正销毁）。本函数跑在播放器线程上，不能自己碰 Qt 的 D3D11。
+         *
+         * 基类那一步（AFActiveVideoRender::releaseFrames()）会先暂停 VSync 线程、
+         * 把帧队列和正在渲染的那一帧逐帧放掉 —— 那是"帧引用"这一层；
+         * 上面第 1、2 条是"这一层 + D3D11 那一层"剩下的两个持有者。
+         */
+        void releaseFrames() override;
 
         int setRotate(Rotate rotate) override
         {

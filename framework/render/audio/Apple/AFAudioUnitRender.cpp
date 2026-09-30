@@ -636,6 +636,35 @@ namespace Cicada {
                         mTotalPlayedBytes += len;
 
                         if (frameClear) {
+                            /*
+                             * ============ 【必须上报"这一帧已经交给设备"】============
+                             *
+                             * frameClear == true 意味着这一帧的 PCM 已经**整段**被复制进 AudioUnit
+                             * 交给我们的输出缓冲（ioData）——这就是本渲染器上"整帧真的被设备消费"
+                             * 的那一点。部分写入（remaining > 0）与"设备没在跑 / 等数据填满"那两条
+                             * 提前返回（都是补静音）都**不**上报：在"写尝试"处上报会让播放位置
+                             * 超前于真正送出去的音频。
+                             *
+                             * 口径与同族的两处参考实现完全一致：
+                             *   · `AFAudioQueueRender::copyAudioData`（本目录，AudioQueue 那条路）
+                             *     同样在 frameClear 分支里、delete 之前上报；
+                             *   · Android 的 `AudioTrackRender`（:691-693）在设备接收整帧之后上报。
+                             *
+                             * 为什么缺了它进度条会不动（有音轨的片源）：播放器侧唯一会在普通播放里
+                             * 推进内容位置 mCurrentPos 的写点，就是这条链 ——
+                             *   onFrameInfoUpdate → SuperMediaPlayer::ApsaraAudioRenderCallback
+                             *   → RenderCallback(ST_TYPE_AUDIO, true, info) → MSG_INTERNAL_RENDERED
+                             *   → SMPMessageControllerListener::ProcessRenderedMsg 里的
+                             *     `mCurrentPos = info.timePosition`；
+                             * 而 getCurrentPosition() 在"还没建立过不连续点"（起播后没 seek 过，或
+                             * Reset 之后）时逐字返回 mCurrentPos，视频那一路在有音轨时又被
+                             * `mCurrentAudioIndex < 0 || mAudioEOS` 挡住不写它 ⇒ 位置恒为初值 0，
+                             * 直到用户手动 seek 一次（seek 之后位置改从 mMasterClock 读）才开始走。
+                             */
+                            if (mListener != nullptr) {
+                                mListener->onFrameInfoUpdate(frame->getInfo(), true);
+                            }
+
                             delete frame;
                             mAudioDataList.pop();
                             mReadOffset = 0;

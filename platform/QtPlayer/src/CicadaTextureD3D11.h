@@ -38,6 +38,7 @@
 #include <QtQuick/QSGTexture>
 /* 色彩调整的三个值 + 脏标记：GUI 线程写、渲染线程读，所以用原子量。 */
 #include <atomic>
+#include <thread>
 
 struct ID3D11Device;
 struct ID3D11DeviceContext;
@@ -102,6 +103,66 @@ namespace cicadaqt {
          * CreateVideoProcessorEnumerator，纯属浪费）。
          */
         void releaseInputView();
+
+        /*
+         * 渲染线程：忘掉"输出纹理那张 QSGTexture 包装"的记录（**只丢指针，不 delete**）。
+         *
+         * 调用时机只有一个要求：**场景图节点被删掉/重建的那一刻**。那张 QSGTexture 归节点
+         * 所有（setOwnsTexture(true)），节点一没它就没了，再拿着旧指针去 setTexture() 就是
+         * use-after-free。节点重建的四个点在 CicadaPlayerItem::updatePaintNode 里，
+         * 那里会调本函数。
+         */
+        void forgetOutputTextureWrapper();
+
+        /*
+         * 渲染线程：逼 D3D11 把"延迟销毁"的对象真正销毁掉。
+         *
+         * 为什么需要它（微软官方文档，不是猜的）：
+         *   ID3D11DeviceContext::Flush 的 Remarks 原文 —— "Direct3D 11 defers the
+         *   destruction of objects. Therefore, an application can't rely upon objects
+         *   immediately being destroyed. By calling Flush, you destroy any objects whose
+         *   destruction was deferred."
+         *
+         * 换成这套代码里的话：**我们把最后一帧/输入视图/纹理的引用全 Release 掉了，
+         * 也只是把引用计数减到 0；那张 20 片 surface 的纹理数组（1080p 约 62MB、
+         * 4K 约 249MB）仍然可能被运行时"延迟销毁"拖着**。所以"关解码器 + 放帧"
+         * 之后必须再 Flush 一次，否则显存/驱动分配会一直挂在那里 —— 这正是
+         * "pool 释放不掉"最直接、也最被忽略的一环。
+         *
+         * 为什么**不**顺手调 ID3D11DeviceContext::ClearState()：
+         *   官方在 Flush 那一页给的"同步销毁"配方是 "release all references →
+         *   ClearState → Flush"，其中 ClearState 的作用是清掉**管线绑定**，让 D3D
+         *   不再持有那些对象的引用。但这里的 m_context 是 **Qt 场景图的立即上下文**
+         *   （QSGRendererInterface::DeviceContextResource），而 ClearState 会把所有
+         *   资源槽/shaders/输入布局/光栅化与混合状态/viewport 全部置 NULL
+         *   （ClearState 文档原文："sets all input/output resource slots, shaders,
+         *   input layouts, ... and viewports to NULL"）—— Qt 的 RHI 自己也在跟踪
+         *   管线状态，我们一清就会和它记账对不上，画面上会出现随机的错绑定。
+         *   所以这条路我们只用 Flush（它只"把命令推给 GPU"，不改任何状态），
+         *   而"清绑定"这件事交给下一条：Trim 之前的场景图失效路径本来就把渲染
+         *   资源全放了（见 releaseResources）。
+         */
+        void flushDeferredDestruction();
+
+        /*
+         * 渲染线程（只在**空闲**时刻调：场景图失效 / 关窗 / 播放器销毁）：
+         * 让 DXGI 立刻销毁延迟销毁的对象，并把驱动内部缓存的内存还给系统。
+         *
+         * IDXGIDevice3::Trim 文档原文："Trims the graphics memory allocated by the
+         * IDXGIDevice3 DXGI device on the app's behalf... graphics drivers periodically
+         * allocate internal memory buffers in order to speed up subsequent rendering
+         * requests. **These memory allocations count against the app's memory usage**...
+         * Direct3D will normally defer the destruction of D3D objects. Calling Trim,
+         * however, forces Direct3D to destroy objects immediately... apps should only
+         * call Trim when going idle for a period of time."
+         *
+         * 两点正是我们要的：
+         *   1. "驱动内部缓冲算在应用的内存账上" —— 关窗后那几十 MB 不降，这一条是
+         *      官方点名的来源之一（不只是我们自己的纹理）；
+         *   2. "只在空闲时调" —— 关窗/销毁播放器就是这个时刻，切档那种每几秒一次的
+         *      路径**不能**调（文档明说会有性能损失，驱动要重新分配内部缓冲）。
+         */
+        void trimVideoMemory();
 
         /* 诊断用：当前走的是哪条路。 */
         const char *backendName() const
@@ -185,6 +246,40 @@ namespace cicadaqt {
 
         bool m_failed = false;
         bool m_loggedFirstFrame = false;
+
+        /*
+         * 【新增·追加在成员表末尾】输出纹理那张 QSGTexture 包装 + 它属于哪个"输出纹理世代"。
+         *
+         * 为什么要缓存它：`wrapD3D11Texture()` 每调一次，Qt 就新建一个 QSGTexture 并在
+         * D3D11 上建一个 SRV。而这张包装包的是**我们自己的** m_outputTexture —— 尺寸不变
+         * 就一直是同一个 D3D11 对象，变的只是它的内容（视频处理器 Blt 写进去的）。
+         * 所以包装一次就够，每帧只需要重新 Blt 一次。
+         *
+         * 实测动机（2026-09-30 真机日志）：弹幕层让场景图按 60Hz 重绘，视频项每次重绘都
+         * 会重新走 textureForFrame()（帧对象每帧都是新的 clone，帧指针判据必然落空），
+         * 于是 **60 次/秒新建 QSGTexture + SRV**；对应的现象是 `nvwgf2umx.dll`
+         * （NVIDIA D3D11 用户态驱动）线程 +18 条/轮、句柄 +~100/轮、私有提交 +~50MB/轮，
+         * 而且窗口关掉之后都不还回来。
+         *
+         * 生命周期：**不持有**（那张 QSGTexture 归场景图节点），节点重建/销毁时必须用
+         * forgetOutputTextureWrapper() 把这里的记录清掉。
+         */
+        QSGTexture *m_outputQsTexture = nullptr;
+        int m_outputQsTextureGeneration = -1;
+        /* 每重建一次输出纹理 +1；包装的世代对不上就重新包一次 */
+        int m_outputTextureGeneration = 0;
+
+        /*
+         * 【新增·追加在成员表末尾】prepare() 是在 Qt 的**渲染线程**上被调用的，这里记下
+         * 那条线程的 id。
+         *
+         * 为什么必须记：`ID3D11DeviceContext::Flush()` 用的是**立即上下文**，而 D3D11 的
+         * 立即上下文**不是自由线程的**（同一时刻只能有一条线程用它）。但
+         * releaseResources() 有一条调用路径跑在 **GUI 线程**上（~CicadaPlayerItem），
+         * 所以 Flush / Trim 之前必须核对线程 —— 否则就是在和 Qt 渲染线程抢上下文。
+         * （Release 那些 COM 对象不需要核对：引用计数本身是线程安全的。）
+         */
+        std::thread::id m_renderThreadId{};
     };
 
 }// namespace cicadaqt

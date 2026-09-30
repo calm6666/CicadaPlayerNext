@@ -28,6 +28,17 @@ int Cicada::CheaterVideoRender::clearScreen()
     return 0;
 }
 
+void Cicada::CheaterVideoRender::releaseFrames()
+{
+    /* 与 renderFrame / onVSync 同一把锁；本渲染器只持有 mLastVideoFrame 这一帧。 */
+    std::unique_lock<std::mutex> lock(mRenderMutex);
+
+    if (mLastVideoFrame) {
+        mLastVideoFrame->setDiscard(true);
+        mLastVideoFrame = nullptr;
+    }
+}
+
 int Cicada::CheaterVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
 {
 

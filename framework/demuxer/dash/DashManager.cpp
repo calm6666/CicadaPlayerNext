@@ -480,6 +480,33 @@ int64_t DashManager::seek(int64_t us, int flags, int index)
 
         // 2. seek video first ,get the seekedUs
         type = STREAM_TYPE_VIDEO;
+        /*
+         * 【P0-B：其余每一路的 seek 目标必须是"用户请求值"，不能是视频那一侧的落点】
+         *
+         * 本函数原来在第 3 步给其余每一路喂的是 `us`，而 `us` 在这里被改写成**视频 seek()
+         * 的返回值**。DASH 的返回值是"视频分片起点"（DashStream.cpp 的 landingUs），HLS 的
+         * 返回值同样是"自己那一片的分片起点"（SegmentList::getSegmentNumberByTime 会把入参
+         * time 就地改写成该片的 startTime）。于是音频的**读位置**由另一路（视频）的分片网格
+         * 决定：请求落在视频分片尾部时，音频被拽到比请求值早将近一整个视频分片的位置
+         * （实测 output.mpd：视频片 19.9866 s、音频片 9.984 s；日志里视频与音频的 reqUs 差
+         * -369 / -760 / -1932 / -2997 / -5176 ms，方向恒为音频更早）。
+         *
+         * 为什么这样是错的：每一路的分片网格是各自的，"包含请求值的那一片"才是它自己的正确
+         * 读起点。用视频的分片起点当音频的目标，等于要求音频按**别的流**的网格对齐，音频
+         * 自己的分片起点于是可能再往前落一整片 —— 这段前缀必须被解码后丢掉，既拉长 seek
+         * 的收敛时间，也让"音频与视频拿到同一个目标点"这条前提失效。
+         *
+         * 为什么这样改不会让落点精度变差：落点精度由播放器侧的单一判据负责
+         * （SuperMediaPlayer 的 shouldDropForDiscontinuity 与音频落点地板都与 targetUs 比较，
+         * 与"落点"无关），解复用层只决定"从哪里开始读、开始解"。这里把**同一个请求值**交给
+         * 每一路，每一路各自落到自己那一片的片首，播放器再按同一个 targetUs 把各自的前缀裁掉。
+         *
+         * 视频侧行为一字不变：第 2 步仍然用请求值 seek 视频、仍然取回它的返回值，返回值照旧
+         * 只用于诊断日志与"视频 seek 失败 ⇒ 整次 seek 失败"这条既有终态（失败时负值继续留在
+         * us 里传给第 3 步，与改动前逐字相同）；视频的落点对齐与落点延迟线都在
+         * DashStream::seek() 内部，本函数既不参与也不影响它们。
+         */
+        const int64_t requestedUs = us;
 
         for (auto &i : mStreamInfoList) {
             if (i->selected) {
@@ -487,14 +514,32 @@ int64_t DashManager::seek(int64_t us, int flags, int index)
                     type = i->mPStream->getStreamType();
                     int64_t seekedUs = i->mPStream->seek(us, flags);
                     AF_LOGD("first seeked time is %lld --> %lld", us, seekedUs);
-                    us = seekedUs;
+
+                    if (seekedUs < 0) {
+                        /* 视频 seek 失败：把这个负值留在 us 里，第 3 步拿它 seek 其余流并返回 -1。 */
+                        us = seekedUs;
+                    } else {
+                        /* 视频 seek 成功：第 3 步的目标回到请求值，不吃"视频分片起点"。 */
+                        us = requestedUs;
+                    }
+
+                    /*
+                     * 本次改动的验收读数：video_return 仍是视频的分片起点（视频侧一字未变），
+                     * 而 other_seek_target 与 user 相同 ⇒ 音频及其它每一路不再被视频的网格拽走。
+                     * 一次 seek 一条，天然有界，不需要限频。
+                     */
+                    AF_LOGI("[dashseek] user=%lld video_return=%lld -> other_seek_target=%lld (stream=%d type=%d): "
+                            "every stream is positioned by the SAME request value and lands on its own segment "
+                            "grid; only the VOD video path stages its landing\n",
+                            (long long) requestedUs, (long long) seekedUs, (long long) us,
+                            i->mPStream->getId(), (int) type);
                     i->eos = false;
                     break;
                 }
             }
         }
 
-        // 3. use the seekedUs to seek all other streams opened
+        // 3. use the request value to seek all other streams opened (each on its own segment grid)
 
         for (auto &i : mStreamInfoList) {
             if (i->selected && i->mPStream->getStreamType() != type) {
