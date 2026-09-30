@@ -26,6 +26,12 @@
 // available() 返回 false，QML 会退回原来的 QML FileDialog 那条路 —— 功能不受影响，
 // 只是又回到了"需要手动销毁"的老办法（代码里那份保留着，见 Main.qml/HomeWindow.qml）。
 //
+// 【平台范围】**只在 Windows 上启用**：available() 在 macOS/Linux 上固定返回 false。
+// 实现里那套"工作线程 + COM 公寓 + 前台锁重试"是 Windows 专属的必要手段，而 macOS/Linux
+// 的 AppKit(NSOpenPanel)/GDK 界面调用**必须在主线程**，在工作线程里创建面板会当场崩
+// （macOS 上点"打开文件"直接闪退就是这个原因）。这两个平台上 Qt 自己的
+// QtQuick.Dialogs.FileDialog 才是正确实现，QML 侧会自动走它。
+//
 #ifndef CICADA_QT_APPFILEDIALOGS_H
 #define CICADA_QT_APPFILEDIALOGS_H
 

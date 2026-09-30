@@ -3,6 +3,17 @@
 //
 // 实现见头文件里的说明（为什么放在 C++ 里、为什么用平台对话框抽象）。
 //
+// 【平台范围：只在 Windows 上启用】下面这一整套（工作线程 + COM 公寓 + 前台锁重试）
+// 是为了绕开 Windows 特有的两个坑：IFileDialog 是 COM(STA) 对象，Show() 必须和创建它的
+// 线程同公寓；以及进程不在前台时系统会拒绝弹出，表现为"点了没反应"。为此对话框的
+// 创建与显示被放到**工作线程**上，GUI 线程只跑嵌套事件循环（见下面的"策略 A"）。
+//
+// macOS / Linux **不能**这么做：AppKit 的 NSOpenPanel/NSSavePanel 与 GDK 的界面调用
+// 必须在**主线程**，在工作线程里创建面板会当场崩 —— macOS 上"点打开文件直接闪退"
+// 就是这么来的。这两个平台上 Qt 自己的 QtQuick.Dialogs.FileDialog（主线程、平台原生
+// 实现、异步回调，不会嵌套事件循环）才是正确路径，QML 侧通过 available() == false
+// 自动走它（代码保留在 Main.qml / HomeWindow.qml 里）。
+//
 // 关键点只有一个：**对话框对象是局部生命周期**。
 //   * 每次调用 `createPlatformDialogHelper()` 造一个；
 //   * 用户选完之后（accept/reject 信号）读结果、退出嵌套事件循环；
@@ -31,7 +42,7 @@
 #include <objbase.h>
 #endif
 
-#ifdef CICADA_QT_HAVE_PLATFORM_FILE_DIALOG
+#if defined(CICADA_QT_HAVE_PLATFORM_FILE_DIALOG) && defined(Q_OS_WIN)
 /* QtGui 私有头（CMakeLists 里链了 Qt6::GuiPrivate 才有）：
  *   qplatformtheme.h        —— QPlatformTheme::createPlatformDialogHelper()
  *   qplatformdialoghelper.h —— QPlatformFileDialogHelper / QFileDialogOptions
@@ -61,7 +72,12 @@ namespace cicadaqt {
 
     bool AppFileDialogs::available() const
     {
-#ifdef CICADA_QT_HAVE_PLATFORM_FILE_DIALOG
+        /*
+         * 只有 Windows 走 C++ 的原生对话框（见文件头的"平台范围"）：
+         * macOS/Linux 上必须用 QML 的 FileDialog，否则就是在工作线程里碰
+         * AppKit / GDK —— 那是直接崩。
+         */
+#if defined(CICADA_QT_HAVE_PLATFORM_FILE_DIALOG) && defined(Q_OS_WIN)
         return true;
 #else
         return false;
@@ -96,7 +112,7 @@ namespace cicadaqt {
         return runDialog(true, tr("选择视频文件夹"), startPath, QStringList{});
     }
 
-#ifdef CICADA_QT_HAVE_PLATFORM_FILE_DIALOG
+#if defined(CICADA_QT_HAVE_PLATFORM_FILE_DIALOG) && defined(Q_OS_WIN)
 
     namespace {
 
@@ -514,11 +530,14 @@ namespace cicadaqt {
         return QString();
     }
 
-#else// CICADA_QT_HAVE_PLATFORM_FILE_DIALOG
+#else// 不是 Windows，或没有 QtGui 私有头
 
     /*
-     * 没有 QtGui 私有头（老 Qt / 精简安装）时的退化实现：什么都不做，返回空串。
-     * QML 侧通过 available() == false 会走回原来的 QML FileDialog 路径，功能不丢。
+     * 退化实现：什么都不做，返回空串。两种情况会落到这里：
+     *   * 不是 Windows —— 见文件头的"平台范围"，C++ 原生对话框只在 Windows 上启用
+     *     （macOS/Linux 的工作线程方案会崩在 AppKit/GDK 的主线程要求上）；
+     *   * Windows 上没装 QtGui 私有头（老 Qt / 精简安装）。
+     * QML 侧通过 available() == false 会走回 QML FileDialog 路径，功能不丢。
      */
     QString AppFileDialogs::runDialog(bool selectDirectory, const QString &title,
                                       const QString &startPath, const QStringList &nameFilters)
@@ -527,12 +546,12 @@ namespace cicadaqt {
         (void) startPath;
         (void) nameFilters;
 
-        setLastError(tr("这个 Qt 构建没有原生对话框支持（缺 QtGui 私有头）"));
+        setLastError(tr("这个平台没有启用 C++ 原生对话框（仅 Windows），或缺少 QtGui 私有头"));
         AF_LOGW("AppFileDialogs: compiled without platform file dialog support, "
                 "QML falls back to QtQuick.Dialogs (%s)\n", title.toUtf8().constData());
         return QString();
     }
 
-#endif// CICADA_QT_HAVE_PLATFORM_FILE_DIALOG
+#endif// CICADA_QT_HAVE_PLATFORM_FILE_DIALOG && Q_OS_WIN
 
 }// namespace cicadaqt
