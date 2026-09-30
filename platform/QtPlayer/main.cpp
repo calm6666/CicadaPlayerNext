@@ -56,6 +56,15 @@
 #include <dbghelp.h>
 #endif
 
+#ifdef Q_OS_MACOS
+/* 崩溃时打印调用栈 —— 和 Windows 那边的 cicadaUnhandledException 对等，
+ * 见下面 installMacCrashHandlers 的说明。 */
+#include <execinfo.h>
+#include <csignal>
+#include <cstring>
+#include <unistd.h>
+#endif
+
 #include <utils/frame_work_log.h>
 #include <render/renderFactory.h>
 
@@ -804,6 +813,111 @@ namespace {
 }// namespace
 #endif// Q_OS_WIN
 
+#ifdef Q_OS_MACOS
+namespace {
+
+    /*
+     * ================== macOS 的崩溃处理器 ==================
+     *
+     * 与 Windows 那边（SetUnhandledExceptionFilter + dbghelp，见上面那段）对等：
+     * macOS 上进程崩了，日志会在崩溃前那一行**直接断掉**，调用栈只存在于
+     * ~/Library/Logs/DiagnosticReports/appQtPlayer-*.ips 里 —— 排查时得另外去翻。
+     * 这里把栈直接写进 stderr 和单一日志文件（installFrameworkLogFile 那个出口），
+     * 一份日志就能定位"崩在哪"。
+     *
+     * 注意：信号处理器里能安全调用的函数很少，这里用的 write()/backtrace_symbols()
+     * 属于尽力而为（后者内部会 malloc）—— 目的是把现场留下来，不会比默认行为更差。
+     */
+    void crashWrite(const char *text)
+    {
+        if (text == nullptr) {
+            return;
+        }
+
+        const size_t len = strlen(text);
+        ssize_t ignored = write(STDERR_FILENO, text, len);
+        (void) ignored;
+
+        if (g_cicadaLogFile != nullptr) {
+            fputs(text, g_cicadaLogFile);
+            fflush(g_cicadaLogFile);
+        }
+    }
+
+    void crashDumpBacktrace()
+    {
+        void *frames[64];
+        const int count = backtrace(frames, 64);
+
+        if (count <= 0) {
+            crashWrite("[crash] （拿不到调用栈）\n");
+            return;
+        }
+
+        char **symbols = backtrace_symbols(frames, count);
+
+        if (symbols != nullptr) {
+            for (int i = 0; i < count; ++i) {
+                if (symbols[i] != nullptr) {
+                    crashWrite(symbols[i]);
+                    crashWrite("\n");
+                }
+            }
+
+            free(symbols);
+        } else {
+            /* 符号化失败也不能什么都没有：至少把地址写出来 */
+            backtrace_symbols_fd(frames, count, STDERR_FILENO);
+            crashWrite("[crash] backtrace_symbols 失败，栈地址已写到 stderr\n");
+        }
+    }
+
+    void cicadaFatalSignalHandler(int sig, siginfo_t *info, void *context)
+    {
+        (void) context;
+
+        char header[192];
+        snprintf(header, sizeof(header), "\n[crash] fatal signal %d (%s) faultAddr=%p\n",
+                 sig, strsignal(sig), info != nullptr ? info->si_addr : nullptr);
+        crashWrite(header);
+
+        crashDumpBacktrace();
+        crashWrite("[crash] 结束（系统崩溃报告在 ~/Library/Logs/DiagnosticReports/appQtPlayer-*.ips）\n");
+
+        /* 恢复默认处理并重发，让系统照常生成崩溃报告 */
+        signal(sig, SIG_DFL);
+        raise(sig);
+    }
+
+    void cicadaMacTerminateHandler()
+    {
+        crashWrite("\n[crash] std::terminate：未捕获的 C++ 异常（多半是内存/越界）\n");
+
+        crashDumpBacktrace();
+
+        _exit(3);
+    }
+
+    void installMacCrashHandlers()
+    {
+        struct sigaction action;
+        memset(&action, 0, sizeof(action));
+        action.sa_sigaction = cicadaFatalSignalHandler;
+        action.sa_flags = SA_SIGINFO | SA_RESETHAND;
+        sigemptyset(&action.sa_mask);
+
+        const int signals[] = {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT};
+
+        for (int sig : signals) {
+            sigaction(sig, &action, nullptr);
+        }
+
+        std::set_terminate(cicadaMacTerminateHandler);
+    }
+
+}// namespace
+#endif// Q_OS_MACOS
+
 int main(int argc, char *argv[])
 {
     /*
@@ -825,6 +939,11 @@ int main(int argc, char *argv[])
     /* CRT 堆发现越界写的那一刻也打栈（fail-fast 会绕过 SEH，只能靠这个钩子） */
     installCrtHeapReportHook();
 #endif
+#endif
+
+#ifdef Q_OS_MACOS
+    /* 崩溃/未捕获异常时把调用栈打进日志（见 installMacCrashHandlers 的说明） */
+    installMacCrashHandlers();
 #endif
 
     QGuiApplication app(argc, argv);

@@ -1675,6 +1675,25 @@ namespace Cicada {
         void sendMediaFrameToCache(const IAFPacket *frame, StreamType type);
         void ReleaseCacheManager();
 #endif
+
+        /*
+         * 【切档时 meta 还不完整 ⇒ 把"原地重建解码器"推迟到新档第一个包】
+         *
+         * 真机现象（2026-09-30 22:02，DASH output.mpd，h265-854_480 → h265-1920_1080）：
+         * 切档那一刻 DashStream::GetStreamMeta() 里 mPDemuxer 还是空的（新档的 init 段要等
+         * 读线程 ~200 ms 后才解析出来），拿到的 meta 只有清单信息、**extradata 为空**；
+         * 此时重建 VideoToolbox 会话只能沿用旧档的参数集 ⇒ 新档每个关键帧都回
+         * kVTVideoDecoderBadDataErr(-12909) ⇒ 解码器在 ~3 s 里丢掉 1000+ 帧 ⇒ 读线程一路
+         * 冲到第 8 片（42 s）⇒ 主时钟才 3.7 s，read-ahead gate 判定"视频超前 38 s"把视频
+         * 掐死 ⇒ 画面卡住、随后闪退。内容本身没问题（已核对分段 tfdt：第 1 片 0 s、
+         * 第 8 片 42.042 s；MPD 六个档共用同一条 SegmentTimeline）。
+         *
+         * 处置：meta 缺 extradata 时**不当场重建**，只置这一位；新档第一个视频包到达时
+         * （那时 init 段早已解析完、meta 完整）再重建。**纯事件驱动**：没有计时器、
+         * 没有阈值、没有重试。追加在成员列表最末尾（本工程硬规则：只有追加才是增量
+         * ABI 安全的）。
+         */
+        bool mVideoDecoderRebuildPending{false};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

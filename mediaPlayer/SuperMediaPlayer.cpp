@@ -3931,6 +3931,27 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
 
     if (pVideoPacket != nullptr) {
         /*
+         * 【切档那一跳重建解码器：推迟到这个包的现场来做】
+         *
+         * 见 switchVideoStream() 里 mVideoDecoderRebuildPending 的说明：切档那一刻新档的
+         * meta 还没有 extradata（init 段由读线程稍后解析），按它重建会沿用旧档参数集，
+         * 新档会整段判坏数据。这里已经是"新档第一个视频包到手"的时刻 —— meta 完整了，
+         * 必须在把这一包交给解码器**之前**重建。
+         */
+        if (mVideoDecoderRebuildPending && mVideoSwitchInFlight &&
+            pVideoPacket->getInfo().streamIndex == mCurrentVideoIndex) {
+            mVideoDecoderRebuildPending = false;
+            AF_LOGI("quality switch: first packet of stream %d arrived — rebuilding the in-place decoder now "
+                    "(the target stream meta carries the init segment's parameter sets by now)\n",
+                    mCurrentVideoIndex);
+
+            if (rebuildVideoDecoder(false) < 0) {
+                AF_LOGW("quality switch: deferred in-place decoder rebuild failed for stream %d\n",
+                        mCurrentVideoIndex);
+            }
+        }
+
+        /*
          * ============ 【B9】"视频原始 pts → 节目轴"的偏移必须**跟着分段走** ============
          *
          * 真机证据（2026-09-25 13:47，DASH `output.mpd`，8 档）：同一个档每次 seek 落点报出来的
@@ -6902,6 +6923,9 @@ void SuperMediaPlayer::SwitchVideo(int64_t switchPos)
      * 置假并 stop（`HLSManager.cpp:398-422`），否则两路包会混进同一条队列。
      * 关的只是这一路视频流，音频是另一路、有自己的 selected，不受影响。
      */
+    /* 上一次切档如果没走到"新档第一个包"就结束了，这里清掉残留的推迟标记（见成员说明）。 */
+    mVideoDecoderRebuildPending = false;
+
     const int oldStreamIndex = mCurrentVideoIndex;
 
     if (oldStreamIndex >= 0 && oldStreamIndex != targetStreamIndex && mDemuxerService != nullptr) {
@@ -6983,7 +7007,24 @@ void SuperMediaPlayer::SwitchVideo(int64_t switchPos)
                 "SINGLE decoder is rebuilt, never a second one\n",
                 (int) newMeta.codec, newMeta.width, newMeta.height);
 
-        if (rebuildVideoDecoder(false) < 0) {
+        /*
+         * 【meta 里还没有 extradata ⇒ 不能现在重建】
+         *
+         * 切档这一刻新流刚 OpenStream + Seek 完，而它的 init 段是**读线程**随后解析的
+         * （DashStream::GetStreamMeta 里 mPDemuxer 非空才会带出 extradata）。此刻重建
+         * VideoToolbox 会话只能沿用旧档的参数集，新档每个关键帧都会判坏数据；解码器随即
+         * 丢掉成百上千帧，读线程趁这段时间冲到很远的分片（实测冲到第 8 片 42 s），主时钟
+         * 还停在切换点，read-ahead gate 就永久掐住视频 —— 表现为"切完清晰度画面不动"。
+         *
+         * 所以这种情况把重建推迟到**新档第一个视频包**（DecodeVideoPacket 里那一跳）：
+         * 那时 init 段已经解析完，meta 完整，重建出来的会话才是对的。纯事件驱动，无计时器。
+         */
+        if (newMeta.extradata == nullptr || newMeta.extradata_size == 0) {
+            AF_LOGI("quality switch: the target stream meta carries no extradata yet (its init segment is "
+                    "parsed by the read thread) — deferring the in-place decoder rebuild to the first packet "
+                    "of the new stream\n");
+            mVideoDecoderRebuildPending = true;
+        } else if (rebuildVideoDecoder(false) < 0) {
             AF_LOGW("switch video: in-place decoder rebuild failed for stream %d\n", targetStreamIndex);
             mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
                                                  "in-place decoder rebuild failed");
