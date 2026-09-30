@@ -44,6 +44,33 @@ function create_cmake_config(){
    echo "set(SRC_LIBRARIES_DIR ${SRC_LIBRARIES_DIR})" >>$CONFIG_FILE
 }
 
+# ffmpeg 的静态库里会出现**同一个目标文件被收进两个库**的情况，而 framework 是
+# `-all_load` 全量拉取（为了让框架导出所有符号），两份就会撞成
+#     duplicate symbol '_ff_frame_pool_get' in libavfilter.a[..](framepool.o)
+#                                       libswscale.a[..](framepool.o)
+# 实测（ffmpeg 9 源码树）：framepool.o 同时出现在 libavfilter.a 与 libswscale.a，
+# 两份定义的符号集合完全一致（ff_frame_pool_get / _audio_reinit / _video_reinit /
+# _uninit）。这里在链接前把其中一份删掉 —— 保留 libswscale.a 里那份（它自己要引用），
+# libavfilter 的引用会解析到同一个符号。删完必须重跑 ranlib（否则 ld 的归档索引还是旧的）。
+#
+# 为什么不用链接选项去"容忍重复"：`-multiply_defined,suppress` 在新版 ld64 上已经被
+# 弱化/移除，写进去可能反而报"unknown option"，所以从**归档本身**去掉重复才是稳的。
+function dedupe_ffmpeg_archives(){
+    local lib_dir="$1"
+    local obj="framepool.o"
+    local aff="${lib_dir}/libavfilter.a"
+    local swf="${lib_dir}/libswscale.a"
+
+    [ -f "${aff}" ] && [ -f "${swf}" ] || return 0
+
+    if ar t "${aff}" 2>/dev/null | grep -qx "${obj}" && \
+       ar t "${swf}" 2>/dev/null | grep -qx "${obj}"; then
+        echo "== 去掉重复对象：ar d libavfilter.a ${obj}（同名对象保留在 libswscale.a 里）"
+        ar d "${aff}" "${obj}" || return 1
+        ranlib "${aff}" 2>/dev/null || true
+    fi
+}
+
 #build to ffmpeg
 function build_shared_framework(){
     #
@@ -100,6 +127,9 @@ function build_shared_framework(){
     fi
     MAC_ARCH=$(uname -m)
     SRC_LIBRARIES_DIR="$CWD/install/ffmpeg/Darwin/${MAC_ARCH}/lib"
+
+    # 链接前先去重（见上面 dedupe_ffmpeg_archives 的说明：framepool.o 在两个库里各一份）
+    dedupe_ffmpeg_archives "$SRC_LIBRARIES_DIR"
 
     for support_lib in ${support_libs}
     do
