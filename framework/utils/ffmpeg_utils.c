@@ -40,7 +40,9 @@ static void ffmpeg_log_back(void *ptr, int level, const char *fmt, va_list vl)
     __log_print(AF_LOG_LEVEL_DEBUG, "FFMPEG", "%s", line);
 }
 
-static void ffmpeg_init_once()
+/* 参数列表写全 (void): pthread_once 要的是 void (*)(void), 空参数表在 C 里是"未指定",
+ * MSVC 会为这个不匹配报 C4113。 */
+static void ffmpeg_init_once(void)
 {
     AF_LOGI("Ffmpeg version %s", av_version_info());
     // av_lockmgr_register / av_register_all were removed in FFmpeg 5.0:
@@ -897,7 +899,7 @@ bool updateH26xHeader2xxc(AVCodecParameters *par)
 
     extradata_size = avio_close_dyn_buf(pb, &extradata);
 
-    if (extradata > 0) {
+    if (extradata != NULL) {
         av_free(par->extradata);
         par->extradata = av_realloc(extradata, extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
         par->extradata_size = extradata_size;

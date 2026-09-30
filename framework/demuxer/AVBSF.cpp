@@ -158,22 +158,51 @@ namespace Cicada {
                 continue;
             }
 
-            // 找到下一个 start code（00 00 01 或 00 00 00 01）
+            /*
+             * 找下一个 start code（00 00 01 或 00 00 00 01）。
+             *
+             * 【原来这里在吃字节】扫描条件是 nal_end + 3 <= end，退出时 nal_end 最多停在
+             * end - 2；而"最后一个 NAL 后面没有 start code"恰恰是最常见的情况，于是
+             * **每个包的最后 2 字节被丢掉**。H.264 一个访问单元的最后一个 NAL 通常就是
+             * slice，截掉 2 字节 = 整包损坏：VideoToolbox 一律回
+             * kVTVideoDecoderBadDataErr(-12909)，一帧都出不来；hw 失败后切软件解码也照样
+             * 解不出来 —— 因为数据本来就坏了（日志里 errorFrames=1002、零输出，就是这个）。
+             *
+             * 一个 3 字节 start code 至少要占 3 字节，所以扫到 end - 3 已足以判定"后面没有
+             * start code"；这种情况 NAL 的末尾就是整包的末尾。顺带：包尾那几个零字节是
+             * NAL 自己的数据（不能像"下一个 start code 的前导零"那样剥掉）。
+             */
             const uint8_t *nal_end = nal_start;
+            bool foundNextStartCode = false;
+
             while (nal_end + 3 <= end) {
                 if (nal_end[0] == 0 && nal_end[1] == 0 &&
                     (nal_end[2] == 1 ||
                      (nal_end + 3 < end && nal_end[2] == 0 && nal_end[3] == 1))) {
+                    foundNextStartCode = true;
                     break;
                 }
                 nal_end++;
             }
-            // 剥离 NAL 尾部属于下一个 start code 前导的零字节
-            while (nal_end > nal_start && nal_end[-1] == 0) {
-                nal_end--;
+
+            if (!foundNextStartCode) {
+                /* 包里最后一个 NAL：一直到包尾，一个字节都不能少 */
+                nal_end = end;
+            } else {
+                /* 下一个 start code 的前导零字节不属于这个 NAL */
+                while (nal_end > nal_start && nal_end[-1] == 0) {
+                    nal_end--;
+                }
             }
 
             int nal_len = (int) (nal_end - nal_start);
+            p = nal_end;
+
+            /* 空 NAL（连续两个 start code）不写出 0 长度项：那是非法 AVCC，解码器会直接拒包 */
+            if (nal_len <= 0) {
+                continue;
+            }
+
             uint8_t *new_dst = (uint8_t *) av_realloc(dst, dst_size + 4 + nal_len);
             if (new_dst == nullptr) {
                 av_free(dst);
@@ -183,8 +212,6 @@ namespace Cicada {
             AV_WB32(dst + dst_size, nal_len);
             memcpy(dst + dst_size + 4, nal_start, nal_len);
             dst_size += 4 + nal_len;
-
-            p = nal_end;
         }
 
         if (dst == nullptr) {
