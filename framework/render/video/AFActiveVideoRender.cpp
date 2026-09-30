@@ -81,8 +81,20 @@ void AFActiveVideoRender::releaseFrames()
     unsigned long long dropped = 0;
 
     if (mRendingFrame) {
+        /*
+         * 【只标记丢弃，绝不在这里 delete —— 这是真机崩溃的根因】
+         *
+         * mVSync->pause() 只保证 VSync 线程停在**安全点**，并不保证它没停在 onVSync
+         * 回调内部：那一帧（"已从队列取走、还没交给 deviceRenderFrame"）此刻可能正被
+         * 回调使用。原来这里 `mRendingFrame = nullptr`（= 立刻释放）就会让 onVSync
+         * 拿着已释放的帧继续跑 —— 真机崩溃栈正是
+         *     AFActiveVideoRender::onVSync → abort（libsystem_malloc，堆错误），
+         * 而且是延迟十几秒才被 malloc 发现。
+         *
+         * 析构函数（本文件 :23-25）用的就是"只 setDiscard(true)"，这里与它对齐：
+         * 真正的释放交给 VSync 线程自己按 discard 完成。
+         */
         mRendingFrame->setDiscard(true);
-        mRendingFrame = nullptr;
         dropped++;
     }
 
