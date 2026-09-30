@@ -157,10 +157,10 @@ namespace Cicada {
 
         int invokeComponent(std::string content) override;
 
-        void SetAudioRenderingCallBack(onRenderFrame cb, void *userData)
+        void SetAudioRenderingCallBack(onRenderFrame cb, void *userData) override
         {}
 
-        void SetVideoRenderingCallBack(videoRenderingFrameCB cb, void *userData)
+        void SetVideoRenderingCallBack(videoRenderingFrameCB cb, void *userData) override
         {}
 
         void SetUpdateViewCB(UpdateViewCB cb, void *userData) override

@@ -153,7 +153,9 @@ PBAFFrame::operator AVAFFrame *()
         pFrame = pyvFrame;
     }
     pFrame->pts = mInfo.pts;
-    pFrame->pkt_duration = mInfo.duration;
+    // FFmpeg 7.0 删除了 AVFrame::pkt_duration, 统一用 duration(语义相同),
+    // 与 AVAFPacket::copyInfo 里的写法保持一致。
+    pFrame->duration = mInfo.duration;
     pFrame->chroma_location = static_cast<AVChromaLocation>(mInfo.video.colorInfo.chroma_location);
     pFrame->color_primaries = static_cast<AVColorPrimaries>(mInfo.video.colorInfo.color_primaries);
     pFrame->color_range = static_cast<AVColorRange>(mInfo.video.colorInfo.color_range);

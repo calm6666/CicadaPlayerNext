@@ -14,7 +14,9 @@ NS_ASSUME_NONNULL_BEGIN
 @interface AppleAVPlayerLayerProcessor : NSObject
 
 @property (nonatomic, strong) CALayer *parentLayer;
-@property (nonatomic, strong) AVPlayerLayer *playerLayer;
+// playerLayer 会被 removePlayerLayer 置空(表示当前不挂任何 layer), 所以它是
+// nullable; NS_ASSUME_NONNULL_BEGIN 下的默认 nonnull 会让置空产生 -Wnonnull。
+@property (nonatomic, strong, nullable) AVPlayerLayer *playerLayer;
 
 @property (nonatomic, assign) ScaleMode scaleMode;
 @property (nonatomic, assign) MirrorMode mirrorMode;
