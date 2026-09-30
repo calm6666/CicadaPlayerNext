@@ -98,7 +98,23 @@ case "$DEPLOY_DIR" in /*) ;; *) DEPLOY_DIR="${SRC_DIR}/${DEPLOY_DIR}" ;; esac
 # 2. 选 Qt
 # ---------------------------------------------------------------------------
 is_qt6()      { [ -d "$1/lib/cmake/Qt6" ]; }
-is_static_qt() { [ -f "$1/lib/libQt6Core.a" ] || [ -f "$1/lib/libQt6Core_debug.a" ]; }
+# 判"这份 Qt 是不是静态"：
+#   * 非 framework 的静态 Qt：lib/libQt6Core.a；
+#   * **macOS 上很常见的静态 framework**：lib/QtCore.framework/QtCore 是一个 ar 归档
+#     （动态 Qt 在同一个位置是 Mach-O dylib）。只看 libQt6Core.a 会把这种静态 Qt
+#     误判成"不是静态"从而拒绝，所以这里用 file(1) 看文件类型。
+is_static_qt() {
+    local q="$1"
+    [ -f "$q/lib/libQt6Core.a" ] && return 0
+    [ -f "$q/lib/libQt6Core_debug.a" ] && return 0
+
+    local fw="$q/lib/QtCore.framework/QtCore"
+    [ -f "$fw" ] || fw="$q/lib/QtCore.framework/Versions/A/QtCore"
+    [ -f "$fw" ] || return 1
+
+    file -b "$fw" 2>/dev/null | grep -qi 'archive' && return 0
+    return 1
+}
 
 if [ -n "$QT_PREFIX_ARG" ]; then
     QT_PREFIX="$QT_PREFIX_ARG"
