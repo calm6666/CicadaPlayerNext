@@ -44,6 +44,9 @@ add_subdirectory(${TOP_DIR}/plugin plugin.out)
 add_compile_options(-x objective-c++)
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fobjc-abi-version=2 -fobjc-arc")
+# .mm/.m 由 OBJCXX/OBJC 语言规则编译, 不会继承 C/CXX 的编译参数, 需要单独打开 ARC。
+set(CMAKE_OBJC_FLAGS "${CMAKE_OBJC_FLAGS} -fobjc-arc")
+set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -fobjc-abi-version=2 -fobjc-arc")
 
 include_directories(
         ./thumbnail

@@ -141,6 +141,10 @@ set(SOURCE_FILES
 if(APPLE)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-arc")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fobjc-arc")
+    # .mm/.m 由 OBJCXX/OBJC 语言规则编译, 不会继承 C/CXX 的编译参数,
+    # 必须单独打开 ARC, 否则 __weak/__strong 会报 manual reference counting 错误。
+    set(CMAKE_OBJC_FLAGS "${CMAKE_OBJC_FLAGS} -fobjc-arc")
+    set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -fobjc-arc")
     set(SOURCE_FILES ${SOURCE_FILES}
             externalPlayer/AppleAVPlayer.mm
             externalPlayer/AppleAVPlayer.h
