@@ -100,6 +100,39 @@ namespace cicadaqt {
         return true;
     }
 
+    void CicadaTextureMetal::releaseInputState()
+    {
+        if (d == nullptr || d->cache == nullptr) {
+            return;
+        }
+
+        /*
+         * 1) 缓存里**没在用**的条目全部放掉（正在被采样的那些 CVMetalTextureCacheFlush
+         *    自己会留着，所以这一步不会给 Qt 抽底）。
+         */
+        CVMetalTextureCacheFlush(d->cache, 0);
+
+        /*
+         * 2) 帧环只保留**最新**那一帧：Qt 的场景图是异步的，上一帧的命令缓冲可能还在执行，
+         *    对应的 IOSurface 映射不能提前释放；更老的两帧已经没有使用者了。
+         *    （d->next 指向"下一个要写的槽"，所以最新那一帧在 (next + 2) % 3。）
+         */
+        const int newest = (d->next + 2) % 3;
+        int dropped = 0;
+
+        for (int i = 0; i < 3; ++i) {
+            if (i != newest && d->refs[i] != nullptr) {
+                CFRelease(d->refs[i]);
+                d->refs[i] = nullptr;
+                ++dropped;
+            }
+        }
+
+        AF_LOGI("[mem] releaseInputState: flushed the Metal texture cache and dropped %d old "
+                "CVPixelBuffer reference(s) (newest frame kept: Qt may still be sampling it)\n",
+                dropped);
+    }
+
     void CicadaTextureMetal::releaseResources()
     {
         if (d == nullptr) {

@@ -432,7 +432,25 @@ namespace cicadaqt {
             planes = swFrame->data;
             lineSizes = swFrame->linesize;
             sourceFormat = static_cast<AVPixelFormat>(swFrame->format);
-        } else if (isGpuOnlyPixelFormat(info.video.format)) {
+        } else if (isGpuOnlyPixelFormat(info.video.format)
+#if defined(__APPLE__)
+                   /*
+                    * 【2026-09-30 · macOS 对齐 · P0 修复】Apple 的 CVPixelBuffer 帧不能被这条
+                    * 3b 拦住。
+                    *
+                    * 3b 的语义是"这是 GPU 原生帧、又拿不到池子信息 ⇒ 绝不能把 data[0] 当像素
+                    * 喂 swscale"。而 AF_PIX_FMT_APPLE_PIXEL_BUFFER 虽然被 isGpuOnlyPixelFormat
+                    * 收录，它其实是**可以**在 CPU 侧读的：下面 3c 里那段 #if __APPLE__ 分支会用
+                    * PBAFFrame 的转换运算符把 CVPixelBuffer 拷成普通 CPU 帧。3b 在 3c 之前，
+                    * 于是那段分支**永远不可达**，macOS 截图/悬停预览一直是空图。
+                    *
+                    * 这里用 #if defined(__APPLE__) 把这一条排除掉（**只影响 Apple**：
+                    * 在 Windows/Android 上枚举值虽然合法，但根本不会出现在这条路上，
+                    * 而且这个 #if 让判定逐字不变，不动跨平台的截图行为）。
+                    */
+                   && info.video.format != AF_PIX_FMT_APPLE_PIXEL_BUFFER
+#endif
+                  ) {
             /*
              * 3b) 是 GPU 原生帧但没有池子信息（正常不该发生）：**绝不能**把 data[0]
              *     当像素交给 swscale，宁可给一张空图。

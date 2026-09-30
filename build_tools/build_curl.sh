@@ -3,6 +3,38 @@
 source cross_compile_env.sh
 source native_compile_env.sh
 
+#
+# Apple 平台的 TLS 后端选项名。
+#
+# curl **7.81** 起把 Darwin 的 TLS 后端从 `--with-darwinssl` 改名为
+# `--with-secure-transport`。老名字在新版里是**无法识别的选项**：autotools 只会打一条
+# "unrecognized options" 警告然后继续，结果一个 TLS 后端都没选中，configure 直接失败：
+#     configure: error: select TLS backend(s) or disable TLS with --without-ssl.
+# 本仓库锁的是 curl-8_14_1（external/player_git_source_list.sh:105），必须用新名字；
+# 这里按源码里的 curlver.h 探一次版本，兼容还在用 7.x 源码树的场景。
+function curl_apple_tls_option(){
+    local header="${CURL_SOURCE_DIR}/include/curl/curlver.h"
+    local major=0
+    local minor=0
+
+    if [ -f "${header}" ]; then
+        major=$(sed -n 's/^#define LIBCURL_VERSION_MAJOR *\([0-9][0-9]*\).*/\1/p' "${header}" | head -1)
+        minor=$(sed -n 's/^#define LIBCURL_VERSION_MINOR *\([0-9][0-9]*\).*/\1/p' "${header}" | head -1)
+    fi
+
+    # 探不到版本时按"新名字"给（本仓库唯一的版本就是 8.14.1）
+    if [ -z "${major}" ]; then
+        major=8
+        minor=0
+    fi
+
+    if [ "${major}" -gt 7 ] || { [ "${major}" -eq 7 ] && [ "${minor}" -ge 81 ]; }; then
+        echo "--with-secure-transport"
+    else
+        echo "--with-darwinssl"
+    fi
+}
+
 function build_curl(){
     if [ ! -f ${CURL_SOURCE_DIR}/configure ]
     then
@@ -41,7 +73,7 @@ function build_curl(){
         export LDFLAGS="-arch $2 --sysroot=$SYSROOT"
         export CC=clang
         if [[ "${SSL_USE_NATIVE}" == "TRUE" ]];then
-            ssl_opt="--with-darwinssl"
+            ssl_opt="$(curl_apple_tls_option)"
         fi
     elif [[ "$1" == "win32" ]];then
         cross_compile_set_platform_win32 $2
@@ -49,7 +81,7 @@ function build_curl(){
     elif [[ "$1" == "Darwin" ]];then
         LIBSDEPEND="LIBS=-lresolv"
         if [[ "${SSL_USE_NATIVE}" == "TRUE" ]];then
-            ssl_opt="--with-darwinssl"
+            ssl_opt="$(curl_apple_tls_option)"
         fi
         print_warning "native build curl for $1 $2"
         native_compile_set_platform_macOS $2
@@ -60,7 +92,7 @@ function build_curl(){
     elif [ "$1" == "maccatalyst" ];then
         LIBSDEPEND="LIBS=-lresolv"
         if [[ "${SSL_USE_NATIVE}" == "TRUE" ]];then
-            ssl_opt="--with-darwinssl"
+            ssl_opt="$(curl_apple_tls_option)"
         fi
         cross_compile_set_platform_maccatalyst "$2"
         export CFLAGS="${CPU_FLAGS}"

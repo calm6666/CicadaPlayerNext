@@ -311,15 +311,27 @@ namespace cicadaqt {
         if (m_d3d11) {
             m_d3d11->releaseInputView();
         }
+#elif defined(Q_OS_MACOS)
+        /*
+         * macOS：同上一条契约，但**放的东西不一样**。
+         *
+         * D3D11 那边解码器的整池 surface 装在我们自己的输出纹理里，输入视图是唯一外部
+         * 引用；macOS 这边我们包的**就是** VideoToolbox 的 CVPixelBuffer（IOSurface），
+         * 钉住它的是 CVMetalTextureCache 的缓存条目 + 帧环里那几个 CVMetalTextureRef。
+         * 关解码器之前同样要放，否则解码器的缓冲池跨代际留着。
+         *
+         * 具体怎么放、为什么不能"全放"（正在被采样的纹理不能抽底）写在
+         * CicadaTextureMetal::releaseInputState() 上 —— 那一头是权威。
+         */
+        if (m_metal) {
+            m_metal->releaseInputState();
+        }
 #endif
 
         /*
-         * macOS / Linux 是有意的空实现：本次要修的保留问题（整池表面纹理被一个
-         * 输入视图钉住）是 D3D11 特有的 —— 只有 FFmpeg 的 d3d11va 才是"一个
-         * ID3D11Texture2D 装 20 个 surface"。Metal / VAAPI 那两个后端这一轮没有实测过，
-         * 不能凭空写一个"释放"动作（放错了会当场黑屏或崩）。
-         * 以后真在那两个平台上量到"停播后显存不回收"，要在各自后端里加同名方法
-         * （例如清掉 Metal 纹理缓存里对应解码器的条目），而不是在这里瞎放东西。
+         * Linux/VAAPI 仍是有意的空实现：这一轮没有在 VAAPI 上实测过，不凭空写"释放"动作
+         * （放错了会当场花屏或崩）。以后真在那边量到"停播后显存不回收"，在它自己的后端里
+         * 加同名方法，而不是在这里瞎放东西。
          *
          * 注意：这里**不碰** m_prepared / m_zeroCopyActive —— 那两个是给
          * startPlaybackWhenReady() 判断"要不要开 direct_texture"用的，动了就会

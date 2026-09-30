@@ -60,6 +60,28 @@ namespace cicadaqt {
          */
         QSGTexture *textureForFrame(QQuickWindow *window, IAFFrame *frame, bool *flipVertically);
 
+        /*
+         * 渲染线程：**解码代际结束**时放掉我们替解码器握着的那些缓冲引用。
+         *
+         * 为什么需要它（和 Windows 那条 `releaseInputView()` 是**同一件事的两端**）：
+         * D3D11 那边解码器的 20 片 surface 装在**我们自己**的一张输出纹理里，输入视图
+         * 是唯一的外部引用；而 macOS 这边我们包的是 **VideoToolbox 自己的
+         * CVPixelBuffer（IOSurface）**，持有者是
+         *   * CVMetalTextureCache 里的缓存条目，以及
+         *   * 帧环 d->refs[3] 里的 CVMetalTextureRef。
+         * 这两者都钉着 IOSurface ⇒ 解码器的缓冲池不能复用/释放。所以关解码器之前同样
+         * 要放掉它们。
+         *
+         * 与 Windows 的**关键差别**（照抄 Windows 会花屏/崩）：这边包出来的 MTLTexture
+         * 不是拷贝，就是解码器那块内存。所以不能"全部放掉"：
+         *   * CVMetalTextureCacheFlush(cache, 0) 只清**没在用**的缓存条目 —— 正在被采样的
+         *     那些它自己会留着，安全；
+         *   * 帧环里**保留最新那一帧**（Qt 的场景图是异步的，上一帧的命令缓冲可能还在跑），
+         *     只放掉更老的两帧。
+         * 这样既把"跨解码代际的多余引用"清干净，又不给正在采样的纹理抽底。
+         */
+        void releaseInputState();
+
         void releaseResources();
 
         const char *backendName() const

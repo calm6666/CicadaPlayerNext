@@ -25,6 +25,14 @@ PBAFFrame::PBAFFrame(CVPixelBufferRef pixelBuffer, int64_t pts, int64_t duration
         mInfo.video.colorRange = COLOR_RANGE_FULL;
     } else if (pixel_format == kCVPixelFormatType_420YpCbCr8BiPlanarVideoRange) {
         mInfo.video.colorRange = COLOR_RANGE_LIMITIED;
+    } else if (pixel_format == kCVPixelFormatType_32BGRA) {
+        /*
+         * 【2026-09-30 · macOS 对齐】32BGRA 是 **RGB（打包）**，没有"有限/全范围"那一说，
+         * 一律按 FULL 记：Qt 播放器会强制 VideoToolbox 直出 32BGRA（零拷贝那条路要求
+         * 单平面纹理），CPU 回退/截图都从这一帧来；这里报 UNSPECIFIED 会让下游
+         * （swscale / 统计面板）按"未知"处理，截图与画面颜色就会对不上。
+         */
+        mInfo.video.colorRange = COLOR_RANGE_FULL;
     } else {
         mInfo.video.colorRange = COLOR_RANGE_UNSPECIFIED;
     }
@@ -86,6 +94,22 @@ PBAFFrame::operator AVAFFrame *()
         format = AV_PIX_FMT_NV12;
     } else if (pixel_format == kCVPixelFormatType_420YpCbCr8Planar) {
         format = AV_PIX_FMT_YUV420P;
+    } else if (pixel_format == kCVPixelFormatType_32BGRA) {
+        /*
+         * 【2026-09-30 · macOS 对齐 · 这一条是 P0 修复】
+         *
+         * Qt 播放器为了让 Metal 零拷贝能直接用一张普通纹理采样，**强制** VideoToolbox
+         * 输出 32BGRA（见 CicadaPlayerItem.cpp 里设 pixelBufferOutputFormat 的那一段）。
+         * 而这里原来只认 NV12 / YUV420P，32BGRA 直接 return nullptr ⇒
+         *   · CPU 回退（CicadaVideoTexture 的 textureForFrameCpu）拿不到帧，
+         *     配上门面里"运行期零拷贝失败就永久切 CPU"的判定 ⇒ **画面永久冻结**；
+         *   · 截图（CicadaVideoRender 的 3c 分支）同样拿不到 CPU 像素 ⇒ 永远空图。
+         *
+         * 32BGRA 是非平面（打包）格式，所以下面 CVPixelBufferIsPlanar() 走 else，
+         * 用 GetBaseAddress/GetBytesPerRow 拿一整块，av_image_copy 按 AV_PIX_FMT_BGRA
+         * 拷就行（swscale 那条链本来就吃 BGRA）。
+         */
+        format = AV_PIX_FMT_BGRA;
     } else {
         return nullptr;
     }
