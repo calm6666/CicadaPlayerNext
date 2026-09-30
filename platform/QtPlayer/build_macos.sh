@@ -9,6 +9,8 @@
 #     ./build_macos.sh --deploy /tmp/out   # 部署到指定目录
 #     ./build_macos.sh --debug             # Debug 构建
 #     ./build_macos.sh --clean             # 删掉构建目录重新配置
+#     ./build_macos.sh --qt-prefix ~/Qt/6.8.0/macos   # 指定 Qt 前缀（跳过自动探测）
+#     ./build_macos.sh --build-dir build/macos-static # 指定构建目录（deploy_macos.sh 用）
 #
 # Qt 怎么找（按顺序）：
 #   1. 环境变量 QTDIR（例：export QTDIR=~/Qt/6.11.1/macos）—— Qt 官网安装包用这个；
@@ -43,6 +45,11 @@ BUILD_TYPE="Release"
 DO_DEPLOY=0
 DO_CLEAN=0
 EXTRA_PREFIX=""
+# 命令行指定的 Qt 前缀（空 = 走下面的自动探测）。deploy_macos.sh 用它把"静态/动态"
+# 那条 Qt 前缀传进来，而不用在这里再抄一份探测逻辑。
+QT_PREFIX_OVERRIDE=""
+# deploy_macos.sh 传进来的构建目录（把它动态/静态分开：build/macos 与 build/macos-static）。
+DO_CLEAN_REQUESTED_DIR=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -51,12 +58,32 @@ while [ $# -gt 0 ]; do
                    if [ $# -ge 2 ] && [ "${2#-}" = "$2" ]; then
                        DEPLOY_DIR="$2"; shift
                    fi ;;
+        --qt-prefix)
+                   if [ $# -ge 2 ] && [ -n "$2" ]; then
+                       QT_PREFIX_OVERRIDE="$2"; shift
+                   else
+                       echo "[ERROR] --qt-prefix 需要目录参数" >&2; exit 1
+                   fi ;;
+        --build-dir)
+                   if [ $# -ge 2 ] && [ -n "$2" ]; then
+                       DO_CLEAN_REQUESTED_DIR="$2"; shift
+                   else
+                       echo "[ERROR] --build-dir 需要目录参数" >&2; exit 1
+                   fi ;;
         --clean)   DO_CLEAN=1 ;;
         -h|--help) sed -n '2,40p' "$0"; exit 0 ;;
         *) echo "[ERROR] 未知参数: $1（--help 看用法）" >&2; exit 1 ;;
     esac
     shift
 done
+
+# --build-dir 要在"默认值"之后生效（也允许相对路径）
+if [ -n "$DO_CLEAN_REQUESTED_DIR" ]; then
+    case "$DO_CLEAN_REQUESTED_DIR" in
+        /*) BUILD_DIR="$DO_CLEAN_REQUESTED_DIR" ;;
+        *)  BUILD_DIR="${SRC_DIR}/${DO_CLEAN_REQUESTED_DIR}" ;;
+    esac
+fi
 
 if [ -z "$DEPLOY_DIR" ]; then
     DEPLOY_DIR="${SRC_DIR}/deploy"
@@ -86,7 +113,15 @@ fi
 # 2. 找 Qt
 # ---------------------------------------------------------------------------
 QT_PREFIX=""
-if [ -n "${QTDIR:-}" ] && [ -d "${QTDIR}/lib/cmake/Qt6" ]; then
+if [ -n "${QT_PREFIX_OVERRIDE}" ]; then
+    # 命令行指定优先：不再做任何"猜"，但目录必须真的是一份 Qt6 安装。
+    if [ ! -d "${QT_PREFIX_OVERRIDE}/lib/cmake/Qt6" ]; then
+        echo "[ERROR] --qt-prefix 指向的目录里没有 lib/cmake/Qt6：${QT_PREFIX_OVERRIDE}" >&2
+        exit 1
+    fi
+    QT_PREFIX="${QT_PREFIX_OVERRIDE}"
+    echo "== 命令行指定的 Qt: ${QT_PREFIX}"
+elif [ -n "${QTDIR:-}" ] && [ -d "${QTDIR}/lib/cmake/Qt6" ]; then
     QT_PREFIX="${QTDIR}"
 else
     for q in qmake6 qmake; do
