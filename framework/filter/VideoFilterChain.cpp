@@ -25,7 +25,7 @@ VideoFilterChain::~VideoFilterChain()
 void VideoFilterChain::addFilter(const std::string &target, std::unique_ptr<IVideoFilter> videoFilter)
 {
     videoFilter->setCurrentTarget(target);
-    mVideoFiltersMap[target] = move(videoFilter);
+    mVideoFiltersMap[target] = std::move(videoFilter);
 }
 
 int VideoFilterChain::push(std::unique_ptr<IAFFrame> &frame)

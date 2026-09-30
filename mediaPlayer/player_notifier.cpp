@@ -517,7 +517,7 @@ namespace Cicada {
                 }
             }
 
-            playerEvent = move(mEventQueue.front());
+            playerEvent = std::move(mEventQueue.front());
             mEventQueue.pop_front();
         }
 

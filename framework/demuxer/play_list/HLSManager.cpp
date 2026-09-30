@@ -289,7 +289,7 @@ namespace Cicada {
                 if (i->mPStream->isOpened() && i->selected && i->mPFrame != nullptr && !i->eos) {
                     if (i->mPFrame->getInfo().streamIndex == index) {
                         pFrameOut = i->mPFrame.get();
-                        packet = move(i->mPFrame);
+                        packet = std::move(i->mPFrame);
                         break;
                     }
                 }
@@ -308,7 +308,7 @@ namespace Cicada {
                 }
 
                 if (pFrameOut == i->mPFrame.get()) {
-                    packet = move(i->mPFrame);
+                    packet = std::move(i->mPFrame);
                     break;
                 }
             }

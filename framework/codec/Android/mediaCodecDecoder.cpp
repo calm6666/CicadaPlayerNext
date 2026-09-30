@@ -302,7 +302,7 @@ namespace Cicada {
                 memcpy(data + vps_data_size + sps_data_size, pps_data, pps_data_size);
 
                 csd0->setScd("csd-0", data, data_size);
-                mCSDList.push_back(move(csd0));
+                mCSDList.push_back(std::move(csd0));
 
                 av_free(vps_data);
                 av_free(sps_data);
@@ -325,10 +325,10 @@ namespace Cicada {
                 mCSDList.clear();
                 std::unique_ptr<CodecSpecificData> csd0 = std::unique_ptr<CodecSpecificData>(new CodecSpecificData());
                 csd0->setScd("csd-0", sps_data, sps_data_size);
-                mCSDList.push_back(move(csd0));
+                mCSDList.push_back(std::move(csd0));
                 std::unique_ptr<CodecSpecificData> csd1 = std::unique_ptr<CodecSpecificData>(new CodecSpecificData());
                 csd1->setScd("csd-1", pps_data, pps_data_size);
-                mCSDList.push_back(move(csd1));
+                mCSDList.push_back(std::move(csd1));
 
                 av_free(sps_data);
                 av_free(pps_data);
@@ -364,13 +364,13 @@ namespace Cicada {
                 mCSDList.clear();
                 std::unique_ptr<CodecSpecificData> csd0 = std::unique_ptr<CodecSpecificData>(new CodecSpecificData());
                 csd0->setScd("csd-0", csd, kCsdLength);
-                mCSDList.push_back(move(csd0));
+                mCSDList.push_back(std::move(csd0));
             } else {
                 isADTS = false;
                 mCSDList.clear();
                 std::unique_ptr<CodecSpecificData> csd0 = std::unique_ptr<CodecSpecificData>(new CodecSpecificData());
                 csd0->setScd("csd-0", (void *) extradata, extradata_size);
-                mCSDList.push_back(move(csd0));
+                mCSDList.push_back(std::move(csd0));
             }
             return;
         } else if (meta->codec == AF_CODEC_ID_VP8) {
@@ -386,7 +386,7 @@ namespace Cicada {
             mCSDList.clear();
             std::unique_ptr<CodecSpecificData> csd0 = std::unique_ptr<CodecSpecificData>(new CodecSpecificData());
             csd0->setScd("csd-0", (void *) extradata, extradata_size);
-            mCSDList.push_back(move(csd0));
+            mCSDList.push_back(std::move(csd0));
         } else {
             return;
         }

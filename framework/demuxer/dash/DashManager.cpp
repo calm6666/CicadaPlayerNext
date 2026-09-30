@@ -294,7 +294,7 @@ int DashManager::ReadPacket(unique_ptr<IAFPacket> &packet, int index)
             if (i->mPStream->isOpened() && i->selected && i->mPFrame != nullptr && !i->eos) {
                 if (i->mPFrame->getInfo().streamIndex == index) {
                     pFrameOut = i->mPFrame.get();
-                    packet = move(i->mPFrame);
+                    packet = std::move(i->mPFrame);
                     break;
                 }
             }
@@ -302,7 +302,7 @@ int DashManager::ReadPacket(unique_ptr<IAFPacket> &packet, int index)
     } else {
         for (auto &i : mStreamInfoList) {
             if (pFrameOut == i->mPFrame.get()) {
-                packet = move(i->mPFrame);
+                packet = std::move(i->mPFrame);
                 break;
             }
         }

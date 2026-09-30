@@ -231,7 +231,7 @@ int FfmpegMuxer::writeFrame(unique_ptr<IAFPacket> packetPtr)
 
 int FfmpegMuxer::muxPacket(unique_ptr<IAFPacket> packet)
 {
-    return writeFrame(move(packet));
+    return writeFrame(std::move(packet));
 }
 
 int FfmpegMuxer::close()

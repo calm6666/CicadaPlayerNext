@@ -181,7 +181,7 @@ namespace Cicada {
 
                 if (packet->getInfo().pts + info.mDelay + packet->getInfo().duration >= pts) {
                     mListener.onRender(true, packet);
-                    info.mSubtitleShowedQueue.push_back(move(info.mPacket));
+                    info.mSubtitleShowedQueue.push_back(std::move(info.mPacket));
                 } else {
                     AF_LOGD("drop the late subtitle %lld", packet->getInfo().pts);
                     info.mPacket = nullptr;

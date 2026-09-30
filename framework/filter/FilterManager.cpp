@@ -69,23 +69,23 @@ void FilterManager::setupFilterChains()
             AF_LOGI("textureFilter chain add : %s for %s", targetFilter->getName().c_str(), target.c_str());
 
             targetFilter->setOption("useFeature", AfString::to_string(IVideoFilter::Feature::Texture), "");
-            textureFilterChain->addFilter(target, move(targetFilter));
+            textureFilterChain->addFilter(target, std::move(targetFilter));
 
         } else if ((filterFeature & IVideoFilter::Feature::Buffer) && filter->isFeatureSupported(IVideoFilter::Feature::Buffer)) {
             AF_LOGI("bufferFilter chain add : %s for %s", targetFilter->getName().c_str(), target.c_str());
 
             targetFilter->setOption("useFeature", AfString::to_string(IVideoFilter::Feature::Buffer), "");
             if (targetFilter->init(0) /* not used */) {
-                bufferFilterChain->addFilter(target, move(targetFilter));
+                bufferFilterChain->addFilter(target, std::move(targetFilter));
             }
         }
     }
 
     if (!textureFilterChain->empty()) {
-        mFilterChains[IVideoFilter::Feature::Texture] = move(textureFilterChain);
+        mFilterChains[IVideoFilter::Feature::Texture] = std::move(textureFilterChain);
     }
     if (!bufferFilterChain->empty()) {
-        mFilterChains[IVideoFilter::Feature::Buffer] = move(bufferFilterChain);
+        mFilterChains[IVideoFilter::Feature::Buffer] = std::move(bufferFilterChain);
     }
 
     for (auto &iter : mFilterChains) {

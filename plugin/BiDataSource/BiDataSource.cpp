@@ -101,7 +101,7 @@ void BiDataSource::addSource(unique_ptr<source> &pSource)
     pSource->mDataSource->Set_config(mConfig);
     pSource->mDataSource->Interrupt(mInterrupt);
     unique_lock<mutex> uMutex(mSourceMutex);
-    mSources.push_back(move(pSource));
+    mSources.push_back(std::move(pSource));
 }
 
 int BiDataSource::Open(const std::string &url)

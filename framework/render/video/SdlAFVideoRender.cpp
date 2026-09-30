@@ -242,7 +242,7 @@ int SdlAFVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
              * 【flush 必须把手上的帧放干净】frame == nullptr 就是"清空视频路"这个
              * 既有语义（flushVideoRender() 用的就是它），而 mBackFrame 是**比
              * mLastVideoFrame 活得久**的那一份（onVSyncInner 末尾
-             * `mBackFrame = move(frame)`）—— 原来那次 flush 只放 mLastVideoFrame，
+             * `mBackFrame = std::move(frame)`）—— 原来那次 flush 只放 mLastVideoFrame，
              * 于是"放完"之后渲染器手里还留着一帧旧解码器的输出：切档时它钉着旧池，
              * 关窗时它钉到渲染器析构为止。既然是 flush，就把两帧一起放掉。
              *
@@ -344,7 +344,7 @@ int SdlAFVideoRender::onVSyncInner(int64_t tick)
             return 0;
         }
 
-        frame = move(mLastVideoFrame);
+        frame = std::move(mLastVideoFrame);
     }
 #ifdef __APPLE__
     auto *pBFrame = dynamic_cast<PBAFFrame *>(frame.get());
@@ -457,7 +457,7 @@ int SdlAFVideoRender::onVSyncInner(int64_t tick)
         if (mListener && frame) {
             mListener->onFrameInfoUpdate(frame->getInfo(), true);
         }
-        mBackFrame = move(frame);
+        mBackFrame = std::move(frame);
     }
     return 0;
 }

@@ -150,7 +150,7 @@ int CacheFileRemuxer::muxThreadRun()
 
             } else {
                 unique_ptr<FrameInfo> &frameInfo = mFrameInfoQueue.front();
-                int ret = mMuxer->muxPacket(move(frameInfo->frame));
+                int ret = mMuxer->muxPacket(std::move(frameInfo->frame));
                 mFrameInfoQueue.pop_front();
 
                 if (ret < 0) {

@@ -242,7 +242,7 @@ int ActiveDecoder::thread_send_packet(unique_ptr<IAFPacket> &packet)
             flush_decoder();
         }
 
-        mHoldingQueue.push(move(packet));
+        mHoldingQueue.push(std::move(packet));
         return 0;
     }
 

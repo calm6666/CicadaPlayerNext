@@ -440,7 +440,7 @@ int DashStream::createDemuxer()
             }
 
             if (needUpdateMeta) {
-                mDemuxerMeta->meta.push_back(move(meta));
+                mDemuxerMeta->meta.push_back(std::move(meta));
             }
 
             mDemuxerMeta->bContinue = true;
@@ -617,7 +617,7 @@ int DashStream::read_thread()
 
     if ((nullptr != tmp) && (nullptr != tmp->getData()) && (0 < tmp->getSize())) {
         std::unique_lock<std::mutex> waitLock(mDataMutex);
-        mQueue.push_back(move(tmp));
+        mQueue.push_back(std::move(tmp));
     } else if (nullptr != tmp) {
         AF_LOGE("read_thread frame size be set as 0");
         return 0;
@@ -686,7 +686,7 @@ int DashStream::read(unique_ptr<IAFPacket> &packet)
             }
         }
 
-        packet = move(mQueue.front());
+        packet = std::move(mQueue.front());
         mQueue.pop_front();
         ret = static_cast<int>(packet->getSize());
         mWaitCond.notify_one();

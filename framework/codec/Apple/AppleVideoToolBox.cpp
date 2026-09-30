@@ -502,7 +502,7 @@ namespace Cicada {
         parser->getPictureSize(meta->width, meta->height);
 
         if (mParser) {
-            mParser = move(parser);
+            mParser = std::move(parser);
         }
 
         CM_NULLABLE CMVideoFormatDescriptionRef videoFormatDesRef{nullptr};
@@ -737,14 +737,14 @@ namespace Cicada {
                 mReorderedQueue.push(unique_ptr<IAFFrame>(avframe));
             } else {
                 std::unique_lock<std::mutex> uMutex(mReorderMutex);
-                mReorderedQueue.push(move(frame));
+                mReorderedQueue.push(std::move(frame));
             }
             if (mBUsePoc) {
                 mOutputPoc = mapKey;
             }
         } else {
             std::unique_lock<std::mutex> uMutex(mReorderMutex);
-            mReorderFrameMap[mapKey] = move(frame);
+            mReorderFrameMap[mapKey] = std::move(frame);
         }
 
         push_to_recovery_queue(unique_ptr<IAFPacket>(packet));
@@ -779,7 +779,7 @@ namespace Cicada {
         int64_t duration = presentationDuration.value * (1000000.0 / presentationDuration.timescale);
         int64_t pts = presentationTimeStamp.value * (1000000.0 / presentationTimeStamp.timescale);
         pbafFrame = unique_ptr<PBAFFrame>(new PBAFFrame(imageBuffer, pts, duration, ((Stream_meta *) (*(decoder->mPInMeta)))->color_info));
-        return decoder->onDecoded(packet, move(pbafFrame), status);
+        return decoder->onDecoded(packet, std::move(pbafFrame), status);
     }
 
     int AFVTBDecoder::dequeue_decoder(unique_ptr<IAFFrame> &pFrame)
@@ -788,7 +788,7 @@ namespace Cicada {
         std::unique_lock<std::mutex> uMutex(mReorderMutex);
 
         if (!mReorderedQueue.empty()) {
-            pFrame = move(mReorderedQueue.front());
+            pFrame = std::move(mReorderedQueue.front());
             mReorderedQueue.pop();
             return 0;
         }
@@ -819,7 +819,7 @@ namespace Cicada {
             auto *frame = (AVAFFrame *) (*pbafFrame);
             pFrame = unique_ptr<IAFFrame>(frame);
         } else {
-            pFrame = move(*(mReorderFrameMap.begin())).second;
+            pFrame = std::move(*(mReorderFrameMap.begin())).second;
         }
 
         mReorderFrameMap.erase(mReorderFrameMap.begin());
@@ -830,14 +830,14 @@ namespace Cicada {
     {
         // push the RecoveringQueue to RecoveryQueue
         while (!mRecoveringQueue.empty()) {
-            mRecoveryQueue.push(move(mRecoveringQueue.front()));
+            mRecoveryQueue.push(std::move(mRecoveringQueue.front()));
             mRecoveringQueue.pop();
         }
 
         assert(mRecoveringQueue.empty());
 
         while (!mRecoveryQueue.empty()) {
-            mRecoveringQueue.push(move(mRecoveryQueue.front()));
+            mRecoveringQueue.push(std::move(mRecoveryQueue.front()));
             mRecoveryQueue.pop();
         }
     }
@@ -853,7 +853,7 @@ namespace Cicada {
             }
         }
 
-        mRecoveryQueue.push(move(pPacket));
+        mRecoveryQueue.push(std::move(pPacket));
     }
 
     void AFVTBDecoder::flushReorderQueue()
@@ -866,7 +866,7 @@ namespace Cicada {
                 frame->getInfo().timePosition = pbafFrame->getInfo().timePosition;
                 mReorderedQueue.push(unique_ptr<IAFFrame>(frame));
             } else {
-                mReorderedQueue.push(move(*(mReorderFrameMap.begin())).second);
+                mReorderedQueue.push(std::move(*(mReorderFrameMap.begin())).second);
             }
 
             mReorderFrameMap.erase(mReorderFrameMap.begin());

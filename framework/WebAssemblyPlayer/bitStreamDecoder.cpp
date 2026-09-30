@@ -123,7 +123,7 @@ namespace Cicada {
         int ret = mDemuxer.ReadPacket(pkt, 0);
 
         if (ret > 0) {
-            mPacketQues[pkt->getInfo().streamIndex].push(move(pkt));
+            mPacketQues[pkt->getInfo().streamIndex].push(std::move(pkt));
         } else if (ret == 0) {
             inPutEOS = true;
             mListener.onEOS(eosTypeDemuxer);
@@ -188,7 +188,7 @@ namespace Cicada {
             return;
         }
 
-        pkt = move(mPacketQues[stream].front());
+        pkt = std::move(mPacketQues[stream].front());
         mPacketQues[stream].pop();
 
         do {
