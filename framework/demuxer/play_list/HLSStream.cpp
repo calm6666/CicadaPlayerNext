@@ -806,7 +806,13 @@ namespace Cicada {
 
         if (ret < 0) {
             AF_LOGE("open key file error\n");
-            return ret;
+            /*
+             * 原来是 `return ret;`: 函数返回 bool, 负的 ret 会被隐式转成 **true**,
+             * 调用方 (updateSegDecrypter / updateSampleAesDecrypter) 看到 true 就以为
+             * "key 已经换好了", 于是拿一份根本没读到的 mKey 去解整段(黑屏/花屏)。
+             * 失败就是失败 —— 返回 false, 让读段那两条路走"没有 decrypter"的分支。
+             */
+            return false;
         }
 
         int64_t size = 0;
@@ -825,7 +831,8 @@ namespace Cicada {
             AF_LOGE("key size is %d not 16\n", size);
 //                    delete mSegKeySource;
             mSegKeySource->Close();
-            return -1;
+            /* 和上面那条一样: -1 在这个 bool 函数里会被隐式转成 true(见上一条注释) */
+            return false;
         }
 
         mSegKeySource->Close();
@@ -863,11 +870,17 @@ namespace Cicada {
                 mSegDecrypter->SetOption("decryption key", mKey, 16);
             }
 
-            if (updateIV()) {
+            /*
+             * 这两处都要判空: updateKey() 现在会真的返回 false(key 打不开 / 长度不是 16),
+             * 那时 mSegDecrypter 还没建出来 —— 原来正是因为"失败也返回 true"才没走到这里。
+             */
+            if (updateIV() && mSegDecrypter) {
                 mSegDecrypter->SetOption("decryption IV", &mCurrentEncryption.iv[0], 16);
             }
 
-            mSegDecrypter->flush();
+            if (mSegDecrypter) {
+                mSegDecrypter->flush();
+            }
 
             if (mDRMMagicKey.empty() && mSegKeySource){
                 mDRMMagicKey = mSegKeySource->GetOption("drmMagicKey");
@@ -912,14 +925,14 @@ namespace Cicada {
             mSampeAesDecrypter->SetOption("decryption key", mKey, 16);
         }
 
-        if (updateIV()) {
-            assert(mSampeAesDecrypter != nullptr);
-
-            if (mSampeAesDecrypter) {
-                mSampeAesDecrypter->SetOption("decryption IV", &mCurrentEncryption.iv[0], 16);
+        /*
+         * 与 updateSegDecrypter 同理要判空: updateKey() 失败时 decrypter 还没建出来,
+         * 只靠 assert 不够 —— Release 下 assert 会被优化掉。
+         */
+        if (updateIV() && mSampeAesDecrypter) {
+            mSampeAesDecrypter->SetOption("decryption IV", &mCurrentEncryption.iv[0], 16);
 //                mSampeAesDecrypter->SetOption("decryption KEYFORMAT", (uint8_t *) mCurSeg->encryption.keyFormat.c_str(),
 //                                              (int) mCurSeg->encryption.keyFormat.length());
-            }
         }
         if (mDRMMagicKey.empty() && mSegKeySource) {
             mDRMMagicKey = mSegKeySource->GetOption("drmMagicKey");

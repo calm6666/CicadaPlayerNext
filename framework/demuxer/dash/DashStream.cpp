@@ -369,7 +369,13 @@ int DashStream::createDemuxer()
     mError = 0;
     mDataSourceError = 0;
 
-    if (mDemuxerMeta && mDemuxerMeta->id != mCurSeg->discontinuity) {
+    /*
+     * mCurSeg 是 DashSegment, 它的 discontinuity 是 **bool**(标记"这段之后有断层"),
+     * 而 DemuxerMeta::id 是 uint64 —— 本函数下面那段赋值就是把 bool 当 0/1 的序号存进去。
+     * 这里显式转一次: 一是消掉 MSVC 的 C4805(uint64 与 bool 混用不安全),
+     * 二是把"拿 bool 当序号"这件事写在脸上, 免得后来人以为是比较两个同类量。
+     */
+    if (mDemuxerMeta && mDemuxerMeta->id != static_cast<uint64_t>(mCurSeg->discontinuity)) {
         mDemuxerMeta = nullptr;
     }
 
