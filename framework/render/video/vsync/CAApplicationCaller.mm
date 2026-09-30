@@ -27,10 +27,6 @@
     return self;
 }
 
-- (void)dealloc {
-    [super dealloc];
-}
-
 - (void)startMainLoop {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (lisener) {
@@ -52,7 +48,10 @@
             lisener->VSyncOnDestroy();
         }
     });
-    [displayLink release];
+    // ARC 下不再手动 release; 但只把引用置空是不够的: run loop 还持有这个
+    // display link, 它会继续以 self 为目标回调(dealloc 之后就是野指针),
+    // 所以必须先 invalidate 摘掉注册, 再让 ARC 释放。
+    [displayLink invalidate];
     displayLink = nil;
 }
 

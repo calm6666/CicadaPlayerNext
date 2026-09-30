@@ -15,7 +15,9 @@
     bool isValid;
 }
 
-@property(nonatomic, assign) NSDate* liveResizeStart;
+// strong 而不是 assign: [NSDate date] 返回的是自动释放对象, assign 属性下
+// 池子一排水 liveResizeStart 就是野指针, 后面的 isLiveResize 判据会读它。
+@property(nonatomic, strong) NSDate* liveResizeStart;
 @end
 
 @implementation CicadaPlayerView

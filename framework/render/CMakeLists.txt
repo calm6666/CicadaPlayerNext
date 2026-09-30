@@ -77,6 +77,13 @@ endif ()
 if (APPLE)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -fobjc-arc")
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fobjc-arc")
+    # .mm/.m 由 OBJCXX/OBJC 语言规则编译, 不会继承 C/CXX 的参数。
+    # 本目录的 .mm 全部按 ARC 语义写的(__bridge 桥接、CFBridgingRetain、
+    # strong 属性), 漏掉这里会让桥接退化成空操作:
+    #   -Warc-bridge-casts-disallowed-in-nonarc, 且 __bridge_retained 不再持有;
+    #   -Wobjc-missing-super-calls 也只是 MRR 下的假象。
+    set(CMAKE_OBJC_FLAGS "${CMAKE_OBJC_FLAGS} -fobjc-arc")
+    set(CMAKE_OBJCXX_FLAGS "${CMAKE_OBJCXX_FLAGS} -fobjc-arc")
     list(APPEND SRC_FILES
             audio/Apple/AudioRenderType.h
             audio/Apple/AFAudioQueueRender.cpp
