@@ -171,8 +171,25 @@ namespace Cicada {
 
         mPInMeta = unique_ptr<streamMeta>(new streamMeta(meta));
         Stream_meta *pInmeta = (Stream_meta *) (*(mPInMeta));
-        pInmeta->extradata = new uint8_t[meta->extradata_size];
-        memcpy(pInmeta->extradata, meta->extradata, pInmeta->extradata_size);
+        /*
+         * extradata 的所有权归 streamMeta: streamMeta 析构时 releaseMeta() 用的是
+         * free()(framework/utils/mediaFrame.c:26), 所以这里必须用 av_malloc 配自己的一份,
+         * 不能用 new[](不配对的分配器, 释放时是 UB)。先把浅拷贝来的指针清掉,
+         * 免得分配失败时 streamMeta 去 free 调用方的内存。
+         */
+        pInmeta->extradata = nullptr;
+        pInmeta->extradata_size = 0;
+
+        if (meta->extradata != nullptr && meta->extradata_size > 0) {
+            pInmeta->extradata = static_cast<uint8_t *>(av_malloc(meta->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE));
+
+            if (pInmeta->extradata == nullptr) {
+                return -ENOMEM;
+            }
+
+            memcpy(pInmeta->extradata, meta->extradata, meta->extradata_size);
+            pInmeta->extradata_size = meta->extradata_size;
+        }
         pInmeta->lang = nullptr;
         pInmeta->description = nullptr;
         pInmeta->meta = nullptr;
@@ -946,9 +963,75 @@ namespace Cicada {
     void AFVTBDecoder::decoder_updateMetaData(const Stream_meta *meta)
     {
         Stream_meta *pMeta = ((Stream_meta *) (*(mPInMeta)));
+
+        /*
+         * 【画质切换必须重建 VT 会话 —— macOS 上"切档之后一帧都解不出来"的根因】
+         *
+         * SMPAVDeviceManager 复用解码器时(SMPAVDeviceManager.cpp 的 "reuse decoder" 分支)
+         * 只做 flush() + updateMetaData() + pause(false), **不会**再走 open()/init_decoder();
+         * 而复用判据 DecoderHandle::match() 只看 codec/设备/flags/dstFormat/drm —— 同一条
+         * 视频的两个码率档 codec 都是 HEVC, 于是 480p 切 1080p 也算"匹配", 走到这里。
+         *
+         * 但 VideoToolbox 的会话把格式描述(CMVideoFormatDescription, 由 extradata 的
+         * VPS/SPS/PPS + 宽高建出来)在创建那一刻**钉死**了: 拿旧会话去解新档的包, 每个
+         * 关键帧都回 kVTVideoDecoderBadDataErr(-12909), 接着 mThrowPacket 又把中间所有帧
+         * 丢掉, 下一个关键帧照样失败 —— 日志里 1000+ 错误帧、零输出、两次重建后报致命错误,
+         * 就是这条链。
+         *
+         * 所以这里必须判"格式变了没有"(extradata 或宽高), 变了就更新 meta 并关掉旧会话,
+         * 立刻按新格式描述重建。
+         */
+        bool formatChanged = false;
+
+        if (meta->extradata != nullptr && meta->extradata_size > 0) {
+            const bool sameExtra = pMeta->extradata != nullptr &&
+                                   pMeta->extradata_size == meta->extradata_size &&
+                                   memcmp(pMeta->extradata, meta->extradata, meta->extradata_size) == 0;
+            formatChanged = !sameExtra;
+        }
+
+        if (pMeta->width != meta->width || pMeta->height != meta->height) {
+            formatChanged = true;
+        }
+
+        /* 这三项与格式描述无关, 但也要跟着新档走(显示宽高比 / HDR 信息) */
         pMeta->displayHeight = meta->displayHeight;
         pMeta->displayWidth = meta->displayWidth;
         pMeta->color_info = meta->color_info;
+
+        if (!formatChanged) {
+            return;
+        }
+
+        pMeta->width = meta->width;
+        pMeta->height = meta->height;
+
+        if (meta->extradata != nullptr && meta->extradata_size > 0) {
+            void *newExtra = av_malloc(meta->extradata_size + AV_INPUT_BUFFER_PADDING_SIZE);
+
+            if (newExtra != nullptr) {
+                memcpy(newExtra, meta->extradata, meta->extradata_size);
+                free(pMeta->extradata);
+                pMeta->extradata = static_cast<uint8_t *>(newExtra);
+                pMeta->extradata_size = meta->extradata_size;
+            }
+        }
+
+        AF_LOGI("video format changed (%dx%d, extradata %d bytes): rebuilding the VideoToolbox session\n",
+                meta->width, meta->height, meta->extradata_size);
+
+        flushReorderQueue();
+        close_decoder();
+        resetPocInfo();
+        /*
+         * 立刻按新格式描述建会话; 万一失败也不要紧 —— enqueue_decoder() 里那句
+         * "mVTDecompressSessionRef == nullptr 就 init_decoder_internal()" 还会再补一次。
+         */
+        const int ret = init_decoder_internal();
+
+        if (ret < 0) {
+            AF_LOGE("rebuilding the VideoToolbox session after the format change failed: %d\n", ret);
+        }
     }
 
 }// namespace Cicada
