@@ -71,7 +71,9 @@ function create_cmake_config(){
    echo "set(SRC_LIBRARIES_DIR ${SRC_LIBRARIES_DIR})" >>"$CONFIG_FILE"
    echo "set(SRC_INCLUDE_DIR ${SRC_INCLUDE_DIR})" >>"$CONFIG_FILE"
    echo -n "set(LINK_FRAMEWORKS " >> "$CONFIG_FILE"
-   echo -n '"-framework Security -framework AudioToolbox"' >> "$CONFIG_FILE"
+   # SystemConfiguration：curl 的 macos.c 用 SCDynamicStoreCopyProxies 读系统代理，
+   # ios/catalyst 上同样要链进去（同 build_native.sh 里那一处的说明）。
+   echo -n '"-framework Security -framework AudioToolbox -framework SystemConfiguration"' >> "$CONFIG_FILE"
    echo  ")" >> "$CONFIG_FILE"
 }
 #build to ffmpeg

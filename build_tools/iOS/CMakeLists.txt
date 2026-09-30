@@ -9,7 +9,11 @@ if (IOS)
     set(IPHONEOS_DEPLOYMENT_TARGET 8.0)
     set(CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET ${IPHONEOS_DEPLOYMENT_TARGET})
 else ()
-    set(MACOSX_DEPLOYMENT_TARGET 10.11)
+    # 10.11 早已低于实际要求：CVMetalTextureCache 要 10.11、VideoToolbox 的 HEVC 探测
+    # 用 __builtin_available(macOS 10.13)、Qt 6.x 自身要求更高，而 arm64 的 Mac 起步就是
+    # 11.0。旧值会让 Xcode 每次都打 "deployment target 10.11 ... supported ... 10.13 to
+    # 15.x" 的警告，并让链接期出现"object 为新系统编的、却按 11.0 链接"的噪音。
+    set(MACOSX_DEPLOYMENT_TARGET 11.0)
     set(CMAKE_XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET ${MACOSX_DEPLOYMENT_TARGET})
 endif ()
 

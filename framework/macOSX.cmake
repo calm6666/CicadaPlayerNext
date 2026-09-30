@@ -1,6 +1,9 @@
 
 
-set(MACOSX_DEPLOYMENT_TARGET 10.11)
+# 最低系统版本：Metal / CVMetalTextureCache、VideoToolbox 的 HEVC 探测（__builtin_available
+# (macOS 10.13)）以及 Qt 6.x 自身都要求比 10.11 更高，而 arm64 的 Mac 起步就是 11.0。
+# 旧值 10.11 会让 Xcode 每次都报 "deployment target 10.11 ... supported ... 10.13 to 15.x"。
+set(MACOSX_DEPLOYMENT_TARGET 11.0)
 
 set(CMAKE_XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET ${MACOSX_DEPLOYMENT_TARGET})
 set(MAC_INSTALL_DIR ${CMAKE_CURRENT_LIST_DIR}/../external/install)

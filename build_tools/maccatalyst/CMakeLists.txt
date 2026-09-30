@@ -6,7 +6,9 @@ if (IOS)
     set(IPHONEOS_DEPLOYMENT_TARGET 9.0)
     set(CMAKE_XCODE_ATTRIBUTE_IPHONEOS_DEPLOYMENT_TARGET ${IPHONEOS_DEPLOYMENT_TARGET})
 else ()
-    set(MACOSX_DEPLOYMENT_TARGET 10.11)
+    # 同 build_tools/iOS/CMakeLists.txt：10.11 低于实际要求（Metal/VideoToolbox/Qt6，
+    # 且 arm64 Mac 起步 11.0），旧值会一直刷 deployment-target 警告。
+    set(MACOSX_DEPLOYMENT_TARGET 11.0)
     set(CMAKE_XCODE_ATTRIBUTE_MACOSX_DEPLOYMENT_TARGET ${MACOSX_DEPLOYMENT_TARGET})
 endif ()
 

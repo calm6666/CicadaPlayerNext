@@ -20,6 +20,11 @@ function create_cmake_config(){
    echo "find_library(COREVIDEO CoreVideo)" >> $CONFIG_FILE
    echo "find_library(COREFOUNDATION CoreFoundation)" >> $CONFIG_FILE
    echo "find_library(SECURITY Security)" >> $CONFIG_FILE
+   # SystemConfiguration：curl 的 macos.c（Curl_macos_init）用 SCDynamicStoreCopyProxies
+   # 读系统代理设置。少了它，链接 ffmpeg.framework 时会报
+   #     Undefined symbols for architecture arm64: "_SCDynamicStoreCopyProxies"
+   # （只在 macOS 上出现；iOS/catalyst 那两份脚本的 LINK_FRAMEWORKS 里同样要补。）
+   echo "find_library(SYSTEM_CONFIGURATION SystemConfiguration)" >> $CONFIG_FILE
    echo "find_library(LIBXML2 Xml2)" >> $CONFIG_FILE
    echo -n "set(SRC_LIBRARIES ${SRC_LIBRARIES}" >> $CONFIG_FILE
    echo -n ' ${AUDIO_TOOL_BOX}' >> $CONFIG_FILE
@@ -27,6 +32,7 @@ function create_cmake_config(){
    echo -n ' ${COREMEDIA}' >> $CONFIG_FILE
    echo -n ' ${COREVIDEO}' >> $CONFIG_FILE
    echo -n ' ${COREFOUNDATION}' >> $CONFIG_FILE
+   echo -n ' ${SYSTEM_CONFIGURATION}' >> $CONFIG_FILE
    if [[ "${SSL_USE_NATIVE}" == "TRUE" ]];then
       echo -n ' ${SECURITY}' >> $CONFIG_FILE
    fi
