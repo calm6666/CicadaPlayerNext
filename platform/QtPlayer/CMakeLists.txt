@@ -41,6 +41,27 @@ cmake_minimum_required(VERSION 3.16)
 project(QtPlayer VERSION 0.1 LANGUAGES CXX)
 
 # ===========================================================================
+# OBJCXX —— **和下面的静态/动态开关同一条规矩：必须在任何 add_subdirectory 之前**
+#
+# CMake 的"语言"是**目录作用域 + 向下继承**的：`enable_language(OBJCXX)` 只对**它之后**
+# 进入的子目录生效。而 .mm 不只在本目录编：
+#   * 本目录：src/CicadaTextureMetal.mm、src/CicadaQtTextureWrap.mm；
+#   * 3rdparty/qwindowkit：src/core/cocoawindowcontext.mm、src/core/style/styleagent_mac.mm
+#     —— 它是本文件下面 add_subdirectory(3rdparty/qwindowkit …) 进来的**子目录**。
+#
+# 原来这一句写在后面那段"平台源文件列表"里（在 add_subdirectory 之后），于是
+# qwindowkit 的 .mm 所在作用域压根没有 OBJCXX，configure 能过、**生成阶段**才炸：
+#     CMake Error: Error required internal CMake variable not set …
+#     Missing variable is: CMAKE_OBJCXX_COMPILE_OBJECT      （一次十几条）
+# 放到这里（project() 之后、第一个 add_subdirectory 之前）就对了。
+#
+# 只在 APPLE 上开：Windows/Linux 上没有 .mm，多开一门语言会拖慢配置。
+# ===========================================================================
+if (APPLE)
+    enable_language(OBJCXX)
+endif ()
+
+# ===========================================================================
 # 静态 / 动态 Qt —— **这个开关必须放在文件最前面，任何 add_subdirectory 之前**
 #
 # 用法（脚本 deploy_win.ps1 有对应的参数，见那个文件）：
