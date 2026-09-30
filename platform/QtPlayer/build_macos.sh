@@ -11,6 +11,8 @@
 #     ./build_macos.sh --clean             # 删掉构建目录重新配置
 #     ./build_macos.sh --qt-prefix ~/Qt/6.8.0/macos   # 指定 Qt 前缀（跳过自动探测）
 #     ./build_macos.sh --build-dir build/macos-static # 指定构建目录（deploy_macos.sh 用）
+#     ./build_macos.sh --static            # 这份 Qt 是静态 Qt（会传 -DCICADA_QT_STATIC=ON）
+#     ./build_macos.sh --shared            # 显式声明动态 Qt（-DCICADA_QT_STATIC=OFF）
 #
 # Qt 怎么找（按顺序）：
 #   1. 环境变量 QTDIR（例：export QTDIR=~/Qt/6.11.1/macos）—— Qt 官网安装包用这个；
@@ -48,6 +50,9 @@ EXTRA_PREFIX=""
 # 命令行指定的 Qt 前缀（空 = 走下面的自动探测）。deploy_macos.sh 用它把"静态/动态"
 # 那条 Qt 前缀传进来，而不用在这里再抄一份探测逻辑。
 QT_PREFIX_OVERRIDE=""
+# CICADA_QT_STATIC：CMakeLists 用它拦"开关与 Qt 实际形态不一致"（静态 Qt 必须 ON，否则
+# 静态插件没导入等一堆怪问题）。空 = 不传，交给 CMake 默认（OFF）。--static/--shared 会置它。
+QT_STATIC_OPT=""
 # deploy_macos.sh 传进来的构建目录（把它动态/静态分开：build/macos 与 build/macos-static）。
 DO_CLEAN_REQUESTED_DIR=""
 
@@ -64,6 +69,8 @@ while [ $# -gt 0 ]; do
                    else
                        echo "[ERROR] --qt-prefix 需要目录参数" >&2; exit 1
                    fi ;;
+        --static)  QT_STATIC_OPT="-DCICADA_QT_STATIC=ON" ;;
+        --shared)  QT_STATIC_OPT="-DCICADA_QT_STATIC=OFF" ;;
         --build-dir)
                    if [ $# -ge 2 ] && [ -n "$2" ]; then
                        DO_CLEAN_REQUESTED_DIR="$2"; shift
@@ -177,6 +184,9 @@ PREFIX_PATH="${QT_PREFIX}"
 CMAKE_ARGS=(-S "$SRC_DIR" -B "$BUILD_DIR" -G "$GENERATOR"
             "-DCMAKE_BUILD_TYPE=${BUILD_TYPE}"
             "-DCMAKE_PREFIX_PATH=${PREFIX_PATH}")
+
+# 静态/动态 Qt 必须和 CMakeLists 里那个守卫一致（见上面 QT_STATIC_OPT 的说明）
+[ -n "$QT_STATIC_OPT" ] && CMAKE_ARGS+=("$QT_STATIC_OPT")
 
 # 想指定架构（例如在 Apple Silicon 上编 x86_64）时：
 #     CMAKE_OSX_ARCHITECTURES=x86_64 ./build_macos.sh

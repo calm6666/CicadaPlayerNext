@@ -152,6 +152,14 @@ echo "== 部署目录: ${DEPLOY_DIR}"
 # 3. 编译 + cmake --install（全部交给 build_macos.sh，避免两份逻辑走偏）
 # ---------------------------------------------------------------------------
 BUILD_ARGS=(--deploy "$DEPLOY_DIR" --build-dir "$BUILD_DIR")
+# 静态/动态要一路传到 CMake：CMakeLists 里有个守卫会拦"开关与 Qt 实际形态不一致"
+# （静态 Qt 没有 -DCICADA_QT_STATIC=ON 会直接 FATAL_ERROR，报错原文就写着
+#  "deploy_win.ps1 -Static does it for you"）。所以这里按模式显式传。
+if [ "$MODE" = "static" ]; then
+    BUILD_ARGS+=(--static)
+else
+    BUILD_ARGS+=(--shared)
+fi
 [ "$BUILD_TYPE" = "Debug" ] && BUILD_ARGS+=(--debug)
 [ "$DO_CLEAN" = "1" ] && BUILD_ARGS+=(--clean)
 [ -n "$QT_PREFIX" ] && BUILD_ARGS+=(--qt-prefix "$QT_PREFIX")
