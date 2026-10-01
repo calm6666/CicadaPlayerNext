@@ -191,6 +191,19 @@ enum AFPixelFormat {
     AF_PIX_FMT_VAAPI = 902,       ///< Linux：data[3] = VASurfaceID（VAAPI 表面）
 
     AF_PIX_FMT_APPLE_PIXEL_BUFFER = 1000,
+
+    /*
+     * BGRA/RGBA 这一族（32 位打包）—— VideoToolbox 直出的 32BGRA CVPixelBuffer 走的就是它。
+     *
+     * 【为什么必须存在】macOS 零拷贝要求 VT 直出 32BGRA（单平面纹理），而截图 / CPU 回退
+     * 需要把这一帧落到 CPU 侧：如果框架里没有对应的 AF_PIX_FMT_* 值，`AVPixFmt2Cicada()`
+     * 只能返回 AF_PIX_FMT_NONE，未识别的格式继续流到 swscale 就会命中 FFmpeg 自己的断言
+     * （真机：Assertion desc failed at src/libswscale/swscale_internal.h:778 → SIGABRT）。
+     *
+     * 【为什么放在末尾并显式给值】枚举中间插值会改动其后所有枚举值（等于悄悄改 ABI 与
+     * 一切按整数值存储/比较的地方）；追加 + 显式值只新增，不动任何既有值。
+     */
+    AF_PIX_FMT_BGRA = 1001,
     AF_PIX_FMT_CICADA_AF,         //framework VideoFrame
     AF_PIX_FMT_CICADA_MEDIA_CODEC,//Android mediacodec buffer index
     AF_PIX_FMT_CICADA_TEXTURE,    //texture frame

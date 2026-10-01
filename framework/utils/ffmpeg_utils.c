@@ -487,6 +487,13 @@ static pix_fmt_pair pix_fmt_pair_table[] = {
          * 就是崩溃或者满屏花屏。
          */
         {AF_PIX_FMT_VAAPI, AV_PIX_FMT_VAAPI},
+        /*
+         * Apple 零拷贝：VideoToolbox 直出 32BGRA（PBAFFrame 里把 CVPixelBuffer 转成
+         * AVAFFrame 时用的就是 AV_PIX_FMT_BGRA）。**这一行是必须的** —— 缺了它
+         * AVPixFmt2Cicada(AV_PIX_FMT_BGRA) 会返回 AF_PIX_FMT_NONE，未知格式流到 swscale
+         * 就命中 FFmpeg 的 assert(desc) 并 abort（截图 / CPU 回退必现）。
+         */
+        {AF_PIX_FMT_BGRA, AV_PIX_FMT_BGRA},
 };
 
 int AVPixFmt2Cicada(enum AVPixelFormat fmt)
