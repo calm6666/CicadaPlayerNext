@@ -25,11 +25,14 @@
 // （渲染线程），见 prepare()。
 //
 // 线程约定：本文件所有函数只能在 Qt 的**渲染线程**上调用（updatePaintNode 里）。
+// 唯一的例外是 setColorAdjust()：它从 GUI 线程调（用户拖滑块），只写三个原子量，
+// 真正生效在渲染线程的 textureForFrame() 里（和 CicadaTextureD3D11 一样的写法）。
 //
 #ifndef CICADA_QT_CICADATEXTUREMETAL_H
 #define CICADA_QT_CICADATEXTUREMETAL_H
 
 #include <QtCore/QString>
+#include <atomic>
 
 class QQuickWindow;
 class QSGTexture;
@@ -90,6 +93,22 @@ namespace cicadaqt {
         }
 
         /*
+         * 视频色彩调整（右键菜单 →「视频色彩调整」）。
+         *
+         * 取值与 CicadaTextureD3D11::setColorAdjust() **完全同量纲**：0~200，100 = 中性。
+         * 可以**从 GUI 线程调**（拖滑块时），所以只写三个原子量；真正应用到 GPU 在渲染线程的
+         * textureForFrame() 里（见 .mm 里的实现说明）。
+         *
+         * macOS 的做法（和 Windows 一样是"GPU 上过一遍"，绝不落到 CPU）：
+         *   * 三个值**全中性时完全不进这条路** —— 仍旧把 VideoToolbox 的 MTLTexture 直接交给
+         *     Qt，零额外 pass、零额外开销，画面与没有这个功能时逐像素一致；
+         *   * 非中性时才用 Core Image 的 CIColorControls 在 GPU 上渲染到我们自己复用的一张
+         *     输出纹理（3 槽环，有界），再交给 Qt 场景图。
+         * 全程**零 CPU 下载**：没有 CVPixelBufferGetBaseAddress、没有 QImage、没有 swscale。
+         */
+        void setColorAdjust(float brightness, float contrast, float saturation);
+
+        /*
          * 实现细节（PIMPL）：结构体在 .mm 里定义，为的是把 Objective-C / CoreVideo
          * 的类型挡在头文件外面（这个头会被 C++ 的 .cpp 包含）。外部不要碰它。
          */
@@ -99,6 +118,24 @@ namespace cicadaqt {
     private:
         bool m_failed = false;
         bool m_loggedFirstFrame = false;
+
+        /*
+         * 色彩调整的三个值：GUI 线程写（拖滑块）、渲染线程读（每帧），所以是原子量。
+         * 取值 0~200，100 = 中性（和 CicadaTextureD3D11 一致）。
+         */
+        std::atomic<float> m_brightness{100.0f};
+        std::atomic<float> m_contrast{100.0f};
+        std::atomic<float> m_saturation{100.0f};
+
+        /*
+         * 三条**一次性**日志（绝不做每帧打印，拖滑块时更不能刷屏）：
+         *   * 第一次真的走 CIColorControls 那条额外 pass；
+         *   * 第一次从"有效果"回到中性（直通）；
+         *   * 第一次这一帧没能应用（画面仍旧走直通，不黑屏）。
+         */
+        bool m_loggedColorAdjustActive = false;
+        bool m_loggedColorAdjustBypass = false;
+        bool m_loggedColorAdjustFailure = false;
     };
 
 }// namespace cicadaqt

@@ -923,6 +923,10 @@ if (APPLE)
     #   VTPixelTransferSession（NV12 -> BGRA）与 CVMetalTextureCache。
     find_library(VIDEOTOOLBOX VideoToolbox)
     find_library(COREVIDEO CoreVideo)
+    # 视频色彩调整在 macOS 上走 Core Image 的 CIColorControls（CIContext / CIFilter / CIImage
+    # 都在这个框架里，见 src/CicadaTextureMetal.mm）。虽然 SDK 的 module map 通常会自动带上
+    # 这个 -framework，但显式写出来最稳：少了它就是链接期一堆 "Undefined symbols: OBJC_CLASS_$_CIContext"。
+    find_library(COREIMAGE CoreImage)
     target_link_libraries(appQtPlayer PUBLIC
             iconv
             bz2
@@ -931,6 +935,7 @@ if (APPLE)
             ${QUARTZCORE}
             ${VIDEOTOOLBOX}
             ${COREVIDEO}
+            ${COREIMAGE}
             )
 elseif (MSVC)
     # 什么都不加

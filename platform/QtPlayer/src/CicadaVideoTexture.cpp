@@ -505,6 +505,18 @@ namespace cicadaqt {
         if (m_d3d11) {
             m_d3d11->setColorAdjust(m_brightness.load(), m_contrast.load(), m_saturation.load());
         }
+#elif defined(Q_OS_MACOS)
+        /*
+         * macOS：同一条契约，转给 Metal 后端（它也只有 3 个原子量，可以从 GUI 线程写，
+         * 真正应用到 GPU 在渲染线程的 textureForFrame 里，见 CicadaTextureMetal）。
+         * 后端还没建（刚换过片源 / 还没开始渲染）时不用管：下一帧 textureForFrame() 会补上，
+         * 而且那时画面本来也还没出来。
+         */
+        if (m_metal) {
+            m_metal->setColorAdjust(static_cast<float>(m_brightness.load()),
+                                    static_cast<float>(m_contrast.load()),
+                                    static_cast<float>(m_saturation.load()));
+        }
 #endif
     }
 
@@ -526,12 +538,24 @@ namespace cicadaqt {
     bool CicadaVideoTexture::colorAdjustSupported() const
     {
         /*
-         * 目前只有 Windows 的 D3D11 零拷贝路径实现了（视频处理器的过滤器）。
-         * 其它后端（Metal / VAAPI / CPU 回退）要在各自的像素转换里另做，
-         * 所以这里如实返回 false —— 界面据此显示"当前后端不支持"。
+         * Windows：D3D11 视频处理器自带的过滤器。
+         * macOS：Metal 零拷贝路上的 Core Image CIColorControls（见 CicadaTextureMetal）。
+         * 两边都是**在 GPU 上过一遍**：不退出零拷贝、不做 CPU 下载、不额外拷贝回内存。
          */
 #if defined(Q_OS_WIN)
         return true;
+#elif defined(Q_OS_MACOS)
+        /*
+         * macOS 按**后端实际在不在**回答，而不是"编译进来就算支持"：
+         * 只有 Metal 零拷贝那条路才有这个能力（Core Image 渲染到我们复用的输出纹理）；
+         * 少数降级情况（场景图不是 Metal / CVMetalTextureCache 建不起来）会退回 CPU 路径，
+         * 那种情况下拖滑块确实不生效，所以如实返回 false，面板会显示"仅界面预览"。
+         *
+         * m_zeroCopyActive 由渲染线程写、这里（GUI 线程）读 —— 和本类既有的
+         * backendName() 是同一个读法；值变化时 CicadaPlayerItem 会发 backendChanged
+         * （第一帧渲染完、以及切换渲染路径时各发一次），QML 的绑定会跟着重新求值。
+         */
+        return m_zeroCopyActive;
 #else
         return false;
 #endif
