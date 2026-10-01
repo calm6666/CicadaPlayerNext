@@ -47,6 +47,16 @@
 #include <thread>
 #include <QtCore/QTimer>
 
+/*
+ * stderr 并进日志文件要用到的描述符 API：POSIX 是 dup2/unistd.h，
+ * Windows 是 _dup2/_fileno/io.h（见 installFrameworkLogFile 里那段说明）。
+ */
+#if defined(_WIN32)
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #ifdef Q_OS_WIN
 #include <windows.h>
 /* 枚举本进程所有线程（卡死时逐个走栈要用）。 */
@@ -381,6 +391,33 @@ namespace {
 
         std::printf("[log] 框架日志单文件出口：%s\n", qPrintable(path));
         AF_LOGI("[log] framework log file (single writer): %s\n", qPrintable(path));
+
+        /*
+         * ============ 【把 stderr 并进同一个日志文件：跨平台一句 dup2】============
+         *
+         * 为什么需要：崩溃报告（.ips）里对 abort 只记一句 "abort() called"，**原因那句人话
+         * 只写在 stderr** —— libc++ 的容器/边界硬化断言（`libc++abi: …`）、Qt 的
+         * `qFatal`（`QFATAL: …`）、malloc 的 `pointer being freed was not allocated`
+         * 全是 stderr。以前排查得单独 `2>&1 | tee` 一份控制台，只有 .ips 时看不到原因。
+         *
+         * 做法：把 stderr 这个**文件描述符**直接指向日志文件 —— 不建管道、不起线程、
+         * 不改任何写入方，之后所有 stderr 输出自动落到同一个文件里。
+         *
+         * 边界（都很重要）：
+         *   · **只重定向 stderr**：框架日志本身走 log_set_back 那个出口、stdout 保持原样，
+         *     所以控制台不会变哑，文件里也不会把框架日志重复一遍；
+         *   · Qt 的 qWarning/qCritical 由 cicadaQtMessageHandler 写进框架日志（见下面那段
+         *     说明），它不再额外写 stderr ⇒ 不会出现两份；
+         *   · 日志文件是行缓冲(_IOLBF) + 出错级别 fflush ⇒ 崩溃前那几行一定已经落盘；
+         *   · 想关掉：和日志文件同一套开关 —— `--log-file -` 或 `CICADA_LOG_FILE=-`。
+         *
+         * 追加在"两个出口都成功"之后：上面那两行启动信息仍然照常显示在控制台上。
+         */
+#if defined(_WIN32)
+        _dup2(_fileno(g_cicadaLogFile), 2);
+#else
+        dup2(fileno(g_cicadaLogFile), STDERR_FILENO);
+#endif
     }
 
 }// namespace
