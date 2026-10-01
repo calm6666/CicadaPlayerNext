@@ -330,7 +330,8 @@ Rectangle {
          * 整块 Text 都不显示，面板底部是干净的。
          *
          * 只删绿字、**保留**下面这条琥珀色的"后端不支持"提示：那种情况下拖滑块真的不动画面，
-         * 必须如实说，否则就是在骗用户（macOS Metal / Linux VAAPI / CPU 回退）。
+         * 必须如实说，否则就是在骗用户（Linux VAAPI / CPU 回退；macOS 已经实现了，
+         * 见 CicadaTextureMetal 的 Core Image CIColorControls）。
          */
         Text {
             width: parent.width - 40
@@ -339,7 +340,7 @@ Rectangle {
             wrapMode: Text.WordWrap
             color: "#e0c060"
             font.pixelSize: 11
-            text: qsTr("当前渲染后端（macOS Metal / Linux VAAPI / CPU 回退）尚未实现色彩调整，以上数值仅作界面预览。")
+            text: qsTr("当前渲染后端（Linux VAAPI / CPU 回退）尚未实现色彩调整，以上数值仅作界面预览。")
         }
 
         /* 重置：border-top + padding 8px 0，按钮底 hsla(0,0%,100%,.3) */

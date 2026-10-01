@@ -271,12 +271,23 @@ namespace cicadaqt {
  *   * seek 之后必须 avcodec_flush_buffers，否则收到的是 seek 之前的残留帧；
  *   * 最多读 128 个包就放弃：只有音频没有视频、或者关键帧损坏时不能无限循环。
  *
- * 【不要用它解进度条 hover 的图】缩略图只是"封面"，策略上允许退让；hover 预览
- * 应该是用户指着的那一帧，抽不到就该没有，不能偷偷换成别的画面。
+ * 【两个消费者，策略不同】"抽哪一帧"的策略留在各自的调用方，实现只有这一份：
+ *   * 首页封面 VideoLibrary::thumbnailFor()：允许退让（先试 2 秒，失败再试第 0 帧）；
+ *   * 进度条悬停预览 PreviewFrameSource：要的就是用户指着的那一帧，抽不到就该没有
+ *     （界面占位），**不能**偷偷换成别的画面 —— 所以那边一句退让都没有。
  * =========================================================================== */
 static QImage grabFrameAt(const QString &path, qint64 positionMs, const QSize &targetSize)
 {
     const QByteArray utf8Path = path.toUtf8();
+
+    /*
+     * 【独立会话】这一行是"预览抽帧与播放无关"的日志证据：每次调用都自己 avformat_open_input、
+     * 自己 seek、自己解一帧，走的是 libavformat + libavcodec + libswscale 的**软解**，
+     * 既不碰播放那块解码器（硬解零拷贝那条路照常跑），也不从渲染队列取帧。
+     */
+    AF_LOGI("local frame grab (independent session, software decode): \"%s\" @ %lld ms -> %dx%d\n",
+            utf8Path.constData(), static_cast<long long>(positionMs),
+            targetSize.width(), targetSize.height());
 
     AVFormatContext *format = nullptr;
 
@@ -460,6 +471,19 @@ QString VideoLibrary::thumbnailFor(const QString &videoPath)
         AF_LOGW("VideoLibrary: QImage::save failed for \"%s\" (%s not supported?)\n",
                 target.toUtf8().constData(), canWriteJpeg ? "JPEG" : "PNG");
         return QString();
+    }
+
+    /*
+     * 把上面那段抽帧实现暴露给别的 .cpp（进度条悬停预览，见 PreviewFrameSource）。
+     * 只是转发，一行策略都没有 —— 保证"首页封面"和"悬停预览"用的是**同一份**踩过坑的实现。
+     *
+     * 线程安全：grabFrameAt 每次调用都是独立会话（自己的 AVFormatContext/AVCodecContext），
+     * 不共享任何状态，所以可以从工作线程调。
+     */
+    QImage VideoLibrary::grabLocalFrame(const QString &videoPath, qint64 positionMs,
+                                        const QSize &targetSize)
+    {
+        return grabFrameAt(videoPath, positionMs, targetSize);
     }
 
 }// namespace cicadaqt

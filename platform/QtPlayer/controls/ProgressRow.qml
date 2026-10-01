@@ -369,8 +369,8 @@ Item {
 
         function requestSnapshotThrottled() {
             /* 【有接口帧就别再截屏】位置帧由 videoshot/preview.bin 提供（onlineSource 非空就是
-               这一档有接口帧）；CaptureScreen 给的是"此刻正在显示"的那一帧，只在接口整条不可用
-               时才当兜底（判断放在最前面：连 150ms 节流都不用起）。 */
+               这一档有接口帧）；下面两条兜底只在接口整条不可用时才用（判断放在最前面：
+               连 150ms 节流都不用起）。 */
             if (preview.onlineSource !== "")
                 return
 
@@ -383,7 +383,20 @@ Item {
                 return
             }
 
-            bar.player.requestSnapshot()
+            /*
+             * 【本地文件：按悬停位置**独立抽帧**】positionMs 取这一档的档首
+             * （档位 × 5 秒，和接口帧同一套粒度）—— 抽帧自己去本地文件 seek，
+             * 与播放完全解耦，所以整条时间轴都有图，而不是只有"当前播放位置"那一张。
+             * 同一档重复悬停命中的是缓存里同一张图，不会重复抽。
+             *
+             * requestPreviewFrame 返回 false = 不是本地文件（在线源），那时才退回框架的
+             * CaptureScreen：它抓的是"此刻正在显示的那一帧"，只适合这种本来就拿不到
+             * 指定位置画面的兜底场景。
+             */
+            if (!bar.player.requestPreviewFrame(hoverFrameIndex * QtPlayerTheme.progressPreviewFrameSec * 1000,
+                                                hoverFrameIndex))
+                bar.player.requestSnapshot()
+
             snapshotCooldown.restart()
         }
 
@@ -767,7 +780,15 @@ Item {
              * cache 关掉：revision 一直在变，缓存旧的是白占内存。
              */
             Image {
+                /*
+                 * 【只有"这张图正好是当前悬停档位"才显示】独立抽帧是异步的：请求刚发出时
+                 * 手里只有上一档的旧图，把它留在气泡里就是用户抱怨的"预览图始终是一段时间内的"。
+                 * hoverPreviewImageIsCurrent 为 false 时这里藏起来，气泡显示空框（占位）——
+                 * 绝不用旧图冒充。在线兜底（框架 CaptureScreen）那条路上它恒为 true，
+                 * 行为与加这个功能之前完全一致。
+                 */
                 visible: !preview.apiFramesAvailable && preview.localSource !== ""
+                         && bar.player !== null && bar.player.hoverPreviewImageIsCurrent
                 anchors.fill: parent
                 fillMode: Image.Stretch
                 asynchronous: false

@@ -441,6 +441,10 @@ set(CICADA_QT_SOURCES
         # 本地视频库：递归扫描文件夹 + 抽首帧缩略图缓存 + 当播放列表（上一集/下一集/选集共用）。
         src/VideoLibrary.cpp
         src/VideoLibrary.h
+        # 进度条悬停预览的"按位置独立抽帧"（专属工作线程 + 有界 LRU 缓存，见那个文件头）：
+        # 抽帧本体复用 VideoLibrary 里那段已经在跑的 grabFrameAt，这里只负责调度与缓存。
+        src/PreviewFrameSource.cpp
+        src/PreviewFrameSource.h
         # 应用级文件/目录选择对话框（**从 C++ 调**，见那个文件头：QML 的 FileDialog 会占住
         # 原生句柄不释放，这里每次现建现销）。
         src/AppFileDialogs.cpp

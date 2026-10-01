@@ -72,6 +72,11 @@ namespace CicadaManifest {
 namespace cicadaqt {
 
     class CicadaVideoTexture;
+    /*
+     * 进度条悬停预览的"按位置独立抽帧"（见 PreviewFrameSource.h）。这里只前向声明：
+     * 它只在 .cpp 里被 new 出来，头文件不必把 <thread>/<mutex> 那些拖进来。
+     */
+    class PreviewFrameSource;
 
     class CicadaPlayerItem : public QQuickItem {
         Q_OBJECT
@@ -555,12 +560,14 @@ namespace cicadaqt {
          *
          * 三条滑块都是 **0~200，100 = 中性**（就是面板上的原始值）。调用后：
          *   * 值记在本组件里（换后端/换片源后能重新应用）；
-         *   * 转给渲染后端（Windows 的 D3D11 零拷贝路径用视频处理器的
-         *     BRIGHTNESS/CONTRAST/SATURATION 过滤器实现，**每帧零额外代价**）。
+         *   * 转给渲染后端：Windows 用 D3D11 视频处理器的
+         *     BRIGHTNESS/CONTRAST/SATURATION 过滤器（**每帧零额外代价**）；
+         *     macOS 在 Metal 零拷贝路上用 Core Image 的 CIColorControls 过一遍 GPU
+         *     （三个值全中性时完全不进那条额外 pass；全程不读回 CPU）。
          *
-         * colorAdjustSupported 告诉界面"当前后端到底支不支持"：目前只有 Windows 的
-         * D3D11 路径实现了；macOS(Metal)/Linux(VAAPI)/CPU 回退会返回 false，
-         * 界面照实说明（而不是让用户拖了滑块却什么都没发生）。
+         * colorAdjustSupported 告诉界面"当前后端到底支不支持"：Windows 与 macOS（Metal 零拷贝
+         * 生效时）都是 true；Linux(VAAPI) 与 CPU 回退返回 false，界面照实说明
+         * （而不是让用户拖了滑块却什么都没发生）。
          */
         Q_INVOKABLE void setColorAdjust(int brightness, int contrast, int saturation);
         Q_PROPERTY(bool colorAdjustSupported READ colorAdjustSupported NOTIFY backendChanged)
@@ -1321,6 +1328,63 @@ namespace cicadaqt {
          * 输出纹理"继续显示，与解码池无关。
          */
         std::atomic<bool> m_decoderGenerationEnded{false};
+
+    public:
+        /*
+         * ===========================================================================
+         * 进度条悬停预览：**按悬停位置独立抽帧**（不再抓"当前正在显示的那一帧"）
+         *
+         * 【为什么要有这个属性】要显示的那张图必须**正好是当前悬停档位**的那一张。
+         * 抽帧是异步的，请求刚发出时手里只有上一档的旧图 —— 直接把旧图留在气泡里
+         * 就是用户抱怨的"预览图始终是一段时间内的、不是整个视频"。
+         * 所以界面拿这个属性当"这张图还算不算数"的判据：
+         *   * 没走独立抽帧这条路（在线兜底 / 还没请求过）：恒为 true ——
+         *     沿用框架 CaptureScreen 给的那张，与以前的行为完全一致；
+         *   * 走了独立抽帧：只有"已发布的图 = 最后一次请求的那个文件的那一档"才是 true，
+         *     否则界面把图藏起来显示空框（占位），**绝不用旧图冒充当前位置的画面**。
+         * ===========================================================================
+         */
+        Q_PROPERTY(bool hoverPreviewImageIsCurrent READ hoverPreviewImageIsCurrent NOTIFY snapshotChanged)
+        bool hoverPreviewImageIsCurrent() const
+        {
+            /* 没请求过独立抽帧（-1）：沿用旧行为（框架给的那张图照常显示）。 */
+            if (m_previewRequestBucket < 0) {
+                return true;
+            }
+
+            return m_previewFrameBucket == m_previewRequestBucket
+                   && !m_previewFramePath.isEmpty()
+                   && m_previewFramePath == m_previewRequestPath;
+        }
+
+        /*
+         * 按悬停位置请求一张预览图（GUI 线程，QML 直接调）。
+         *
+         * positionMs：要抽的时间点（界面按 5 秒一档取档首，见 ProgressRow.qml）；
+         * bucketIndex：档位号（缓存键 + 结果过滤都用它，同一档不会重复抽）。
+         *
+         * 返回 true = 已经由"独立抽帧"这条路接管（命中缓存则同步出图，未命中则先占位、
+         * 图抽到后异步补上）；返回 false = 不是本地文件，调用方应退回框架的 CaptureScreen。
+         */
+        Q_INVOKABLE bool requestPreviewFrame(qint64 positionMs, int bucketIndex);
+
+    private:
+        /* PreviewFrameSource 的结果回调（GUI 线程）：只认"当前请求的文件 + 档位"。 */
+        void onPreviewFrameExtracted(const QImage &image, int bucket, qint64 positionMs,
+                                     const QString &path);
+
+        /* 最后一次请求的文件与档位（结果过滤 + hoverPreviewImageIsCurrent 的判据）。 */
+        QString m_previewRequestPath;
+        int m_previewRequestBucket = -1;
+        /* 当前**已发布**的那张预览图来自哪个文件、哪一档（-1 = 还没有过抽帧的图）。 */
+        QString m_previewFramePath;
+        int m_previewFrameBucket = -1;
+
+        /*
+         * 抽帧器（工作线程 + 有界 LRU 缓存都在它里面，见 PreviewFrameSource.h）。
+         * **追加在成员表末尾**：本类是 QML_ELEMENT，QML 引擎按 sizeof 分配对象内存。
+         */
+        std::unique_ptr<PreviewFrameSource> m_previewFrameSource;
     };
 
 }// namespace cicadaqt

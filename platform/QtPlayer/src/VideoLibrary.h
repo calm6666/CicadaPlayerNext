@@ -15,6 +15,8 @@
 #include <QtCore/QObject>
 #include <QtCore/QStringList>
 #include <QtCore/QVariantList>
+#include <QtCore/QSize>
+#include <QtGui/QImage>
 /* QML_ELEMENT：让 QML 里可以直接写 VideoLibrary { }（和 DanmakuController 同一种注册方式）。
    少了这个头会报 "语法错误: 缺少";"(在"public"的前面)" —— 那个坑踩过。 */
 #include <QtQml/qqmlregistration.h>
@@ -60,6 +62,19 @@ namespace cicadaqt {
         /* 第 index 项的文件路径（越界返回空串） */
         Q_INVOKABLE QString pathAt(int index) const;
         Q_INVOKABLE QString nameAt(int index) const;
+
+        /*
+         * 按**任意时间点**从本地文件抽一帧（进度条悬停预览用，见 PreviewFrameSource）。
+         *
+         * 这是把本文件里那段抽帧实现暴露给别的 .cpp 用 —— **同一份实现**，首页封面（thumbnailFor）
+         * 和悬停预览共用；"抽哪一帧、抽不到怎么办"的策略留在各自的调用方。
+         *
+         * 解码方式是**软解**（libavformat + libavcodec + libswscale），每次调用都是独立会话，
+         * 不碰播放的解码器；可以从任意线程调（内部不共享任何状态）。
+         * 抽不到返回**空 QImage**，调用方必须按"这一帧没有图"处理，不许拿别的帧顶替。
+         */
+        static QImage grabLocalFrame(const QString &videoPath, qint64 positionMs,
+                                     const QSize &targetSize);
 
     signals:
         void itemsChanged();

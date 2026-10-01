@@ -18,6 +18,8 @@
 #include "CicadaManifestBuilder.h"
 /* 截屏结果的出口：QML 的 Image 通过 image://snapshot/<rev> 向它取图（见文件头）。 */
 #include "SnapshotImageProvider.h"
+/* 进度条悬停预览的"按位置独立抽帧"（工作线程 + 有界缓存，见那个文件头）。 */
+#include "PreviewFrameSource.h"
 
 #include <QtQuick/QQuickWindow>
 #include <QtQuick/QSGSimpleTextureNode>
@@ -1105,6 +1107,18 @@ namespace cicadaqt {
          * 正确做法：seek 的终态只由框架事件（Seeking / SeekEnd）驱动 ——
          * 内核侧已保证"落点帧上屏即结束 seek"（SuperMediaPlayer 的 K1）。
          */
+
+        /*
+         * 进度条悬停预览的抽帧器：一个专属工作线程 + 有界 LRU 缓存（见 PreviewFrameSource.h）。
+         *
+         * 回调以 this 作为投递接收者，所以它经 Qt 队列投递回 GUI 线程；本对象析构后
+         * 尚未投递的结果会被 Qt 丢掉，回调里访问本对象是安全的。
+         */
+        m_previewFrameSource.reset(new PreviewFrameSource(this,
+                                  [this](const QImage &image, int bucket, qint64 positionMs,
+                                         const QString &path) {
+            onPreviewFrameExtracted(image, bucket, positionMs, path);
+        }));
     }
 
     CicadaPlayerItem::~CicadaPlayerItem()
@@ -2488,8 +2502,10 @@ namespace cicadaqt {
      * NV12/P010 转成 RGBA，视频处理器自带 BRIGHTNESS / CONTRAST / SATURATION / HUE
      * 四个「过滤器」（ID3D11VideoContext::VideoProcessorSetStreamFilter），
      * 在那里应用是**零额外代价**的（不额外拷贝、不退出零拷贝路径）。
-     * macOS(Metal) / Linux(VAAPI) / CPU 回退目前没有实现，colorAdjustSupported()
-     * 会返回 false，界面如实说明 —— 见 CicadaVideoTexture::colorAdjustSupported()。
+     * macOS 也在**渲染后端**做（Metal 零拷贝路上用 Core Image 的 CIColorControls 过一遍 GPU，
+     * 三个值全中性时完全不进那条额外 pass，全程不读回 CPU），见 CicadaTextureMetal。
+     * Linux(VAAPI) 目前还没有实现 —— 那种情况下 colorAdjustSupported() 返回 false，
+     * 界面如实说明（见 CicadaVideoTexture::colorAdjustSupported()）。
      */
     void CicadaPlayerItem::setColorAdjust(int brightness, int contrast, int saturation)
     {
@@ -4926,5 +4942,93 @@ namespace cicadaqt {
      *   * 时长      —— 在"准备好了 / 首帧 / seek 结束"事件点上现取（refreshDuration）。
      * 见构造函数里那段说明（轮询是第二个时钟，会把弹幕时钟往回拽）。
      */
+
+    /* ===========================================================================
+     * 进度条悬停预览：按位置**独立抽帧**（设计说明见 PreviewFrameSource.h，
+     * 界面的判据见头文件里 hoverPreviewImageIsCurrent 的注释）
+     * =========================================================================== */
+
+    bool CicadaPlayerItem::requestPreviewFrame(qint64 positionMs, int bucketIndex)
+    {
+        if (m_previewFrameSource == nullptr) {
+            return false;
+        }
+
+        /*
+         * 只有**本地文件**才走独立抽帧：在线源这边没有可 seek 的本地文件，抽帧器帮不上忙，
+         * 所以返回 false，让调用方退回框架的 CaptureScreen（在线本来还有
+         * videoshot/preview.bin 那条接口帧的路，在 QML 里优先级更高）。
+         * 同时把独立抽帧那套状态清干净（含抽帧器的在途结果与缓存）—— 界面回到
+         * "沿用框架给的图"的旧行为，也不会把上一个文件的图串过来。
+         */
+        if (!m_source.isLocalFile()) {
+            m_previewFrameSource->reset();
+            m_previewRequestPath.clear();
+            m_previewRequestBucket = -1;
+            m_previewFramePath.clear();
+            m_previewFrameBucket = -1;
+            return false;
+        }
+
+        const QString path = m_source.toLocalFile();
+
+        if (path.isEmpty() || positionMs < 0 || bucketIndex < 0) {
+            return false;
+        }
+
+        m_previewRequestPath = path;
+        m_previewRequestBucket = bucketIndex;
+
+        const QImage cached = m_previewFrameSource->request(path, positionMs, bucketIndex);
+
+        if (!cached.isNull()) {
+            /* 命中缓存：这张就是这一档的图，直接发布（先记来源、再通知界面）。 */
+            m_previewFramePath = path;
+            m_previewFrameBucket = bucketIndex;
+            notifySnapshot(cached);
+            return true;
+        }
+
+        /*
+         * 未命中：**什么都不发布**，只让界面知道"现在显示的那张图不属于这一档"
+         * （hoverPreviewImageIsCurrent 变 false → 气泡显示空框占位）。抽帧结果回来时
+         * 由 onPreviewFrameExtracted 发布。
+         * 这一次通知是必要的：界面靠它重新求值那个判据（revision 不变、URL 不变，
+         * 所以不会白白重新请求图片）。
+         */
+        emit snapshotChanged();
+        return true;
+    }
+
+    void CicadaPlayerItem::onPreviewFrameExtracted(const QImage &image, int bucket, qint64 positionMs,
+            const QString &path)
+    {
+        /*
+         * 【纯状态过滤，不用计时器/看门狗】只认"当前请求的那个文件 + 那一档"：
+         * 换过片源、或者用户已经移到别的档位时，在途结果直接丢掉 ——
+         * 宁可空框，也不给错的画面。
+         */
+        if (bucket != m_previewRequestBucket || path != m_previewRequestPath) {
+            return;
+        }
+
+        if (image.isNull()) {
+            /*
+             * 抽不到：**保持空框**（请求那一刻界面已经切到占位状态了），
+             * 绝不拿相邻档位或上一档的旧图顶替 —— 那正是用户抱怨的
+             * "预览图始终是一段时间内的"。
+             * 具体失败原因（打不开/没有视频流/没有解码器/seek 不了/解不出帧）
+             * 已经在抽帧器里逐条记过 AF_LOGW。
+             */
+            AF_LOGW("hover preview: bucket %d (%.1f s) has no frame in \"%s\"; "
+                    "the bubble stays empty\n",
+                    bucket, double(positionMs) / 1000.0, path.toUtf8().constData());
+            return;
+        }
+
+        m_previewFramePath = path;
+        m_previewFrameBucket = bucket;
+        notifySnapshot(image);
+    }
 
 }// namespace cicadaqt
