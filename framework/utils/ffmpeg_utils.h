@@ -45,6 +45,13 @@ int get_stream_meta(const struct AVStream *pStream, Stream_meta *meta);
 
 int AVPixFmt2Cicada(enum AVPixelFormat fmt);
 
+/*
+ * AVPixFmt2Cicada() 的反向映射。查不到（包括 AF_PIX_FMT_NONE）返回 AV_PIX_FMT_NONE，
+ * 调用方**必须**把它当硬错误：绝不能把这个值交给 swscale（FFmpeg 自己的断言会
+ * abort 整个进程，见 ffmpeg_utils.c 里的说明）。
+ */
+enum AVPixelFormat Cicada2AVPixFmt(int fmt);
+
 int AVColorSpace2AF(enum AVColorSpace space);
 
 int AVColorRange2AF(enum AVColorRange range);

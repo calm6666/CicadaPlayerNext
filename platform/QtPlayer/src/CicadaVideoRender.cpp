@@ -7,6 +7,8 @@
 #include "CicadaVideoRender.h"
 
 #include <utils/frame_work_log.h>
+/* Cicada2AVPixFmt()：把框架的 AF_PIX_FMT_* 换成 FFmpeg 的 AVPixelFormat。 */
+#include <utils/ffmpeg_utils.h>
 #include <utils/CicadaJSON.h>
 /* 节拍频率来自全局设置 "video.render.hz"。 */
 #include <utils/globalSettings.h>
@@ -412,7 +414,15 @@ namespace cicadaqt {
 #endif
         uint8_t **planes = frame->getData();
         int *lineSizes = frame->getLineSize();
-        AVPixelFormat sourceFormat = static_cast<AVPixelFormat>(info.video.format);
+        /*
+         * 源像素格式：info.video.format 是 **Cicada** 的 AF_PIX_FMT_* 口径，必须走
+         * Cicada2AVPixFmt() 换成 FFmpeg 的 AVPixelFormat。直接 static_cast 只对
+         * "数值恰好对齐"的普通格式成立；AF_PIX_FMT_APPLE_PIXEL_BUFFER(1000) /
+         * AF_PIX_FMT_BGRA(1001) 这类值在 FFmpeg 里根本不存在，交给 swscale 会命中
+         * av_assert0(desc) 把进程 abort 掉（真机就是这么崩的）。查不到的在下面
+         * sws_getCachedContext 之前按"截不出图"处理。
+         */
+        AVPixelFormat sourceFormat = Cicada2AVPixFmt(info.video.format);
 
         if (hwFrame != nullptr && hwFrame->hw_frames_ctx != nullptr) {
             /* 3a) 硬解零拷贝帧：GPU->CPU 回读，这一条是"硬解也能截图"的关键。 */
@@ -484,9 +494,10 @@ namespace cicadaqt {
                 if (appleConverted != nullptr) {
                     planes = appleConverted->getData();
                     lineSizes = appleConverted->getLineSize();
-                    /* 注意：像素格式要用**转换后**那一帧的，不是 AF_PIX_FMT_APPLE_PIXEL_BUFFER。 */
-                    sourceFormat = static_cast<AVPixelFormat>(
-                            appleConverted->getInfo().video.format);
+                    /* 注意：像素格式要用**转换后**那一帧的，不是 AF_PIX_FMT_APPLE_PIXEL_BUFFER。
+                     * 同样要走反向映射（32BGRA 直出时它是 AF_PIX_FMT_BGRA = 1001，
+                     * static_cast 出来的是 FFmpeg 不认识的格式）。 */
+                    sourceFormat = Cicada2AVPixFmt(appleConverted->getInfo().video.format);
                 }
             }
 #endif
@@ -530,6 +541,29 @@ namespace cicadaqt {
             /* 不该发生；真发生了就按显示尺寸读，总比拿个负数去建上下文好。 */
             sourceWidth = width;
             sourceHeight = height;
+        }
+
+        /*
+         * 最后一道闸：格式必须能被 FFmpeg 认识。走到这里还是 AV_PIX_FMT_NONE，说明这一帧
+         * 的框架格式在 pix_fmt_pair_table 里没有对应项（或者走到了一条没被上面分支覆盖的
+         * 帧类型）——把它交给 sws_getCachedContext 会命中 FFmpeg 自己的断言
+         * （swscale_internal.h 的 isYUV(): av_assert0(desc)）直接 abort 整个进程。
+         * 这里按框架约定的"没有画面"回调一张空图，播放不受影响。
+         */
+        if (sourceFormat == AV_PIX_FMT_NONE) {
+            if (!m_loggedCaptureFailure) {
+                m_loggedCaptureFailure = true;
+                AF_LOGW("captureScreen: the frame pixel format %d has no FFmpeg counterpart, "
+                        "so this snapshot is empty (playback is unaffected)\n",
+                        info.video.format);
+            }
+
+            if (swFrame != nullptr) {
+                av_frame_free(&swFrame);
+            }
+
+            func(nullptr, 0, 0);
+            return;
         }
 
         SwsContext *sws = sws_getCachedContext(nullptr, sourceWidth, sourceHeight, sourceFormat,

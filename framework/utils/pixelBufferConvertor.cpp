@@ -6,6 +6,8 @@
 #include "pixelBufferConvertor.h"
 #include <base/media/AVAFPacket.h>
 #include <utils/frame_work_log.h>
+/* Cicada2AVPixFmt()：把框架的 AF_PIX_FMT_* 换成 FFmpeg 的 AVPixelFormat。 */
+#include <utils/ffmpeg_utils.h>
 
 using namespace Cicada;
 static int copy_avframe_to_pixel_buffer(const AVFrame *frame, CVPixelBufferRef cv_img, const size_t *plane_strides,
@@ -350,7 +352,10 @@ int pixelBufferConvertor::init(const IAFFrame::videoInfo &src)
         case AF_PIX_FMT_YUV420P:
             //            break;
         default:
-            dst.format = AV_PIX_FMT_NV12;
+            /* 这里写的是**框架**的格式值：dst.format 是 Cicada 的 AFPixelFormat 口径，
+             * 下面 cvpxpool_create() 也按 AF_PIX_FMT_* 解释它。（数值上 NV12 两边恰好
+             * 相同，但口径写错迟早会在别的格式上出事。） */
+            dst.format = AF_PIX_FMT_NV12;
     }
 
 
@@ -370,11 +375,27 @@ int pixelBufferConvertor::init(const IAFFrame::videoInfo &src)
         sws_ctx = nullptr;
     }
     av_frame_free(&mOutFrame);
-    dstFormat = static_cast<AVPixelFormat>(dst.format);
+    dstFormat = Cicada2AVPixFmt(dst.format);
+
+    if (dstFormat == AV_PIX_FMT_NONE) {
+        AF_LOGE("cicada pixel format %d has no FFmpeg counterpart, cannot convert\n", dst.format);
+        return -EINVAL;
+    }
 
     if (src != dst) {
+        const enum AVPixelFormat srcFormat = Cicada2AVPixFmt(src.format);
 
-        sws_ctx = sws_getContext(src.width, src.height, static_cast<AVPixelFormat>(src.format), src.width, src.height, dstFormat,
+        /*
+         * 源格式必须能在 FFmpeg 里找到。查不到（例如某个 AF_PIX_FMT_* 还没有对应的
+         * AV_PIX_FMT_* 表项）就直接失败：未知格式交给 sws_getContext 会命中 FFmpeg
+         * 自己的断言（swscale_internal.h 的 isYUV(): av_assert0(desc)）并把进程 abort 掉。
+         */
+        if (srcFormat == AV_PIX_FMT_NONE) {
+            AF_LOGE("cicada pixel format %d has no FFmpeg counterpart, cannot convert\n", src.format);
+            return -EINVAL;
+        }
+
+        sws_ctx = sws_getContext(src.width, src.height, srcFormat, src.width, src.height, dstFormat,
                                  SWS_BILINEAR, nullptr, nullptr, nullptr);
         mOutFrame = alloc_picture(dstFormat, src.width, src.height);
     }

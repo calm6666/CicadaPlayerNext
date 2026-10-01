@@ -103,27 +103,35 @@ PBAFFrame::operator AVAFFrame *()
          * 而这里原来只认 NV12 / YUV420P，32BGRA 直接 return nullptr ⇒
          *   · CPU 回退（CicadaVideoTexture 的 textureForFrameCpu）拿不到帧，
          *     配上门面里"运行期零拷贝失败就永久切 CPU"的判定 ⇒ **画面永久冻结**；
-         *   · 截图（CicadaVideoRender 的 3c 分支）同样拿不到 CPU 像素 ⇒ 永远空图。
+         *   · 截图与进度条悬停预览（CicadaVideoRender 的 3c 分支）同样拿不到
+         *     CPU 像素 ⇒ 永远空图。
          *
          * 32BGRA 是非平面（打包）格式，所以下面 CVPixelBufferIsPlanar() 走 else，
          * 用 GetBaseAddress/GetBytesPerRow 拿一整块，av_image_copy 按 AV_PIX_FMT_BGRA
          * 拷就行（swscale 那条链本来就吃 BGRA）。
          */
         /*
-         * 【2026-10-01 回退：这条路会让 swscale 直接 abort】
+         * 【2026-10-01 · 现在框架真的认识这个格式了，可以声明成 AV_PIX_FMT_BGRA】
          *
-         * 32BGRA 在 Cicada 的 AFMediaType 里**没有**对应的 AF_PIX_FMT_* 值。把它声明成
-         * AV_PIX_FMT_BGRA 之后，AVAFPacket::copyInfo() → AVPixFmt2Cicada() 只能得到
-         * AF_PIX_FMT_NONE（真机日志里那行 "AVPixelFormat 28 not found" 就是它），
-         * 下游再把这个未知格式交给 swscale，就命中 FFmpeg 自己的断言：
+         * 上一版把它声明成 AV_PIX_FMT_BGRA 时崩过，问题不在这一行，而在**框架里没有
+         * 对应的框架格式**：AVAFPacket::copyInfo() → AVPixFmt2Cicada(AV_PIX_FMT_BGRA)
+         * 只能得到 AF_PIX_FMT_NONE（真机日志里那行 "AVPixelFormat 28 not found"），
+         * 未知格式继续流到 swscale 就命中 FFmpeg 自己的断言：
          *     Assertion desc failed at src/libswscale/swscale_internal.h:778   → SIGABRT
          *
-         * 所以这里先回到"拿不到 CPU 帧"的安全行为：32BGRA 只走 GPU 零拷贝那条路
-         * （CicadaVideoRender / CicadaTextureMetal 直接吃 CVPixelBuffer，不经过 AVAFFrame）。
-         * 要让 CPU 回退与截图也支持 32BGRA，得先在 AFMediaType 里补一个 BGRA 格式、
-         * 并让 swscale 那条链认识它 —— 那是独立的一步，不能靠这一行糊过去。
+         * 现在这条链的两头都补齐了，所以这一行可以恢复：
+         *   · framework/utils/AFMediaType.h 里有 AF_PIX_FMT_BGRA = 1001（追加在枚举末尾、
+         *     显式给值，不动任何既有枚举值）；
+         *   · framework/utils/ffmpeg_utils.c 的 pix_fmt_pair_table 里有
+         *     {AF_PIX_FMT_BGRA, AV_PIX_FMT_BGRA}，正反两个方向都能查到；
+         *   · 所有"把框架格式交给 FFmpeg"的地方都改走 Cicada2AVPixFmt()，查不到就
+         *     直接失败返回，绝不会把未知值送进 swscale。
+         *
+         * 于是 CPU 回退、截图和进度条悬停预览都能从这一帧拿到 CPU 像素（含 32BGRA
+         * 零拷贝那条路），而 "AVPixelFormat 28 not found" / "Assertion desc failed" /
+         * "[crash] fatal signal 6" 都不再出现。
          */
-        return nullptr;
+        format = AV_PIX_FMT_BGRA;
     } else {
         return nullptr;
     }

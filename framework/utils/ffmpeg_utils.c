@@ -511,6 +511,39 @@ int AVPixFmt2Cicada(enum AVPixelFormat fmt)
     return AF_PIX_FMT_NONE;
 }
 
+/*
+ * AVPixFmt2Cicada() 的反向映射：把框架自己的 AF_PIX_FMT_* 换回 FFmpeg 的
+ * enum AVPixelFormat。用的是同一张 pix_fmt_pair_table，所以两个方向永远一致。
+ *
+ * 【为什么不能直接 static_cast】
+ * AF_PIX_FMT_* 里只有一部分是与 AV_PIX_FMT_* **数值对齐**的普通格式
+ * （YUV420P/NV12 那一批，两者恰好相等），另一部分是刻意避开那段数值区间的
+ * "原生句柄"格式：AF_PIX_FMT_D3D11 = 900、AF_PIX_FMT_VAAPI = 902、
+ * AF_PIX_FMT_APPLE_PIXEL_BUFFER = 1000，以及追加在末尾的 AF_PIX_FMT_BGRA = 1001。
+ * 这些值直接 static_cast 成 AVPixelFormat 就是 FFmpeg **不认识**的像素格式，
+ * 而 swscale 拿到未知格式时第一步就是查 av_pix_fmt_desc_get()，查不到就命中它
+ * 自己的断言（swscale_internal.h 的 isYUV(): av_assert0(desc)），进程直接 SIGABRT。
+ * 真机上 macOS 走 32BGRA 直出时就是这么崩的（"Assertion desc failed at
+ * src/libswscale/swscale_internal.h:778"）。
+ *
+ * 所以凡是"把框架格式交给 FFmpeg"的地方都必须走这里，并且把返回的
+ * AV_PIX_FMT_NONE 当成硬错误处理（打日志 + 失败返回），绝不能继续往下传。
+ */
+enum AVPixelFormat Cicada2AVPixFmt(int fmt)
+{
+    int num = sizeof(pix_fmt_pair_table) / sizeof(pix_fmt_pair_table[0]);
+    int i;
+
+    for (i = 0; i < num; i++) {
+        if (pix_fmt_pair_table[i].klId == fmt) {
+            return pix_fmt_pair_table[i].avId;
+        }
+    }
+
+    AF_LOGW("cicada pixel format %d has no FFmpeg counterpart\n", fmt);
+    return AV_PIX_FMT_NONE;
+}
+
 int AVColorSpace2AF(enum AVColorSpace space)
 {
     switch (space) {

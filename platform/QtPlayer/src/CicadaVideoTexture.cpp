@@ -10,6 +10,8 @@
 #include <QtCore/QDebug>
 
 #include <utils/frame_work_log.h>
+/* Cicada2AVPixFmt()：把框架的 AF_PIX_FMT_* 换成 FFmpeg 的 AVPixelFormat。 */
+#include <utils/ffmpeg_utils.h>
 #include "base/media/AVAFPacket.h"
 
 #if defined(Q_OS_MACOS)
@@ -194,7 +196,12 @@ namespace cicadaqt {
 
     QSGTexture *CicadaVideoTexture::textureForFrameCpu(QQuickWindow *window, IAFFrame *frame)
     {
-        const int srcFormat = static_cast<int>(frame->getInfo().video.format);
+        /*
+         * 帧的像素格式（Cicada 的 AF_PIX_FMT_* 口径）。**不是 const**：macOS 的
+         * PBAFFrame 在下面被下载成 CPU 帧之后，格式要换成**转换后**那一帧的
+         * （见 #if defined(Q_OS_MACOS) 那一段）。
+         */
+        int srcFormat = static_cast<int>(frame->getInfo().video.format);
 
         /*
          * **绝对不能让未下载的 GPU 帧走到 swscale。**
@@ -251,6 +258,14 @@ namespace cicadaqt {
 
             downloaded.reset(converted);
             frame = downloaded.get();
+            /*
+             * 格式必须换成**转换后**那一帧的：上面那个 srcFormat 是
+             * AF_PIX_FMT_APPLE_PIXEL_BUFFER，它只表示"data[0] 是个 CVPixelBuffer
+             * 句柄"，不是任何像素布局；拿它去建 swscale 上下文就是未知格式
+             * （FFmpeg 自己的断言会 abort）。转换后的帧不是 NV12/YUV420P 就是
+             * BGRA，都能在 pix_fmt_pair_table 里查到。
+             */
+            srcFormat = static_cast<int>(frame->getInfo().video.format);
         }
 #endif
 
@@ -277,9 +292,29 @@ namespace cicadaqt {
             m_bgraImage = new QImage(width, height, QImage::Format_ARGB32);
         }
 
+        /*
+         * 交给 swscale 之前必须把框架格式换成 FFmpeg 的 AVPixelFormat：两者只在
+         * "数值对齐"的普通格式（YUV420P / NV12 那一批）上恰好相等，而 AF_PIX_FMT_BGRA
+         * (1001) 这类按 Cicada 自己编号追加的值直接 static_cast 出来是 FFmpeg
+         * **不认识**的像素格式，swscale 内部的 av_assert0(desc) 会直接把进程 abort
+         * （真机 macOS 32BGRA 直出时就是这么崩的）。查不到就直接失败：画面停在上一帧，
+         * 绝不把未知值传给 swscale。
+         */
+        const enum AVPixelFormat srcAvFormat = Cicada2AVPixFmt(srcFormat);
+
+        if (srcAvFormat == AV_PIX_FMT_NONE) {
+            if (!m_loggedFallback) {
+                m_loggedFallback = true;
+                AF_LOGE("the frame pixel format %d has no FFmpeg counterpart, "
+                        "the CPU path cannot convert it\n", srcFormat);
+            }
+
+            return nullptr;
+        }
+
         if (m_sws == nullptr || m_swsSrcWidth != width || m_swsSrcHeight != height ||
                 m_swsSrcFormat != srcFormat) {
-            m_sws = sws_getCachedContext(m_sws, width, height, static_cast<AVPixelFormat>(srcFormat),
+            m_sws = sws_getCachedContext(m_sws, width, height, srcAvFormat,
                                          width, height, AV_PIX_FMT_BGRA, SWS_BILINEAR,
                                          nullptr, nullptr, nullptr);
             m_swsSrcWidth = width;
