@@ -104,15 +104,28 @@ Apple's published geometry (`MACOS_CONTENT_FRACTION`):
 | body (rounded square) | **824 × 824**, centred |
 | transparent margin | **100 px** on each side |
 | corner radius | 22.37 % **of the body** (scales with it) |
-| glyph | scaled with the body (`MACOS_GLYPH_FRACTION`), so its size *relative to the white square* is unchanged |
+| glyph | scaled with the body by `render_icon` (it multiplies `fraction` by `content_fraction` **once**), so its size *relative to the white square* is unchanged |
 
-Measured on the generated files (non-zero alpha span across the mid row):
+Measured on the generated files — the body's non-zero alpha span, and the glyph's
+cyan bounding box, across the mid row / whole image:
 
 ```
-icon_16x16.png        canvas=  16  body=  13  (target 13)
-icon_256x256.png      canvas= 256  body= 206  (target 206)
-icon_512x512@2x.png   canvas=1024  body= 824  (target 824)
+platform     canvas   body    glyph    glyph/body   glyph/canvas
+macOS          256    206     128x122    0.6214        0.5000
+Android        192    192     120x114    0.6250        0.6250
+HarmonyOS      216    216     135x128    0.6250        0.6250
 ```
+
+`glyph/body` is the number that has to match across platforms, and it does
+(0.62). Note `glyph/canvas` is deliberately *lower* on macOS (0.50) because the
+body itself is only 0.805 of the canvas — that is the whole point of the grid.
+
+Getting this wrong is easy and was in fact a bug: an earlier attempt applied
+`content_fraction` **twice** (once inside `render_icon` and again via
+`MACOS_GLYPH_FRACTION`), which shrank the glyph to ~0.805² = 65 % of intended —
+the outer square measured correctly while the cicada inside looked small and out
+of proportion. If the Dock size looks right but the artwork looks "shrunk", check
+for a double application before touching any constant.
 
 The body is drawn at **target size** rather than supersampled: LANCZOS
 downscaling spreads a straight edge over ~4 px of ringing (a row of near-zero

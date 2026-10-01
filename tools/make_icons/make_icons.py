@@ -104,8 +104,11 @@ GLYPH_FRACTION_ROUNDED = 0.62            # about 62 %
 MACOS_CONTENT_FRACTION = 824.0 / 1024.0
 
 #: The glyph is scaled with the body so its relative size inside the white
-#: square is unchanged on macOS (0.62 * 0.8046875).
-MACOS_GLYPH_FRACTION = GLYPH_FRACTION_ROUNDED * MACOS_CONTENT_FRACTION
+#: square is unchanged on macOS.  This is baked into `render_icon` (it multiplies
+#: `fraction` by `content_fraction` once), so the call sites pass the PLAIN
+#: rounded-variant fraction -- passing a pre-multiplied one would shrink the
+#: glyph twice.
+MACOS_GLYPH_FRACTION = GLYPH_FRACTION_ROUNDED
 
 #: Flat variants (Windows / Linux): no background, glyph only.
 GLYPH_FRACTION_FLAT = 0.92               # about 92 %
@@ -857,8 +860,17 @@ def render_icon(shapes, ink_box, size, variant, fraction=None, content_fraction=
     if fraction is None:
         fraction = GLYPH_FRACTION_ROUNDED if rounded else GLYPH_FRACTION_FLAT
 
-    # Shrinking the body must shrink the glyph with it, otherwise the glyph
-    # would grow *relative* to the white square it sits on.
+    # `fraction` is documented as "the glyph's share of the CANVAS side" and
+    # `glyph_matrix` scales against `canvas`.  When the body is smaller than the
+    # canvas (macOS only), the glyph must keep the same relative size *inside the
+    # body*, i.e. it has to come down with it -- so apply content_fraction here,
+    # ONCE.
+    #
+    # This must NOT also be pre-multiplied at the call site: doing both shrank the
+    # glyph twice (~0.805^2 = 65 % of intended) and is exactly the reported
+    # "外框对上了，但里面的图标还是跟着缩小了、和背景不协调".
+    # For every non-macOS platform content_fraction is 1.0, so this is a no-op
+    # there and the 62 % / 92 % sizes are unchanged.
     fraction = fraction * content_fraction
 
     canvas = size * SUPERSAMPLE
