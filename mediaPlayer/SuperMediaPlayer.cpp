@@ -2068,7 +2068,25 @@ void SuperMediaPlayer::ProcessVideoLoop()
 
         for (int i = 0; i < size; ++i) {
             for (int j = 0; j < size; ++j) {
-                if (i != j && streamIds[i] >= 0) {
+                /*
+                 * 【2026-10-01 修正：去掉一对"设计上就该相等"的组合，否则切档必炸】
+                 *
+                 * 单解码器切档的设计是"**先把 mCurrentVideoIndex 提交成目标档**，再重建同一块
+                 * 解码器"（见 SwitchVideo 的 ③/④：提交当前档必须早于 flush 与 rebuild），
+                 * 所以切档在途时
+                 *     mCurrentVideoIndex == mVideoSwitchTargetIndex
+                 * 是**预期状态**。原来这里无条件要求六个下标两两不同，于是每次切档都会命中：
+                 *     真机 Debug 版：Assertion failed: (streamIds[i] != streamIds[j]),
+                 *                    function ProcessVideoLoop, file SuperMediaPlayer.cpp, line 2072
+                 * 紧跟在 "FlushVideoPath from quality switch immediate" 之后 —— SIGABRT。
+                 *
+                 * 该断言真正要守的不变量是"不同的媒体类型不能同时选中同一条流"（音视频串流
+                 * 才会真的出错），而"当前视频档 == 切档目标档"只是同一条视频流的两个角色。
+                 * 所以这里只豁免这一对（i/j 为 0 与 3 的两种顺序），其余组合照旧检查。
+                 */
+                const bool allowedPair = (i == 0 && j == 3) || (i == 3 && j == 0);
+
+                if (i != j && streamIds[i] >= 0 && !allowedPair) {
                     assert(streamIds[i] != streamIds[j]);
                 }
             }
