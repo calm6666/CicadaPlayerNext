@@ -70,12 +70,13 @@ Peak memory: the largest icon (1024 px, iOS marketing) is rasterised at
 | --- | --- |
 | glyph colour | `#00C1DE`, taken from the source SVG (`GLYPH_COLOR_HEX`) |
 | rounded-square variants | Android, HarmonyOS, macOS, iOS |
-| rounded-square background | `#FFFFFF`, filling the whole canvas |
-| corner radius | **22.37 %** of the canvas side (`CORNER_RADIUS_FRACTION = 0.2237`) |
-| glyph size, rounded variant | **62 %** of the canvas side |
+| rounded-square background | `#FFFFFF` |
+| corner radius | **22.37 %** of the *body* side (`CORNER_RADIUS_FRACTION = 0.2237`) |
+| glyph size, rounded variant | **62 %** of the *body* side |
 | flat variants | Windows, Linux |
 | flat background | transparent |
 | glyph size, flat variant | **92 %** of the canvas side |
+| body size | fills the canvas, **except macOS** (see below) |
 | supersampling | `scale = 8`, downscaled with `Image.LANCZOS` |
 | curve flattening | 16 straight segments per cubic/quadratic |
 
@@ -86,9 +87,43 @@ The tight box is measured by rendering the glyph once and asking for the
 non-zero bounding box, so the mask clip and the curves' real extent are both
 accounted for.
 
+### macOS gets Apple's icon grid — the body does NOT fill the canvas
+
+Every other platform masks the icon itself, so the rounded square is meant to
+fill the canvas. **macOS does not:** the Finder/Dock draw the image as-is, and
+Apple's macOS icon grid places the icon's body on a smaller centred square with
+a transparent margin around it. A macOS icon whose body fills the whole canvas
+therefore renders **visibly bigger than every neighbouring icon in the Dock**.
+
+The generator therefore shrinks the body for the macOS `.iconset`/`.icns` to
+Apple's published geometry (`MACOS_CONTENT_FRACTION`):
+
+| quantity | value |
+| --- | --- |
+| canvas | 1024 × 1024 |
+| body (rounded square) | **824 × 824**, centred |
+| transparent margin | **100 px** on each side |
+| corner radius | 22.37 % **of the body** (scales with it) |
+| glyph | scaled with the body (`MACOS_GLYPH_FRACTION`), so its size *relative to the white square* is unchanged |
+
+Measured on the generated files (non-zero alpha span across the mid row):
+
+```
+icon_16x16.png        canvas=  16  body=  13  (target 13)
+icon_256x256.png      canvas= 256  body= 206  (target 206)
+icon_512x512@2x.png   canvas=1024  body= 824  (target 824)
+```
+
+The body is drawn at **target size** rather than supersampled: LANCZOS
+downscaling spreads a straight edge over ~4 px of ringing (a row of near-zero
+alphas before the solid edge), which made the body measure ~3 px too wide.
+`ImageDraw.rounded_rectangle` antialiases by itself, so the body is exact; the
+**glyph** is still supersampled because its curves genuinely need the coverage
+mask.
+
 Qt is used on **both** macOS and Windows, and the two get deliberately different
-icons: macOS gets the rounded-white-background `.icns`, Windows gets the flat
-transparent-background `.ico`.
+icons: macOS gets the rounded-white-background `.icns` on Apple's grid, Windows
+gets the flat transparent-background `.ico`.
 
 ### How the source art is read
 

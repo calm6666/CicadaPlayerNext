@@ -89,6 +89,24 @@ SUPERSAMPLE = 8
 CORNER_RADIUS_FRACTION = 0.2237          # 22.37 % of the canvas side
 GLYPH_FRACTION_ROUNDED = 0.62            # about 62 %
 
+#: macOS only: the rounded square must NOT fill the canvas.
+#:
+#: Apple's macOS icon grid puts the icon's body on a smaller square centred in
+#: the image, leaving a transparent margin around it.  A macOS icon whose body
+#: fills the full canvas therefore looks a notch bigger than every system and
+#: third-party icon next to it in the Dock -- which is exactly the bug this
+#: constant fixes ("macOS 上 Qt 程序图标比别的图标大了一圈").
+#:
+#: The value is Apple's published macOS icon geometry: the body occupies
+#: 824 x 824 of the 1024 x 1024 canvas, i.e. 0.8046875 of the side, centred
+#: (100 px transparent margin on each side).  The corner radius stays 22.37 %
+#: *of the body*, so it stays proportional as the body shrinks.
+MACOS_CONTENT_FRACTION = 824.0 / 1024.0
+
+#: The glyph is scaled with the body so its relative size inside the white
+#: square is unchanged on macOS (0.62 * 0.8046875).
+MACOS_GLYPH_FRACTION = GLYPH_FRACTION_ROUNDED * MACOS_CONTENT_FRACTION
+
 #: Flat variants (Windows / Linux): no background, glyph only.
 GLYPH_FRACTION_FLAT = 0.92               # about 92 %
 
@@ -781,33 +799,51 @@ def glyph_matrix(ink_box, canvas, fraction):
     return (scale, 0.0, 0.0, scale, offset_x, offset_y)
 
 
-def draw_rounded_square(image, radius):
-    """Fill `image` (mode L) with a rounded square covering the whole canvas."""
+def draw_rounded_square(image, radius, inset=0):
+    """Fill `image` (mode L) with a rounded square.
+
+    `inset` (in pixels) shrinks the square symmetrically towards the centre,
+    leaving a transparent margin.  macOS needs this: its icon grid places the
+    body on a smaller centred square (see MACOS_CONTENT_FRACTION), and an icon
+    whose body fills the whole canvas renders visibly larger than every other
+    icon in the Dock.
+    """
     size = image.size[0]
+    left = int(round(inset))
+    right = size - 1 - left
+
+    if right <= left:
+        return
+
     draw = ImageDraw.Draw(image)
     if hasattr(draw, "rounded_rectangle"):
-        draw.rounded_rectangle((0, 0, size - 1, size - 1), radius=radius, fill=255)
+        draw.rounded_rectangle((left, left, right, right), radius=radius, fill=255)
         del draw
         return
     # Fallback for very old Pillow: two rectangles plus four quarter discs.
     r = int(round(radius))
-    draw.rectangle((r, 0, size - 1 - r, size - 1), fill=255)
-    draw.rectangle((0, r, size - 1, size - 1 - r), fill=255)
+    draw.rectangle((left + r, left, right - r, right), fill=255)
+    draw.rectangle((left, left + r, right, right - r), fill=255)
     d = 2 * r
-    draw.pieslice((0, 0, d, d), 180, 270, fill=255)
-    draw.pieslice((size - 1 - d, 0, size - 1, d), 270, 360, fill=255)
-    draw.pieslice((0, size - 1 - d, d, size - 1), 90, 180, fill=255)
-    draw.pieslice((size - 1 - d, size - 1 - d, size - 1, size - 1), 0, 90, fill=255)
+    draw.pieslice((left, left, left + d, left + d), 180, 270, fill=255)
+    draw.pieslice((right - d, left, right, left + d), 270, 360, fill=255)
+    draw.pieslice((left, right - d, left + d, right), 90, 180, fill=255)
+    draw.pieslice((right - d, right - d, right, right), 0, 90, fill=255)
     del draw
 
 
-def render_icon(shapes, ink_box, size, variant, fraction=None):
+def render_icon(shapes, ink_box, size, variant, fraction=None, content_fraction=1.0):
     """Render one icon at `size` x `size`.
 
     `variant` is "rounded" (white rounded square, glyph at 62 %) or "flat"
     (transparent background, glyph at 92 %).  `fraction`, when given, overrides
     the glyph size fraction the variant would otherwise pick -- the Android
     adaptive foreground needs a transparent background at the 62 % size.
+
+    `content_fraction` shrinks the whole rounded-square body towards the centre,
+    leaving a transparent margin.  macOS needs it (see MACOS_CONTENT_FRACTION):
+    Apple's icon grid places the body on a smaller centred square, so a body that
+    fills the canvas looks bigger than every neighbouring icon in the Dock.
 
     Memory note: the supersampled coverage images are `size * 8` squared, so
     the 1024 px iOS marketing icon works on 8192 x 8192 8-bit masks (about
@@ -816,8 +852,14 @@ def render_icon(shapes, ink_box, size, variant, fraction=None):
     if variant not in ("rounded", "flat"):
         raise IconError("unknown icon variant %r" % (variant,))
     rounded = variant == "rounded"
+    if content_fraction <= 0.0 or content_fraction > 1.0:
+        raise IconError("content_fraction must be in (0, 1], got %r" % (content_fraction,))
     if fraction is None:
         fraction = GLYPH_FRACTION_ROUNDED if rounded else GLYPH_FRACTION_FLAT
+
+    # Shrinking the body must shrink the glyph with it, otherwise the glyph
+    # would grow *relative* to the white square it sits on.
+    fraction = fraction * content_fraction
 
     canvas = size * SUPERSAMPLE
     matrix = glyph_matrix(ink_box, canvas, fraction)
@@ -837,9 +879,19 @@ def render_icon(shapes, ink_box, size, variant, fraction=None):
         del coverage
         return flat
 
-    square = Image.new("L", (canvas, canvas), 0)
-    draw_rounded_square(square, CORNER_RADIUS_FRACTION * canvas)
-    square = square.resize((size, size), LANCZOS)
+    # The white rounded-square body is drawn at TARGET size rather than
+    # supersampled: `rounded_rectangle` already antialiases, whereas rendering at
+    # 8x and downscaling spreads each edge over ~4 px as LANCZOS ringing (a row of
+    # near-zero alphas like 0,0,1,0,17,238 before the solid edge).  That ringing
+    # makes the body measure ~3 px wider than it is, which is exactly the kind of
+    # slop the macOS grid is meant to avoid.  The GLYPH is still supersampled,
+    # because its curves genuinely need the coverage mask.
+    square = Image.new("L", (size, size), 0)
+    # The corner radius stays proportional to the *body*, so shrinking the body
+    # for macOS keeps the same visual roundness.
+    body_side = size * content_fraction
+    draw_rounded_square(square, CORNER_RADIUS_FRACTION * body_side,
+                        inset=(size - body_side) / 2.0)
 
     # Compositing is linear in colour, so "blend white towards the glyph by the
     # glyph coverage, then set alpha from the rounded square" is identical to
@@ -862,9 +914,11 @@ def render_icon(shapes, ink_box, size, variant, fraction=None):
 class Artifact:
     """One PNG the generator knows how to produce."""
 
-    __slots__ = ("platform", "out_rel", "size", "variant", "dest_rel", "note", "fraction")
+    __slots__ = ("platform", "out_rel", "size", "variant", "dest_rel", "note", "fraction",
+                 "content_fraction")
 
-    def __init__(self, platform, out_rel, size, variant, dest_rel=None, note="", fraction=None):
+    def __init__(self, platform, out_rel, size, variant, dest_rel=None, note="", fraction=None,
+                 content_fraction=1.0):
         self.platform = platform
         self.out_rel = out_rel.replace("\\", "/")
         self.size = size
@@ -875,6 +929,10 @@ class Artifact:
         # adaptive foreground, which needs the plain 62 % glyph rather than the
         # 92 % the "flat" variant would give it.
         self.fraction = fraction
+        # Shrinks the rounded-square body towards the centre, leaving a
+        # transparent margin.  macOS needs it (Apple's icon grid); everything
+        # else fills the canvas.
+        self.content_fraction = content_fraction
 
 
 def build_plan():
@@ -943,10 +1001,14 @@ def build_plan():
         )
 
     # --- macOS: .iconset (the .icns comes from iconutil / Pillow) ----------
+    # NOTE the content_fraction: a macOS icon's body must sit on Apple's smaller
+    # centred grid, NOT fill the canvas.  Without it the icon renders visibly
+    # larger than every neighbouring icon in the Dock.
     for name, px in MACOS_ICONSET_FILES:
         plan.append(
             Artifact("macos", "macos/Cicada.iconset/%s" % name, px, "rounded",
-                     "%s/Cicada.iconset/%s" % (QT_APPICON_DIR, name))
+                     "%s/Cicada.iconset/%s" % (QT_APPICON_DIR, name),
+                     content_fraction=MACOS_CONTENT_FRACTION)
         )
 
     # --- Linux: flat PNGs, hicolor layout ---------------------------------
@@ -1099,13 +1161,15 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
         wanted = set(only)
         plan = [a for a in plan if a.platform in wanted]
 
-    cache: Dict[Tuple[int, str, float], Image.Image] = {}
+    cache: Dict[Tuple[int, str, float, float], Image.Image] = {}
 
-    def get(size, variant, fraction=None):
-        key = (size, variant, fraction if fraction is not None else -1.0)
+    def get(size, variant, fraction=None, content_fraction=1.0):
+        key = (size, variant,
+               fraction if fraction is not None else -1.0,
+               content_fraction)
         image = cache.get(key)
         if image is None:
-            image = render_icon(shapes, ink_box, size, variant, fraction)
+            image = render_icon(shapes, ink_box, size, variant, fraction, content_fraction)
             cache[key] = image
         return image
 
@@ -1113,7 +1177,7 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
     skipped: List[Dict[str, str]] = []
 
     for artifact in plan:
-        image = get(artifact.size, artifact.variant, artifact.fraction)
+        image = get(artifact.size, artifact.variant, artifact.fraction, artifact.content_fraction)
         out_path = os.path.join(out_dir, artifact.out_rel.replace("/", os.sep))
         write_png(image, out_path)
         record = {
@@ -1256,7 +1320,10 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
     icns_written = False
     if "ICNS" in Image.SAVE:
         try:
-            get(1024, "rounded").save(icns_out, format="ICNS")
+            # The .icns MUST use the macOS grid too, otherwise the Dock icon is
+            # the oversized one again on the one platform this matters for.
+            get(1024, "rounded", MACOS_GLYPH_FRACTION, MACOS_CONTENT_FRACTION).save(
+                icns_out, format="ICNS")
             icns_written = True
             icns_note = "written by Pillow (ICNS writer present)"
         except Exception as exc:  # pragma: no cover - depends on Pillow build
