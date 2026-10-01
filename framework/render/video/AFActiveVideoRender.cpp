@@ -56,6 +56,17 @@ int AFActiveVideoRender::renderFrame(std::unique_ptr<IAFFrame> &frame)
         return 0;
     }
     //    std::unique_lock<std::mutex> locker(mFrameMutex);
+    /*
+     * 【临时诊断，定位完就删】把每一次"帧所有权转移/释放"的指针打进日志。
+     *
+     * 目的：真机崩溃栈是 onVSync → malloc 的错误路径 → abort（堆被破坏，延迟几秒才被发现），
+     * 而 backtrace_symbols 在系统库里会解析错位，看不出是哪块内存出问题。这里把 push /
+     * free / drop 的裸指针都留下来，下次复现时同一指针出现两次释放就是凶手。
+     */
+    IAFFrame *pushedFrame = frame.get();
+    AF_LOGI("[frame] push ptr=%p pts=%lld\n", static_cast<void *>(pushedFrame),
+            (long long) pushedFrame->getInfo().pts);
+
     mInputQueue.push(frame.release());
     return 0;
 }
@@ -119,7 +130,8 @@ void AFActiveVideoRender::dropFrame()
         return;
     }
     int64_t framePts = mInputQueue.front()->getInfo().pts;
-    AF_LOGI("drop a frame pts = %lld ", framePts);
+    /* 【临时诊断，定位完就删】见 renderFrame 里那段说明 */
+    AF_LOGI("drop a frame pts = %lld ptr=%p\n", framePts, static_cast<void *>(mInputQueue.front()));
     mInputQueue.front()->setDiscard(true);
     delete mInputQueue.front();
     mInputQueue.pop();
@@ -150,6 +162,9 @@ int AFActiveVideoRender::onVSync(int64_t tick)
     }
     while (mNeedFlushSize > 0) {
         if (mRendingFrame) {
+            /* 【临时诊断，定位完就删】见 renderFrame 里那段说明 */
+            AF_LOGI("[frame] free(flush) ptr=%p pts=%lld\n", static_cast<void *>(mRendingFrame.get()),
+                    (long long) mRendingFrame->getInfo().pts);
             mRendingFrame->setDiscard(true);
             mRendingFrame = nullptr;
         }
@@ -202,6 +217,9 @@ int AFActiveVideoRender::onVSync(int64_t tick)
     if (deviceRenderFrame(mRendingFrame.get())) {
         mRenderCount++;
     }
+    /* 【临时诊断，定位完就删】见 renderFrame 里那段说明 */
+    AF_LOGI("[frame] free(rendered) ptr=%p pts=%lld\n", static_cast<void *>(mRendingFrame.get()),
+            (long long) mFrameInfo.pts);
     mRendingFrame = nullptr;
     calculateFPS(tick);
     if (mListener) {
