@@ -255,7 +255,12 @@ namespace Cicada {
         subsamples.reserve(info.subsamples.size());
 
         for (const auto &sub : info.subsamples) {
-            subsamples.push_back(SubsampleInfo{sub.bytes_of_clear_data, sub.bytes_of_protected_data});
+            /*
+             * 用两参数构造函数而不是列表初始化裸聚合：SubsampleInfo 的成员带
+             * 默认初始化器，**在 C++11 下它不是聚合体**，`SubsampleInfo{a, b}` 编不过
+             * （见 CENCDecrypter.h 里那个构造函数的说明）。本目录固定在 C++11。
+             */
+            subsamples.emplace_back(sub.bytes_of_clear_data, sub.bytes_of_protected_data);
         }
 
         const int64_t size = packet.getSize();

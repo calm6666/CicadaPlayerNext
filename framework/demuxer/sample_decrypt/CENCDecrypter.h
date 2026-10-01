@@ -28,8 +28,29 @@ namespace Cicada {
      * ISO/IEC 23001-7 中一个 subsample 的布局：先是 clearBytes 字节明文（原样保留），
      * 接着是 protectedBytes 字节需要解密的负载。放在命名空间作用域而不是嵌套在
      * CENCDecrypter 里，是为了让调用方不必为了构造它而包含任何包/解复用头文件。
+     *
+     * 【为什么要有这个显式构造函数】成员带默认初始化器（`{0}`）会让本结构在
+     * **C++11 下不是聚合体**（聚合体不允许有 brace-or-equal-initializer，那是
+     * C++14 才放宽的），于是 `SubsampleInfo{a, b}` 这种列表初始化在 C++11 下
+     * 直接编不过：
+     *
+     *     error: no matching constructor for initialization of 'SubsampleInfo'
+     *
+     * 而 `framework/demuxer/CMakeLists.txt:12` 把 demuxer 目标固定在 C++11，
+     * 所以这在 Clang/GCC 上必错、在 MSVC 上却被默认的 C++14 放过 —— 属于
+     * "Windows 绿、macOS 红"的那一类。给一个两参数构造函数之后，`{a, b}` 与
+     * `SubsampleInfo x;` 在 C++11 和 C++14 下都成立。
+     *
+     * 注意：不要把它改回"无构造函数 + 有默认初始化器"的写法，那会重新引入
+     * 上面那个只在非 MSVC 上暴露的编译错误。
      */
     struct SubsampleInfo {
+        SubsampleInfo() = default;
+
+        SubsampleInfo(uint32_t clear, uint32_t protectedBytes_)
+            : clearBytes(clear), protectedBytes(protectedBytes_)
+        {}
+
         uint32_t clearBytes{0};
         uint32_t protectedBytes{0};
     };
@@ -38,7 +59,9 @@ namespace Cicada {
      * 软件 CENC 样本解密器。
      *
      * 支持的 scheme（ISO/IEC 23001-7 第 9 章 / 第 10 章）：
-     *   - "cenc"：AES-CTR，整样本或 subsample 各自重置计数器；
+     *   - "cenc"：AES-CTR，counter block 在每个样本开头构造一次，**样本内跨
+     *             subsample 连续递增**（不是每个 subsample 重置；这是实测定的，
+     *             理由见 CENCDecrypter.cpp 里 decryptCtr 的长注释）；
      *   - "cens"：同 "cenc"（23001-7 里 cens 是 cenc 的 pattern-encryption 版本，
      *             但 CTR 模式下 pattern 没有意义，FFmpeg 对 cens 也走 CTR 全加密路径，
      *             这里按 CTR 处理，与 avFormatDemuxer 拿到的元数据一致）；
