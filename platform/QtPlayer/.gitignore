@@ -32,6 +32,12 @@ qrc_*.cpp
 Thumbs.db
 *.res
 *.rc
+# …except our own hand-written Windows resource script.  The rule above exists to
+# keep Qt Creator / qmake *generated* resource scripts out of the repository; this
+# one is a real source file (it links assets/appicon/Cicada.ico into the PE), so
+# without this exception the app icon would silently stop being built from a
+# clean checkout even though the file is present on the developer's machine.
+!appQtPlayer.rc
 /.qmake.cache
 /.qmake.stash
 **/.qmlls.ini

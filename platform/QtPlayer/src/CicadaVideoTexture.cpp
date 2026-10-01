@@ -539,7 +539,7 @@ namespace cicadaqt {
     {
         /*
          * Windows：D3D11 视频处理器自带的过滤器。
-         * macOS：Metal 零拷贝路上的 Core Image CIColorControls（见 CicadaTextureMetal）。
+         * macOS：Metal 零拷贝路上的 Metal 计算内核（见 CicadaTextureMetal.mm）。
          * 两边都是**在 GPU 上过一遍**：不退出零拷贝、不做 CPU 下载、不额外拷贝回内存。
          */
 #if defined(Q_OS_WIN)
@@ -547,9 +547,11 @@ namespace cicadaqt {
 #elif defined(Q_OS_MACOS)
         /*
          * macOS 按**后端实际在不在**回答，而不是"编译进来就算支持"：
-         * 只有 Metal 零拷贝那条路才有这个能力（Core Image 渲染到我们复用的输出纹理）；
+         * 只有 Metal 零拷贝那条路才有这个能力（计算内核把结果写进我们复用的输出纹理）；
          * 少数降级情况（场景图不是 Metal / CVMetalTextureCache 建不起来）会退回 CPU 路径，
          * 那种情况下拖滑块确实不生效，所以如实返回 false，面板会显示"仅界面预览"。
+         * 另外内核/管线本身准备失败时渲染线程会打一条 "colour adjust: disabled (原因)"，
+         * 界面这边仍按"后端在"回答 —— 那种失败是异常情况，日志里一定看得见。
          *
          * m_zeroCopyActive 由渲染线程写、这里（GUI 线程）读 —— 和本类既有的
          * backendName() 是同一个读法；值变化时 CicadaPlayerItem 会发 backendChanged

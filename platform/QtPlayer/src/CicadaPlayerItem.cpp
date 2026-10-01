@@ -2502,7 +2502,7 @@ namespace cicadaqt {
      * NV12/P010 转成 RGBA，视频处理器自带 BRIGHTNESS / CONTRAST / SATURATION / HUE
      * 四个「过滤器」（ID3D11VideoContext::VideoProcessorSetStreamFilter），
      * 在那里应用是**零额外代价**的（不额外拷贝、不退出零拷贝路径）。
-     * macOS 也在**渲染后端**做（Metal 零拷贝路上用 Core Image 的 CIColorControls 过一遍 GPU，
+     * macOS 也在**渲染后端**做（Metal 零拷贝路上用一个 Metal 计算内核过一遍 GPU，
      * 三个值全中性时完全不进那条额外 pass，全程不读回 CPU），见 CicadaTextureMetal。
      * Linux(VAAPI) 目前还没有实现 —— 那种情况下 colorAdjustSupported() 返回 false，
      * 界面如实说明（见 CicadaVideoTexture::colorAdjustSupported()）。

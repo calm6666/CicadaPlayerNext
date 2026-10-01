@@ -503,6 +503,42 @@ if (WIN32 AND MSVC)
     target_sources(appQtPlayer PRIVATE appQtPlayer.manifest)
 endif ()
 
+# ---------------------------------------------------------------------------
+# 应用图标（Windows 的 .ico / macOS 的 .icns）
+#
+# 【Windows】必须把 .rc 交给链接器：exe 的图标是 PE 里的 RT_GROUP_ICON 资源，
+# 不是运行时画出来的。少了它，资源管理器 / 任务栏 / Alt-Tab 上永远是系统默认图标
+# （Qt 的 setWindowIcon() 只影响窗口标题栏，替不了这个）。
+# 图标本体是多尺寸 ICO，由 tools/make_icons/make_icons.py 从 doc/Cicada.svg 生成。
+#
+# 【macOS】MACOSX_BUNDLE_ICON_FILE 只写**文件名**，CMake 会据此在
+# appQtPlayer.app/Contents/Resources/<名字> 找它，并且只有放在 bundle 里才生效，
+# 所以下面用 MACOSX_PACKAGE_LOCATION Resources 把 .icns 归到 bundle 内那一层。
+# 同一个属性还会把 CFBundleIconFile 写进 Info.plist —— 不需要手改 plist。
+#
+# 【顺序】这两个 if 都必须**在 qt_add_executable 之后**：target_sources() 要求目标
+# 已存在。macOS 的 set_target_properties 与下面那段 MACOSX_BUNDLE_BUNDLE_VERSION
+# 合并生效（CMake 的 set_target_properties 是按属性覆盖，不是整体替换）。
+# ---------------------------------------------------------------------------
+if (WIN32 AND MSVC)
+    target_sources(appQtPlayer PRIVATE appQtPlayer.rc)
+endif ()
+
+if (APPLE)
+    if (EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/assets/appicon/Cicada.icns")
+        target_sources(appQtPlayer PRIVATE assets/appicon/Cicada.icns)
+        set_source_files_properties(assets/appicon/Cicada.icns PROPERTIES
+                MACOSX_PACKAGE_LOCATION Resources)
+        set_target_properties(appQtPlayer PROPERTIES MACOSX_BUNDLE_ICON_FILE Cicada.icns)
+    else ()
+        # 不静默：.icns 是生成物（tools/make_icons/make_icons.py），丢了就明确说一句，
+        # 免得到时候"构建成功但双击 .app 是个默认图标"而没人知道为什么。
+        message(WARNING "QtPlayer: assets/appicon/Cicada.icns 不存在，macOS 应用图标不会被设置。"
+                " 请先运行 `python tools/make_icons/make_icons.py`（或在 macOS 上跑 "
+                "assets/appicon/make_icns.sh 用 iconutil 生成）。")
+    endif ()
+endif ()
+
 # QML 模块：URI "QtPlayer" 对应 QML 里的 `import QtPlayer`；
 # QML_ELEMENT 注册的类型由 qt_add_qml_module 自动生成注册代码。
 #
@@ -927,10 +963,9 @@ if (APPLE)
     #   VTPixelTransferSession（NV12 -> BGRA）与 CVMetalTextureCache。
     find_library(VIDEOTOOLBOX VideoToolbox)
     find_library(COREVIDEO CoreVideo)
-    # 视频色彩调整在 macOS 上走 Core Image 的 CIColorControls（CIContext / CIFilter / CIImage
-    # 都在这个框架里，见 src/CicadaTextureMetal.mm）。虽然 SDK 的 module map 通常会自动带上
-    # 这个 -framework，但显式写出来最稳：少了它就是链接期一堆 "Undefined symbols: OBJC_CLASS_$_CIContext"。
-    find_library(COREIMAGE CoreImage)
+    # 注：macOS 的视频色彩调整**不用** Core Image —— 走的是 src/CicadaTextureMetal.mm 里的
+    # Metal 计算内核。前两次用 Core Image 的方案在真机上都变成"一拖滑块整屏红"（原因见那个
+    # 文件的说明），所以这里**不再**需要 -framework CoreImage。
     target_link_libraries(appQtPlayer PUBLIC
             iconv
             bz2
@@ -939,7 +974,6 @@ if (APPLE)
             ${QUARTZCORE}
             ${VIDEOTOOLBOX}
             ${COREVIDEO}
-            ${COREIMAGE}
             )
 elseif (MSVC)
     # 什么都不加

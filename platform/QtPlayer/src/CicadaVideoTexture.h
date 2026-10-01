@@ -130,9 +130,9 @@ namespace cicadaqt {
          * 范围由 GetVideoProcessorFilterRange 给出）—— 在那里应用是**不花额外代价**的
          * （本来就要 Blt 一次做 NV12→RGBA）。
          *
-         * 【macOS】Metal 零拷贝路径：Core Image 的 CIColorControls（取值范围同样是从实现里
-         * 问出来的 —— filter.attributes 的 min/default/max，和 D3D11 问驱动要 range 同一个
-         * 思路），渲染到我们自己复用的输出纹理再交给 Qt。三个值**全中性时完全不进这条额外
+         * 【macOS】Metal 零拷贝路径：Metal 计算内核（cicadaColorAdjust，源码就在
+         * CicadaTextureMetal.mm 里）算完写进我们自己复用的输出纹理再交给 Qt；
+         * 取值范围与 Windows 同量纲（0~200，100 = 中性）。三个值**全中性时完全不进这条额外
          * pass**（直通，逐像素一致）。细节见 CicadaTextureMetal。
          *
          * 【其它后端】Linux(VAAPI) 还没实现，colorAdjustSupported() 在那边返回 false，

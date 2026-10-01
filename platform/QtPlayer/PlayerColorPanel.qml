@@ -35,7 +35,7 @@
 //   所以调用它不会有任何效果。用户要求"实在没有的先写一个 ui 静态数据"，
 //   这里就把参考的 UI 一比一复刻出来，滑块可拖、数值可记，但不欺骗用户：
 //   面板底部有一行说明，日志里也打一行 warning。
-//   （真实的实现路径见面板底部注释：D3D11 视频处理器的 ProcAmp / macOS 的 CIFilter。）
+//   （真实的实现路径见面板底部注释：D3D11 视频处理器的 ProcAmp / macOS 的 Metal 计算内核。）
 // ===========================================================================
 import QtQuick
 import QtPlayer
@@ -331,7 +331,7 @@ Rectangle {
          *
          * 只删绿字、**保留**下面这条琥珀色的"后端不支持"提示：那种情况下拖滑块真的不动画面，
          * 必须如实说，否则就是在骗用户（Linux VAAPI / CPU 回退；macOS 已经实现了，
-         * 见 CicadaTextureMetal 的 Core Image CIColorControls）。
+         * 见 CicadaTextureMetal 里的 Metal 计算内核）。
          */
         Text {
             width: parent.width - 40

@@ -562,7 +562,7 @@ namespace cicadaqt {
          *   * 值记在本组件里（换后端/换片源后能重新应用）；
          *   * 转给渲染后端：Windows 用 D3D11 视频处理器的
          *     BRIGHTNESS/CONTRAST/SATURATION 过滤器（**每帧零额外代价**）；
-         *     macOS 在 Metal 零拷贝路上用 Core Image 的 CIColorControls 过一遍 GPU
+         *     macOS 在 Metal 零拷贝路上用一个 Metal 计算内核过一遍 GPU
          *     （三个值全中性时完全不进那条额外 pass；全程不读回 CPU）。
          *
          * colorAdjustSupported 告诉界面"当前后端到底支不支持"：Windows 与 macOS（Metal 零拷贝

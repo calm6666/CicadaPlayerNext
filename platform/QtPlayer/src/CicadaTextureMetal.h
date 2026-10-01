@@ -102,8 +102,10 @@ namespace cicadaqt {
          * macOS 的做法（和 Windows 一样是"GPU 上过一遍"，绝不落到 CPU）：
          *   * 三个值**全中性时完全不进这条路** —— 仍旧把 VideoToolbox 的 MTLTexture 直接交给
          *     Qt，零额外 pass、零额外开销，画面与没有这个功能时逐像素一致；
-         *   * 非中性时才用 Core Image 的 CIColorControls 在 GPU 上渲染到我们自己复用的一张
-         *     输出纹理（3 槽环，有界），再交给 Qt 场景图。
+         *   * 非中性时才用本文件里的 Metal 计算内核（cicadaColorAdjust）算一遍，写进我们自己
+         *     复用的输出纹理（3 槽环，有界），再交给 Qt 场景图。内核源码就在 .mm 里，
+         *     输入输出都是我们自己的纹理、通道顺序由 Metal 按像素格式映射、alpha 一律写 1：
+         *     没有色彩管理、没有预乘 alpha 那类隐含约定（那正是前两次"整屏红"的来源）。
          * 全程**零 CPU 下载**：没有 CVPixelBufferGetBaseAddress、没有 QImage、没有 swscale。
          */
         void setColorAdjust(float brightness, float contrast, float saturation);
@@ -129,7 +131,7 @@ namespace cicadaqt {
 
         /*
          * 三条**一次性**日志（绝不做每帧打印，拖滑块时更不能刷屏）：
-         *   * 第一次真的走 CIColorControls 那条额外 pass；
+         *   * 第一次真的走那条额外 pass（Metal 计算内核）；
          *   * 第一次从"有效果"回到中性（直通）；
          *   * 第一次这一帧没能应用（画面仍旧走直通，不黑屏）。
          */
@@ -138,7 +140,7 @@ namespace cicadaqt {
         bool m_loggedColorAdjustFailure = false;
 
         /*
-         * 诊断用：上一次打"colour adjust pass:"那一行诊断时的三个值。那条日志只在**首次生效**
+         * 诊断用：上一次打"colour adjust: applying via"那一行时的三个值。那条日志只在**首次生效**
          * 和**值变了**时各打一次（拖滑块每变一次一行），绝不每帧打；初值 -1 保证第一次必然打。
          */
         float m_loggedBrightness = -1.0f;
