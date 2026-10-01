@@ -374,6 +374,10 @@ int main(int argc, char **argv)
     // Counts samples that carry no encryption side data at all (parameter sets
     // and similar), which must therefore already equal the clear bytes.
     int cleartextSamples = 0;
+    // Subsample shape census.  A verification that only ever sees single-range
+    // samples does NOT exercise the counter-across-subsamples question, so the
+    // result is only as strong as this census says.
+    int singleRangeSamples = 0, multiRangeSamples = 0, maxRanges = 0;
     CENCDecrypter dec;
 
     for (auto &kv : enc) {
@@ -434,6 +438,20 @@ int main(int argc, char **argv)
             }
 
             compared++;
+
+            {
+                const int ranges = static_cast<int>(es[i].subs.size());
+
+                if (ranges > maxRanges) {
+                    maxRanges = ranges;
+                }
+
+                if (ranges > 1) {
+                    multiRangeSamples++;
+                } else {
+                    singleRangeSamples++;
+                }
+            }
 
             if (work == ref[i].data) {
                 identical++;
@@ -521,6 +539,8 @@ int main(int argc, char **argv)
     printf("samples compared        : %d\n", compared);
     printf("  of which encrypted    : %d\n", compared - cleartextSamples);
     printf("  of which clear        : %d\n", cleartextSamples);
+    printf("subsample shapes        : %d single-range, %d multi-range (max %d ranges in one sample)\n",
+           singleRangeSamples, multiRangeSamples, maxRanges);
     printf("BYTE-IDENTICAL to clear : %d\n", identical);
     printf("mismatched              : %d\n", mismatched);
 
