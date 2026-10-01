@@ -113,20 +113,31 @@ param(
     # Explicit Qt prefix. Overrides every automatic search (and the linking mode is
     # then derived from the prefix itself, not from -Static).
     [string]$QtPrefix = "",
+    # Build configuration. Debug/RelWithDebInfo are for crash hunting: a Release
+    # stack has no names (backtrace_symbols and even the .ips end up printing
+    # unrelated neighbours), so an abort in an inlined frame cannot be named at all.
+    # RelWithDebInfo is the recommended one (symbols, still optimised); Debug is
+    # slow but gives line numbers everywhere.
+    [ValidateSet("Release", "RelWithDebInfo", "Debug")]
+    [string]$Config = "Release",
     # Print the usage and stop. "-h" works too (PowerShell resolves it as an
     # unambiguous abbreviation of -Help).
     [switch]$Help
 )
 
 if ($Help) {
-    Write-Host "Usage: deploy_win.ps1 [-Static] [-QtPrefix DIR] [-DeployDir DIR]"
+    Write-Host "Usage: deploy_win.ps1 [-Static] [-QtPrefix DIR] [-DeployDir DIR] [-Config NAME]"
     Write-Host ""
     Write-Host "  (no switch)        dynamic Qt  ->  build\msvc         ->  deploy\"
     Write-Host "  -Static            static Qt   ->  build\msvc-static  ->  deploy-static\"
     Write-Host "  -QtPrefix DIR      use this Qt prefix (the linking mode follows it)"
     Write-Host "  -DeployDir DIR     install into this directory instead of the default"
+    Write-Host "  -Config NAME       Release (default) | RelWithDebInfo | Debug"
+    Write-Host "                     (crash hunting: RelWithDebInfo/Debug keep the symbols;"
+    Write-Host "                      pair it with -DeployDir deploy-dbg to avoid overwriting"
+    Write-Host "                      the Release deploy)"
     Write-Host ""
-    Write-Host "The script configures, builds Release, installs and then self-checks the"
+    Write-Host "The script configures, builds -Config, installs and then self-checks the"
     Write-Host "result. A Qt prefix counts as static when it has no bin\Qt6Core.dll."
     Write-Host ""
     Write-Host "Qt search order: -QtPrefix, QTDIR/QT_DIR/QT_ROOT_DIR, PATH, then"
@@ -359,13 +370,13 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---- 2. build --------------------------------------------------------------
-Write-Host "[2/4] build Release"
-& cmake --build $buildDir --config Release --parallel
+Write-Host "[2/4] build $Config"
+& cmake --build $buildDir --config $Config --parallel
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ---- 3. install (= deploy) -------------------------------------------------
 Write-Host "[3/4] install to $DeployDir"
-& cmake --install $buildDir --config Release --prefix $DeployDir
+& cmake --install $buildDir --config $Config --prefix $DeployDir
 if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
 # ---- 4. self-check ---------------------------------------------------------
