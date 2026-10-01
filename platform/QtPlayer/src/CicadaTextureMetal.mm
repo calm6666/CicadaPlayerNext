@@ -121,6 +121,41 @@ namespace cicadaqt {
         return defaultValue - (defaultValue - minValue) * (-t);
     }
 
+    /*
+     * 下面三个只服务于诊断日志（真机上排查"整屏红"那类通道/格式问题就靠它）：
+     * 全部用 10.0/10.11 起就有的 API，不做任何新分配。
+     */
+    static const char *cicadaPixelFormatName(MTLPixelFormat format)
+    {
+        switch (format) {
+            case MTLPixelFormatBGRA8Unorm:
+                return "BGRA8Unorm";
+
+            case MTLPixelFormatBGRA8Unorm_sRGB:
+                return "BGRA8Unorm_sRGB";
+
+            case MTLPixelFormatRGBA8Unorm:
+                return "RGBA8Unorm";
+
+            case MTLPixelFormatRGBA8Unorm_sRGB:
+                return "RGBA8Unorm_sRGB";
+
+            default:
+                return "other";
+        }
+    }
+
+    /* nil 是合法的（CGColorSpaceGetModel 不能吃空指针），所以空指针一律报 -1。 */
+    static int cicadaColorSpaceModel(CGColorSpaceRef space)
+    {
+        return (space != nullptr) ? (int) CGColorSpaceGetModel(space) : -1;
+    }
+
+    static int cicadaColorSpaceComponents(CGColorSpaceRef space)
+    {
+        return (space != nullptr) ? (int) CGColorSpaceGetNumberOfComponents(space) : -1;
+    }
+
     /* Objective-C / CoreVideo 类型都藏在这里，头文件保持干净。 */
     struct CicadaTextureMetal::Private {
         id<MTLDevice> device = nil;
@@ -148,10 +183,11 @@ namespace cicadaqt {
          */
         CIFilter *ciColorControls = nil;
         /*
-         * 工作色彩空间（我们自己持有，releaseResources 里放）。为什么是线性 RGB、
-         * 为什么输入输出都用它，见 ensureColorAdjustContext() 的长注释。
+         * 输入图与输出目标**共用**的色彩空间（我们自己持有，releaseResources 里放）。
+         * 为什么必须是同一个、为什么不能用 [NSNull null]、为什么是 sRGB 而不是线性空间，
+         * 见 ensureColorAdjustContext() 的长注释。
          */
-        CGColorSpaceRef workingColorSpace = nullptr;
+        CGColorSpaceRef colorSpace = nullptr;
         /* 从 CIColorControls 的 attributes 里读出来的 (min, default, max)。 */
         bool rangesReady = false;
         float brightnessMin = 0.0f;
@@ -165,7 +201,8 @@ namespace cicadaqt {
         float saturationMax = 0.0f;
         /*
          * 输出纹理环（3 槽）：和 refs[3] 一个思路 —— Qt 的场景图是异步的，上一两帧的命令
-         * 缓冲可能还在采样这张纹理，所以不能只用一张。有界（最多 3 张），尺寸变了整体重建。
+         * 缓冲可能还在采样这张纹理，所以不能只用一张。有界（最多 3 张），尺寸**或格式**变了
+         * 整体重建。
          */
         struct OutputSlot {
             id<MTLTexture> texture = nil;
@@ -173,6 +210,12 @@ namespace cicadaqt {
         OutputSlot outputs[3];
         int outputWidth = 0;
         int outputHeight = 0;
+        /*
+         * 输出纹理的像素格式：**直接取输入纹理的**（VT 直出 32BGRA ⇒ BGRA8Unorm）。
+         * 绝不能写死别的格式：格式与输入/取样侧不一致时，轻则红蓝互换，重则只剩一个通道
+         * （真机"整屏红"就是这么来的）。
+         */
+        MTLPixelFormat outputFormat = MTLPixelFormatInvalid;
         int outputNext = 0;
         /*
          * 场景图的 Metal 命令队列（从 getResource 借的，我们不持有、也不 release）。
@@ -183,31 +226,41 @@ namespace cicadaqt {
 
         /* 下面三个只在渲染线程调用。 */
         bool ensureColorAdjustContext();
-        bool ensureOutputTextures(int width, int height);
+        bool ensureOutputTextures(int width, int height, MTLPixelFormat format);
+        /*
+         * logDiagnostics = true 时打**一条**诊断日志（首次生效 / 参数变化时由调用方给 true，
+         * 绝不每帧打）。字段见实现。
+         */
         id<MTLTexture> colorAdjustedTexture(QQuickWindow *window, id<MTLTexture> input, int width,
                                             int height, float brightness, float contrast,
-                                            float saturation);
+                                            float saturation, bool logDiagnostics);
     };
 
     /*
      * 建 Core Image 的上下文（一次性，惰性）。
      *
-     * 【色彩空间：为什么这么设，为什么输入和输出用同一个】
+     * 【色彩空间：输入和输出必须用**同一个** RGB 空间（真机"整屏红"的根因就在这）】
      *
-     * 直通那条路（没调色彩时）是把 VideoToolbox 解出来的 BGRA 纹理**原值**交给 Qt 采样，
-     * 中间没有任何色彩转换。色彩调整这条路必须保持同样的口径，否则就是"一拖滑块颜色就偏"：
+     * 上一版是给输入图声明 kCIImageColorSpace = [NSNull null]（"不做色彩管理"），再配一个
+     * 线性的工作色彩空间。**那是错的**：Apple 对这个 key 的说明写得很清楚
+     * （CIImageOption.colorSpace）——"Use this option for images that don't contain color data
+     * (such as elevation maps, normal vector maps, and sampled function tables)"，
+     * 它服务的是**单通道**数据。套在 BGRA 视频纹理上，Core Image 就把它当单通道图读：
+     * 一个像素只活下来一个字节（BGRA 内存布局里那个字节是 B），写回 BGRA 目标时落进 R 通道、
+     * G/B 全 0 ⇒ 整幅画面只剩红色（真机看到的就是这个）。同时输入（无色彩空间）与输出
+     * （线性空间）还不是同一个空间，等于让 Core Image 在两个方向各做一次不同的转换。
      *
-     *   * 输入：CIImage 用 kCIImageColorSpace = [NSNull null] 创建。Apple 的文档写得明确
-     *     （Core Image 的 CIImageOption.colorSpace 条目）："To request that Core Image
-     *     perform no color management, specify the NSNull object as the value for this key."
-     *     于是纹理里的像素值被原样当成"已经在工作色彩空间里"，滤镜直接在这个值上运算；
-     *   * 工作色彩空间：线性 RGB（kCGColorSpaceGenericRGBLinear）。Core Image 的滤镜内核
-     *     就是按线性光设计的，工作空间必须是线性的；
-     *   * 输出：render(...) 的 colorSpace 参数传**同一个**色彩空间。工作空间 → 目标空间
-     *     是恒等变换，所以除滤镜那一步运算之外，颜色值不会被任何 transfer function 动过。
+     * 现在的写法（Apple 文档里成对给出的标准用法）：
+     *   * 图像与目标都用**同一个** sRGB：sRGB → 工作空间 → 滤镜 → 工作空间 → sRGB，
+     *     进出是同一组变换，来回正好抵消 ⇒ 净效果只有滤镜那一步运算动过颜色值，
+     *     不会整体偏色、也不会整体变亮变暗；
+     *   * CIContext 不再指定工作色彩空间（两个方向同一个空间时它本来就抵消），
+     *     Core Image 实际用的 workingColorSpace / workingFormat 会打进诊断日志备查。
      *
-     * 反过来做（例如输入声明成 sRGB、输出按线性写回）就是一次真实的 gamma 转换 ——
-     * 那正是"颜色偏了"的来源，所以这里刻意两边都用同一个空间。
+     * 【为什么不用 kCIImageTextureFormat 指定纹理格式】那个 key 只对
+     * imageWithTexture:size:flipped:options:（OpenGL 纹理那条）有效，10.14 起已废弃。
+     * MTLTexture 这条路由 Core Image 自己按 texture.pixelFormat 判定，我们只要保证
+     * **输入与输出纹理的 pixelFormat 完全一致**（见 ensureOutputTextures，格式直接取输入纹理的）。
      *
      * 【为什么不用 kCIContextCacheIntermediates 之类的选项】本工程 macOS 的部署目标是 10.11
      * （见 framework/macOSX.cmake 的 MACOSX_DEPLOYMENT_TARGET），那些 10.12+ 才有的 option key
@@ -227,25 +280,33 @@ namespace cicadaqt {
         }
 
         /*
-         * 这段会创建自释放对象（options / attributes 字典），所以自己开一个自动释放池：
-         * 调用方是 Qt 的渲染线程，不能指望它头上有池。ciContext / ciColorControls 是我们
-         * 显式 alloc/retain 持有的，不受池影响。
+         * 这段会创建自释放对象（attributes 字典），所以自己开一个自动释放池：
+         * 调用方是 Qt 的渲染线程，不能指望它头上有池。ciContext / ciColorControls / colorSpace
+         * 是我们显式 alloc/retain/Create 持有的，不受池影响。
          */
         @autoreleasepool {
-            workingColorSpace = CGColorSpaceCreateWithName(kCGColorSpaceGenericRGBLinear);
+            /*
+             * 输入图与输出目标**共用**的色彩空间（同一个 ⇒ 来回抵消）。
+             * 用 sRGB 而不是 kCGColorSpaceGenericRGBLinear：BGRA 视频纹理本来就是按 sRGB 解释的，
+             * 给它贴一个线性空间、再写回线性空间，等于把 transfer function 单向做掉了一次。
+             */
+            colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
 
-            if (workingColorSpace == nullptr) {
-                AF_LOGE("cannot create the linear RGB colour space, video colour adjust is off\n");
+            if (colorSpace == nullptr) {
+                AF_LOGE("cannot create the sRGB colour space, video colour adjust is off\n");
                 return false;
             }
 
-            NSDictionary *options = @{ kCIContextWorkingColorSpace: (__bridge id) workingColorSpace };
-            ciContext = [[CIContext alloc] initWithMTLDevice:device options:options];
+            /*
+             * 工作色彩空间 / 工作格式都不指定：输入与输出是同一个空间时它们本来就抵消，
+             * 少一个变量少一个坑（实际值在诊断日志里打出来）。
+             */
+            ciContext = [[CIContext alloc] initWithMTLDevice:device options:nil];
 
             if (ciContext == nil) {
                 AF_LOGE("cannot create the Metal backed CIContext, video colour adjust is off\n");
-                CGColorSpaceRelease(workingColorSpace);
-                workingColorSpace = nullptr;
+                CGColorSpaceRelease(colorSpace);
+                colorSpace = nullptr;
                 return false;
             }
 
@@ -255,8 +316,8 @@ namespace cicadaqt {
                 AF_LOGE("Core Image has no CIColorControls filter, video colour adjust is off\n");
                 [ciContext release];
                 ciContext = nil;
-                CGColorSpaceRelease(workingColorSpace);
-                workingColorSpace = nullptr;
+                CGColorSpaceRelease(colorSpace);
+                colorSpace = nullptr;
                 return false;
             }
 
@@ -277,8 +338,8 @@ namespace cicadaqt {
                 ciColorControls = nil;
                 [ciContext release];
                 ciContext = nil;
-                CGColorSpaceRelease(workingColorSpace);
-                workingColorSpace = nullptr;
+                CGColorSpaceRelease(colorSpace);
+                colorSpace = nullptr;
                 return false;
             }
 
@@ -294,16 +355,20 @@ namespace cicadaqt {
     }
 
     /*
-     * 输出纹理环：惰性建、按尺寸复用（尺寸变了整体重建，和有界的 refs 环一个思路）。
+     * 输出纹理环：惰性建、按尺寸+格式复用（变了就整体重建，和有界的 refs 环一个思路）。
      * Core Image 把滤镜结果渲染进这里，再由 Qt 采样 —— 全程在 GPU 上，不读回 CPU。
+     *
+     * format **必须**是输入纹理那一份（调用方传进来）：写死别的格式就是真机"整屏红"那类事故
+     * （轻则红蓝互换，重则只剩一个通道）。
      */
-    bool CicadaTextureMetal::Private::ensureOutputTextures(int width, int height)
+    bool CicadaTextureMetal::Private::ensureOutputTextures(int width, int height, MTLPixelFormat format)
     {
-        if (device == nil || width <= 0 || height <= 0) {
+        if (device == nil || width <= 0 || height <= 0 || format == MTLPixelFormatInvalid) {
             return false;
         }
 
-        if (outputs[0].texture != nil && outputWidth == width && outputHeight == height) {
+        if (outputs[0].texture != nil && outputWidth == width && outputHeight == height &&
+                outputFormat == format) {
             return true;
         }
 
@@ -316,11 +381,12 @@ namespace cicadaqt {
 
         outputWidth = 0;
         outputHeight = 0;
+        outputFormat = MTLPixelFormatInvalid;
 
         /*
-         * 尺寸/格式和**解码纹理**一致（BGRA8；就是显示尺寸，Core Image 这里只做颜色运算、
-         * 不缩放），所以交给 Qt 的纹理与直通那条路同尺寸，后面的缩放 / letterbox 逻辑
-         * 一个字都不用改。
+         * 尺寸与格式都跟**解码纹理**一致（BGRA8；就是显示尺寸，Core Image 这里只做颜色运算、
+         * 不缩放），所以交给 Qt 的纹理与直通那条路同尺寸同格式，后面的缩放 / letterbox /
+         * wrap 逻辑一个字都不用改。
          *
          * usage 必须带 RenderTarget：Core Image 是往它里面**渲染**；
          * 也必须带 ShaderRead：Qt 的场景图要采样它。
@@ -328,7 +394,7 @@ namespace cicadaqt {
          *（这正是零拷贝那条硬约束）。
          */
         MTLTextureDescriptor *descriptor =
-            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:MTLPixelFormatBGRA8Unorm
+            [MTLTextureDescriptor texture2DDescriptorWithPixelFormat:format
                                                               width:(NSUInteger) width
                                                              height:(NSUInteger) height
                                                           mipmapped:NO];
@@ -346,13 +412,15 @@ namespace cicadaqt {
                     }
                 }
 
-                AF_LOGE("cannot allocate the colour adjust output texture (%dx%d)\n", width, height);
+                AF_LOGE("cannot allocate the colour adjust output texture (%dx%d, format %d)\n",
+                        width, height, (int) format);
                 return false;
             }
         }
 
         outputWidth = width;
         outputHeight = height;
+        outputFormat = format;
         outputNext = 0;
         return true;
     }
@@ -376,7 +444,7 @@ namespace cicadaqt {
      */
     id<MTLTexture> CicadaTextureMetal::Private::colorAdjustedTexture(QQuickWindow *window,
             id<MTLTexture> input, int width, int height, float brightness, float contrast,
-            float saturation)
+            float saturation, bool logDiagnostics)
     {
         /*
          * 每帧都会创建几个自释放对象（CIImage、命令缓冲、参数 NSNumber、字典……），
@@ -402,13 +470,16 @@ namespace cicadaqt {
                 }
             }
 
-            if (!ensureOutputTextures(width, height)) {
+            if (!ensureOutputTextures(width, height, input.pixelFormat)) {
                 return nil;
             }
 
             /*
-             * 输入图：不做色彩管理（kCIImageColorSpace = NSNull，见
-             * ensureColorAdjustContext 的长注释），像素值原样进滤镜。
+             * 输入图：贴**和输出目标同一个**色彩空间（见 ensureColorAdjustContext 的长注释）。
+             *
+             * 之前这里是 kCIImageColorSpace = [NSNull null]（"不做色彩管理"）—— 那是给单通道数据
+             * 用的写法，套在 BGRA 上会让 Core Image 当单通道图读，真机表现为"一拖滑块整屏红"，
+             * 所以现在绝不能再用它。
              *
              * 方向：imageWithMTLTexture: 与 render:toMTLTexture: 是 Apple 文档里**成对**给出的
              * 用法（输入纹理 → 滤镜 → 输出纹理，见 imageWithMTLTexture 的 Discussion），
@@ -422,22 +493,28 @@ namespace cicadaqt {
              * 置成 1。
              */
             CIImage *image = [CIImage imageWithMTLTexture:input
-                                                  options:@{ kCIImageColorSpace: [NSNull null] }];
+                                                  options:@{ kCIImageColorSpace: (__bridge id) colorSpace }];
 
             if (image == nil) {
                 return nil;
             }
 
+            /*
+             * 面板的 0~200（100 = 中性）换算成 CIColorControls 自己的量纲：中点是**从 attributes
+             * 读到的 default**（亮度 0 / 对比度 1 / 饱和度 1 那一类），取值范围也是读出来的 min/max。
+             * 绝不能把 100 直接当参数值传进去（那等于把亮度加 100、饱和度乘 100，画面会被拉爆）。
+             */
+            const float brightnessValue = mapColorAdjustValue(brightness, brightnessMin,
+                                          brightnessDefault, brightnessMax);
+            const float contrastValue = mapColorAdjustValue(contrast, contrastMin,
+                                        contrastDefault, contrastMax);
+            const float saturationValue = mapColorAdjustValue(saturation, saturationMin,
+                                          saturationDefault, saturationMax);
+
             [ciColorControls setValue:image forKey:kCIInputImageKey];
-            [ciColorControls setValue:@(mapColorAdjustValue(brightness, brightnessMin,
-                                      brightnessDefault, brightnessMax))
-                               forKey:kCicadaColorBrightness];
-            [ciColorControls setValue:@(mapColorAdjustValue(contrast, contrastMin,
-                                      contrastDefault, contrastMax))
-                               forKey:kCicadaColorContrast];
-            [ciColorControls setValue:@(mapColorAdjustValue(saturation, saturationMin,
-                                      saturationDefault, saturationMax))
-                               forKey:kCicadaColorSaturation];
+            [ciColorControls setValue:@(brightnessValue) forKey:kCicadaColorBrightness];
+            [ciColorControls setValue:@(contrastValue) forKey:kCicadaColorContrast];
+            [ciColorControls setValue:@(saturationValue) forKey:kCicadaColorSaturation];
 
             CIImage *filtered = ciColorControls.outputImage;
 
@@ -449,14 +526,54 @@ namespace cicadaqt {
             id<MTLCommandBuffer> commandBuffer = (queue != nil) ? [queue commandBuffer] : nil;
 
             /*
-             * bounds 用图像自己的尺寸（输出纹理就是这么大），colorSpace 用工作色彩空间
-             * （恒等变换，见 ensureColorAdjustContext 的说明）。
+             * 【一次性诊断】只在"首次生效 / 参数变了"时打（由调用方决定，绝不每帧打）。
+             * 真机上排查"一拖滑块整屏红"这类通道/格式问题，全靠这一行把下面几件事一次交代清楚：
+             *   * 输入/输出纹理的 pixelFormat、宽高、usage、storageMode（格式不一致就是红色/红蓝互换）；
+             *   * 面板值（0~200）与**实际传给 CIColorControls** 的三个值，以及从 attributes 读到的
+             *     min/max/default（量纲问题在这里一眼可见）；
+             *   * 输入图的有效色彩空间（image.colorSpace —— 如果它变成单通道就是那条"整屏红"的根因）、
+             *     CIContext 的 workingColorSpace / workingFormat、以及 render 收到的 colorSpace；
+             *   * 这一次走的是额外 pass（直通那条路不会走到这个函数）。
+             */
+            if (logDiagnostics) {
+                AF_LOGI("colour adjust pass: in %s(%d) %ux%u usage=%lu storage=%lu -> out %s(%d) %ux%u "
+                        "usage=%lu storage=%lu | panel b=%.0f c=%.0f s=%.0f (0~200, 100 = neutral) -> "
+                        "CIColorControls brightness=%.3f contrast=%.3f saturation=%.3f | attributes "
+                        "b[%.2f..%.2f] default %.2f, c[%.2f..%.2f] default %.2f, s[%.2f..%.2f] default %.2f | "
+                        "image.colorSpace=%p (model=%d components=%d) | CIContext workingColorSpace=%p "
+                        "(model=%d components=%d) workingFormat=%d | render colorSpace=%p (model=%d "
+                        "components=%d) | path=extra pass (one CIColorControls pass on the GPU into the "
+                        "3 slot MTLTexture ring, no CPU download)\n",
+                        cicadaPixelFormatName(input.pixelFormat), (int) input.pixelFormat,
+                        (unsigned) input.width, (unsigned) input.height,
+                        (unsigned long) input.usage, (unsigned long) input.storageMode,
+                        cicadaPixelFormatName(slot.texture.pixelFormat), (int) slot.texture.pixelFormat,
+                        (unsigned) slot.texture.width, (unsigned) slot.texture.height,
+                        (unsigned long) slot.texture.usage, (unsigned long) slot.texture.storageMode,
+                        (double) brightness, (double) contrast, (double) saturation,
+                        (double) brightnessValue, (double) contrastValue, (double) saturationValue,
+                        (double) brightnessMin, (double) brightnessMax, (double) brightnessDefault,
+                        (double) contrastMin, (double) contrastMax, (double) contrastDefault,
+                        (double) saturationMin, (double) saturationMax, (double) saturationDefault,
+                        (const void *) image.colorSpace, cicadaColorSpaceModel(image.colorSpace),
+                        cicadaColorSpaceComponents(image.colorSpace),
+                        (const void *) ciContext.workingColorSpace,
+                        cicadaColorSpaceModel(ciContext.workingColorSpace),
+                        cicadaColorSpaceComponents(ciContext.workingColorSpace),
+                        (int) ciContext.workingFormat,
+                        (const void *) colorSpace, cicadaColorSpaceModel(colorSpace),
+                        cicadaColorSpaceComponents(colorSpace));
+            }
+
+            /*
+             * bounds 用图像自己的尺寸（输出纹理就是这么大），colorSpace 传**输入图用的同一个**
+             * 色彩空间（进出同一组变换 ⇒ 来回抵消，见 ensureColorAdjustContext 的说明）。
              */
             [ciContext render:filtered
                   toMTLTexture:slot.texture
                  commandBuffer:commandBuffer
                         bounds:CGRectMake(0.0, 0.0, (CGFloat) width, (CGFloat) height)
-                    colorSpace:workingColorSpace];
+                    colorSpace:colorSpace];
 
             if (commandBuffer != nil) {
                 [commandBuffer commit];
@@ -621,12 +738,13 @@ namespace cicadaqt {
             d->ciContext = nil;
         }
 
-        if (d->workingColorSpace != nullptr) {
-            CGColorSpaceRelease(d->workingColorSpace);
-            d->workingColorSpace = nullptr;
+        if (d->colorSpace != nullptr) {
+            CGColorSpaceRelease(d->colorSpace);
+            d->colorSpace = nullptr;
         }
 
         d->rangesReady = false;
+        d->outputFormat = MTLPixelFormatInvalid;
         d->queue = nil;
         d->queueResolved = false;
 
@@ -757,17 +875,29 @@ namespace cicadaqt {
         id<MTLTexture> textureForQt = texture;
 
         if (colorAdjustActive) {
+            /*
+             * 诊断日志的开关：**首次生效**，或者三个值**变了**（拖滑块每变一次一行）。
+             * 绝不能每帧打 —— 值不变时这里一直是 false。
+             */
+            const bool logDiagnostics = !m_loggedColorAdjustActive ||
+                                        brightnessValue != m_loggedBrightness ||
+                                        contrastValue != m_loggedContrast ||
+                                        saturationValue != m_loggedSaturation;
             id<MTLTexture> adjusted = d->colorAdjustedTexture(window, texture, width, height,
-                                     brightnessValue, contrastValue, saturationValue);
+                                     brightnessValue, contrastValue, saturationValue, logDiagnostics);
 
             if (adjusted != nil) {
                 textureForQt = adjusted;
 
-                if (!m_loggedColorAdjustActive) {
+                if (logDiagnostics) {
                     m_loggedColorAdjustActive = true;
+                    m_loggedBrightness = brightnessValue;
+                    m_loggedContrast = contrastValue;
+                    m_loggedSaturation = saturationValue;
                     AF_LOGI("video colour adjust is active: brightness=%.0f contrast=%.0f saturation=%.0f "
                             "(0~200, 100 = neutral), applied on the GPU with CIColorControls into a "
-                            "reused %dx%d MTLTexture (one extra pass, no CPU download)\n",
+                            "reused %dx%d MTLTexture (one extra pass, no CPU download); "
+                            "the detailed diagnostics are in the 'colour adjust pass:' line above\n",
                             (double) brightnessValue, (double) contrastValue,
                             (double) saturationValue, width, height);
                 }

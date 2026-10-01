@@ -136,6 +136,14 @@ namespace cicadaqt {
         bool m_loggedColorAdjustActive = false;
         bool m_loggedColorAdjustBypass = false;
         bool m_loggedColorAdjustFailure = false;
+
+        /*
+         * 诊断用：上一次打"colour adjust pass:"那一行诊断时的三个值。那条日志只在**首次生效**
+         * 和**值变了**时各打一次（拖滑块每变一次一行），绝不每帧打；初值 -1 保证第一次必然打。
+         */
+        float m_loggedBrightness = -1.0f;
+        float m_loggedContrast = -1.0f;
+        float m_loggedSaturation = -1.0f;
     };
 
 }// namespace cicadaqt
