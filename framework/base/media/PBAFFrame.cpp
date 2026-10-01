@@ -109,7 +109,21 @@ PBAFFrame::operator AVAFFrame *()
          * 用 GetBaseAddress/GetBytesPerRow 拿一整块，av_image_copy 按 AV_PIX_FMT_BGRA
          * 拷就行（swscale 那条链本来就吃 BGRA）。
          */
-        format = AV_PIX_FMT_BGRA;
+        /*
+         * 【2026-10-01 回退：这条路会让 swscale 直接 abort】
+         *
+         * 32BGRA 在 Cicada 的 AFMediaType 里**没有**对应的 AF_PIX_FMT_* 值。把它声明成
+         * AV_PIX_FMT_BGRA 之后，AVAFPacket::copyInfo() → AVPixFmt2Cicada() 只能得到
+         * AF_PIX_FMT_NONE（真机日志里那行 "AVPixelFormat 28 not found" 就是它），
+         * 下游再把这个未知格式交给 swscale，就命中 FFmpeg 自己的断言：
+         *     Assertion desc failed at src/libswscale/swscale_internal.h:778   → SIGABRT
+         *
+         * 所以这里先回到"拿不到 CPU 帧"的安全行为：32BGRA 只走 GPU 零拷贝那条路
+         * （CicadaVideoRender / CicadaTextureMetal 直接吃 CVPixelBuffer，不经过 AVAFFrame）。
+         * 要让 CPU 回退与截图也支持 32BGRA，得先在 AFMediaType 里补一个 BGRA 格式、
+         * 并让 swscale 那条链认识它 —— 那是独立的一步，不能靠这一行糊过去。
+         */
+        return nullptr;
     } else {
         return nullptr;
     }
