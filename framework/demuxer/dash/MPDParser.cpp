@@ -340,6 +340,99 @@ size_t MPDParser::parseSegmentBase(MPDPlayList *mpd, xml::Node *segmentBaseNode,
     return 1;
 }
 
+void MPDParser::parseContentProtections(xml::Node *containerNode, Representation *representation)
+{
+    if (containerNode == nullptr || representation == nullptr) {
+        return;
+    }
+
+    /*
+     * ============ DASH 的 <ContentProtection>（本轮新增）============
+     *
+     * 【为什么必须有这一段】在本轮之前，本工程**完全没有任何** ContentProtection
+     * 解析（MPDParser 里只有 UTCTiming 用过 schemeIdUri 这个属性名），于是：
+     *   · `Stream_meta.keyFormat` / `keyUrl` 永远是空的 ⇒ SMPAVDeviceManager 组出来的
+     *     `DrmInfo` 是空的（`SMPAVDeviceManager.cpp:50-59` 是唯一填充点）⇒
+     *     **Android 上 Widevine 那条硬解 DRM 通路根本不会被触发**
+     *     （MediaCodec 的 DRM 只在 `drmInfo != nullptr` 时建，见
+     *     `framework/codec/Android/mediaCodecDecoder.cpp:258`）；
+     *   · 内核自己也不知道这是一路受保护的流。
+     * 也就是说：DASH 的 DRM 之前是**一条都没有**，不是"只有软解"。
+     *
+     * 【只读清单】这里一个值都不发明：schemeIdUri / value / default_KID / pssh /
+     * 许可地址都按清单原样存。下游按"有没有值"决定行为，不需要任何开关。
+     *
+     * 【命名空间】MPD 里这两个属性带 cenc: 前缀（`cenc:default_KID`），而
+     * `<cenc:pssh>` 是**子元素**、其文本用 getText() 取。libxml 的
+     * xmlTextReaderConstName 返回的是**限定名（含前缀）**，所以按带前缀的名字查；
+     * 同时兼容不带前缀的写法（有些工具会省掉）。
+     */
+    /*
+     * 【必须是**直接子节点**，不能用 DOMHelper::getElementByTagName】
+     * 那个函数是**递归**的：对 AdaptationSet 容器调用它会连每个子 Representation
+     * 里的 ContentProtection 一起捞出来，于是"某一档单独声明了加密"会被错误地
+     * 挂到同 AS 下**所有**档上。这里只走一层，语义才是"这一层声明的保护"。
+     */
+    for (xml::Node *node : containerNode->getSubNodes()) {
+        if (node == nullptr || node->getName() != "ContentProtection") {
+            continue;
+        }
+
+        Representation::ContentProtection protection{};
+
+        if (node->hasAttribute("schemeIdUri")) {
+            protection.schemeIdUri = node->getAttributeValue("schemeIdUri");
+        }
+
+        if (node->hasAttribute("value")) {
+            protection.value = node->getAttributeValue("value");
+        }
+
+        // default_KID：标准写法是 cenc:default_KID；不带前缀也接受。
+        if (node->hasAttribute("cenc:default_KID")) {
+            protection.keyId = node->getAttributeValue("cenc:default_KID");
+        } else if (node->hasAttribute("default_KID")) {
+            protection.keyId = node->getAttributeValue("default_KID");
+        }
+
+        // 许可/密钥地址：各家工具的写法不统一，这里按出现频率依次取，**都是"清单里
+        // 明写了才取"**，一个都不发明。取不到就是空串。
+        static const char *kUrlAttributeNames[] = {
+            "cenc:licenseUrl", "licenseUrl", "cenc:laurl", "laurl", "Laurl", "cenc:Laurl",
+        };
+
+        for (const char *name : kUrlAttributeNames) {
+            if (node->hasAttribute(name)) {
+                protection.licenseUrl = node->getAttributeValue(name);
+                break;
+            }
+        }
+
+        // <cenc:pssh>（子元素）：base64 文本。同样兼容不带前缀的 <pssh>。
+        xml::Node *psshNode = DOMHelper::getFirstChildElementByName(node, "cenc:pssh");
+
+        if (psshNode == nullptr) {
+            psshNode = DOMHelper::getFirstChildElementByName(node, "pssh");
+        }
+
+        if (psshNode != nullptr) {
+            protection.pssh = psshNode->getText();
+        }
+
+        /*
+         * 只把"真的说了点什么"的条目挂上去：某些 MPD 会有空的
+         * <ContentProtection/>（占位）。空条目会把 hasContentProtection() 弄成
+         * 恒真，反而让下游误判"这路受保护"。
+         */
+        const bool hasAnything = !protection.schemeIdUri.empty() || !protection.keyId.empty() ||
+                                 !protection.pssh.empty() || !protection.licenseUrl.empty();
+
+        if (hasAnything) {
+            representation->addContentProtection(protection);
+        }
+    }
+}
+
 void MPDParser::parseAdaptationSets(MPDPlayList *mpd, xml::Node *periodNode, Period *period)
 {
     std::vector<xml::Node *> adaptationSets = DOMHelper::getElementByTagName(periodNode, "AdaptationSet", false);
@@ -391,6 +484,15 @@ void MPDParser::parseRepresentations(MPDPlayList *mpd, xml::Node *adaptationSetN
     for (auto repNode : representations) {
         auto *currentRepresentation = new Representation(adaptationSet);
 
+        /*
+         * ContentProtection 先按 AdaptationSet 解一遍（继承），等本 Representation
+         * 自己的解完再追加 —— 于是"Rep 层覆盖 AS 层"这件事在**存储顺序**上就成立
+         * （下游从后往前找第一条能用的）。放在最前面还有一个原因：下面
+         * parseSegmentInformation 会 new 出 DashSegment，不存在依赖关系，但保持
+         * "先填属性、再建分段"的阅读顺序与既有代码一致。
+         */
+        parseContentProtections(adaptationSetNode, currentRepresentation);
+
         parseBaseUrl(mpd, repNode, currentRepresentation);
 
         if (repNode->hasAttribute("id")) {
@@ -417,6 +519,11 @@ void MPDParser::parseRepresentations(MPDPlayList *mpd, xml::Node *adaptationSetN
         if (repNode->hasAttribute("codecs")) {
             currentRepresentation->addCodecs(repNode->getAttributeValue("codecs"));
         }
+
+        // Representation 层自己的 ContentProtection：追加在 AS 层之后，
+        // 所以"后出现的覆盖先出现的"这条语义成立（见上面 AS 层的说明）。
+        parseContentProtections(repNode, currentRepresentation);
+
         size_t i_total = parseSegmentInformation(mpd, repNode, currentRepresentation, &nextid);
 
         // Empty Representation with just baseurl (ex: subtitles)

@@ -190,7 +190,143 @@ namespace Cicada {
         int ret;
         CHECK_DEMUXER;
         ret = mDemuxerPtr->ReadPacket(packet, index);
+
+        /*
+         * ============ 样本级加密（CENC）的**兜底**就地解密 ============
+         *
+         * 【判据全部来自数据，没有任何平台宏、没有开关】
+         *   · mCencDecrypter 为空 ⇒ 说明本次播放**没有任何 KID 注册过软件密钥**
+         *     （见 setCencKey）。有 CDM 的平台就属于这一种：包原样放行，由
+         *     平台解码器 queueSecureInputBuffer 去解。这里立刻返回，零开销。
+         *   · 非空 ⇒ 逐个包看**包自己带的** AV_PKT_DATA_ENCRYPTION_INFO：
+         *     有 KID 且该 KID 注册过密钥就解；没注册就**原样放行**。
+         *
+         * 为什么"没注册就原样放行"是对的而不是漏解：CENCDecrypter 对未知 KID
+         * 返回 -ENOENT（拒绝把密文当明文），而这条路径的语义是"注册了才解"，
+         * 所以未注册本来就不该由内核动它。
+         *
+         * 为什么放在 readPacket 而不是 avFormatDemuxer 内部：这是**所有**解复用
+         * 路径（HLS 分片管线、DASH 分片管线、普通文件）的唯一收口，放在这里
+         * 一处即可覆盖，且天然在 bsf **之后**（解密后的包才该参与 head 合并），
+         * 与 avFormatDemuxer::createBsf 里"看到加密 side data 就不建 bsf"的
+         * 既有判据不会互相打架。
+         */
+        if (ret > 0 && mCencDecrypter != nullptr && packet != nullptr) {
+            applyCencDecryption(*packet);
+        }
+
         return ret;
+    }
+
+    /*
+     * 对一个包尝试 CENC 解密。返回**实际解了没有**（供日志/自检使用）。
+     *
+     * 只碰包内字节，不碰包长（CENC 密文与明文等长），所以不需要重建 AVPacket，
+     * 也不需要通知任何持有者的尺寸信息。
+     */
+    bool demuxer_service::applyCencDecryption(IAFPacket &packet)
+    {
+        if (!packet.isProtected() && !packetHasEncryptionInfo(packet)) {
+            return false;
+        }
+
+        IAFPacket::EncryptionInfo info{};
+
+        if (!packet.getEncryptionInfo(&info)) {
+            return false;
+        }
+
+        if (info.key_id == nullptr || info.key_id_size == 0 || info.iv == nullptr || info.iv_size == 0) {
+            return false;
+        }
+
+        const std::string keyId = CENCDecrypter::toHex(info.key_id, info.key_id_size);
+
+        /*
+         * 没注册这把密钥 ⇒ 不是"失败"，而是"不该由内核解"（平台 CDM 负责）。
+         * 这里刻意**不打日志**：有 CDM 的平台上每一路流、每一个包都会走到这里，
+         * 打日志就是刷屏。
+         */
+        if (!mCencDecrypter->hasKey(keyId)) {
+            return false;
+        }
+
+        std::vector<SubsampleInfo> subsamples;
+        subsamples.reserve(info.subsamples.size());
+
+        for (const auto &sub : info.subsamples) {
+            subsamples.push_back(SubsampleInfo{sub.bytes_of_clear_data, sub.bytes_of_protected_data});
+        }
+
+        const int64_t size = packet.getSize();
+        const int64_t got = mCencDecrypter->decrypt(keyId, info.scheme, info.iv, info.iv_size,
+                              subsamples, info.crypt_byte_block, info.skip_byte_block,
+                              packet.getData(), size);
+
+        if (got < 0) {
+            /*
+             * 注册了密钥却解不开，是**真错误**（密钥不对 / 元数据不对），
+             * 绝不能把密文当明文交给解码器（那就是花屏 + 一条看不懂的通用解码错误）。
+             * 只打一条，避免每包刷屏；包本身照常交出 —— 上层会因解码失败报错，
+             * 而这条日志给出了真正的原因。
+             */
+            if (!mCencDecryptFailedLogged) {
+                mCencDecryptFailedLogged = true;
+                AF_LOGE("CENC software decryption failed for key id %s (scheme=%s, iv_size=%u, "
+                        "subsamples=%zu): the ciphertext is NOT being passed off as plaintext\n",
+                        keyId.c_str(), info.scheme.c_str(), info.iv_size, subsamples.size());
+            }
+
+            return false;
+        }
+
+        if (!mCencDecryptAppliedLogged) {
+            mCencDecryptAppliedLogged = true;
+            AF_LOGI("CENC software decryption is active (key id %s, scheme=%s): decrypted on the CPU "
+                    "because no platform CDM handled this stream\n",
+                    keyId.c_str(), info.scheme.c_str());
+        }
+
+        return true;
+    }
+
+    bool demuxer_service::packetHasEncryptionInfo(IAFPacket &packet)
+    {
+        IAFPacket::EncryptionInfo info{};
+        return packet.getEncryptionInfo(&info) && info.key_id != nullptr && info.key_id_size > 0;
+    }
+
+    int demuxer_service::setCencKey(const std::string &keyIdHex, const uint8_t *key, int keySize)
+    {
+        if (mCencDecrypter == nullptr) {
+            mCencDecrypter = std::unique_ptr<CENCDecrypter>(new CENCDecrypter());
+        }
+
+        const int ret = mCencDecrypter->setKey(keyIdHex, key, keySize);
+
+        /*
+         * 登记失败且表里一把 key 都没有 ⇒ 把空壳收掉。
+         * 为什么在意这个：`applyCencDecryption` 的入口判据是"mCencDecrypter 非空"
+         * （那是"本次播放有没有注册过软件密钥"的唯一记号），留一个空壳会让每个包
+         * 都白白走一遍 getEncryptionInfo。收掉之后状态与"从没注册过"完全同态。
+         */
+        if (!mCencDecrypter->hasAnyKey()) {
+            mCencDecrypter.reset();
+        }
+
+        return ret;
+    }
+
+    bool demuxer_service::hasCencKey(const std::string &keyIdHex) const
+    {
+        return mCencDecrypter != nullptr && mCencDecrypter->hasKey(keyIdHex);
+    }
+
+    void demuxer_service::clearCencKeys()
+    {
+        mCencDecrypter.reset();
+        mCencDecryptAppliedLogged = false;
+        mCencDecryptFailedLogged = false;
     }
 
     void demuxer_service::close()

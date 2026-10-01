@@ -19,6 +19,7 @@
 
 namespace Cicada {
 
+    class Representation;
     class DashSegmentTracker;
     namespace Dash {
         class DashSegment;
@@ -223,6 +224,46 @@ namespace Cicada {
          * 本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
          */
         SeekLandingStage mSeekLanding{mQueue, mDataMutex, mWaitCond};
+
+        /*
+         * ============ DASH 的 DRM：清单声明 + 软解兜底（本轮新增）============
+         *
+         * 【分工】"谁来解 CENC"有两个可能的执行者，按**能力**决定，不是开关：
+         *   1. **平台 CDM**（Android MediaCodec+MediaCrypto、OHOS DRM Kit）——
+         *      只要 `DrmHandlerPrototype::isSupport()` 认这条 ContentProtection 的
+         *      schemeIdUri，就把 format/uri 交给 Stream_meta，由平台在安全世界里解。
+         *      这条优先（用户要求"能硬解的都硬解"）。
+         *   2. **内核软解**（CENCDecrypter）—— 只在平台不认这个 scheme、
+         *      而清单又明确给出了一个可以取到 16 字节裸密钥的地址时启用。
+         *      判据是 `DrmHandlerPrototype::isSupport()` 的返回值，**没有任何
+         *      平台宏**（该函数本身按平台注册 handler，见 framework/drm/）。
+         *
+         * 【为什么懒执行】GetStreamMeta 会被反复调用（每一路流、每次换档），
+         * 而"取密钥"是一次网络读取。所以只在**第一次确实需要软解**时取一次，
+         * 结果记在 mSoftwareCencTried 里（失败也记，不重试 —— 没有重试机制）。
+         *
+         * 新成员一律追加在类末尾（仓库约定，中间插入会移动偏移）。
+         */
+        void setDrmMetaFromContentProtection(Stream_meta *meta) const;
+
+        /*
+         * 按 MPD 里声明的地址取 16 字节内容密钥并登记给内层 demuxer（软件兜底）。
+         *
+         * kid 从**容器**里读出来（init 段的 tenc），那才是解密时包里带的 KID，
+         * 必须用它登记 —— 用 MPD 的 cenc:default_KID 有可能对不上（清单与 init 段
+         * 不一致是 DRM 现场最常见的坑之一）。
+         *
+         * 失败**不静默**：打一条 ERROR 说明"这条流解不开、以及为什么"。
+         */
+        void ensureSoftwareCencKey(const std::string &kid) const;
+
+        Representation *getCurrentRepresentation() const;
+
+        // mutable: GetStreamMeta 是 const 覆盖（基类 AbstractStream 的签名），
+        // 而这两个标记只是"这件事做过了/日志打过了"，不改对外可见状态。
+        mutable bool mSoftwareCencTried{false};
+        // 取密钥失败/成功各只打一条日志（同 HLSStream::mKeyFetchFailedLogged 的做法）。
+        mutable bool mSoftwareCencLogged{false};
     };
 }
 

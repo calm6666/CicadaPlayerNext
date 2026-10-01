@@ -109,7 +109,18 @@ namespace Cicada {
 
     protected:
         IDataSource *mExtDataSource = nullptr;
-        IDataSource::SourceConfig mSourceConfig{};
+        /*
+         * mutable 的原因：`IDataSource::Set_config()` 的形参是**非 const 引用**
+         * （既有签名，不动它），而"给新开的 dataSource 套上同一份配置"这件事在
+         * **const 查询路径**上也要做 —— DASH 那里是在 const 的 GetStreamMeta 里
+         * 按需去取 DRM 密钥（见 DashStream::ensureSoftwareCencKey），取密钥时要给
+         * 临时 dataSource 配 cache/proxy 等。
+         *
+         * 为什么这不是"掩盖设计问题"：这份配置是**外部注入的只读参数**，没有哪个
+         * 成员函数会把它当成可变状态去读改写；`Set_config` 只是恰好按非 const 引用
+         * 收参。标 mutable 比在调用点 const_cast 更诚实，也不会让谁"意外改到它"。
+         */
+        mutable IDataSource::SourceConfig mSourceConfig{};
         header_type mMergeVideoHeader = header_type::header_type_no_touch;
         header_type mMergerAudioHeader = header_type::header_type_no_touch;
         UrlHashCB mUrlHashCb{nullptr};

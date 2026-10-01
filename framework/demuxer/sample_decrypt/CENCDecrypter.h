@@ -117,14 +117,31 @@ namespace Cicada {
                         uint32_t cryptByteBlock, uint32_t skipByteBlock,
                         uint8_t *buffer, int64_t size);
 
+        /**
+         * 表里是否**一把** key 都没有。
+         *
+         * 调用方（demuxer_service）用它做"本次播放到底有没有走软件解密"的判据：
+         * 注册失败后如果表还是空的，就把解密器整个丢掉，让读取路径回到零开销。
+         */
+        bool hasAnyKey() const
+        {
+            return !mKeys.empty();
+        }
+
+        /**
+         * 把密钥 ID 字节串转成十六进制串（小写）。
+         *
+         * 公开出来是因为调用方拿到的是 IAFPacket::EncryptionInfo 里的**字节**形式的
+         * key_id，而注册/查表用的是十六进制串，两边必须用同一个转换，否则会出现
+         * "明明注册过却查不到"这种最难查的错。
+         */
+        static std::string toHex(const uint8_t *data, uint32_t size);
+
     private:
         struct KeyEntry;
 
         // 把 keyIdHex 归一化成小写、去分隔符的形式；非法（奇数长度/非十六进制）返回 false。
         static bool normalizeKeyId(const std::string &keyIdHex, std::string &normalized);
-
-        // 字节串转十六进制，仅用于日志（最多 16 字节）。
-        static std::string toHex(const uint8_t *data, uint32_t size);
 
         // 按 key id 查表；未命中返回 nullptr。
         const KeyEntry *findKey(const std::string &keyIdHex) const;
@@ -133,7 +150,8 @@ namespace Cicada {
         // 成员 mRanges（保留 capacity，避免每包重新分配）。校验失败返回 false（不写 buffer）。
         bool buildProtectedRanges(const std::vector<SubsampleInfo> &subsamples, int64_t size);
 
-        // cenc/cens：AES-CTR。每个 protected 区间重新用 iv 构造 counter block，counter 从 0 起。
+        // cenc/cens：AES-CTR。counter block 在每个样本开头构造一次，**样本内跨
+        // subsample 连续递增**（实测定的，理由见 .cpp 里 decryptCtr 的长注释）。
         void decryptCtr(const uint8_t *iv, uint32_t ivSize, uint8_t *buffer, const KeyEntry *entry,
                         const std::vector<std::pair<int64_t, int64_t>> &ranges);
 

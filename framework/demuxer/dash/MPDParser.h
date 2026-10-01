@@ -14,6 +14,7 @@ namespace Cicada {
 
     class Period;
     class AdaptationSet;
+    class Representation;
 
     namespace Dash {
         class SegmentInformation;
@@ -45,6 +46,19 @@ namespace Cicada {
             void parseCommonMultiSegmentBase(MPDPlayList *mpd, xml::Node *node, ISegmentBase *base, SegmentInformation *parent);
             void parseInitSegment(xml::Node *initNode, ISegmentBase *base, SegmentInformation *parent);
             void parseBaseUrl(MPDPlayList *mpd, xml::Node *containerNode, SegmentInformation *parent);
+
+            /*
+             * 解析 <ContentProtection> 并挂到 Representation 上。
+             *
+             * 【为什么要按"容器"调两次】ContentProtection 在 MPD 里可以出现在
+             * AdaptationSet 或 Representation 任一层（Rep 层覆盖 AS 层），
+             * 所以先按 AdaptationSet 解一遍、再按 Representation 解一遍，
+             * 后解到的追加在后面 —— 下游按"最后一条生效"取。
+             *
+             * 【只读清单，不发明任何东西】schemeIdUri / value / cenc:default_KID /
+             * <cenc:pssh> / 许可地址，清单里没有就是空串；**不猜、不拼 URL**。
+             */
+            static void parseContentProtections(xml::Node *containerNode, Representation *representation);
 
         private:
             xml::Node *mRoot = nullptr;
