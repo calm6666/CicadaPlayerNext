@@ -107,30 +107,28 @@ namespace cicadaqt {
         }
 
         /*
-         * 1) 缓存里**没在用**的条目全部放掉（正在被采样的那些 CVMetalTextureCacheFlush
-         *    自己会留着，所以这一步不会给 Qt 抽底）。
+         * ============ 【这里绝不能再去 invalidate 任何东西】============
+         *
+         * 原来这里做两件事，都是**不安全**的（真机崩溃就是它）：
+         *
+         *   1) `CVMetalTextureCacheFlush(d->cache, 0)` —— 注释里当时以为"正在被采样的条目
+         *      会被留着"。**不是**：这个 API 把缓存里的 CVMetalTexture 全部失效（Apple 头文件
+         *      里 options 参数目前就是保留未用），于是我们环里那几张、以及 Qt 场景图此刻
+         *      可能仍在采样的那些 CVMetalTexture，底层对象当场失效 ⇒ 再取 `.texture` 或
+         *      GPU 采样它就会让 Metal 直接 abort()。崩溃栈正是
+         *          AFActiveVideoRender::onVSync → (内联的渲染链) → abort()   （SIGABRT）
+         *      而且时机吻合：本地视频播几秒后、以及每次切档落点之后（那条路径会调到本函数）。
+         *
+         *   2) 把帧环里除"最新一帧"之外的 CVMetalTexture 引用全放掉 —— 可"最新"是按**我们自己
+         *      的写入顺序**算的，Qt 的场景图是异步的：它此刻可能还在采样更早的那一两帧，
+         *      提前 CFRelease 同样是 use-after-free。
+         *
+         * 现在的处理：本函数**只做状态复位、不释放任何纹理**。内存是有界的 ——
+         * 帧环固定 3 槽（新的覆盖最老的），缓存本身也只服务这几帧；真正的释放放在
+         * releaseResources()（关播放器/析构那条路，那时 item 已经先
+         * forgetOutputTextureWrapper() + invalidateFrameTextureCache() 把外层引用丢干净了）。
          */
-        CVMetalTextureCacheFlush(d->cache, 0);
-
-        /*
-         * 2) 帧环只保留**最新**那一帧：Qt 的场景图是异步的，上一帧的命令缓冲可能还在执行，
-         *    对应的 IOSurface 映射不能提前释放；更老的两帧已经没有使用者了。
-         *    （d->next 指向"下一个要写的槽"，所以最新那一帧在 (next + 2) % 3。）
-         */
-        const int newest = (d->next + 2) % 3;
-        int dropped = 0;
-
-        for (int i = 0; i < 3; ++i) {
-            if (i != newest && d->refs[i] != nullptr) {
-                CFRelease(d->refs[i]);
-                d->refs[i] = nullptr;
-                ++dropped;
-            }
-        }
-
-        AF_LOGI("[mem] releaseInputState: flushed the Metal texture cache and dropped %d old "
-                "CVPixelBuffer reference(s) (newest frame kept: Qt may still be sampling it)\n",
-                dropped);
+        d->next = 0;
     }
 
     void CicadaTextureMetal::releaseResources()
