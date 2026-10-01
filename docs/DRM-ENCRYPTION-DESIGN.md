@@ -1349,6 +1349,330 @@ python D:\hilihili\转码脚本\aes128.py
 
 ---
 
+### 4.9 二期施工：自建密钥服务器与 CENC
+
+> 本节是**二期施工记录**（在前一节 §4.8 之上继续）。与本文件其他部分同样的口径：
+> 【已证实】= 本次真的读过该文件该行；【待验证】= 本机跑不了（本会话 shell 不可用，
+> 不能跑 python/ffmpeg/go），必须由本机实测，最小验证命令都写在 §4.9.7。
+>
+> 二期做两件事，**互相独立**、可以分别采用：
+> 1. **密钥来源换成自建 Go 密钥服务器**（`server/drm-keyserver`）——HLS AES-128 的
+>    密钥不再来自本地静态文件，而是每次转码向服务器铸一把新的；
+> 2. **CENC（样本级加密）产物**——用 ffmpeg 的 mov muxer CENC 支持产另一套加密产物，
+>    并**如实声明**、**有断言**。
+
+#### 4.9.1 新增参数（全部是**值承载**的参数，没有任何布尔开关）
+
+【已证实】参数解析在 `转码脚本/transcode_all.py` 的 `_parse_cli_key_info()` /
+`_assert_cenc_conflict()`（`main()` 在**任何产物落盘之前**调用它们）：
+
+| 参数 | 值 | 语义 | 单独使用的后果 |
+|---|---|---|---|
+| `--hls-key-info <文件>` | 一个三行文件 | **一期既有**：HLS AES-128 整片加密 | 明文流水线（既有语义，不变） |
+| `--drm-keyserver <base-url>` | `http://127.0.0.1:9101` | 密钥改从服务器取（`POST /admin/keys` → `GET /key/{kid}`） | **报错退出**："密钥服务器只说明去哪儿取密钥，没说明要加密什么" |
+| `--drm-secret <secret>` | 一个密钥串 | 调 `GET /admin/sign` 时带 `X-DRM-Secret` 头 | **报错退出**（没有服务器地址就无处可用） |
+| `--cenc-key-info <文件>` | 一个三行文件 | CENC 样本级加密那一趟 | 产 CENC 产物；**必须同时给 `--cenc-out-dir`** |
+| `--cenc-out-dir <目录>` | 一个目录 | CENC 产物的落点 | 没给 `--cenc-key-info` ⇒ 报错退出 |
+| `--cenc-kid <kid>` | 32 hex 或 UUID | 显式指定 CENC 的 KID（省略时由密钥 SHA-256 前 16 字节派生） | 没给 `--cenc-key-info` ⇒ 报错退出 |
+
+组合规则（全部在 `_assert_cenc_conflict()` 里判死，任一不成立即**非零退出**）：
+
+* `--drm-keyserver` **必须**与 `--hls-key-info` 或 `--cenc-key-info` 一起给；
+* `--hls-key-info` 与 `--cenc-key-info` **同时给**时，`--cenc-out-dir` 必须存在、
+  且**必须与主输出目录不同** —— 一个输出目录不能同时是"整片密文"和"CENC 样本级密文"。
+  同时给且目录不同是**允许**的（两套产物、两个目录），脚本会明确打印两处落点。
+* CENC 的 IV：本脚本**不改 IV 语义**，HLS AES-128 的 IV 基永远是 key_info 第 3 行
+  （省略 = 全 0 + 按分片序号递增，见 §4.8.2）。密钥服务器那一步**只覆盖密钥与 URI**，
+  **不碰第 3 行**。
+
+**【已证实】参数不是开关**（§5.5 第 1 条的机械核对）：以上六个参数的取值都是
+路径/URL/hex 串，`_parse_cli_key_info()` 里给的缺值分支是 `sys.exit(1)`；
+不认识的参数（例如 `--enable-drm`）会被 `unknown` 分支拦下并报错退出。
+
+#### 4.9.2 密钥服务器那一步：做什么、在哪里、失败怎么办
+
+【已证实】实现：`transcode_all.py` 的 `fetch_hls_key_from_keyserver()`（约 70 行），
+调用点在最前面（`main()` 里 `load_hls_key_info()` 之后 **立刻**，早于 `run_transcode()`）：
+
+```
+① POST /admin/keys   body {"label": "hls-<版本>-<雪花ID>"}
+      → 201 {"kid","key","created","label","scheme"}（key 是 32 hex = 16 字节）
+② GET  /key/{kid}    → **裸 16 字节**（application/octet-stream）；长度不是 16 ⇒ 报错
+③ 给了 --drm-secret ⇒ GET /admin/sign?kid=<kid>&ttl=604800 → 用返回的 url 当清单 URI
+   没给            ⇒ 清单 URI = /key/<kid>
+④ 覆盖内存里的 HLS_KEY_URI / HLS_KEY_BYTES（**IV 基不动**）
+⑤ 把 16 字节裸密钥写进 key_info 第 2 行的路径；把第 1 行改写成服务器 URI
+   （原文件先备份成 <key_info>.local.bak —— 运维能看出"这把 URI 是被改过的"）
+```
+
+设计取舍（每条都是**刻意的**，不是顺手）：
+
+* **为什么复用 `key_info` 文件而不是新造一套参数**：一期已经把"密钥内容 + 清单 URI + IV 基"
+  三件事收在一个文件里（§4.1）；二期只换**来源**，不该把参数模型推翻。
+  于是第 2 行、第 3 行的语义完全不变 —— `verify_segmentbase.py --key-file`
+  也因此**不用改口径**（这是"验收脚本不需要跟着改"的关键）。
+* **为什么把密钥写回第 2 行**：写的是**服务器铸出来的那一把**（不是本地旧密钥），
+  所以"清单里的 URI"与"验收用的密钥"天然同源；但要注意它**覆盖**原文件。
+* **为什么不擅自拼 `--drm-keyserver` 的基址去当清单 URI**：那可能是**控制面**地址
+  （内网管理口 / `127.0.0.1`），写进清单会让远端播放器去连它自己的 localhost。
+  服务器返回什么就写什么；要绝对 URL 就走 `--drm-secret` + `/admin/sign`
+  （服务端支持 `?absolute=1`，但本脚本不主动加，见 §4.9.7 #6）。
+* **签名 URL 的 TTL 是常量（7 天，`DRM_KEY_TTL_SECONDS = 604800`）**：做成参数会让运维
+  多一个旋钮，而漏给的后果是"一小时后播放器取不到密钥"——线上最难查的一类问题。
+  服务端上限是 365 天（`token.go:19-20` 的 `maxTokenTTL`）。
+* **`urllib.request` 且不传 `timeout=`**：§5.5 第 3 条禁止墙钟死线；不传就是"等到对端
+  给出终态或连接失败"，由**事件**产生终态。**没有重试**。
+* **失败一律非零退出**：`KeyserverError` 的消息里带 **URL 与状态码**
+  （以及服务器 `{"error":"…"}` 的正文）；**绝不**回落到 key_info 第 2 行那把本地密钥。
+  这条最重要 —— 回落会让"清单 URI 指向服务器、密文却是本地旧密钥加的"，
+  播放器取到的密钥解不开内容，而**转码日志一切正常**。
+
+#### 4.9.3 CENC 那一趟：做什么、在哪里、失败怎么办
+
+【已证实】实现：`transcode_all.py` 的 `parse_cenc_key_info()` / `run_cenc_pass()` /
+`build_cenc_cmd()` / `verify_cenc_output()` / `_cenc_mpd_content_protection()`。
+
+命令（**【待验证】**：本机 ffmpeg 8.1 是否接受这些参数、产出的 box 是否齐全，
+必须实测 —— 见 §4.9.7 #3）：
+
+```bat
+ffmpeg -y -i <主输出目录>\output.mpd -map 0 -c copy -f dash ^
+       -encryption_scheme cenc-aes-ctr -encryption_key <32hex> -encryption_kid <32hex> ^
+       -init_seg_name cenc-$RepresentationID$-init.mp4 ^
+       -media_seg_name cenc-$RepresentationID$-$Number$.m4s ^
+       -use_template 1 -use_timeline 1 -seg_duration 6 -hls_playlist 0 ^
+       <CENC 输出目录>\output-cenc.mpd
+```
+
+* **为什么是独立一趟而不是在主转码命令里加参数**：§6 红线 4 禁止为加密改动主转码命令；
+  而且 SegmentBase 再封装（`-c copy -i output.mpd`）与整套 sidx 断言都建立在
+  "box 布局不变"上，CENC 会改布局（`moov` 多 `tenc`/`pssh`、`trak` 多 `senc/saiz/saio`）。
+* **为什么输入是明文的 `output.mpd` 且必须在 AES-128 加密之前跑**：一旦 AES-128 先跑，
+  `output.mpd` 的每个 `AdaptationSet` 会被插 `ContentProtection`、分片会变成整片密文，
+  再 `-c copy` 就是"加密密文"。所以 CENC 跑在 `rename_files()` 之后、
+  `run_encryption()` 之前，并且这一条写进了 `main()` 的注释。
+  附带好处：CENC 参数不被本机 ffmpeg 支持时**立刻**失败，不必先白跑一遍
+  耗时的纯 Python AES-128 加密。
+* **`-c copy` 不重编码**：复用主转码已经编好的分片（与 SegmentBase 再封装同一取舍）。
+* **子进程只等自然退出**：`subprocess.run(...)` 无 `timeout=`、无重试循环，
+  与 `run_segmentbase_remux()`（`:1117`）同一范式。
+* **失败时原样打印 ffmpeg 的 stderr 并抛错**：**绝不**"去掉加密参数再跑一遍"——
+  那正是"以为加密了其实产了明文"的经典事故（§6 红线 1）。
+* **生产端自检**（`verify_cenc_output()`）：媒体段必须能找到 `senc`、init 段必须能找到
+  `encv`/`enca` + `tenc`，且 `tenc` 的 `default_KID` == 我们写进旁挂 JSON 的 KID；
+  不自检通过就**不落盘声明、不置 `CENC_DONE`**，直接非零退出。
+  （与验收端 `--expect-cenc` 是**刻意重复**的两道：生产端交付前自查，验收端独立复核。）
+
+产物（都在 `--cenc-out-dir`）：
+
+| 文件 | 内容 |
+|---|---|
+| `output-cenc.mpd` | ffmpeg 的 DASH 清单，**脚本后处理**给每个 `<AdaptationSet>` 插 `<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc" cenc:default_KID="<kid>"/>`，并补 `xmlns:cenc="urn:mpeg:cenc:2013"`（否则 MPD 不是良构 XML） |
+| `cenc-<rep>-init.mp4` / `cenc-<rep>-<序号>.m4s` | CENC 加密的 fMP4（init 段含 `tenc`，媒体段含 `senc`/`saiz`/`saio`） |
+| `cenc_key_info.json` | 旁挂：`{"kid":…, "key_uri":…, "scheme":"cenc"}` —— **不含密钥**（`key_uri` 是 key_info 第 1 行，播放端据此换许可证） |
+
+> ⚠ **HLS 侧的 CENC 表达（SAMPLE-AES）本次没做**：那一趟用 `-hls_playlist 0`
+> 明确关掉内嵌 HLS。理由：CENC 的 HLS 表达是 `#EXT-X-KEY:METHOD=SAMPLE-AES`，
+> 而 dashenc 顺手写出来的 m3u8 **不会**带 KEY 声明 —— 那会得到一份
+> "分片是样本级加密的、清单却没声明"的清单，正是 §6 红线 1 禁止的形态。
+> 明确不产它，比产一份会误导播放器的清单更安全。
+
+#### 4.9.4 `drm_keyserver_tool.py`（新脚本，运维/验收工具）
+
+【已证实】新文件 `转码脚本/drm_keyserver_tool.py`（**只用标准库**；手写 CLI，
+与本目录既有脚本同一风格，不用 argparse；四个子命令都"打印做了什么 + 失败非零退出"）：
+
+| 子命令 | 做什么 |
+|---|---|
+| `health` | `GET /healthz` 并打印 JSON；`status != "ok"` ⇒ 非零退出 |
+| `create <label>` | `POST /admin/keys` 铸一把密钥 → 写三行 key_info（`--key-info-out`）+ 16 字节裸密钥文件（默认 `<key-info-out>.bin`）；第 1 行 = `--public-base` 拼出的 `/key/<kid>`，不给 `--public-base` 时写相对路径 `/key/<kid>`（并明确提示"仅当 key 服务与媒体同源时可用"）；第 3 行 = `--iv`（默认 `0x`+32 个 0） |
+| `sign <kid>` | `GET /admin/sign?kid=&ttl=`（带 `--secret` 头）并打印签名 URL；`--secret` 缺失**直接报错**（服务端会 401，不猜） |
+| `verify <key-file> <cipher-file> --iv 0x…` | 先跑两条 AES 官方向量自检，再用**脚本内** AES-128-CBC 解密该文件（去 PKCS7），并要求明文**前 8 字节是合法 MP4 box 头**（4 字节大端长度 + 可打印 4 字节 type）⇒ 证明"这个文件确实是**这把密钥**的 AES-128 密文，且能解回结构化明文"。密文可以是裸二进制，也可以是 hex 文本（`--hex` 强制 / 默认自动识别）；`--cenc-iv-size 8` 时改走 AES-128-CTR（CENC 的样本级口径），并显式拒绝计数器溢出 |
+
+> 【已证实（读代码）】`verify` 的"MP4 box 头"判据与 `verify_segmentbase.py` 的
+> A1（`mp4_plaintext_head()`）**同口径**，但它是**独立的一条命令**：
+> 不依赖 SegmentBase 那套断言、也不依赖输出目录结构 —— 运维可以拿它去验一个
+> 从 CDN 上拉下来的孤立分片。
+
+#### 4.9.5 `verify_segmentbase.py` 的 CENC 验收（`--expect-cenc`）
+
+【已证实】新增参数：`--expect-cenc`、`--cenc-dir <目录>`、`--expect-cenc-kid <kid>`、
+`--cenc-only`；新增实现：`check_cenc_encryption()` 与三个 box 工具函数。
+
+断言（每条都是"要么真、要么 FAIL"）：
+
+| # | 断言 | 为什么 |
+|---|---|---|
+| C1 | init 段（`cenc-*-init.mp4`）里的样本入口是 **`encv`/`enca`**（不是 `avc1`/`mp4a`） | 样本级加密的入口标记；用 `avc1` 说明 ffmpeg 根本没加密 |
+| C2 | 该 `encv`/`enca` 的 `sinf/schi/tenc` 存在，且 **`tenc` 的 `default_KID` == 旁挂 JSON 的 KID == `--expect-cenc-kid`** | §5.1 的"三方 KID 必须同源"；不一致的现场表现极其模糊（能建会话、能拿 license、解出来是垃圾） |
+| C3 | 媒体段里必须有 **`senc` + `saiz` + `saio`** 三个 box | sample encryption + 它的索引；缺任一个都说明 CENC 不完整 |
+| C4 | 媒体段必须有 `moof` 与 `mdat`（是完整 fMP4 段） | 抓"输出的是别的东西" |
+| C5 | 旁挂 `cenc_key_info.json`：`scheme == "cenc"`、`kid` 是 32 小写 hex、有 `key_uri` | 清单声明必须与产物同真同假 |
+| C6 | `output-cenc.mpd` 里有 `schemeIdUri="urn:mpeg:dash:mp4protection:2011"`，`cenc:default_KID` 与 `tenc` **有交集**，且有 `xmlns:cenc` 声明 | 声明侧与产物侧同源；`cenc:` 前缀没有命名空间会让 MPD 直接不是良构 XML |
+| C7 | **不是整片密文**：文件必须以 `ftyp` 开头（`data[4:8] == b"ftyp"`） | CENC 只加密样本数据、**box 结构留在明文**；整片加密会把这里变成随机字节 —— 这条与一期的 A1 **互为反证**，两条不可能同时成立 |
+
+**【已证实】`--cenc-only` 为什么必须存在**：CENC 那一趟可以单独跑
+（`--cenc-key-info` + `--cenc-out-dir`），那种产物目录里既没有 `output-segmentbase.mpd`
+也没有 `test-*-segmentbase.json` —— 本脚本原来的第 0 步之后**立刻**要求 SegmentBase MPD
+存在（`verify_segmentbase.py` 的 `main()`），不跳过的话 CENC 那些断言根本轮不到执行。
+所以 `--cenc-only` 是**明确声明"这批断言不适用"**，而不是"找不到就放过"：
+它与 `--expect-cenc` 绑定（只给 `--cenc-only` 会直接 FAIL，免得出现"一条断言都没跑却报 PASS"）。
+
+#### 4.9.6 端到端命令序列（**这是本节的交付口径**）
+
+> 下面的行号/参数都对应**本次施工后**的代码。**全部属于【待验证】**
+> —— 本会话没有可用的 shell，一条都没有在本机跑过。
+
+**第 0 步：起密钥服务器**（另一个 agent 的产物；本文件只引用它的 HTTP 契约）
+
+```bat
+cd /d D:\hilihili\CicadaPlayerNext\server\drm-keyserver
+go build -o drm-keyserver.exe .
+drm-keyserver.exe -addr 127.0.0.1:9101 -data D:\hilihili\keys\drm --secret <管理密钥>
+```
+
+**第 1 步：确认服务器活着**
+
+```bat
+python D:\hilihili\转码脚本\drm_keyserver_tool.py health --server http://127.0.0.1:9101
+```
+
+期望：打印 `{"keys":N,"status":"ok"}` 并以 0 退出。
+
+**第 2 步：铸密钥 + 落地三行 key_info**（操作员侧）
+
+```bat
+python D:\hilihili\转码脚本\drm_keyserver_tool.py create v4-demo ^
+       --server http://127.0.0.1:9101 ^
+       --secret <管理密钥> ^
+       --key-info-out D:\hilihili\keys\v4.info ^
+       --public-base http://127.0.0.1:9101 ^
+       --iv 0x00000000000000000000000000000000
+```
+
+产出：`D:\hilihili\keys\v4.info`（三行：`<public-base>/key/<kid>` /
+`D:\hilihili\keys\v4.info.bin` / `0x000…0`）与 `v4.info.bin`（16 字节裸密钥）。
+把 `v4.info.bin` 交给验收脚本的 `--key-file`。
+
+**第 3 步：转码 + 加密（密钥由服务器铸）** —— 两种形态，**分别跑**：
+
+```bat
+rem (a) 只要 HLS AES-128 整片加密（脚本会自己向服务器铸一把新密钥）
+python D:\hilihili\转码脚本\transcode_all.py ^
+       --hls-key-info D:\hilihili\keys\v4.info ^
+       --drm-keyserver http://127.0.0.1:9101 ^
+       --drm-secret <管理密钥>
+```
+
+```bat
+rem (b) 只要 CENC 样本级加密（产物落在另一个目录）
+python D:\hilihili\转码脚本\transcode_all.py ^
+       --cenc-key-info D:\hilihili\keys\v4-cenc.info ^
+       --cenc-out-dir D:\hilihili\out-cenc ^
+       --drm-keyserver http://127.0.0.1:9101
+```
+
+```bat
+rem (c) 两套都要：必须给两个不同的目录（否则脚本直接报错退出）
+python D:\hilihili\转码脚本\transcode_all.py ^
+       --hls-key-info D:\hilihili\keys\v4.info ^
+       --cenc-key-info D:\hilihili\keys\v4-cenc.info ^
+       --cenc-out-dir D:\hilihili\out-cenc ^
+       --drm-keyserver http://127.0.0.1:9101 --drm-secret <管理密钥>
+```
+
+> ⚠ 跑 (a) 时注意：`--drm-keyserver` 那一步会**改写** `v4.info` 的第 1 行为服务器 URI，
+> 并把**新的** 16 字节密钥写回 `v4.info.bin` —— 也就是说，第 2 步 `create` 铸的那把密钥
+> 在这一刻被**替换**掉了（keystore 里会留下一条"铸了没用"的记录，那是刻意的：
+> 宁可多一把废弃密钥，也不要"清单说 A、密文用 B"）。
+> 所以**验收必须用改写后的那个 `v4.info.bin`**：脚本会在转码日志里打印密钥指纹，
+> 与 `drm_keyserver_tool.py verify` 打印的指纹一致即说明用的是同一把（§4.9.7 #7）。
+> 若希望"create 铸的那把"与"转码用的那把"是同一把，就别把 `--drm-keyserver`
+> 与 `--hls-key-info` 一起给 —— 那样 `key_info` 第 2 行那把本地密钥就是最终密钥。
+
+**第 4 步：验收**
+
+```bat
+rem 分段式 AES-128（一期那批断言）
+python D:\hilihili\转码脚本\verify_segmentbase.py D:\hilihili\out v4 ^
+       --expect-encrypted --key-file D:\hilihili\keys\v4.info.bin
+```
+
+```bat
+rem CENC 那一套（单独一个目录，所以带 --cenc-only）
+python D:\hilihili\转码脚本\verify_segmentbase.py D:\hilihili\out-cenc ^
+       --expect-cenc --cenc-only --expect-cenc-kid <kid>
+```
+
+```bat
+rem 孤立分片的独立复核（不依赖输出目录结构）
+python D:\hilihili\转码脚本\drm_keyserver_tool.py verify ^
+       D:\hilihili\keys\v4.info.bin <某个密文分片>.m4s --iv 0x00000000000000000000000000000001
+```
+
+#### 4.9.7 【待验证清单】—— 二期这一批，本机跑一条命令就能验
+
+> 本会话 **shell 不可用**，所以下面每一条都**没有本地实测**。编号越小风险越高。
+
+| # | 待验证的事 | 最小验证命令 | 期望结果 |
+|---|---|---|---|
+| **1** | **Go 密钥服务器本身能编、能起、四个端点都通**（本文件只读到了它的源码，没读过它的 main/config，也没编译过） | 上面 §4.9.6 的第 0~1 步 | `/healthz` 返回 `{"status":"ok","keys":N}`；`create` 能铸出 key |
+| **2** | **`drm_keyserver_tool.py` 四个子命令都对**（工具自身没跑过） | `python drm_keyserver_tool.py health --server http://127.0.0.1:9101`，再 `create` 一次，再 `sign <kid> --secret …`，再 `verify <key.bin> <一个真密文分片> --iv <该片 IV>` | 四条都退出码 0；`verify` 打印"解密结果是一个合法 MP4 顶层 box"（这条是"原语 + 文件形状"的独立证据） |
+| **3** | **ffmpeg 8.1 真的接受 CENC 那组参数，且产出的 box 齐全**（二期最大的未知） | `ffmpeg -h muxer=mp4 \| findstr encryption`，然后按 §4.9.3 的命令跑一趟 | 命令退出 0；`cenc-*-init.mp4` 里有 `encv`+`tenc`，媒体段里有 `senc`/`saiz`/`saio`。**若 ffmpeg 报"unrecognized option"，本脚本会原样打印它的 stderr 并非零退出 —— 那就是如实结论，不要绕过** |
+| **4** | **`--cenc-out-dir` 那一趟用的 `-i output.mpd` 能跑通**（输入是 dashenc 产的分段式 MPD） | §4.9.6 第 3 步 (b) | 不报 "could not find codec parameters" 之类的解复用错误 |
+| **5** | **CENC 的 `tenc` 版本（v0 还是 v1）与 KID 偏移**（断言 C2 的偏移常量是**读 ISO 规范 + 源码写的，没在真产物上核过**） | 跑完 §4.9.6 第 3 步 (b) 后：`findstr /c:"default_KID" D:\hilihili\out-cenc\output-cenc.mpd`，再与 `cenc_key_info.json` 的 kid 对照；然后跑第 4 步的 CENC 验收 | `SEGMENTBASE-VERIFY: PASS (CENC-only)`，notes 里能看到读到的 `default_KID`。**如果 KID 读出来是一串显然不对的随机值**，先怀疑 `CENC_TENC_KID_OFFSET_V0/V1`（`verify_segmentbase.py` 顶部常量） |
+| **6** | **签名 URL 写进清单后播放器能不能取到密钥**：`/admin/sign` 默认返回**相对路径**（除非带 `?absolute=1`，见 `handlers.go:168-171`），所以清单里那条 URI 是相对的 `/key/<kid>?exp=&sig=` —— 内核 `Helper::combinePaths(播放列表基址, URI)` 会把它拼成"媒体服务器上的 /key/…" | 起 `python -m http.server` 服务媒体目录，用内核播 `master.m3u8` | 能播。**这一条的结论直接决定部署形态**：要么让 key 服务与媒体**同源**（反代把 `/key/*` 转到 keyserver），要么改造 `fetch_hls_key_from_keyserver()` 让它把签名 URL 拼到 `--drm-keyserver` 基址上（本次**没做**，因为控制面基址常常不是播放器可达的地址）|
+| **7** | **密码学上"服务器铸的密钥真的被用上了"** | 对比转码日志里"密钥指纹"与 `verify` 子命令打印的指纹 | 两处指纹一致 |
+| **8** | **CENC 产物在 Android/OHOS 上真能解**（桌面 Qt 没有 CDM，也没有 HEVC 的软件样本解密，§3.2） | 在 Android 上按 ClearKey 流程播 `output-cenc.mpd` | 这条**本机做不了**，属于二期真正的验收终点 |
+| **9** | **`--cenc-kid` 那 32 hex 的 KID 与 ffmpeg 的 `-encryption_kid` 口径一致**（大小写/是否要连字符） | 用 `--cenc-kid 00112233445566778899aabbccddeeff` 跑一趟，再验 C2 | `tenc` 里读出的 KID 就是它 |
+
+**明确"没有验"的三件事**（不是"待验"，是本次**刻意不做**，理由都在代码注释里）：
+
+1. **不用服务器密钥把 CENC 的样本数据 AES-CTR 解回码流再验"解出来是不是合法 H.264/AAC"**。
+   要做对这件事，得把 `senc` 的 per-sample IV 与 `saiz`/`saio` 的偏移按 `trun` 的样本表
+   对齐解析 —— 那是一份完整的 CENC 解析器；而且判据不牢靠：CTR 解错密钥得到的是**均匀随机**
+   字节，随机字节里出现 `00 00 00 01` 起始码的概率并不低，拿它当判据会给出**假 PASS**。
+   所以这一条**如实说"没验"**，而不是写一条看着很硬、实际会蒙对的断言。
+2. **HLS 的 SAMPLE-AES 清单**（`#EXT-X-KEY:METHOD=SAMPLE-AES`）：本次不产出（§4.9.3 末）。
+   顺带一提，即使产出，内核的 `HLSSampleAesDecrypter` **只支持 H264/AAC**
+   （`HLSSampleAesDecrypter.cpp:54-77`），本工程的 h265 档也解不了。
+3. **单文件 SegmentBase 的加密**：一期就明确不做（§4.2），二期**也没有改变这个结论** ——
+   CENC 会改 box 布局，而单文件模式的 `indexRange`/`#EXT-X-BYTERANGE` 全是绝对字节范围。
+   所以 §4.6 的 A10 断言（单文件必须明文）**在二期依然成立**。
+
+#### 4.9.8 二期改了哪些文件（改动点 + 与设计初稿/一期的关系）
+
+| 文件 | 位置 | 语义 |
+|---|---|---|
+| `转码脚本/transcode_all.py` | `:1-12` | 新增 `import urllib.request / urllib.error / urllib.parse`（HTTP 只用标准库，且**不传 timeout**） |
+| 同上 | `:144-184` | 二期配置区：`DRM_KEYSERVER_ARG`、`DRM_SECRET_ARG`、`DRM_KEY_TTL_SECONDS`、`DRM_KEY_BYTES`、`DRM_KID_HEX_LEN`、`CENC_KEY_INFO_ARG`、`CENC_OUT_DIR_ARG`、`CENC_KID_ARG`、`CENC_SCHEME_ID`、`CENC_SCHEME_VALUE`、`CENC_SIDECAR_NAME`、`CENC_MPD_NAME`、`CENC_INIT_TEMPLATE`、`CENC_MEDIA_TEMPLATE`、`CENC_FFMPEG_SCHEME`（**没有**任何布尔开关） |
+| 同上 | `:220-231` | 二期状态：`DRM_KEYSERVER`/`DRM_SECRET`/`DRM_KID`/`DRM_KEY_URI_SIGNED`、`CENC_INFO_PATH`/`CENC_KEY_BYTES`/`CENC_KID_HEX`/`CENC_OUT_DIR`/`CENC_DONE` |
+| 同上 | `:581-884` | **新增密钥服务器客户端**：`KeyserverError` `:596`、`_norm_base_url` `:600`、`_http_get` `:617`、`_http_post_json` `:638`、`_http_error_detail` `:660`、`_is_kid_hex` `:672`、`parse_kid_text` `:677`、`keyserver_create_key` `:700`、`keyserver_fetch_key_bytes` `:731`、`keyserver_sign_url` `:749`、`_write_key_bytes_file` `:774`、`rewrite_key_info_uri` `:786`、`fetch_hls_key_from_keyserver` `:813` |
+| 同上 | `:3099-3461` | **新增 CENC 那一趟**：`parse_cenc_key_info` `:3120`、`_cenc_derive_kid` `:3178`、`scan_mp4_boxes` `:3190`、`_find_cenc_boxes` `:3218`、`verify_cenc_output` `:3260`、`_cenc_mpd_content_protection` `:3302`、`build_cenc_cmd` `:3341`、`run_cenc_pass` `:3368` |
+| 同上 | `:3553-3654` | `_parse_cli_key_info()` `:3553` 从"只认 `--hls-key-info`"扩成"六个值承载参数"；**新增** `_assert_cenc_conflict()` `:3610`（互斥与目录规则） |
+| 同上 | `:3683-3757` | `main()`：命令行解析 `:3685` + 参数校验 + `load_hls_key_info` + **`fetch_hls_key_from_keyserver` `:3715`（密钥来源换成服务器）** + CENC key_info 装配 `:3730`（含向服务器铸 CENC 密钥） |
+| 同上 | `:3789-3802` | `main()`：**CENC 那一趟的调用点** `:3799`（`rename_files()` 之后、`verify_keyframe()`/`run_encryption()` 之前） |
+| 同上 | `:3849-3874` | 收尾日志：打印 KID、签名/非签名 URI、CENC 落点与"桌面无 CDM"提示（**不含密钥**） |
+| `转码脚本/drm_keyserver_tool.py` | **新文件**（整份，601 行） | `health` / `create` / `sign` / `verify` 四个子命令（`cmd_health` `:282`、`cmd_create` `:302`、`cmd_sign` `:374`、`cmd_verify` `:404`）；手写 CLI（`OPTION_SPECS` `:494`、`parse_options` `:510`）；与 `transcode_all.py` 共用 `aes128.py`；`create` 写三行 key_info + 裸密钥文件 |
+| `转码脚本/verify_segmentbase.py` | `:3-63` | 文件头断言清单新增第 10 条（CENC），并写明"不用服务器密钥解样本数据"这条**明确不验**的边界 |
+| 同上 | `:111-139` | 二期常量：`CENC_INIT_RE`、`CENC_MEDIA_RE`、`CENC_SIDECAR_NAME`、`CENC_MPD_NAME`、`CENC_SCHEME_ID`、`CENC_DEFAULT_KID_ATTR`、`CENC_TENC_KID_OFFSET_V0/V1` |
+| 同上 | `:1255-1473` | **新增**：`cenc_box_children` `:1255`、`cenc_find_tenc` `:1277`、`cenc_box_counts` `:1310`、`check_cenc_encryption` `:1328` |
+| 同上 | `:1496-1517` | `main()`：新增 `--expect-cenc` `:1496` / `--cenc-dir` / `--expect-cenc-kid` `:1507` / `--cenc-only` `:1511` |
+| 同上 | `:1523-1525,1546-1575` | `main()`：`--cenc-only` 分支（跳过 SegmentBase 那批，但**必须**同时给 `--expect-cenc`，否则直接 FAIL） |
+| 同上 | `:1777-1784` | `main()`：`--expect-cenc` 时调用 `check_cenc_encryption()` |
+| `CicadaPlayerNext/docs/DRM-ENCRYPTION-DESIGN.md` | §4.9（新增，`:1350-1720` 附近）、§5.5 第 3 条、§7.3、附录文件清单 | 本节 + 二期证据索引 |
+
+**没有改动**：`convert-to-manifest.py`、`aes128.py`、`_sb_name_selfcheck.py`、
+以及 `CicadaPlayerNext` 下的任何 C++/Go 代码（密钥服务器是另一个 agent 的文件，
+本文件只读它的 HTTP 契约）。
+
+> 【已证实】与一期口径的关系：**一期那批断言一条都没动**（`--expect-encrypted` 的语义、
+> `#EXT-X-KEY` 的形状、IV 口径、`_clear/` 对照、SegmentBase 必须明文）。二期是**加**，
+> 不是替换 —— `--expect-cenc` 与 `--expect-encrypted` 是两套互斥的产物形态，
+> 可以分别验，也可以在同一次运行里都验（那时两套产物分别在两个目录，用 `--cenc-dir` 指路）。
+
+---
+
 ## 5. 风险与边界
 
 ### 5.1 PSSH / KID 在 MPD 与 init 段不一致会怎样（二期主风险）
@@ -1456,6 +1780,10 @@ python D:\hilihili\转码脚本\aes128.py
      `transcode_all.py:472-487` 就是这个范式：跑完看 `returncode`，**不设超时**）；
    * 现有的 `urllib.request.urlopen(req, timeout=5)`（`convert-to-manifest.py:619`）
      是**既有代码**，一期**不新增**同类超时；如要动，属于"删减"而不是"增加"。
+     **【二期施工后】** 二期新增的两处 HTTP 客户端
+     （`transcode_all.py` 的 `_http_get`/`_http_post_json`、`drm_keyserver_tool.py` 的同名函数）
+     **都不传 `timeout=`**，也**没有任何重试**：终态由"对端给了响应或连接失败"这个事件产生。
+     这一条是有意写成注释的（写在 `transcode_all.py` 的二期配置区），免得后来者"顺手补个超时"。
    * 理由（本工程已固化的判断）：终态必须由事件产生，时间只允许用于观测
      （对齐 `docs/PLAN-SEEK-FAST-LANDING-CROSSPLATFORM.md:199`、`:242`、
      `docs/SEEK-PRECISION-TODO.md:9`）。
@@ -1574,6 +1902,12 @@ python D:\hilihili\转码脚本\aes128.py
 | ~~**转码侧零加密**~~（**【施工后】已作废**） | 【施工后】加密阶段 `transcode_all.py:2404-2710`（`run_encryption` `:2582`）；参数解析 `:2807-2837` |
 | **【施工后】加密原语与密钥装载** | `transcode_all.py:287-502`（`_aes128_encrypt_block` `:314`、`_iv_for_index` `:324`、`aes128_cbc_encrypt` `:335`、`load_hls_key_info` `:429`） |
 | **【施工后】SegmentBase 不加密的双向断言** | `transcode_all.py:1920-1955`（`_assert_segmentbase_plain` / `_assert_segmentbase_not_encrypted_on_disk`） |
+| **【二期施工后】密钥服务器客户端** | `transcode_all.py:581-884`（`fetch_hls_key_from_keyserver` `:813`、`keyserver_sign_url` `:749`、`rewrite_key_info_uri` `:786`） |
+| **【二期施工后】CENC 那一趟** | `transcode_all.py:3099-3461`（`parse_cenc_key_info` `:3120`、`verify_cenc_output` `:3260`、`build_cenc_cmd` `:3341`、`run_cenc_pass` `:3368`）；调用点 `:3789-3802` |
+| **【二期施工后】新增参数与互斥规则** | `transcode_all.py:3553-3654`（`_parse_cli_key_info` `:3553`、`_assert_cenc_conflict` `:3610`）、装配 `:3683-3757` |
+| **【二期】密钥服务器运维工具** | `drm_keyserver_tool.py`（整份：`cmd_health` `:282` / `cmd_create` `:302` / `cmd_sign` `:374` / `cmd_verify` `:404`） |
+| **【二期】CENC 验收断言** | `verify_segmentbase.py`：常量 `:111-139`、`cenc_box_children` `:1255` / `cenc_find_tenc` `:1277` / `cenc_box_counts` `:1310` / `check_cenc_encryption` `:1328`、`--cenc-only` 分支 `:1546-1575` |
+| **【二期】Go 密钥服务器（只读契约，未改）** | `CicadaPlayerNext/server/drm-keyserver/*.go`（`handlers.go:37-55` 路由、`:105-129` 铸密钥、`:187-233` 裸字节密钥、`:147-179` 签名；`keystore.go:356-381` KID/label 规则；`token.go:88-110` 签名 URL 形状） |
 | `#EXT-X-KEY` → encryption | `convert-to-manifest.py:143-162`；写出 `:738-770` |
 | License Server 客户端（假定形状） | `convert-to-manifest.py:602-638`；开关变量 `:35-37`；触发 `:990-995`；CLI `:954-964` |
 | MPD `xmlns:cenc` 补全（已有） | `convert-to-manifest.py:183-191` |
@@ -1606,16 +1940,19 @@ python D:\hilihili\转码脚本\aes128.py
 
 ---
 
-## 附：一期施工涉及的文件清单（一句话索引）
+## 附：施工涉及的文件清单（一句话索引）
+
+> 上一节是**一期**清单；下面是**二期**（§4.9）的。
 
 | 文件 | 状态 |
 |---|---|
 | `D:\hilihili\转码脚本\aes128.py` | **新增**：纯 Python AES-128（FIPS-197）原语 + 两条官方向量自检；**加密端与验收端共用这一份** |
-| `D:\hilihili\转码脚本\transcode_all.py` | **已改**：`--hls-key-info` 参数、AES-128-CBC 加密（原语来自 `aes128.py`）、`run_encryption()`、`#EXT-X-KEY`/`#EXT-X-SESSION-KEY`/`ContentProtection`、内置 JSON 的 `encryption`、SegmentBase 明文断言（改动点清单见 §4.8.1） |
-| `D:\hilihili\转码脚本\verify_segmentbase.py` | **已改**：一期 DRM 验收（A1~A13）+ `--key-file` / `--clear-dir` / `--expect-encrypted` |
-| `D:\hilihili\转码脚本\convert-to-manifest.py` | **未改**（本来就认识 `#EXT-X-KEY`，并且本来就写全 6 个 JSON —— 本次施工时重新核对了 `:1042-1066`，它确实写 `test-dash-*` 与 `test-hls-*-segmentbase.json` 两版） |
-| `D:\hilihili\front\hili-player\packages\plugins\src\hls\vendor\hls.mjs` | **已改**：`_buildLevelDetails()` 消费 `playlist.encryption`（Object 注入路径补上 AES-128） |
-| `D:\hilihili\front\hili-player\packages\plugins\src\hls\vendor\hls.d.ts` | **已改**：`ManifestEncryption` 文档 |
-| `D:\hilihili\CicadaPlayerNext\**`（C++） | **未改**（一期内核零改动；§4.5.3 的可观测性改动留给单独施工，理由见 §4.8.5） |
-| `D:\hilihili\CicadaPlayerNext\docs\DRM-ENCRYPTION-DESIGN.md` | **已改**：回写实现差异 + §4.8 施工记录 |
-（本文件是唯一新增内容；`CicadaPlayerNext` 下未修改任何其他文件。）
+| `D:\hilihili\转码脚本\transcode_all.py` | **已改（一期）**：`--hls-key-info` 参数、AES-128-CBC 加密（原语来自 `aes128.py`）、`run_encryption()`、`#EXT-X-KEY`/`#EXT-X-SESSION-KEY`/`ContentProtection`、内置 JSON 的 `encryption`、SegmentBase 明文断言（改动点清单见 §4.8.1）<br>**已改（二期）**：`--drm-keyserver`/`--drm-secret` 密钥服务器客户端、`--cenc-key-info`/`--cenc-out-dir`/`--cenc-kid` 的 CENC 那一趟、`_assert_cenc_conflict()` 互斥规则（改动点清单见 §4.9.8） |
+| `D:\hilihili\转码脚本\drm_keyserver_tool.py` | **二期新增**：`health` / `create` / `sign` / `verify` 四个子命令；`create` 写三行 key_info + 16 字节裸密钥文件；`verify` 用脚本内 AES-128 证明"某文件确实是该密钥的密文" |
+| `D:\hilihili\转码脚本\verify_segmentbase.py` | **已改（一期）**：一期 DRM 验收（A1~A13）+ `--key-file` / `--clear-dir` / `--expect-encrypted`<br>**已改（二期）**：CENC 验收（C1~C7）+ `--expect-cenc` / `--cenc-dir` / `--expect-cenc-kid` / `--cenc-only` |
+| `D:\hilihili\转码脚本\convert-to-manifest.py` | **未改**（一期本次施工已核过它认识 `#EXT-X-KEY` —— `:143-162` / `:738-770`；二期**没有**重新核"它写几个 JSON"，那与二期无关） |
+| `D:\hilihili\front\hili-player\packages\plugins\src\hls\vendor\hls.mjs` | **已改（一期）**：`_buildLevelDetails()` 消费 `playlist.encryption`（Object 注入路径补上 AES-128） |
+| `D:\hilihili\front\hili-player\packages\plugins\src\hls\vendor\hls.d.ts` | **已改（一期）**：`ManifestEncryption` 文档 |
+| `D:\hilihili\CicadaPlayerNext\server\drm-keyserver\`（Go） | **未改**（二期只**读**它的 HTTP 契约：`handlers.go` / `keystore.go` / `cenc.go` / `token.go`；它由另一个 agent 施工） |
+| `D:\hilihili\CicadaPlayerNext\**`（其余 C++/Go） | **未改**（一期与二期都没有改动内核代码；§4.5.3 的可观测性改动留给单独施工，理由见 §4.8.5） |
+| `D:\hilihili\CicadaPlayerNext\docs\DRM-ENCRYPTION-DESIGN.md` | **已改**：一期回写（§4.8）+ 二期施工记录（§4.9）；另在 §5.5 第 3 条补了"二期新增的 HTTP 客户端同样不传 timeout"，在 §7.3 补了二期证据索引 |

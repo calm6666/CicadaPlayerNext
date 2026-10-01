@@ -309,6 +309,27 @@ namespace Cicada {
          *     上一片的 decrypter 仍然有效（多 key 轮换里换到坏 URL 时不会把好 key 冲掉）。
          */
         bool mKeyFetchFailedLogged{false};
+
+        /*
+         * ============ 把"上一片残留的解密状态"交还（本轮新增）============
+         *
+         * 这两个函数只服务一件事：**从密文片切回明文片时，不能让上一片的解密器/密钥 URL
+         * 继续对明文片生效**。为什么必须是独立函数而不是塞进 updateDecrypter()：
+         * updateDecrypter() 是按 mCurrentEncryption.method 分支的，而"本片是明文"这条路
+         * （method == NONE）两个分支都不进 —— 在它里面够不到"清掉密文态"这个动作。
+         * 调用点因此放在 createDemuxer() 里"已经确定本片一条加密记录都没接受"之后。
+         *
+         * 两个函数的分工：
+         *   · clearDecrypterState()：**只在确实残留时才动**（纯明文片源里它是空操作），
+         *     释放两个解密器并清掉 mKeyUrl（URL 是"这把 key 已经拉过"的记号，
+         *     清掉之后下次遇到密文片会重新拉 —— 这是"解密器被重建"的必要条件，不是重试）。
+         *   · releaseSampleAesDecrypter()：切换加密**方法**时清掉样本级解密器（见其调用点）。
+         */
+        void clearDecrypterState();
+
+        void releaseSampleAesDecrypter();
+
+        bool hasActiveDecrypter() const;
     };
 }
 

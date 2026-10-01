@@ -40,6 +40,12 @@ platform/Flutter/android/libs/
 .settings/
 .vscode/
 
+# Visual Studio (MSVC) related. `.vs/` is per-user IDE state (browse database,
+# open-document list); `deploy_win.ps1` / `build_macos.sh` regenerate nothing
+# from it, so committing it only adds churn and machine-specific paths.
+.vs/
+**/.vs/
+
 # Flutter repo-specific
 /bin/cache/
 /bin/internal/bootstrap.bat
@@ -144,3 +150,15 @@ platform/HarmonyOS/entry/oh_modules/
 platform/HarmonyOS/.hvigor/report/
 platform/HarmonyOS/.hvigor/cache/
 platform/HarmonyOS/.hvigor/outputs/build-logs/
+
+# Icon generator output. `tools/make_icons/out/` is a build product: it holds a
+# copy of every generated icon plus a manifest, and `tools/make_icons/out/`
+# can be recreated byte-for-byte with `python tools/make_icons/make_icons.py`.
+# The real artifacts are installed into the platform trees by that same run, so
+# committing the copy would duplicate ~650 KB of PNGs on every regeneration.
+tools/make_icons/out/
+
+# Go build products. `go build` drops a binary named after the module directory
+# next to the sources, which would otherwise be committed by a blanket `git add`.
+server/drm-keyserver/drm-keyserver
+server/drm-keyserver/drm-keyserver.exe

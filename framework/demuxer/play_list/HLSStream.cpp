@@ -146,8 +146,26 @@ namespace Cicada {
     int HLSStream::readSegment(const uint8_t *buffer, int size)
     {
         int ret = 0;
+        /*
+         * 【判据必须是"本片声明的加密方法"，不能只看 mSegDecrypter 在不在】
+         *
+         * createDemuxer() 现在保证"本片不加密就把解密器交还"（clearDecrypterState），
+         * 但这里的判据仍然按**权威来源**（mCurrentEncryption.method）再确认一次：
+         * 只要本片声明的不是整片加密（NONE / AES_SAMPLE），就**绝不**让 mSegDecrypter
+         * 参与读字节。这样"残留解密器把明文解坏"这一整类问题在结构上不可能发生 ——
+         * 而不是依赖两个地方的成员状态恰好同步。
+         */
+        const bool useSegDecrypter = hasActiveDecrypter();
 
-        if (mSegDecrypter == nullptr) {
+        if (mSegDecrypter != nullptr && !useSegDecrypter) {
+            // 样本级路径的 mSegDecrypter 恒为 null，所以走到这里只能是"状态不同步"，
+            // 打一条 ERROR 让现场能看见，而不是静默换路径。
+            AF_LOGE("a segment decrypter is present but the current segment declares method=%d "
+                    "(not AES_128): ignoring the leftover decrypter and reading the segment as-is\n",
+                    (int) mCurrentEncryption.method);
+        }
+
+        if (!useSegDecrypter) {
             /*
              * ============ 【★ 这里绝不能把密文当明文读出去（本轮修）★】============
              *
@@ -234,7 +252,13 @@ namespace Cicada {
     {
         int64_t ret;
 
-        if (mSegDecrypter == nullptr) {
+        /*
+         * 判据与 readSegment() 同源（hasActiveDecrypter）：**只有本片声明整片加密、
+         * 且解密器确实在，才拒绝字节级 seek**。原来这里只判 mSegDecrypter != nullptr，
+         * 于是"上一片留下的残留解密器"会让明文片的 seek 也返回 -EINVAL —— 表现是
+         * 明文片源在密文片之后 seek 变得不可用（只能整片重开），而且完全没有日志。
+         */
+        if (!hasActiveDecrypter()) {
             if (mExtDataSource) {
                 ret = mExtDataSource->Seek(offset, whence);
             } else {
@@ -563,6 +587,66 @@ namespace Cicada {
         return pts;
     }
 
+    bool HLSStream::hasActiveDecrypter() const
+    {
+        /*
+         * 唯一的"整片解密现在生效吗"判据，readSegment() 与 seekSegment() 都读它。
+         * 两个条件缺一不可：
+         *   · mSegDecrypter 真的建出来了（key 拉到、长度对）；
+         *   · 本片声明的方法**就是** AES_128。
+         * 只看前者会让上一片的残留解密器影响本片（把它当密文解 / 让 seek 失效）；
+         * 只看后者会在"key 拉取失败、解密器还没建"时以为解密生效，把密文当明文读出去。
+         */
+        return mSegDecrypter != nullptr && mCurrentEncryption.method == SegmentEncryption::AES_128;
+    }
+
+    void HLSStream::releaseSampleAesDecrypter()
+    {
+        /*
+         * 方法切换（AES_SAMPLE ⇄ 其它）时必须把样本级解密器放掉。
+         * 原来 mSampeAesDecrypter 一旦建出来就**再也不会**被检查方法：
+         * 于是"前一片是样本级加密、后一片不是"时，createDemuxer() 仍会把上一片的
+         * 样本级解密器交给内层 demuxer（`setSampleDecryptor(mSampeAesDecrypter.get())`），
+         * 而它的 mValidKeyInfo 还是上一片那把 key —— 这属于"用错 key 去解"，
+         * 表现为偶发花屏且无任何日志。
+         */
+        if (mSampeAesDecrypter != nullptr) {
+            AF_LOGW("releasing the sample-level (SAMPLE-AES) decrypter: this segment's encryption "
+                    "method changed (now method=%d)\n", (int) mCurrentEncryption.method);
+            mSampeAesDecrypter.reset();
+        }
+    }
+
+    void HLSStream::clearDecrypterState()
+    {
+        /*
+         * "本片一条加密记录都没接受"⇒ 把上一片留下的解密状态整体交还。
+         *
+         * 为什么连 mKeyUrl 一起清：它是 updateKey() 里"这条 URL 已经拉过 key"的记号。
+         * 留着它，下一次再遇到同一把 key 的密文片时 updateKey() 会立刻 return false、
+         * 而新 decrypter（若被重建）里**没有 key** ⇒ mValidKeyInfo 为假 ⇒ Read() 返回 -EINVAL。
+         * 清掉之后下次会重新拉一次 —— 触发点是"遇到密文片"这个事件，不是计时器，
+         * 也没有次数上限（与 updateKey() 里"失败不记住 URL"的语义完全一致）。
+         *
+         * mKey 字节本身不清：它不参与任何判据（判据是 hasActiveDecrypter），
+         * 且清了反而会让人误以为"需要重新填充密钥缓冲区"。
+         * mDRMMagicKey 也不清：它是"本流受保护"的标记（ReadPacket 的 setProtected 读它），
+         * 与"这一片要不要解密"是两件事。
+         */
+        if (mSegDecrypter == nullptr && mSampeAesDecrypter == nullptr && mKeyUrl.empty()) {
+            return; // 纯明文片源的常态：本来就是空的，不做任何事也不打日志
+        }
+
+        mSegDecrypter.reset();
+        mSampeAesDecrypter.reset();
+        mKeyUrl.clear();
+        /*
+         * 一并复位"key 拉取失败已打过日志"的记号：本片是明文，那条失败已经与现场无关；
+         * 留着它会让**下一次真的失败**时少打一条关键 ERROR。
+         */
+        mKeyFetchFailedLogged = false;
+    }
+
     int HLSStream::createDemuxer()
     {
         int ret;
@@ -573,11 +657,74 @@ namespace Cicada {
             mDemuxerMeta = nullptr;
         }
 
+        /*
+         * ============ 【★ 这一段决定"这个分片到底算不算加密"（本轮修）★】============
+         *
+         * 原来只有一个"接受第一条支持的记录"的循环，没有 else 分支，也没有在循环前复位：
+         *
+         *   · **本片没有声明任何加密**时（mCurSeg->encryptions 为空 —— 明文分片就是这样），
+         *     循环一次都不进，于是 mCurrentEncryption **原封不动地保留着上一片的值**。
+         *     后果是"密文片 + 明文片"混排的片源里，明文片会被当成密文片：
+         *     mProtectedBuffer 仍为 true、mSegDecrypter 仍在，整个明文片被 AES-128-CBC
+         *     "解密"一遍 ⇒ 解出来必然是垃圾（更糟的是 PKCS7 去填充会把尾部真实字节删掉）。
+         *   · 同理，加密记录**全部因 keyFormat 不支持被跳过**时（非 Android 平台上的
+         *     Widevine/FairPlay KID 记录就是这种），也沿用上一片的状态，而且**一条日志都没有**，
+         *     现场表现是"它以为自己播的是明文/它以为自己拿的还是上一把 key"。
+         *
+         * 现在：**每片独立判定**。先在循环前复位成"本片不加密"，只有真的接受了某条记录
+         * 才赋值；一条都没接受却确实声明了加密时，打一条带 keyFormat 的 ERROR，**不静默**。
+         *
+         * 为什么复位是安全的：明文片复位成 NONE 之后 mProtectedBuffer=false、
+         * mSegDecrypter 不再参与 readSegment（见那里的判据），这正是明文片该有的行为；
+         * 而加回密文片时 updateDecrypter() 会按新记录重建/复用 decrypter。
+         * 这里没有任何计时器、重试或超时 —— 判据全部来自"本片自己声明的加密记录"。
+         */
+        mCurrentEncryption = SegmentEncryption();
+        bool encryptionAccepted = false;
+        std::string skippedKeyFormat{};
+
         for (SegmentEncryption &item: mCurSeg->encryptions) {
             if (item.keyFormat.empty() || DrmUtils::isSupport(item.keyFormat)) {
                 mCurrentEncryption = item;
+                encryptionAccepted = true;
                 break;
             }
+
+            if (skippedKeyFormat.empty()) {
+                skippedKeyFormat = item.keyFormat;
+            }
+        }
+
+        if (!encryptionAccepted && !skippedKeyFormat.empty()) {
+            /*
+             * 只打一条（这是"清单声明了加密、但当前平台一条都不支持"的唯一现场证据）。
+             * 绝不打 key 内容：keyFormat 是"DRM 系统标识"（如 Widevine 的 urn:uuid:…），不是密钥。
+             */
+            AF_LOGE("this segment declares encryption but no declared key format is supported by "
+                    "the current platform (keyFormat=%s): the segment will be treated as if it "
+                    "carried no encryption record at all\n", skippedKeyFormat.c_str());
+        }
+
+        /*
+         * ============ 从"密文片"回到"明文片"时把上一片的解密状态交还（本轮修）============
+         *
+         * 上面把 mCurrentEncryption 复位成 NONE 只解决了"判定"，还没解决"残留"：
+         * mSegDecrypter / mSampeAesDecrypter / mKeyUrl 都是**跨分片存活**的成员，
+         * 明文片进来时它们还停在上一片的状态上。只在 updateDecrypter() 里按 method 分支
+         * 是够不到这一层的（NONE 两个分支都不进），所以必须在这里、在**已经确定本片不加密**
+         * 的时刻显式交还。
+         *
+         * 判据用的是"本片一条加密记录都没接受"，而且加密确实被声明过或解密状态确实非空 ——
+         * 纯明文片源每片都会走到这里，此时 reset 是个空操作（成员本来就都是空的）。
+         *
+         * 为什么连 mKeyUrl 一起清：URL 是 updateKey() 的"已经拉过这把 key"的记号。
+         * 清掉之后，下一次再遇到密文片会**重新拉一次 key** —— 这不是重试机制，
+         * 而是"解密器要被重建"这一事实的必然要求（重建的解密器里没有 key）。
+         * mDRMMagicKey **不清**：它是"本流受保护"的标记（ReadPacket 里的 setProtected
+         * 判据读它），与"这一片要不要解密"是两件事。
+         */
+        if (!encryptionAccepted) {
+            clearDecrypterState();
         }
 
         ret = updateDecrypter();
@@ -1170,6 +1317,18 @@ namespace Cicada {
     {
         int ret = 0;
         mProtectedBuffer = mCurrentEncryption.method != SegmentEncryption::NONE;
+
+        /*
+         * 【方法切换时把样本级解密器放掉】单独放在分支之前，是为了覆盖
+         * "AES_SAMPLE 片之后跟了 AES_128 / AES_PRIVATE 片"这种情况 ——
+         * 那时下面两个分支都不会去动 mSampeAesDecrypter，而 createDemuxer() 随后又会
+         * 把它交给内层 demuxer（setSampleDecryptor），于是用**上一片那把 key** 去解。
+         * 判据是"存在样本级解密器 + 本片不是样本级加密"，与顺序、时序无关。
+         */
+        if (mSampeAesDecrypter != nullptr &&
+                mCurrentEncryption.method != SegmentEncryption::AES_SAMPLE) {
+            releaseSampleAesDecrypter();
+        }
 
         if (mCurrentEncryption.method == SegmentEncryption::AES_128 ||
                 mCurrentEncryption.method == SegmentEncryption::AES_PRIVATE) {

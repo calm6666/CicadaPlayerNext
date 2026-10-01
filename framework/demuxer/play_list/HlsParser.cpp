@@ -15,6 +15,7 @@
 #include "utils/frame_work_log.h"
 #include <cstring>
 #include <map>
+#include <vector>
 
 #define CLOCK_FREQ INT64_C(1000000)
 
@@ -169,6 +170,46 @@ namespace Cicada {
 
     typedef int64_t mtime_t;
 
+    /*
+     * ============ #EXT-X-KEY 的 KEYID（本轮新增）============
+     *
+     * RFC 8216bis 的 #EXT-X-KEY 允许一个 KEYID=0x<十六进制> 属性（FairPlay / CENC 都用它
+     * 指明"这段内容属于哪把密钥"，即 default_KID）。**原来这里完全不读它**：
+     * SegmentEncryption::keyId 一直空着，于是
+     *   · HLSStream 上报的 Stream_meta.drmKeyId 永远是 nullptr
+     *     ⇒ SMPAVDeviceManager 组出来的 DrmInfo.keyId 为空
+     *     ⇒ 任何按 KID 取密钥的实现（许可证服务器、CENC 解密器）都拿不到 KID，
+     *       只能退化成"猜"或者"第一把 key"；
+     *   · 现场表现为"DRM 内容能建会话但解不开"，而且**日志里没有 KID，无从对账**。
+     *
+     * 口径：解出来按**小写 hex 字符串**存（不带 0x 前缀、不带连字符），
+     * 与 DASH 侧 MPDParser 解析 cenc:default_KID 的口径一致（后者本来就是 UUID 文本）。
+     * 解析失败 / 属性缺失 ⇒ 保持空串（"清单没给 KID"与"给了但读不出来"在语义上都等于没有）。
+     */
+    static std::string hlsKeyIdOf(const AttributesTag *keytag)
+    {
+        if (keytag == nullptr || keytag->getAttributeByName("KEYID") == nullptr) {
+            return std::string();
+        }
+
+        const std::vector<uint8_t> keyId = keytag->getAttributeByName("KEYID")->hexSequence();
+
+        if (keyId.empty()) {
+            return std::string();
+        }
+
+        static const char *kHexDigits = "0123456789abcdef";
+        std::string ret;
+        ret.reserve(keyId.size() * 2);
+
+        for (uint8_t byte : keyId) {
+            ret.push_back(kHexDigits[(byte >> 4) & 0x0F]);
+            ret.push_back(kHexDigits[byte & 0x0F]);
+        }
+
+        return ret;
+    }
+
     void HlsParser::parseSegments(dataSourceIO *stream, Representation *rep, const std::list<Tag *> &tagslist)
     {
         auto *segmentList = new SegmentList(rep);
@@ -300,6 +341,9 @@ namespace Cicada {
 
                     SegmentEncryption encryption{};
                     const auto *keytag = static_cast<const AttributesTag *>(tag);
+                    // KEYID 与 METHOD 无关：三种方法都可能带它，先在分支之前统一解出来
+                    // （见 hlsKeyIdOf 的说明：解不出来就是空串，不报错、不猜测）
+                    const std::string keyIdHex = hlsKeyIdOf(keytag);
 
                     if (keytag->getAttributeByName("METHOD") &&
                             keytag->getAttributeByName("METHOD")->value == "AES-128" &&
@@ -307,6 +351,7 @@ namespace Cicada {
                         encryption.method = SegmentEncryption::AES_128;
                         encryption.iv.clear();
                         encryption.keyUrl = keytag->getAttributeByName("URI")->quotedString();
+                        encryption.keyId = keyIdHex;
 
                         if (keytag->getAttributeByName("IV")) {
                             encryption.iv.clear();
@@ -319,6 +364,7 @@ namespace Cicada {
                         encryption.method = SegmentEncryption::AES_PRIVATE;
                         encryption.iv.clear();
                         encryption.keyUrl = keytag->getAttributeByName("DATE")->quotedString();
+                        encryption.keyId = keyIdHex;
 
                         if (keytag->getAttributeByName("IV")) {
                             encryption.iv.clear();
@@ -330,6 +376,7 @@ namespace Cicada {
                         encryption.method = SegmentEncryption::AES_SAMPLE;
                         encryption.iv.clear();
                         encryption.keyUrl = keytag->getAttributeByName("URI")->quotedString();
+                        encryption.keyId = keyIdHex;
 
                         if (keytag->getAttributeByName("IV")) {
                             encryption.iv.clear();
