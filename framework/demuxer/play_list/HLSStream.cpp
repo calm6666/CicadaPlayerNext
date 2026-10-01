@@ -148,6 +148,37 @@ namespace Cicada {
         int ret = 0;
 
         if (mSegDecrypter == nullptr) {
+            /*
+             * ============ 【★ 这里绝不能把密文当明文读出去（本轮修）★】============
+             *
+             * 走到这个分支有两种情况，必须分清楚：
+             *
+             *   1. **本来就不加密**（mCurrentEncryption.method == NONE）：
+             *      正常路径，直接读分片字节 —— 行为与以前完全一致。
+             *
+             *   2. **清单声明了加密，但解密器没建出来**（key 拉取失败 / key 长度不对）：
+             *      以前这里也是**直接读密文**交给内层 demuxer ⇒ 表现是"HLS 分片解密失败"
+             *      但日志里一句"解密失败"都没有，只有下游一条通用 demux/解码错误
+             *      （花屏 / `not a key frame` / moov 解析失败），现场无法区分
+             *      "密钥错"和"产物坏"。
+             *
+             * 现在第 2 种情况**明确报错**：返回 -EIO 并只打一条 ERROR（用 updateKey() 里
+             * 已经置好的 mKeyFetchFailedLogged 去重，避免 read_thread 每 10ms 刷一条）。
+             * 为什么是 -EIO 而不是继续读：读出去必然是垃圾，让上层拿到一个明确的 IO 错误
+             * 比拿一堆垃圾去喂解码器干净得多 —— 这也是"不许假成功"的直接落点。
+             */
+            if (mProtectedBuffer) {
+                if (!mKeyFetchFailedLogged) {
+                    mKeyFetchFailedLogged = true;
+                    AF_LOGE("segment decryption is not applied: the manifest declares encryption "
+                            "but no decrypter could be built (key url=%s). Refusing to hand "
+                            "ciphertext to the demuxer as if it were plaintext\n",
+                            mKeyUrl.empty() ? mCurrentEncryption.keyUrl.c_str() : mKeyUrl.c_str());
+                }
+
+                return -EIO;
+            }
+
             if (mExtDataSource) {
                 ret = mExtDataSource->Read((void *) buffer, size);
             } else if (mPdataSource) {
@@ -795,7 +826,30 @@ namespace Cicada {
             return false;
         }
 
-        mKeyUrl = keyUrl;
+        /*
+         * ============ 【★ key 拉取失败的失败语义（本轮修）★】============
+         *
+         * 这里原来在 Open() **之前**就写了 `mKeyUrl = keyUrl`，于是：
+         *   第一次拉 key 失败（密钥还没上传好 / HTTP 404 / 网络抖一下）⇒
+         *   下一次 updateKey() 一进来就被上面那句 `mKeyUrl == keyUrl` 挡住，直接 return false
+         *   ⇒ **同一个 URL 永远不会再试**，整条流从此再也解不开。
+         * 而"起播时密钥还没就绪"恰恰是 DRM 现场最常见的一类失败。
+         *
+         * 现在改成：**只有真的把 16 字节读到手，才记住这个 URL**（见函数末尾）。
+         * 失败时 mKeyUrl 保持原值，于是下一次开流/换分片走到 updateKey() 会**自然再试一次**。
+         * 这不是"重试机制"：没有次数、没有退避、没有计时器 —— 触发点是"下一次 updateKey()"
+         * 这个**事件**（换分片 / 重开流 / 切档都会走到）。
+         *
+         * 失败时还要把这次建出来的 dataSource 释放掉并把 mSegKeySource 置空：
+         *   · 半坏的 source 留着，后面 `mSegKeySource->GetOption("drmMagicKey")` 会从一个
+         *     失败对象上取值；
+         *   · 置空之后 mSegKeySource == nullptr，与"从来没试过"完全同态，
+         *     下一次 updateKey() 会重新 create（这也是"再试一次"能成立的前提）。
+         *
+         * 另外，失败**不碰** mSegDecrypter / mKey：多 key 轮换里换到一个坏 URL 时，
+         * 上一段那把可用的 key 仍然留在 decrypter 里（"保留上一个可用 key"），
+         * 不会因为一次失败就把已经能解的流冲成不可解。
+         */
         {
             std::lock_guard<std::mutex> lock(mHLSMutex);
             delete mSegKeySource;
@@ -805,13 +859,20 @@ namespace Cicada {
         int ret = mSegKeySource->Open(0);
 
         if (ret < 0) {
-            AF_LOGE("open key file error\n");
-            /*
-             * 原来是 `return ret;`: 函数返回 bool, 负的 ret 会被隐式转成 **true**,
-             * 调用方 (updateSegDecrypter / updateSampleAesDecrypter) 看到 true 就以为
-             * "key 已经换好了", 于是拿一份根本没读到的 mKey 去解整段(黑屏/花屏)。
-             * 失败就是失败 —— 返回 false, 让读段那两条路走"没有 decrypter"的分支。
-             */
+            AF_LOGE("open key file error: %s (ret=%d) —— key 拉取失败，本片不建解密器；"
+                    "URL 未被记住，下一次开流/换分片会再试\n", keyUrl.c_str(), ret);
+
+            if (!mKeyFetchFailedLogged) {
+                mKeyFetchFailedLogged = true;
+                AF_LOGE("the stream declares %s encryption but its key cannot be fetched: %s "
+                        "(decryption is NOT applied; playback of this segment will fail)\n",
+                        mCurrentEncryption.method == SegmentEncryption::AES_SAMPLE ? "SAMPLE-AES" : "AES-128",
+                        keyUrl.c_str());
+            }
+
+            std::lock_guard<std::mutex> lock(mHLSMutex);
+            delete mSegKeySource;
+            mSegKeySource = nullptr;
             return false;
         }
 
@@ -828,14 +889,29 @@ namespace Cicada {
         }
 
         if (size != 16) {
-            AF_LOGE("key size is %d not 16\n", size);
-//                    delete mSegKeySource;
+            AF_LOGE("key size is %lld not 16 (url=%s) —— key 内容不对，本片不建解密器；"
+                    "URL 未被记住，下一次开流/换分片会再试\n", (long long) size, keyUrl.c_str());
             mSegKeySource->Close();
-            /* 和上面那条一样: -1 在这个 bool 函数里会被隐式转成 true(见上一条注释) */
+
+            if (!mKeyFetchFailedLogged) {
+                mKeyFetchFailedLogged = true;
+                AF_LOGE("the key fetched from %s is %lld bytes, expected exactly 16; "
+                        "decryption is NOT applied\n", keyUrl.c_str(), (long long) size);
+            }
+
+            std::lock_guard<std::mutex> lock(mHLSMutex);
+            delete mSegKeySource;
+            mSegKeySource = nullptr;
             return false;
         }
 
         mSegKeySource->Close();
+        /*
+         * **到这里才记住 URL**：同 URL 下一次直接复用（不重复拉），换 URL 才重拉 ——
+         * 多 key 轮换就是靠这条"URL 变化"来触发的（见函数头那句判据）。
+         */
+        mKeyUrl = keyUrl;
+        mKeyFetchFailedLogged = false;
         return true;
     }
 
@@ -1622,6 +1698,21 @@ namespace Cicada {
                 delete mSegKeySource;
                 mSegKeySource = nullptr;
             }
+
+            /*
+             * 【必须连 mKeyUrl 一起清（本轮修）】
+             *
+             * mKeyUrl 的语义是"**当前这把 key 是从哪个 URL 拿到的**"（updateKey 用它做
+             * "同 URL 不重复拉 / 换 URL 才重拉"的判据）。它从这一轮起**只在真的拿到 16 字节
+             * 之后**才被赋值（见 updateKey）。
+             *
+             * 而这里把 mSegKeySource 释放了 —— 如果 mKeyUrl 还留着，下一次 start() 走
+             * updateKey() 时 `mKeyUrl == keyUrl` 成立 ⇒ 直接 return false ⇒
+             * 调用方以为"key 已经就绪"，于是拿着**没有被填充过的 mKey** 去解密整片
+             * （正是这次要消灭的那类"假成功"）。
+             * 两者必须同生共死：source 没了，就当作"还没拿过 key"。
+             */
+            mKeyUrl.clear();
 
             mIsOpened_internal = false;
         }

@@ -289,6 +289,26 @@ namespace Cicada {
          * 本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
          */
         SeekLandingStage mSeekLanding{mQueue, mDataMutex, mWaitCond};
+
+        /*
+         * ============ key 拉取失败的失败语义（本轮新增）============
+         *
+         * 【要修的三件事，都是"失败被当成成功"的后半截】
+         *   1. mKeyUrl 原来在 Open() **之前**就赋值：只要 key URL 没变，updateKey() 下一次
+         *      直接 return false ⇒ **同一个 URL 永不重试**。而"密钥还没上传好/网络抖一下"
+         *      恰恰是第一片最常见的失败。现在改成**只在真的拿到 16 字节之后才记住 URL**。
+         *   2. 拉 key 失败时 updateSegDecrypter() 不再建 decrypter，但读段那条路
+         *      （readSegment）会把**密文当明文**交给 demuxer ⇒ 花屏 + 一条通用 demux 错误，
+         *      日志里**没有一句**"解密失败"。现在 readSegment 会明确报错并只打一条 ERROR。
+         *   3. 失败原因要能区分：打不开（可能是暂时性）与长度不是 16（密钥内容错）是两回事。
+         *
+         * 【为什么不是"重试/兜底"】这里没有任何计时器、没有重试次数、没有超时：
+         *   · "重试"= 下一次 updateKey() 自然会再试一次（因为 mKeyUrl 没被记住），
+         *     它是**事件驱动**的（每次换分片/打开流都会走到这里）；
+         *   · "保留上一个可用 key"= mSegDecrypter 与 mKey 在失败时**不被破坏**，
+         *     上一片的 decrypter 仍然有效（多 key 轮换里换到坏 URL 时不会把好 key 冲掉）。
+         */
+        bool mKeyFetchFailedLogged{false};
     };
 }
 
