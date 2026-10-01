@@ -251,18 +251,50 @@ bool CENCDecrypter::buildProtectedRanges(const std::vector<SubsampleInfo> &subsa
 /* cenc / cens：AES-CTR（ISO/IEC 23001-7 9.2，计数器构造见 9.2 与 NIST SP 800-38A F.5） */
 /* ------------------------------------------------------------------ */
 
+/*
+ * ============ 计数器在样本内**跨 subsample 连续**（与两个生产实现一致）============
+ *
+ * 这一条是**实测定的**，不是从规范条文推的（第一版按"每个 subsample 重置"写，
+ * 结果在真 CENC 产物上错了）：
+ *
+ *   用 `ffmpeg -encryption_scheme cenc-aes-ctr` 产出的真 CENC 文件与同一编码的明文
+ *   逐样本比对，150 个样本里 **149 个逐字节解对**；唯一错的是第 0 个样本 ——
+ *   它带 2 个 subsample（5 clear + 593 protected，5 clear + 6929 protected），
+ *   第一个受保护区间解对，第二个区间整段错（首个错字节 = 603，正是第二区间起点）。
+ *
+ * 之所以判定"连续"才对，是因为两个互相独立、都在海量设备上跑的生产实现都这么做：
+ *   · FFmpeg `libavformat/mov.c` 的 `cenc_scheme_decrypt()`：对每个 subsample 调
+ *     `av_aes_ctr_crypt()`，**中间不重新 arm IV**；而它的加密端
+ *     `libavformat/movenccenc.c` 的 `mov_cenc_write_encrypted()` 把**整个样本**
+ *     一次性 crypt 出去 —— 计数器天然连续。
+ *   · Shaka Packager `media/base/aes_encryptor.cc`：`AesCtrEncryptor::Encrypt()` 在
+ *     `UpdateIv()` 之前一直沿用同一个 `counter_` 与 `block_offset_`，而 `UpdateIv()`
+ *     是**每个样本**才调一次。
+ *   规范口径也一致：计数器是"每个后续的样本数据分组 +1"，按**分组**递增。
+ *
+ * 【仍未解释的一处】上面那个多 subsample 样本的**第二个**受保护区间，用"连续"
+ * （counter 38 起）和"重置"（counter 0 起）都复现不出来，把第二区间起始 counter
+ * 从 30 扫到 50 也没有命中的值。也就是说：**该样本第二区间用的不是"同一把 IV +
+ * 某个 counter"**。这是 ffmpeg 那个 muxer 在多 subsample 上的一个未定行为，
+ * 尚未查清（见 tools/drm_bench/README.md 的复现方法）。结论按"与两个生产实现
+ * 一致"落地：**连续**。
+ *
+ * 影响面：单 subsample 的样本两种写法等价（149/150 都是这一类），所以这条差异只在
+ * "一个样本里既有 clear 前缀又有多个受保护区间"的片源上才会体现。
+ */
 void CENCDecrypter::decryptCtr(const uint8_t *iv, uint32_t ivSize, uint8_t *buffer,
                                const KeyEntry *entry,
                                const std::vector<std::pair<int64_t, int64_t>> &ranges)
 {
+    // 每个样本只在这里建一次 counter block；样本内所有受保护区间共用同一条计数器。
+    buildIv(iv, ivSize, mCounterBlock);
+
     for (const auto &range : ranges) {
         uint8_t *pos = buffer + range.first;
         int64_t remaining = range.second;
 
-        buildIv(iv, ivSize, mCounterBlock);
-
-        // counter block：高 8 字节 = IV，低 8 字节 = 大端计数器，初值 0，每 16 字节分组 +1。
-        // 计数器在每个 subsample（即每个 range）重置；IV 本身在一个样本内不变。
+        // counter block：高 ivSize 字节 = 该样本的 IV，低 8 字节 = 大端计数器，
+        // 初值 0，每 16 字节分组 +1，**跨 range 连续**（见上面的长注释）。
         while (remaining > 0) {
             // av_aes_crypt 支持 dst == src，原地把 counter block 加密成 keystream
             entry->enc->encrypt(mKeyStream, mCounterBlock, 1, nullptr);
