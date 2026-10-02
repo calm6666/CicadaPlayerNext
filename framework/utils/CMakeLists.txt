@@ -63,8 +63,6 @@ set(SOURCE_FILES
         ../base/options.h
         UrlUtils.cpp
         UrlUtils.h
-        DrmUtils.cpp
-        DrmUtils.h
         UTCTimer.cpp
         UTCTimer.h
         globalNetWorkManager.cpp

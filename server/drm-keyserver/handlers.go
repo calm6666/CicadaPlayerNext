@@ -289,8 +289,23 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request, kid string) {
 	w.Header().Set("Cache-Control", "no-store")
 
 	format := r.URL.Query().Get("format")
-	switch format {
-	case "", "bin", "raw":
+	switch {
+	case isClearKeyFormat(format):
+		// W3C ClearKey licence. This is the shape an EME/MediaDrm ClearKey
+		// client (and the kernel's ContentKeyFetcher) can actually consume;
+		// see clearkey.go for why the admin JSON cannot be substituted here.
+		payload, err := buildClearKeyLicense(rec)
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		if scheme := r.URL.Query().Get("scheme"); scheme != "" {
+			writeAPIError(w, clearkeyUnsupportedScheme(scheme))
+			return
+		}
+		log.Printf("served clearkey licence kid=%s", kid)
+		writeJSON(w, http.StatusOK, payload)
+	case format == "", format == "bin", format == "raw":
 		raw, err := decodeHexKey(rec.Key)
 		if err != nil {
 			writeAPIError(w, err)
@@ -304,7 +319,7 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request, kid string) {
 			// but the log line.
 			log.Printf("write key kid=%s: %v", kid, err)
 		}
-	case "json":
+	case format == "json":
 		payload, err := buildKeyJSON(rec, r.URL.Query().Get("scheme"))
 		if err != nil {
 			writeAPIError(w, err)
@@ -314,7 +329,7 @@ func (s *Server) handleKey(w http.ResponseWriter, r *http.Request, kid string) {
 		writeJSON(w, http.StatusOK, payload)
 	default:
 		writeError(w, http.StatusBadRequest,
-			"unknown format %q: want raw (default) or json", format)
+			"unknown format %q: want raw (default), json or clearkey", format)
 	}
 }
 
@@ -337,7 +352,7 @@ func (s *Server) handleLicensePost(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "%s", tokenErrMessage(err))
 		return
 	}
-	s.writeLicense(w, req.KID, req.Scheme)
+	s.writeLicense(w, req.KID, req.Scheme, req.Format)
 }
 
 // handleLicenseGet is the same license in GET form. It is convenient for a
@@ -348,16 +363,37 @@ func (s *Server) handleLicenseGet(w http.ResponseWriter, r *http.Request, kid st
 		writeError(w, http.StatusUnauthorized, "%s", tokenErrMessage(err))
 		return
 	}
-	s.writeLicense(w, kid, r.URL.Query().Get("scheme"))
+	s.writeLicense(w, kid, r.URL.Query().Get("scheme"), r.URL.Query().Get("format"))
 }
 
 // writeLicense is the shared tail of both /license forms.
-func (s *Server) writeLicense(w http.ResponseWriter, kid, scheme string) {
+//
+// format selects the shape: empty/"json" is this service's own licence
+// {"kid","key","scheme","iv_size"}, "clearkey" is the W3C ClearKey document that
+// a ClearKey DASH client expects (see clearkey.go).
+func (s *Server) writeLicense(w http.ResponseWriter, kid, scheme, format string) {
 	rec, err := s.store.Lookup(kid)
 	if err != nil {
 		writeAPIError(w, err)
 		return
 	}
+
+	if isClearKeyFormat(format) {
+		if scheme != "" {
+			writeAPIError(w, clearkeyUnsupportedScheme(scheme))
+			return
+		}
+		payload, err := buildClearKeyLicense(rec)
+		if err != nil {
+			writeAPIError(w, err)
+			return
+		}
+		w.Header().Set("Cache-Control", "no-store")
+		log.Printf("issued clearkey licence kid=%s", payload.Keys[0].Kid)
+		writeJSON(w, http.StatusOK, payload)
+		return
+	}
+
 	payload, err := buildLicense(rec, scheme)
 	if err != nil {
 		writeAPIError(w, err)

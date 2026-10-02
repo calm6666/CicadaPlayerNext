@@ -11,12 +11,15 @@
 // This is the C++ equivalent of manifest-to-hls.ts / manifest-to-dash.ts:
 //   - SegmentInfo single/template/list modes -> SegmentList + init_section
 //   - AES-128 (per-representation or global)    -> SegmentEncryption
-//   - ContentProtection / LicenseServer         -> SegmentEncryption(AES_SAMPLE)
-//                                                  with keyFormat=schemeIdUri,
-//                                                  keyUrl=laUrl, which flows into
-//                                                  Stream_meta.keyFormat/keyUrl
-//                                                  and the DRM handler chain
-//                                                  (Widevine/FairPlay/ClearKey).
+//   - ContentProtection                          -> SegmentEncryption(CENC)
+//                                                  selected by DrmSchemes over all
+//                                                  declared systems; keyFormat is set
+//                                                  ONLY when a platform CDM handles the
+//                                                  chosen scheme (so the software decoder
+//                                                  is never excluded by a non-null
+//                                                  DrmInfo), keyUrl = the licence/key URL
+//                                                  used by the on-demand software key
+//                                                  resolver, pssh/keyId passed through.
 //
 
 #ifndef FRAMEWORK_DEMUXER_MANIFEST_MANIFEST_DEMUXER_H

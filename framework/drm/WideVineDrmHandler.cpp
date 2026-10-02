@@ -5,6 +5,7 @@
 #define  LOG_TAG "WideVineDrmHandler"
 
 #include "WideVineDrmHandler.h"
+#include "DrmSchemes.h"
 #include <utils/Android/GetStringUTFChars.h>
 #include <utils/Android/JniUtils.h>
 #include <utils/frame_work_log.h>
@@ -26,6 +27,27 @@ static jmethodID jMediaDrmSession_init = nullptr;
 static jmethodID jMediaDrmSession_requireSession = nullptr;
 static jmethodID jMediaDrmSession_releaseSession = nullptr;
 static jmethodID jMediaDrmSession_isForceInsecureDecoder = nullptr;
+
+/*
+ * Android MediaDrm 能建会话的三家 DRM 系统（W3C / DASH-IF 登记的 urn:uuid: 形式）。
+ *
+ * 【为什么只有三家】Android 的 MediaDrm 只提供这三种 scheme 的插件选择：Widevine、
+ * PlayReady（设备厂商可选）、ClearKey。清单里其余那二十几个 DRM 系统（Marlin / Nagra /
+ * Irdeto / …）在 Android 上**没有**对应的 MediaDrm scheme，所以这里**不能**写成
+ * "是个 urn:uuid: 就认"：认了会在 DrmSessionManager.prepare() 里失败，而这个
+ * "认不认"还要用来决定"要不要把软解让给平台"（认了就不登记软解密钥）。
+ *
+ * ★这三个常量必须与 `platform/Android/**/DrmSessionManager.java` 里的
+ * WIDEVINE_FORMAT / PLAYREADY_FORMAT / CLEARKEY_FORMAT 逐字一致 ——
+ * 那边负责把它们映射成 MediaDrm 的 UUID 并真正建会话。
+ */
+static const char *const kAndroidMediaDrmWidevine =
+    "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+static const char *const kAndroidMediaDrmPlayReady =
+    "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
+static const char *const kAndroidMediaDrmClearKey =
+    "urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e";
+
 using namespace Cicada;
 
 WideVineDrmHandler WideVineDrmHandler::dummyWideVineHandler(0);
@@ -83,12 +105,27 @@ void WideVineDrmHandler::open() {
 
     NewStringUTF jUrl(env, drmInfo.uri.c_str());
     NewStringUTF jFormat(env, drmInfo.format.c_str());
+    NewStringUTF jPssh(env, drmInfo.pssh.c_str());
+    NewStringUTF jKeyId(env, drmInfo.keyId.c_str());
     jstring pJurl = jUrl.getString();
     jstring pJformat = jFormat.getString();
+    jstring pJpssh = jPssh.getString();
+    jstring pJkeyId = jKeyId.getString();
+
+    /*
+     * ★参数顺序与 DrmSessionManager.java 的 requireSession 逐字对应：
+     *   (String keyFormat, String licenseUrl, String pssh, String keyId, String mime)
+     * 第 5 个 mime 传 nullptr：MediaDrm 的 getKeyRequest 对三家 scheme 都不需要它
+     * （清单一路上也没有"流 mime"这个字符串可传，凭空造一个属于发明）。
+     *
+     * 为什么必须把 pssh / keyId 传过去：ClearKey 的 initData 就是 pssh（或者由 KID
+     * 按 W3C Common PSSH box 构造），只传 url 的话 Java 侧根本拿不到 initData。
+     */
     env->CallVoidMethod(mJDrmSessionManger,
                         jMediaDrmSession_requireSession,
-                        pJurl, pJformat,
-                        nullptr, nullptr);
+                        pJformat, pJurl,
+                        pJpssh, pJkeyId,
+                        nullptr);
 }
 
 
@@ -103,7 +140,19 @@ WideVineDrmHandler::clone(const DrmInfo &drmInfo) {
 }
 
 bool WideVineDrmHandler::is_supported(const DrmInfo &drmInfo) {
-    return drmInfo.format == "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+    /*
+     * 清单里的 DRM 系统标识写法五花八门（大写 UUID、裸 UUID、com.widevine.alpha …），
+     * 先归一化成 urn:uuid:<小写>，再与 MediaDrm 真正支持的三种 scheme 比。
+     *
+     * 原来这里只比一个 Widevine 字面量：Android 上声明 PlayReady 或 ClearKey 的
+     * DASH 清单会被判成"没有平台 DRM"，于是内核会去走软解 —— 而这两家在 Android 上
+     * 本来是可以硬解的（Java 的 DrmSessionManager 已经有它们的 MediaDrm UUID）。
+     */
+    const std::string scheme = DrmSchemes::canonical(drmInfo.format);
+
+    return scheme == kAndroidMediaDrmWidevine
+           || scheme == kAndroidMediaDrmPlayReady
+           || scheme == kAndroidMediaDrmClearKey;
 }
 
 static JNINativeMethod mediaCodec_method_table[] = {
@@ -137,7 +186,7 @@ void WideVineDrmHandler::init(JNIEnv *env) {
         jMediaDrmSession_init = env->GetMethodID(jMediaDrmSessionClass, "<init>", "(J)V");
         jMediaDrmSession_requireSession = env->GetMethodID(jMediaDrmSessionClass,
                                                            "requireSession",
-                                                           "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
+                                                           "(Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;Ljava/lang/String;)V");
         jMediaDrmSession_releaseSession = env->GetMethodID(jMediaDrmSessionClass, "releaseSession",
                                                            "()V");
         jMediaDrmSession_isForceInsecureDecoder = env->GetMethodID(jMediaDrmSessionClass,

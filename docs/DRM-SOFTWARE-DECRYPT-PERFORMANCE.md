@@ -162,7 +162,7 @@ Packager 或 Bento4 产的）交叉验证过；也没有在设备上做过 CENC 
 
 | 端 | 有没有硬件/安全级 DRM | 走哪条路 | 今天的实际状态 |
 |---|---|---|---|
-| **Android** | **有**（Widevine，L1 硬件级） | 自己的 JNI MediaCodec：`setDrmInfo` → `MediaCrypto` → `queueSecureInputBuffer`（`framework/codec/Android/jni/MediaCodec_Decoder.cpp:272`、`framework/codec/Android/codecBinding.cpp:103`），DRM 会话管理在 `platform/Android/**/DrmSessionManager.java` | **已实现**，但只在 Android 上；`DrmUtils::isSupport()` 也只认 Widevine 那一个 UUID（`framework/utils/DrmUtils.cpp:7-12`） |
+| **Android** | **有**（Widevine，L1 硬件级） | 自己的 JNI MediaCodec：`setDrmInfo` → `MediaCrypto` → `queueSecureInputBuffer`（`framework/codec/Android/jni/MediaCodec_Decoder.cpp:272`、`framework/codec/Android/codecBinding.cpp:103`），DRM 会话管理在 `platform/Android/**/DrmSessionManager.java` | **已实现**。【订正（本轮）】原来只有 Android 上、且只认 Widevine 一条（`DrmUtils::isSupport()`，该文件已删除）；现在认 Widevine / PlayReady / ClearKey 三家，判定统一走平台无关的 `DrmHandlerPrototype::isSupport`，方案清单见 `framework/drm/DrmSchemes.cpp` |
 | **OHOS** | 有（DRM Kit） | `framework/drm/OHOS/OhosDrmHandler.cpp` | 通道在，`is_supported` 认 Widevine/PlayReady/FairPlay/ClearKey 四个 UUID |
 | **iOS / macOS** | 有（FairPlay），但需要证书与许可服务 | `framework/codec/Apple/AppleVideoToolBox.cpp` 有 `is_drmSupport` 钩子，**没有任何 FairPlay 会话代码** | **未实现** |
 | **桌面 Qt（Windows/Linux/macOS 自绘）** | **没有 CDM** | —— | 只能软解（本文 §1、§2） |

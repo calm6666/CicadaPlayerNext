@@ -9,11 +9,20 @@
 #include "data_source/dataSourcePrototype.h"
 #include "demuxer/DemuxerMeta.h"
 #include "demuxer/IDemuxer.h"
-// DrmInfo / DrmHandlerPrototype: 用于"本平台认不认这个 DRM scheme"的判定
-// (见 ensureSoftwareCencKey)。这是**平台无关**的查询：认不认由各平台在
-// framework/drm/ 下注册的 handler 决定，所以 L1 共享代码里不出现平台宏。
+/*
+ * DRM 相关的三个头：
+ *   · DrmSchemes  —— DASH <ContentProtection> 的**全量**方案注册表与选优（哪个 DRM 系统、
+ *                    是不是 CENC 内容、本平台认不认、该谁去解）。这是**平台无关**的纯函数，
+ *                    所以 L1 共享代码里不出现平台宏；认不认由各平台在 framework/drm/ 下
+ *                    注册的 handler 决定。
+ *   · DrmHandlerPrototype —— 上面那个"本平台认不认"查询的实现。
+ *   · ContentKeyFetcher   —— 按清单声明的地址取 16 字节内容密钥（软解兜底）。
+ *                           它同时接受裸字节、十六进制 JSON 与 W3C ClearKey 许可证 JSON。
+ */
+#include "drm/DrmSchemes.h"
 #include "drm/DrmHandlerPrototype.h"
 #include "drm/DrmInfo.h"
+#include "demuxer/sample_decrypt/ContentKeyFetcher.h"
 #include "demuxer/play_list/Helper.h"
 /*
  * 【为什么必须包含】DashStream::seek() 里要取"tracker 真正选中分片的起点"：
@@ -394,6 +403,20 @@ int DashStream::createDemuxer()
     demuxerMeta->ownerUrl = mPTracker->getPlayListUri();
     mPDemuxer->setDemuxerMeta(demuxerMeta);
     mPDemuxer->SetDataCallBack(read_callback, this, nullptr, nullptr, nullptr);
+
+    /*
+     * 装上"按需取密钥"的回调（软解兜底）。**只在确实要内核软解时才装**：
+     * 装了它，readPacket 才会去解析每个包的加密 side data；没装就是零开销（有 CDM 的
+     * 平台属于这一种）。判据见 needsSoftwareCencDecryption（平台认不认 + 有没有可取
+     * 密钥的地址），没有任何平台宏。
+     */
+    if (needsSoftwareCencDecryption()) {
+        mPDemuxer->setCencKeyResolver(
+        [this](const std::string &kidHex, uint8_t *key, int *keySize) -> bool {
+            return fetchSoftwareCencKey(kidHex, key, keySize);
+        });
+    }
+
     ret = mPDemuxer->createDemuxer(demuxer_type_unknown);
 
     if (ret < 0) {
@@ -404,17 +427,19 @@ int DashStream::createDemuxer()
         mPDemuxer->getDemuxerHandle()->setBitStreamFormat(this->mMergeVideoHeader, this->mMergerAudioHeader);
         /*
          * 【形态提示：这一段是不是样本级加密】与 HLSStream::createDemuxer 同一处语义
-         * （必须在 initOpen 之前，见那里的详细说明）。DASH 侧今天没有任何
-         * ContentProtection 解析（MPDParser 不产出加密信息，DashSegment 上也没有
-         * 加密字段），所以这里如实按"非加密"处理：OpenStream 时就建 head 合并 bsf，
-         * 让 codecpar 从还没有包时起就是包的形态，堵住"刚打开目标档 / reopen 后
-         * GetStreamMeta 抢在第一个包之前"的那一小段竞态。
+         * （必须在 initOpen 之前，见那里的详细说明）。
          *
-         * 万一这一段其实是加密的（带 ContentProtection 的档位），内层 demuxer 会在
-         * 第一个带 AV_PKT_DATA_ENCRYPTION_INFO 的包上撤掉 bsf 并把 codecpar 还原
-         * （见 avFormatDemuxer::ReadPacketInternal 的防御性回退），DRM 路径不受影响。
+         * 判据是"清单声明了 CENC 方案"，与"谁来解"无关：CENC 的样本由 FFmpeg 解复用时
+         * 带 AV_PKT_DATA_ENCRYPTION_INFO，`avFormatDemuxer::createBsf` 一看到加密 side data
+         * 就**不建** head 合并 bsf（并且会把提前建好的那个撤掉）。所以提前建 bsf 只会让
+         * "刚打开、还没出包"的那段窗口里 codecpar 是 bsf 之后的形态、而随后的包是容器原
+         * 形态 —— 那正是 avFormatDemuxer.cpp:546 里记的 DASH 偶发错位。如实按"加密"处理
+         * 就把这个窗口去掉了。
+         *
+         * 非 CENC 的声明（HLS Clear Key / CA / SEA）不按加密处理：内核这条路不解它们，
+         * 包上也不会有加密 side data，照明文对待才是真实的形态。
          */
-        mPDemuxer->getDemuxerHandle()->setStreamEncrypted(false);
+        mPDemuxer->getDemuxerHandle()->setStreamEncrypted(declaresCencProtectedContent());
     }
 
     //        if (mDemuxerMeta) {
@@ -1073,208 +1098,205 @@ int DashStream::GetNbStreams() const
     }
 
     /*
-     * ============ 把清单里的内容保护信息交给上层（Android 硬解 DRM 的唯一触发点）============
+     * ============ 决定"这一路 CENC 由谁解"，并把结论交给上层 ============
      *
-     * 【为什么这一段是 Android 硬解的前提】SMPAVDeviceManager.cpp:49-59 是 DrmInfo
-     * 的**唯一**填充点，而它读的正是 Stream_meta.keyFormat/keyUrl/drmPssh/drmKeyId。
-     * 在这之前 DASH 侧从来不填这几个字段 ⇒ DrmInfo 恒为空 ⇒
-     * decoderFactory::create(..., drmInfo.empty() ? nullptr : &drmInfo) 传 nullptr ⇒
-     * MediaCodec **永远不会建 DRM 会话**（mediaCodecDecoder.cpp:258 只在
-     * drmInfo != nullptr 时走 initDrmHandler），于是 Widevine 硬解那条路在 DASH 上
-     * 一次都没被触发过。填上这几个字段，Android 就会自己去建 MediaCrypto 并用
-     * queueSecureInputBuffer 解 —— 也就是"能硬解的就硬解"。
+     * 【三个角色的分工，判据全部来自清单的值与平台能力，没有开关】
+     *   1. 清单里声明了什么 —— DASH <ContentProtection>（AdaptationSet 层 + Representation 层）。
+     *      可能同时声明好几条（例如 mp4protection + Widevine + PlayReady + ClearKey），
+     *      由 DrmSchemes::decide 选一条，排序判据见 framework/drm/DrmSchemes.h。
+     *      这里不再"最后一条赢"：那样在 Android 上可能选中设备根本不支持的 PlayReady。
+     *   2. 谁来解 —— 平台 CDM 认这条 scheme 就交给平台（Android MediaCodec + MediaCrypto、
+     *      OHOS DRM Kit），也就是"能硬解的都硬解"；平台不认而清单给了可取密钥的地址，
+     *      就由内核的 CENCDecrypter 在 demuxer_service::readPacket 里软解。
+     *   3. 两者都不行 —— 打一条说明原因的错误，**不静默**。
      *
-     * 【口径】schemeIdUri 原样进 keyFormat（Widevine 的 urn:uuid:… 等），
-     * 许可地址原样进 keyUrl。不发明、不改写：是不是本平台能处理的，由
-     * DrmHandlerPrototype 去判（见 ensureSoftwareCencKey 的说明）。
+     * 【为什么 keyFormat 只在平台认的时候才填（本轮修的真 bug）】
+     * `codecPrototype::create` 的判据是
+     *     `drmInfo == nullptr || codecQueue[i]->is_drmSupport(drmInfo)`
+     * 而 `avcodecDecoder::is_drmSupport` **恒返回 false**。所以只要给解码器传了一个
+     * 非空的 DrmInfo，软解解码器就会被**全部排除**，create 返回 nullptr，起播直接失败。
+     * 之前这里把 schemeIdUri 无条件写进 meta->keyFormat：一个只有
+     * `<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"/>` 的标准 MPD
+     * （没指名任何 DRM 系统）会让 keyFormat 变成一个任何 CDM 都不认识的字符串，
+     * 于是"软解兜底"这条路在**所有**平台上都走不通 —— 这正是"CENC-in-DASH 从没串起来
+     * 播过"的直接原因。
+     * 现在：平台认 ⇒ 填（把 DRM 参数交给解码器）；平台不认 ⇒ 一律留空（样本由内核解，
+     * 解码器拿到的是明文）。这与 HLS 侧既有的做法同源（HlsParser 只接受平台支持的
+     * keyFormat）。
+     *
+     * 【口径】进 keyFormat 的一定是**规范化的 DRM 系统标识**（urn:uuid:…），不是
+     * mp4protection 这种"不是 DRM 系统"的字符串，也不是大小写/别名混写的原样文本 ——
+     * 各平台 handler 与 mediaCodecDecoder::is_drmSupport 比的都是规范形式。
      */
-    void DashStream::setDrmMetaFromContentProtection(Stream_meta *meta) const
+
+    DrmSchemes::Decision DashStream::drmDecision() const
+    {
+        /*
+         * 缓存以"当前 Representation 的指针"为键，不是"算过一次就永远用"：
+         * 同一条 DashStream 会在一个 AdaptationSet 内部做 ABR 换档
+         * （mPTracker->getCurrentRepresentation() 会变），而 ContentProtection
+         * 允许被 Representation 层覆盖 AdaptationSet 层 —— 换了档就可能换了一份
+         * 声明。指针不变 ⇒ 复用；指针变了（含 null ⇄ 非 null）⇒ 重算。
+         * Representation 由 playList 持有，生命周期长于本对象，所以指针比较是稳的。
+         */
+        Representation *rep = getCurrentRepresentation();
+
+        if (mDrmDecisionValid && rep == mDrmDecisionRep) {
+            return mDrmDecision;
+        }
+
+        mDrmDecisionValid = true;
+        mDrmDecisionRep = rep;
+        mDrmDecision = DrmSchemes::Decision();
+
+        if (rep == nullptr) {
+            return mDrmDecision;
+        }
+
+        const std::vector<Representation::ContentProtection> &protections = rep->getContentProtections();
+        std::vector<DrmSchemes::Candidate> candidates;
+        candidates.reserve(protections.size());
+
+        for (std::size_t i = 0; i < protections.size(); ++i) {
+            DrmSchemes::Candidate candidate;
+            candidate.schemeIdUri = protections[i].schemeIdUri;
+            candidate.licenseUrl = protections[i].licenseUrl;
+            candidate.pssh = protections[i].pssh;
+            candidate.keyId = protections[i].keyId;
+            candidates.push_back(candidate);
+        }
+
+        mDrmDecision = DrmSchemes::decide(candidates);
+
+        if (mDrmDecision.index < 0) {
+            return mDrmDecision;
+        }
+
+        AF_LOGI("DASH content protection: scheme=%s (%s), %s, %s\n",
+                mDrmDecision.schemeIdUri.c_str(),
+                mDrmDecision.name.empty() ? "unregistered scheme" : mDrmDecision.name.c_str(),
+                mDrmDecision.handledByPlatform ? "handled by the platform CDM"
+                : "not handled by any platform CDM",
+                mDrmDecision.licenseUrl.empty() ? "no key/licence URL declared"
+                : "a key/licence URL is declared");
+
+        if (!mDrmDecision.usable) {
+            AF_LOGE("this DASH representation declares content protection scheme %s but it cannot be "
+                    "played here: %s. Playback will fail on the first encrypted sample\n",
+                    mDrmDecision.schemeIdUri.c_str(),
+                    DrmSchemes::isCencCapable(mDrmDecision.schemeIdUri)
+                    ? "no platform CDM handles it and the manifest declares no address to fetch a key from"
+                    : "it is not a CENC scheme, so the MPD is not its playback entry "
+                    "(use the HLS/CMAF manifest)");
+        }
+
+        return mDrmDecision;
+    }
+
+    void DashStream::applyDrmFromContentProtection(Stream_meta *meta) const
     {
         if (meta == nullptr) {
             return;
         }
 
-        Representation *rep = getCurrentRepresentation();
+        const DrmSchemes::Decision decision = drmDecision();
 
-        if (rep == nullptr) {
+        if (decision.index < 0 || !decision.handledByPlatform) {
+            /*
+             * 两种都走这里，且都**不写任何 DRM 字段**：
+             *   · 清单没声明内容保护（明文流）；
+             *   · 平台不认这个 scheme ⇒ 由内核软解，交给解码器的样本已经是明文。
+             * 软解所需的密钥在读到第一个带加密信息的包时按需取（见 fetchSoftwareCencKey）。
+             */
             return;
         }
 
-        const std::vector<Representation::ContentProtection> &protections = rep->getContentProtections();
-
-        if (protections.empty()) {
-            return;
-        }
-
-        /*
-         * 从后往前取：MPDParser 先塞 AdaptationSet 层、再塞 Representation 层，
-         * 所以后面的条目优先级更高（Rep 覆盖 AS），与 DASH 的继承语义一致。
-         */
-        const Representation::ContentProtection *chosen = nullptr;
-
-        for (auto it = protections.rbegin(); it != protections.rend(); ++it) {
-            if (!it->schemeIdUri.empty()) {
-                chosen = &(*it);
-                break;
-            }
-        }
-
-        if (chosen == nullptr) {
-            return;
-        }
-
-        // 只在底层没填过时才写（底层来自容器里的真值，比清单更权威）。
         if (meta->keyFormat == nullptr) {
-            meta->keyFormat = strdup(chosen->schemeIdUri.c_str());
+            meta->keyFormat = strdup(decision.schemeIdUri.c_str());
         }
 
-        if (meta->keyUrl == nullptr && !chosen->licenseUrl.empty()) {
-            meta->keyUrl = strdup(chosen->licenseUrl.c_str());
+        if (meta->keyUrl == nullptr && !decision.licenseUrl.empty()) {
+            meta->keyUrl = strdup(decision.licenseUrl.c_str());
         }
 
-        if (meta->drmPssh == nullptr && !chosen->pssh.empty()) {
-            meta->drmPssh = strdup(chosen->pssh.c_str());
+        if (meta->drmPssh == nullptr && !decision.pssh.empty()) {
+            meta->drmPssh = strdup(decision.pssh.c_str());
         }
 
-        if (meta->drmKeyId == nullptr && !chosen->keyId.empty()) {
-            meta->drmKeyId = strdup(chosen->keyId.c_str());
+        if (meta->drmKeyId == nullptr && !decision.keyId.empty()) {
+            meta->drmKeyId = strdup(decision.keyId.c_str());
         }
     }
 
-    /*
-     * ============ 软件兜底：按清单声明的地址取 16 字节内容密钥并登记 ============
-     *
-     * 【什么时候才做】只有"平台 CDM 认不了这个 scheme"时才做：
-     *   · 认得了（Android Widevine / OHOS DRM Kit）⇒ 交给平台解，绝不在这里抢着解。
-     *     抢着解会同时踩两个坑：明文进了解码器而平台又期待密文，以及"两把钥匙开同一把锁"
-     *     这种语义混乱；
-     *   · 认不了（桌面 Qt 等没有 CDM 的平台）⇒ 按清单给的地址取裸密钥，登记给内层
-     *     demuxer 的 CENCDecrypter（解密发生在 demuxer_service::readPacket）。
-     *
-     * 【判据没有任何平台宏】DrmHandlerPrototype::isSupport 本身就是按平台注册
-     * handler 的（framework/drm/ 下各平台各自 addPrototype），所以这里只是一句
-     * "问一下本平台认不认"，L1 共享代码里不出现 #ifdef。
-     */
-    void DashStream::ensureSoftwareCencKey(const std::string &kid) const
+    bool DashStream::needsSoftwareCencDecryption() const
     {
-        if (mSoftwareCencTried) {
-            return;
+        const DrmSchemes::Decision decision = drmDecision();
+
+        return decision.index >= 0 && decision.usable && !decision.handledByPlatform &&
+               DrmSchemes::isCencCapable(decision.schemeIdUri);
+    }
+
+    bool DashStream::declaresCencProtectedContent() const
+    {
+        const DrmSchemes::Decision decision = drmDecision();
+
+        return decision.index >= 0 && DrmSchemes::isCencCapable(decision.schemeIdUri);
+    }
+
+    /*
+     * ============ 软解兜底：按清单声明的地址取 16 字节内容密钥 ============
+     *
+     * 【什么时候会被调用】由 demuxer_service 在读到**第一个**带加密信息的包时回调
+     * （见 setCencKeyResolver）。之所以不在 GetStreamMeta 里"提前"按 KID 注册，是因为：
+     *   · 解密查表用的是**包上带的 KID**（AV_PKT_DATA_ENCRYPTION_INFO），而很多 MPD
+     *     只写 <cenc:pssh>，KID 只在 init 段的 tenc 里 —— FFmpeg 不把 tenc 暴露到
+     *     AVStream/codecpar 上（只在**包**上给加密信息），所以"提前按 KID 注册"在那些
+     *     片源上根本拿不到 KID；
+     *   · 反过来，包里既然带了 KID，按需取就一定拿得到正确的那个。
+     * 每个 KID 只会问一次（备忘录在 demuxer_service 里），所以这里不必自己去做去重。
+     *
+     * 【kidHex 参数】只用于"每个 KID 问一次"的去重；本工程的软解来源是清单里那**一个**
+     * laurl（不是按 KID 查的许可证服务），所以密钥内容由 URL 决定，与 kidHex 的取值无关。
+     * 这也意味着"同一 URL 下多把密钥"的片源不在这条路的覆盖范围内 —— 那种片源要靠平台
+     * 的 CDM，或者让许可证服务按 KID 区分（清单里也就是不同的 laurl）。
+     */
+    bool DashStream::fetchSoftwareCencKey(const std::string &kidHex, uint8_t *key, int *keySize) const
+    {
+        if (!needsSoftwareCencDecryption()) {
+            return false;
         }
 
-        Representation *rep = getCurrentRepresentation();
+        const DrmSchemes::Decision decision = drmDecision();
+        const ContentKeyFetcher::Result result =
+                ContentKeyFetcher::fetch(decision.licenseUrl, mOpts, mSourceConfig);
 
-        if (rep == nullptr) {
-            return;
-        }
-
-        const std::vector<Representation::ContentProtection> &protections = rep->getContentProtections();
-
-        if (protections.empty()) {
-            return;
-        }
-
-        const Representation::ContentProtection *chosen = nullptr;
-
-        for (auto it = protections.rbegin(); it != protections.rend(); ++it) {
-            if (!it->licenseUrl.empty()) {
-                chosen = &(*it);
-                break;
-            }
-        }
-
-        mSoftwareCencTried = true;
-
-        if (chosen == nullptr) {
-            /*
-             * 清单声明了内容保护，但没给任何可取密钥的地址 ⇒ 桌面端无解。
-             * 打一条明确的 ERROR，而不是让它在解码器里变成一条看不懂的通用错误。
-             */
+        if (!result.ok()) {
             if (!mSoftwareCencLogged) {
                 mSoftwareCencLogged = true;
-                AF_LOGE("this DASH representation is protected (scheme %s) but declares no address to "
-                        "fetch a key from, and no platform CDM handled it: playback cannot succeed on "
-                        "this platform\n", protections.back().schemeIdUri.c_str());
+                AF_LOGE("cannot set up software CENC decryption for key id %s from %s: %s. Playback of "
+                        "this protected DASH stream will fail on this platform\n",
+                        kidHex.c_str(), decision.licenseUrl.c_str(), result.detail.c_str());
             }
 
-            return;
-        }
-
-        DrmInfo probe{};
-        probe.format = chosen->schemeIdUri;
-        probe.uri = chosen->licenseUrl;
-
-        if (DrmHandlerPrototype::isSupport(&probe)) {
-            // 平台能解 ⇒ 不登记软解密钥（登记了就会在读取路径上抢先解掉）。
-            return;
-        }
-
-        if (kid.empty()) {
-            // 拿不到 KID 就没法登记：解密表是按 KID 查的。明确说清楚。
-            if (!mSoftwareCencLogged) {
-                mSoftwareCencLogged = true;
-                AF_LOGE("cannot set up software CENC decryption: the init segment did not yield a key id "
-                        "(the manifest declares scheme %s)\n", chosen->schemeIdUri.c_str());
-            }
-
-            return;
-        }
-
-        // 与 HLSStream::updateKey() 同一套取密钥做法：建一个 dataSource、读满 16 字节。
-        IDataSource *keySource = dataSourcePrototype::create(chosen->licenseUrl, mOpts);
-        keySource->Set_config(mSourceConfig);
-        const int openRet = keySource->Open(0);
-
-        if (openRet < 0) {
-            AF_LOGE("cannot fetch the CENC content key from %s (ret=%d): playback of this protected DASH "
-                    "stream will fail\n", chosen->licenseUrl.c_str(), openRet);
-            delete keySource;
-            return;
-        }
-
-        uint8_t key[16] = {0};
-        int64_t got = 0;
-
-        while (got < 16) {
-            const int len = keySource->Read(key + got, static_cast<size_t>(16 - got));
-
-            if (len > 0) {
-                got += len;
-            } else {
-                break;
-            }
-        }
-
-        keySource->Close();
-        delete keySource;
-
-        if (got != 16) {
-            AF_LOGE("the CENC content key fetched from %s is %lld bytes, expected exactly 16: playback of "
-                    "this protected DASH stream will fail\n",
-                    chosen->licenseUrl.c_str(), static_cast<long long>(got));
-            return;
-        }
-
-        std::lock_guard<std::mutex> lock(mHLSMutex);
-
-        if (mPDemuxer == nullptr) {
-            AF_LOGE("cannot register the CENC content key: the inner demuxer is gone\n");
-            return;
-        }
-
-        const int ret = mPDemuxer->setCencKey(kid, key, 16);
-
-        if (ret < 0) {
-            AF_LOGE("registering the CENC content key for key id %s failed (%d): playback of this protected "
-                    "DASH stream will fail\n", kid.c_str(), ret);
-            return;
+            return false;
         }
 
         if (!mSoftwareCencLogged) {
             mSoftwareCencLogged = true;
-            AF_LOGI("DASH CENC software decryption is set up (key id %s, key url %s): no platform CDM "
-                    "handles scheme %s here, so decryption runs on the CPU\n",
-                    kid.c_str(), chosen->licenseUrl.c_str(), chosen->schemeIdUri.c_str());
+            AF_LOGI("DASH CENC software decryption is set up (key id %s, key url %s, scheme %s): no "
+                    "platform CDM handles this scheme here, so decryption runs on the CPU\n",
+                    kidHex.c_str(), decision.licenseUrl.c_str(), decision.schemeIdUri.c_str());
         }
+
+        if (key != nullptr) {
+            memcpy(key, result.key, 16);
+        }
+
+        if (keySize != nullptr) {
+            *keySize = result.keySize;
+        }
+
+        return true;
     }
 
 int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
@@ -1353,28 +1375,21 @@ int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
     meta->suggestedPresentationDelay = mPTracker->getLiveDelay();
 
     /*
-     * ============ DASH 的 DRM：先把清单声明交出去，再决定谁来解（本轮新增）============
+     * ============ DASH 的 DRM：先把清单声明交出去，再决定谁来解 ============
      *
-     * 顺序很关键：
-     *   1. 先把 ContentProtection 写进 meta。**这一步就是 Android 硬解的全部前提** ——
-     *      SMPAVDeviceManager 只从这几个字段组 DrmInfo（DrmInfo 非空才会建 MediaCodec
-     *      的 DRM 会话）。写晚了，解码器就已经按"没有 DRM"建好了。
-     *   2. 再读**容器里**的 KID（init 段的 tenc，由底层 demuxer 填进 meta->drmKeyId），
-     *      用它去登记软解密钥。为什么不用清单里的 cenc:default_KID：包里带的 KID 才是
-     *      解密查表用的那个，"清单写一个、init 段是另一个"是 DRM 现场最常见的坑，
-     *      拿清单值去登记会出现"登记了却查不到"。
-     *   3. ensureSoftwareCencKey 自己会先问一句"本平台认不认这个 scheme"
-     *      （DrmHandlerPrototype::isSupport）：认了就什么都不做，交给平台硬解；
-     *      不认才去取密钥走软解。这就是"能硬解的都硬解，实在不行才软解"。
+     * 顺序很关键：这一步就是 Android / OHOS 硬解的**全部前提** ——
+     * SMPAVDeviceManager 只从 meta->keyFormat/keyUrl/drmPssh/drmKeyId 组 DrmInfo，
+     * DrmInfo 非空才会建平台 DRM 会话。写晚了，解码器就已经按"没有 DRM"建好了。
      *
-     * 只在**视频**流上做（index 对应的流类型），音频的 DRM 由同一条 MPD 的音频
-     * Representation 自己在它那一路的 GetStreamMeta 里处理；这里不替它做决定。
+     * 软解那条路**不需要**在这里注册密钥：密钥在读到第一个带加密信息的包时按需取
+     * （见 demuxer_service::setCencKeyResolver 与 fetchSoftwareCencKey）。这样也顺带
+     * 修掉了"MPD 只写 pssh、KID 只在 init 段 tenc 里"就取不到密钥的问题。
+     *
+     * 只在**视频**流上做：音频的 DRM 由同一条 MPD 的音频 Representation 自己在它
+     * 那一路的 GetStreamMeta 里处理；这里不替它做决定。
      */
     if (!sub && meta->type == STREAM_TYPE_VIDEO) {
-        setDrmMetaFromContentProtection(meta);
-
-        const std::string drmKid = (meta->drmKeyId == nullptr) ? std::string() : std::string(meta->drmKeyId);
-        ensureSoftwareCencKey(drmKid);
+        applyDrmFromContentProtection(meta);
     }
 
     return 0;

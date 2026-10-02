@@ -230,7 +230,20 @@ meta->drmKeyId  = mCurrentEncryption.keyId.empty()     ? nullptr : strdup(...);
 
 #### 2.1.5 DASH 侧 `ContentProtection` 与 `DrmUtils::isSupport`
 
-**【已证实】`MPDParser` 完全不解析 `ContentProtection`**：
+> ### 【订正（本轮）—— 这一节的结论**已经过时**，读这里之前先读这段】
+>
+> §2.1.5 是**第一版施工前**的现状盘点，其中三条已经被后续改动推翻：
+>
+> | 这里写的 | 现在的事实 |
+> |---|---|
+> | "`MPDParser` 完全不解析 `ContentProtection`" | **已实现**：`MPDParser::parseContentProtections()` + `Representation::ContentProtection`（AS/Rep 两层、只取直接子节点） |
+> | "`DrmUtils::isSupport` 只认 Android Widevine" | **该文件已删除**（`framework/utils/DrmUtils.{h,cpp}`，连同 CMakeLists 条目）。调用点 `HLSStream` 改问平台无关的 `DrmHandlerPrototype::isSupport`，于是 OHOS 上四种已实现的 DRM 不再被误判成"不支持" |
+> | "把 `schemeIdUri` 写进 `Stream_meta.keyFormat` 就行" | **不能无条件写**：`codecPrototype::create` 是 `drmInfo == nullptr \|\| codec->is_drmSupport(drmInfo)`，而 `avcodecDecoder::is_drmSupport` 恒 false ⇒ 填一个没有 CDM 认得的 `keyFormat` 会把**所有软解解码器排除**。现在只在平台 CDM 认这个 scheme 时才填 |
+>
+> 新的设计与证据在 **`docs/DASH-DRM-SCHEMES.md`**；收口状态在
+> `docs/DRM-COMPLETENESS-AUDIT.md`。下面保留原文以便对照"当时的判断"。
+
+**【已证实，当时】`MPDParser` 完全不解析 `ContentProtection`**：
 
 * grep `framework/demuxer/dash/` 下 `ContentProtection|pssh|default_KID|schemeIdUri` 只命中
   `MPDParser.cpp:231-238`，那是 **`UTCTiming`** 的 `schemeIdUri`，与 DRM 无关；
@@ -765,9 +778,19 @@ main():
 
 ```xml
 <!-- 一期：AES-128 没有真正的 ContentProtection 语义，这里只作为"这条流被保护"的显式声明。
-     schemeIdUri 用 DASH-IF 的 AES-128 标识；不要写 cenc:default_KID（那是 CENC 的 KID）。 -->
-<ContentProtection schemeIdUri="urn:uuid:d0ee2730-09b5-459f-8452-200e52bec0f7"/>
+     schemeIdUri 用 DASH-IF 内容保护标识登记表里的 "Clear Key AES-128"（CBC）；
+     不要写 cenc:default_KID（那是 CENC 的 KID）。 -->
+<ContentProtection schemeIdUri="urn:uuid:3ea8778f-7742-4bf9-b18b-e834b2acbd47"/>
 ```
+
+> **【订正（本轮）】** 这个 UUID 原来写的是 `d0ee2730-09b5-459f-8452-200e52bec0f7`，
+> 注释称其为"DASH-IF 的 AES-128 标识"。查 DASH-IF 的登记表
+> （[dashif.org/identifiers/content_protection](https://dashif.org/identifiers/content_protection/)）后确认：
+> `d0ee2730-…` **不在登记表里**，它只出现在 IOP 文档的示例中（配 `value="FirstDRM 2.0"`）。
+> 登记表里与本产物语义一字不差的是
+> `3ea8778f-7742-4bf9-b18b-e834b2acbd47`（"Clear Key AES-128 / Identifier for HLS Clear Key
+> encryption using CBC mode"），所以换成它。内核的 `framework/drm/DrmSchemes` 认得这个
+> UUID 并把它归类为 `HlsClearKeyCbc`（**非** CENC），因此这条声明不会让内核去猜密钥。
 
 > **重要提醒（已证实的内核行为）**：这条声明对**内核的 URL 直连 `.mpd` 路径毫无作用** ——
 > `MPDParser` 不解析 `ContentProtection`（§2.1.5）。
@@ -808,8 +831,35 @@ main():
 …
 ```
 
-> ⚠ 每片 IV 不同这一点在 **HLS 文本里看不出来**：`#EXT-X-KEY` 只写一条、带的是**第一个
-> 分片的 IV**，后续分片由播放器按序号递推（内核 `HLSStream.cpp:835-853`、web
+> ⚠ **【订正（本轮）—— 这一段的结论与产物都已经改了】**
+> 下面这段原文主张"只写一条 `#EXT-X-KEY` 就够了，靠播放器按序号递推"。那个主张
+> **只在基 IV 全 0 时成立**，而 `key_info` 第 3 行允许给非零基 IV；而且"递推"要求
+> 播放器的实现与转码脚本逐位一致（内核 `HLSStream::updateIV()`、web
+> `createInitializationVector`、商用播放器各自实现）。现在改成**逐片写一条
+> `#EXT-X-KEY`、每片带自己那把 IV**，清单与产物"同真同假"，不依赖任何一方怎么推：
+>
+> ```
+> #EXT-X-MEDIA-SEQUENCE:0
+> #EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x…00   ← 第 1 片（排在任何 #EXT-X-MAP 之前）
+> #EXT-X-MAP:URI="init.mp4"
+> #EXTINF:6.000,
+> seg-0.m4s
+> #EXT-X-KEY:METHOD=AES-128,URI="key.bin",IV=0x…01   ← 第 2 片
+> #EXTINF:6.000,
+> seg-1.m4s
+> ```
+>
+> 落点规则（RFC 8216 §4.3.4.1 的标签顺序）：第 1 条排在
+> `MEDIA-SEQUENCE`/`DISCONTINUITY-SEQUENCE` 之后、`MAP`/`PROGRAM-DATE-TIME`/
+> `DATERANGE`/`START` 之前；其余每条紧贴它覆盖的那个分片的 `#EXT-X-PART`/`#EXTINF` 之前。
+> 实现在 `转码脚本/transcode_all.py` 的 `_segment_anchors()` /
+> `_insert_per_segment_key_lines()` / `_write_media_playlist()`；
+> 离线自检 `转码脚本/_hls_key_selfcheck.py`（3 种清单形态 + 反向对照）。
+> 验收口径同步改成"KEY 条数 == 分片数、第 k 条覆盖第 k 片、第 k 条 IV ==
+> `_iv_for_index(基 IV, 序号+k)`"（`verify_segmentbase.py::check_drm_encryption`）。
+
+> ⚠ 【已过时】每片 IV 不同这一点在 HLS 文本里看不出来：`#EXT-X-KEY` 只写一条、带的是
+> **第一个分片的 IV**，后续分片由播放器按序号递推（内核 `HLSStream.cpp:835-853`、web
 > `createInitializationVector`）。一期让"递推结果"与"真实加密用的 IV"**逐位相同**
 > （基 IV 全 0 + 序号写在最后 4 字节），所以不需要给每个分片写一条 `#EXT-X-KEY`
 > （HLS 也不允许在 `#EXTINF` 之后插标签）。
@@ -821,10 +871,12 @@ main():
 * `IV` 用 `0x` 前缀（`Attribute::hexSequence()` 认这个格式，`HlsTags.h:27`）；
 * **`URI` 写成相对路径**（如 `key.bin`）：内核用 `Helper::combinePaths(baseUri, keyUrl)`
   解析（`HLSStream.cpp:791-792`），相对路径会拼到播放列表同级 —— 最省事、也最不容易配错；
-* **不要**写 `KEYFORMAT`（写了就是非空 ⇒ 内核会去问 `DrmUtils::isSupport`，
-  见 `HLSStream.cpp:546`；非 Android 一律 `false` ⇒ 这条加密记录被跳过 ⇒ **静默降级**！）。
+* **不要**写 `KEYFORMAT`（写了就是非空 ⇒ 内核会去问平台 DRM handler，
+ 见 `HLSStream.cpp` 里 `tryOpenSegment` 的那次 `DrmHandlerPrototype::isSupport`；
+  没有注册 handler 的平台一律 `false` ⇒ 这条加密记录被跳过 ⇒ **静默降级**！）。
   要写就写 `KEYFORMAT="identity"`，但那还是非空 —— **一期统一不写**。
   （脚本与验收脚本都各有一条断言堵这个坑：`_review_json_manifests()` / A4。）
+  【订正】判据原来是 `DrmUtils::isSupport`（已删除，见 §2.1.5 的订正块）。
 
 **主播放列表（`master.m3u8`）**：加 `#EXT-X-SESSION-KEY` 供播放器**预取**密钥。
 **【施工后实际产物样例】**（插在第一条 `#EXT-X-MEDIA` / `#EXT-X-STREAM-INF` 之前）：
@@ -1000,7 +1052,7 @@ seek 只能靠"重开分片"完成。这条在明文路径也一样（`mSegDecry
   **不是"DRM 错误"**；
 * 样本级 AES_SAMPLE 密钥无效 ⇒ **只打一条日志并把密文原样返回**
   （`HLSSampleAesDecrypter.cpp:56-59`）⇒ **静默吐垃圾**，最终表现为花屏/解码错误；
-* `DrmUtils::isSupport()` 返回 false 导致加密记录被跳过（`HLSStream.cpp:546`）
+* `DrmUtils::isSupport()` 返回 false 导致加密记录被跳过（`HLSStream.cpp:546`）【订正】该函数已删除，现为平台无关的 `DrmHandlerPrototype::isSupport`
   ⇒ **完全没有任何日志**，表现为"它以为自己播的是明文"。
 
 **一期要做的（小、但必须）：**
@@ -1078,7 +1130,7 @@ python verify_segmentbase.py <输出目录> <版本号> --expect-encrypted ^
 |---|---|---|---|---|
 | 1 | 密钥参数化（`--key-file` / `--key-env` / 权限 0600） | `transcode_all.py` 配置区 + `main()` | 小 | **改成单个 `--hls-key-info <文件>`**（理由见 §4.1；权限改为手工 `chmod 600`，脚本只读） |
 | 2 | 新增加密阶段 `run_encryption()`，插在 `rename_files()` 之后 | `transcode_all.py`（新函数） | 中 | 已落地；另**新增** `verify_keyframe()` 也要在加密之前这条顺序约束 |
-| 3 | HLS 清单写 `#EXT-X-KEY`（媒体）+ `#EXT-X-SESSION-KEY`（主） | 复用 `_hls_attr/_hls_set_attr` | 小 | 已落地（另有专门的 `_insert_key_lines()` 处理标签跨度顺序） |
+| 3 | HLS 清单写 `#EXT-X-KEY`（媒体）+ `#EXT-X-SESSION-KEY`（主） | 复用 `_hls_attr/_hls_set_attr` | 小 | 已落地。【订正（本轮）】`_insert_key_lines()` 已换成**逐片**写入：`_segment_anchors()` + `_insert_per_segment_key_lines()`，每片一条 KEY、各带自己的 IV |
 | 4 | MPD 插 `ContentProtection` | `rename_files()` 里 `fill_mpd_codecs` 附近 | 小 | **改到 `run_encryption()` 末尾**（不是 `rename_files()` 里）：因为 `run_segmentbase_remux()` 在 `rename_files()` 之后跑，必须让它读到"还没有 ContentProtection"的 MPD |
 | 5 | 内置兜底 JSON 补 `encryption`（或加密启用时禁用兜底并报错） | `build_json_manifest()` / `write_json_manifests()` | 小 | **两条都做了**（补字段 + 加密模式下禁用兜底） |
 | 6 | `LICENSE_SERVER_URL/CONTENT_ID` 改成参数（可选） | `convert-to-manifest.py` | 小 | **未做**（一期用静态 key 文件，不需要 License Server；见 §4.4.2 阶段 0） |
@@ -1129,7 +1181,7 @@ python verify_segmentbase.py <输出目录> <版本号> --expect-encrypted ^
 | 同上 | `:1963-2072` | SegmentBase 清单断言：`generate_segmentbase_json()` 与 `_sb_hls_segmentbase_manifest()` 里钉死"single 不许有 encryption/licenseServer" |
 | 同上 | `:2075-2242` | `write_json_manifests()` 写 encryption；`generate_json_manifests()` 改成"权威实现 → 缺什么补 → `_review_json_manifests()` 核"，**加密模式下禁用兜底**（不完整即抛错） |
 | 同上 | `:2244-2401` | `rename_files()`：**不再生成 JSON 清单**，返回值改成 `(segmentbase_ok, mpd_manifest)`（JSON 要等加密之后才生成） |
-| 同上 | `:2404-2710` | **新增加密阶段**：`_seg_name_from_url/_parse_media_playlist/_found_key_names/_insert_key_lines/_write_media_playlist/_write_master_session_key/insert_mpd_content_protection/run_encryption` |
+| 同上 | `:2404-2710` | **新增加密阶段**：`_seg_name_from_url/_parse_media_playlist/_found_key_names/_insert_key_lines/_write_media_playlist/_write_master_session_key/insert_mpd_content_protection/run_encryption`。【订正（本轮）】`_insert_key_lines` 已被 `_segment_anchors/_insert_per_segment_key_lines` 取代（逐片 KEY），另有自检脚本 `_hls_key_selfcheck.py` |
 | 同上 | `:2857-2905` | `main()`：**第 0 步跑官方向量自检**（`:2860-2878`）→ 密钥装载 → **往返自检** → 其余接线；`_parse_cli_key_info()` 在 `:2840` 附近 |
 | `D:\hilihili\转码脚本\verify_segmentbase.py` | `:60-91` | 新增常量与 **`aes128.py` 的 import**（与 transcode_all.py 共用同一份实现） |
 | 同上 | `:700-800` | 新增验收函数：`parse_media_playlist/parse_hex_bytes/mp4_plaintext_head/`**`aes128_self_test`/`decrypt_segment`/`crosscheck_with_openssl`**`/check_drm_encryption/check_drm_not_encrypted/check_no_enc_tmp/check_drm_declaration_consistent`（旧的 `decrypt_segment_with_openssl` / `decrypt_segment_from_bytes` **已删除**） |
@@ -1687,7 +1739,7 @@ python D:\hilihili\转码脚本\drm_keyserver_tool.py verify ^
   签发回来的密钥与 `tenc` 里的 KID 不匹配 ⇒ **解密失败但表现极其模糊**：
   可能是"能建会话、能拿到 license、但样本解出来是垃圾"（花屏），
   也可能是解码器直接报 `STATUS_DRM_ERROR`（`IDecoder.h:46`）。
-* **可观测性差**：`DrmUtils::isSupport()` 非 Android 恒 false（`DrmUtils.cpp:7-12`），
+* **可观测性差**：`DrmUtils::isSupport()` 非 Android 恒 false（`DrmUtils.cpp:7-12`；【订正】该函数与文件已删除，现为 `DrmHandlerPrototype::isSupport`，见 §2.1.5 订正块），
   **跳过时无日志** ⇒ 现场最难查的一类问题。
 * **边界对策（写进二期验收）**：
   1. 脚本侧断言"MPD 的 `default_KID` == 从 init 段 `tenc` 里读出的 KID"（**必须做**，可脚本化）；
@@ -1850,7 +1902,7 @@ python D:\hilihili\转码脚本\drm_keyserver_tool.py verify ^
 | 按块解密 + 去 PKCS7 | `framework/demuxer/play_list/segment_decrypt/AES_128Decrypter.cpp:27-101`；`.../AES_128Decrypter.h:23-30` |
 | 样本级只支持 H264/AAC + 密钥无效静默 | `framework/demuxer/sample_decrypt/HLSSampleAesDecrypter.cpp:54-77`；`:56-59` |
 | clear-lead 常量 | `framework/demuxer/sample_decrypt/HLSSampleAesDecrypter.h:34-35`；`.cpp:178-179,229,266-268` |
-| `DrmUtils::isSupport`（仅 Android Widevine） | `framework/utils/DrmUtils.cpp:7-12`；调用 `HLSStream.cpp:546` |
+| 【已删除】`DrmUtils::isSupport`（仅 Android Widevine） | 原 `framework/utils/DrmUtils.cpp:7-12`；调用点 `HLSStream.cpp:546`。**本轮删除**，改问平台无关的 `DrmHandlerPrototype::isSupport`；权威清单见 `framework/drm/DrmSchemes.cpp` |
 | DRM handler 只在 Android/OHOS 编 | `framework/drm/CMakeLists.txt:11-24`；`WideVineDrmHandler.cpp:110-113`；`OHOS/OhosDrmHandler.cpp:15` |
 | DRM prototype 队列 | `framework/drm/DrmHandlerPrototype.cpp:14-36` |
 | `DrmInfo` 组装 / 回调 | `mediaPlayer/SMPAVDeviceManager.cpp:47-59,96-97` |

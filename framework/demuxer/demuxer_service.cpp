@@ -195,11 +195,12 @@ namespace Cicada {
          * ============ 样本级加密（CENC）的**兜底**就地解密 ============
          *
          * 【判据全部来自数据，没有任何平台宏、没有开关】
-         *   · mCencDecrypter 为空 ⇒ 说明本次播放**没有任何 KID 注册过软件密钥**
-         *     （见 setCencKey）。有 CDM 的平台就属于这一种：包原样放行，由
-         *     平台解码器 queueSecureInputBuffer 去解。这里立刻返回，零开销。
+         *   · mCencDecrypter 为空 **且** 没装 resolver ⇒ 说明这次播放既没有注册过软件
+         *     密钥，也没有"按需取密钥"的来源。有 CDM 的平台就属于这一种：包原样放行，
+         *     由平台解码器 queueSecureInputBuffer 去解。这里立刻返回，零开销。
          *   · 非空 ⇒ 逐个包看**包自己带的** AV_PKT_DATA_ENCRYPTION_INFO：
-         *     有 KID 且该 KID 注册过密钥就解；没注册就**原样放行**。
+         *     有 KID 且该 KID 注册过密钥就解；没注册就先问一次 resolver
+         *     （见 setCencKeyResolver），问不到就**原样放行**。
          *
          * 为什么"没注册就原样放行"是对的而不是漏解：CENCDecrypter 对未知 KID
          * 返回 -ENOENT（拒绝把密文当明文），而这条路径的语义是"注册了才解"，
@@ -211,7 +212,7 @@ namespace Cicada {
          * 与 avFormatDemuxer::createBsf 里"看到加密 side data 就不建 bsf"的
          * 既有判据不会互相打架。
          */
-        if (ret > 0 && mCencDecrypter != nullptr && packet != nullptr) {
+        if (ret > 0 && packet != nullptr && (mCencDecrypter != nullptr || mCencKeyResolver != nullptr)) {
             applyCencDecryption(*packet);
         }
 
@@ -243,12 +244,15 @@ namespace Cicada {
         const std::string keyId = CENCDecrypter::toHex(info.key_id, info.key_id_size);
 
         /*
-         * 没注册这把密钥 ⇒ 不是"失败"，而是"不该由内核解"（平台 CDM 负责）。
+         * 没注册这把密钥 ⇒ 先问一次"这个 KID 的密钥是多少"（见 setCencKeyResolver）。
+         * 问不到就是"不该由内核解"（平台 CDM 负责，或者清单层根本没给出取密钥的地址）。
          * 这里刻意**不打日志**：有 CDM 的平台上每一路流、每一个包都会走到这里，
-         * 打日志就是刷屏。
+         * 打日志就是刷屏；真正取不到密钥的原因由清单层在它那一次取密钥时打出来。
          */
         if (!mCencDecrypter->hasKey(keyId)) {
-            return false;
+            if (!resolveCencKey(keyId)) {
+                return false;
+            }
         }
 
         std::vector<SubsampleInfo> subsamples;
@@ -330,8 +334,53 @@ namespace Cicada {
     void demuxer_service::clearCencKeys()
     {
         mCencDecrypter.reset();
+        mCencResolveAttempted.clear();
         mCencDecryptAppliedLogged = false;
         mCencDecryptFailedLogged = false;
+    }
+
+    void demuxer_service::setCencKeyResolver(CencKeyResolver resolver)
+    {
+        /*
+         * 换 resolver（或拆掉它）时把"这个 KID 问过了"的备忘录一起清掉：
+         * 备忘录记的是**上一个来源**尝试的结果，来源换了就该重新问一次。
+         * 这仍然不是重试机制 —— 同一个来源下每个 KID 还是只问一次。
+         */
+        mCencResolveAttempted.clear();
+        mCencKeyResolver = std::move(resolver);
+    }
+
+    bool demuxer_service::resolveCencKey(const std::string &keyIdHex)
+    {
+        if (!mCencKeyResolver) {
+            return false;
+        }
+
+        /*
+         * 每个 KID 只问一次：成功失败都记。这是"这个 KID 问过了"的备忘录，
+         * **不是**重试 —— 没有次数上限以外的任何判据、没有计时器、
+         * 失败不会因为下一个包再来一遍（否则每个包都会去打一次网络）。
+         */
+        if (mCencResolveAttempted.find(keyIdHex) != mCencResolveAttempted.end()) {
+            return false;
+        }
+
+        mCencResolveAttempted.insert(keyIdHex);
+
+        uint8_t key[16] = {0};
+        int keySize = 0;
+
+        if (!mCencKeyResolver(keyIdHex, key, &keySize)) {
+            return false;
+        }
+
+        if (keySize != 16) {
+            AF_LOGE("the content key resolved for key id %s is %d bytes, expected exactly 16: "
+                    "the ciphertext will NOT be passed off as plaintext\n", keyIdHex.c_str(), keySize);
+            return false;
+        }
+
+        return setCencKey(keyIdHex, key, keySize) >= 0;
     }
 
     void demuxer_service::close()

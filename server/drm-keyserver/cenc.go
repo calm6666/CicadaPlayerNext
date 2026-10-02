@@ -93,10 +93,13 @@ type LicenseResponse struct {
 	Expires int64  `json:"exp,omitempty"`
 }
 
-// LicenseRequest is the POST /license body.
+// LicenseRequest is the POST /license body. Format selects the licence shape:
+// an empty format (or "json") is this service's own document, "clearkey" is the
+// W3C ClearKey document (see clearkey.go).
 type LicenseRequest struct {
 	KID    string `json:"kid"`
 	Scheme string `json:"scheme"`
+	Format string `json:"format"`
 }
 
 // buildLicense assembles the /license payload for rec under scheme.

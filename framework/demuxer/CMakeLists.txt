@@ -42,6 +42,8 @@ target_sources(demuxer PRIVATE
         sample_decrypt/ISampleDecrypt2c.h
         sample_decrypt/CENCDecrypter.cpp
         sample_decrypt/CENCDecrypter.h
+        sample_decrypt/ContentKeyFetcher.cpp
+        sample_decrypt/ContentKeyFetcher.h
         decrypto/IAESDecrypt.h
         decrypto/avAESDecrypt.cpp
         decrypto/avAESDecrypt.h

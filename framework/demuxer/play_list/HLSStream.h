@@ -148,6 +148,24 @@ namespace Cicada {
 
         int updateDecrypter();
 
+        /*
+         * ============ CENC 软解兜底：按清单声明的地址取内容密钥（本轮新增）============
+         *
+         * 由 demuxer_service 在读到**第一个**带加密信息的包时回调
+         * （见 demuxer_service::setCencKeyResolver）。被调用说明：
+         *   · 本片是 CENC（SegmentEncryption::CENC）；
+         *   · 没有平台 CDM 认这条 scheme（认了就不会装 resolver）；
+         *   · 清单给了一个取密钥的地址（keyUrl）。
+         *
+         * URL 由调用方按值捕获进来（内层 demuxer 是每分片重建的），组合成绝对地址的
+         * 那一步在装回调时就已经做过。kidHex 只用于"每个 KID 只问一次"的去重。
+         *
+         * 取密钥的实现共用 ContentKeyFetcher：**裸 16 字节 / 十六进制 JSON /
+         * W3C ClearKey 许可证 JSON** 三种形状都认（ClearKey 的服务端返回的正是第三种）。
+         * 失败**不静默**：打一条 ERROR 说清是"打不开"还是"形状不认识"。
+         */
+        bool fetchCencKey(const std::string &keyUrl, const std::string &kidHex, uint8_t *key, int *keySize);
+
         void interrupt_internal(int inter);
 
         CicadaJSONArray openInfoArray;
@@ -330,6 +348,12 @@ namespace Cicada {
         void releaseSampleAesDecrypter();
 
         bool hasActiveDecrypter() const;
+
+        /*
+         * CENC 软解：取密钥成/败各只打一条日志（同 mKeyFetchFailedLogged 的做法），
+         * 避免"每个包都问一次"变成刷屏。追加在类末尾。
+         */
+        bool mCencKeyLogged{false};
     };
 }
 

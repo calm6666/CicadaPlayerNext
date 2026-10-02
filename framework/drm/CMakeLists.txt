@@ -6,6 +6,7 @@ set(SOURCE_FILES
         DrmManager.cpp
         DrmHandler.cpp
         DrmHandlerPrototype.cpp
+        DrmSchemes.cpp
         )
 
 if (ANDROID)

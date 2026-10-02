@@ -6,6 +6,7 @@ import (
 	"crypto/cipher"
 	"crypto/hmac"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -563,6 +564,124 @@ func TestLicenseHappyPath(t *testing.T) {
 	}
 	if cbcs.Scheme != SchemeCBCS || cbcs.IVSize != IVSizeCBCS || cbcs.Key != key {
 		t.Fatalf("cbcs license = %+v, want scheme cbcs iv_size %d", cbcs, IVSizeCBCS)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// HTTP: W3C ClearKey licence
+// ---------------------------------------------------------------------------
+
+// TestClearKeyLicenseShape pins the exact W3C ClearKey document: URL-safe
+// base64 (no padding) for both "k" and "kid", kty "oct", type "temporary".
+//
+// This is the shape a ClearKey DASH client (EME, or Android MediaDrm's ClearKey
+// plugin) can consume; the admin JSON this service returns by default cannot be
+// substituted for it, which is why the endpoint exists at all.
+func TestClearKeyLicenseShape(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	// 0xfb 0xff 0xbf force the URL-safe alphabet: standard base64 would emit "+/".
+	const key = "fbffbf00112233445566778899aabbcc"
+	const kid = "0123456789abcdef0123456789abcdef"
+	rec := createKey(t, srv.URL, `{"kid":"`+kid+`","key":"`+key+`"}`)
+
+	for _, path := range []string{
+		"/key/" + rec.KID + "?format=clearkey",
+		"/license/" + rec.KID + "?format=clearkey",
+	} {
+		status, body, header := do(t, http.MethodGet, srv.URL+path, "", nil)
+		if status != http.StatusOK {
+			t.Fatalf("%s status = %d body %s, want 200", path, status, body)
+		}
+		if ct := header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+			t.Fatalf("%s Content-Type = %q, want application/json", path, ct)
+		}
+		if cc := header.Get("Cache-Control"); cc != "no-store" {
+			t.Fatalf("%s Cache-Control = %q, want no-store", path, cc)
+		}
+
+		var lic ClearKeyLicense
+		if err := json.Unmarshal(body, &lic); err != nil {
+			t.Fatalf("%s body %s: %v", path, body, err)
+		}
+		if lic.Type != ClearKeyTypeTemporary {
+			t.Fatalf("%s type = %q, want %q", path, lic.Type, ClearKeyTypeTemporary)
+		}
+		if len(lic.Keys) != 1 {
+			t.Fatalf("%s keys = %d entries, want exactly 1", path, len(lic.Keys))
+		}
+		if lic.Keys[0].Kty != "oct" {
+			t.Fatalf("%s kty = %q, want oct", path, lic.Keys[0].Kty)
+		}
+
+		gotKey, err := base64.RawURLEncoding.DecodeString(lic.Keys[0].K)
+		if err != nil {
+			t.Fatalf("%s k = %q is not unpadded base64url: %v", path, lic.Keys[0].K, err)
+		}
+		wantKey, _ := hex.DecodeString(key)
+		if !bytes.Equal(gotKey, wantKey) {
+			t.Fatalf("%s k decodes to %x, want %x", path, gotKey, wantKey)
+		}
+
+		gotKID, err := base64.RawURLEncoding.DecodeString(lic.Keys[0].Kid)
+		if err != nil {
+			t.Fatalf("%s kid = %q is not unpadded base64url: %v", path, lic.Keys[0].Kid, err)
+		}
+		wantKID, _ := hex.DecodeString(kid)
+		if !bytes.Equal(gotKID, wantKID) {
+			t.Fatalf("%s kid decodes to %x, want %x", path, gotKID, wantKID)
+		}
+
+		// No padding anywhere: RawURLEncoding never emits "=", and the document
+		// must not leak the hex spelling either.
+		if strings.Contains(lic.Keys[0].K, "=") || strings.Contains(lic.Keys[0].Kid, "=") {
+			t.Fatalf("%s emitted padded base64: %+v", path, lic.Keys[0])
+		}
+		if strings.Contains(string(body), key) {
+			t.Fatalf("%s leaked the hex key: %s", path, body)
+		}
+	}
+}
+
+// TestClearKeyLicensePost checks the POST form and that the ClearKey document
+// wins over the default admin JSON.
+func TestClearKeyLicensePost(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	rec := createKey(t, srv.URL, `{}`)
+
+	status, body, _ := do(t, http.MethodPost, srv.URL+"/license",
+		`{"kid":"`+rec.KID+`","format":"clearkey"}`, nil)
+	if status != http.StatusOK {
+		t.Fatalf("status = %d body %s, want 200", status, body)
+	}
+	var lic ClearKeyLicense
+	if err := json.Unmarshal(body, &lic); err != nil {
+		t.Fatalf("body %s: %v", body, err)
+	}
+	if len(lic.Keys) != 1 || lic.Type != ClearKeyTypeTemporary {
+		t.Fatalf("licence = %+v, want one key and type temporary", lic)
+	}
+
+	// GET /license with a scheme is the cenc/cbcs form; asking for ClearKey AND a
+	// scheme is contradictory and must fail loudly rather than pick one.
+	status, body, _ = do(t, http.MethodGet, srv.URL+"/license/"+rec.KID+"?format=clearkey&scheme=cenc", "", nil)
+	assertJSONError(t, status, body, http.StatusBadRequest)
+}
+
+// TestClearKeyDoesNotChangeRawBytes guards the compatibility-critical default:
+// adding ?format=clearkey must not touch what /key/{kid} returns by default,
+// because an HLS #EXT-X-KEY URI reads exactly 16 bytes from it.
+func TestClearKeyDoesNotChangeRawBytes(t *testing.T) {
+	srv, _, _ := newTestServer(t, "")
+	const key = "fbffbf00112233445566778899aabbcc"
+	rec := createKey(t, srv.URL, `{"key":"`+key+`"}`)
+
+	status, body, _ := do(t, http.MethodGet, srv.URL+"/key/"+rec.KID, "", nil)
+	if status != http.StatusOK || len(body) != KeyBytes {
+		t.Fatalf("raw endpoint = %d/%d bytes, want 200/%d", status, len(body), KeyBytes)
+	}
+	want, _ := hex.DecodeString(key)
+	if !bytes.Equal(body, want) {
+		t.Fatalf("raw body = %x, want %x", body, want)
 	}
 }
 

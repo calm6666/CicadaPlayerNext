@@ -691,6 +691,18 @@ namespace Cicada {
 
         static bool isWideVineVideo(const Stream_meta *meta);
 
+        /*
+         * 这一路视频是不是"由平台 CDM 解密的 DRM 内容"（Android 上即 MediaCodec +
+         * MediaCrypto 那条路）。判据是平台注册的 DRM handler 认不认 meta 里的
+         * keyFormat/…，**没有任何硬编码的 UUID**。
+         *
+         * 与 isWideVineVideo 的分工：后者回答"这是不是 Widevine"（决定要不要打
+         * VIDEO_TAG_WIDEVINE_L1 这个**标签**），前者回答"这是不是平台要解的 DRM"
+         * （决定必须走硬解 + dummy/secure 渲染面）。PlayReady / ClearKey 属于前者、
+         * 不属于后者。
+         */
+        static bool isDrmVideo(const Stream_meta *meta);
+
         void closeAudio();
 
         void closeVideo();

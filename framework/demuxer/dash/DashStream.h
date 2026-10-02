@@ -9,6 +9,9 @@
 #include "demuxer/SeekLandingStage.h"
 #include "demuxer/demuxer_service.h"
 #include "demuxer/play_list/AbstractStream.h"
+// DrmSchemes::Decision 是**按值**缓存在本类里的成员，所以这里必须拿到完整定义
+// （只前向声明不够）。DrmSchemes 本身是平台无关的纯函数集合，见 framework/drm/。
+#include "drm/DrmSchemes.h"
 #include "utils/CicadaJSON.h"
 #include "utils/afThread.h"
 #include <atomic>
@@ -226,42 +229,56 @@ namespace Cicada {
         SeekLandingStage mSeekLanding{mQueue, mDataMutex, mWaitCond};
 
         /*
-         * ============ DASH 的 DRM：清单声明 + 软解兜底（本轮新增）============
+         * ============ DASH 的 DRM：清单声明 + 选优 + 软解兜底 ============
          *
          * 【分工】"谁来解 CENC"有两个可能的执行者，按**能力**决定，不是开关：
          *   1. **平台 CDM**（Android MediaCodec+MediaCrypto、OHOS DRM Kit）——
-         *      只要 `DrmHandlerPrototype::isSupport()` 认这条 ContentProtection 的
-         *      schemeIdUri，就把 format/uri 交给 Stream_meta，由平台在安全世界里解。
+         *      只要 `DrmHandlerPrototype::isSupport()` 认选中的那个 scheme，
+         *      就把 format/uri/pssh/KID 交给 Stream_meta，由平台在安全世界里解。
          *      这条优先（用户要求"能硬解的都硬解"）。
          *   2. **内核软解**（CENCDecrypter）—— 只在平台不认这个 scheme、
-         *      而清单又明确给出了一个可以取到 16 字节裸密钥的地址时启用。
-         *      判据是 `DrmHandlerPrototype::isSupport()` 的返回值，**没有任何
-         *      平台宏**（该函数本身按平台注册 handler，见 framework/drm/）。
+         *      而清单又明确给出了一个可以取到内容密钥的地址时启用，且样本由
+         *      demuxer_service 在读取路径上就地解。
          *
-         * 【为什么懒执行】GetStreamMeta 会被反复调用（每一路流、每次换档），
-         * 而"取密钥"是一次网络读取。所以只在**第一次确实需要软解**时取一次，
-         * 结果记在 mSoftwareCencTried 里（失败也记，不重试 —— 没有重试机制）。
+         * 【选优】清单可以同时声明多条 ContentProtection（mp4protection + 各 DRM 系统），
+         * 选哪一条由 `DrmSchemes::decide` 按"平台认不认 / 有没有可取密钥的地址 /
+         * 有没有指名具体 DRM 系统"排序决定，排序判据见 framework/drm/DrmSchemes.h。
+         * 结果缓存一次（mDrmDecision），因为 GetStreamMeta 会被反复调用。
          *
          * 新成员一律追加在类末尾（仓库约定，中间插入会移动偏移）。
          */
-        void setDrmMetaFromContentProtection(Stream_meta *meta) const;
+
+        /** 选优结果（懒计算 + 缓存）。清单没声明任何内容保护时 index 为 -1。 */
+        DrmSchemes::Decision drmDecision() const;
+
+        /** 平台 CDM 认这条 scheme ⇒ 把 DRM 参数写进 meta；否则一个字段都不写。 */
+        void applyDrmFromContentProtection(Stream_meta *meta) const;
+
+        /** 是否要由内核软解（平台不认 + 清单给了可取密钥的地址 + 内容确实是 CENC）。 */
+        bool needsSoftwareCencDecryption() const;
+
+        /** 清单是否声明了 CENC 保护的档位（决定内层 demuxer 的形态提示）。 */
+        bool declaresCencProtectedContent() const;
 
         /*
-         * 按 MPD 里声明的地址取 16 字节内容密钥并登记给内层 demuxer（软件兜底）。
+         * 按清单声明的地址取内容密钥（软件兜底）。由 demuxer_service 在读到第一个带
+         * 加密信息的包时回调（见 demuxer_service::setCencKeyResolver）。
          *
-         * kid 从**容器**里读出来（init 段的 tenc），那才是解密时包里带的 KID，
-         * 必须用它登记 —— 用 MPD 的 cenc:default_KID 有可能对不上（清单与 init 段
-         * 不一致是 DRM 现场最常见的坑之一）。
-         *
+         * kidHex 只用于"每个 KID 只问一次"的去重；密钥内容由清单里那一个 laurl 决定。
          * 失败**不静默**：打一条 ERROR 说明"这条流解不开、以及为什么"。
          */
-        void ensureSoftwareCencKey(const std::string &kid) const;
+        bool fetchSoftwareCencKey(const std::string &kidHex, uint8_t *key, int *keySize) const;
 
         Representation *getCurrentRepresentation() const;
 
         // mutable: GetStreamMeta 是 const 覆盖（基类 AbstractStream 的签名），
-        // 而这两个标记只是"这件事做过了/日志打过了"，不改对外可见状态。
-        mutable bool mSoftwareCencTried{false};
+        // 而这几个成员只是"这件事算过了/日志打过了"，不改对外可见状态。
+        // 【缓存键】mDrmDecisionRep 记的是算这份结论时的当前 Representation：
+        // 同一条 DashStream 会在 AdaptationSet 内部换档，而 ContentProtection 允许被
+        // Representation 层覆盖，所以换了档必须重算（见 drmDecision 的说明）。
+        mutable DrmSchemes::Decision mDrmDecision{};
+        mutable bool mDrmDecisionValid{false};
+        mutable Representation *mDrmDecisionRep{nullptr};
         // 取密钥失败/成功各只打一条日志（同 HLSStream::mKeyFetchFailedLogged 的做法）。
         mutable bool mSoftwareCencLogged{false};
     };

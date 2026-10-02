@@ -13,6 +13,7 @@
 #define LOG_TAG "ManifestDemuxer"
 
 #include "ManifestDemuxer.h"
+#include "drm/DrmSchemes.h"
 #include "MediaManifestParser.h"
 #include <demuxer/play_list/HLSManager.h>
 #include <demuxer/play_list/PlaylistManager.h>
@@ -162,28 +163,56 @@ namespace Cicada {
             return;
         }
 
-        // CENC DRM (Widevine / FairPlay / PlayReady / ClearKey) via ContentProtection.
-        // The DRM-capable pipeline uses method AES_SAMPLE + keyFormat (schemeIdUri)
-        // + keyUrl (license URL): HLSStream marks the stream DRM-protected and the
-        // decoder chain obtains a DrmHandler from the DRM framework.
+        /*
+         * ============ CENC（ISO/IEC 23001-7）via <ContentProtection> ============
+         *
+         * 【选哪一条】清单可以同时声明好几条（mp4protection + 各 DRM 系统），交给
+         * DrmSchemes::decide 选：平台 CDM 认的最高（硬解优先），否则选一条带
+         * 许可/密钥地址的（软解兜底）。排序判据见 framework/drm/DrmSchemes.h。
+         * 这里原来写的是"第一条不是 mp4protection 的就赢"，在 Android 上可能选中设备
+         * 根本不支持的 PlayReady，也会漏掉"只有 mp4protection + laurl"这类能软解的清单。
+         *
+         * 【keyFormat 只在平台认的时候才填】判据与 DashStream::applyDrmFromContentProtection
+         * 一字不差：`codecPrototype::create` 的判据是
+         * `drmInfo == nullptr || codec->is_drmSupport(drmInfo)`，而
+         * `avcodecDecoder::is_drmSupport` 恒返回 false —— 填一个没有 CDM 认识的 keyFormat
+         * 会把**所有软解解码器**排除掉。平台不认时留空，样本由内核解。
+         *
+         * 【为什么是 method = CENC 而不是 AES_SAMPLE】见 SegmentEncryption.h 里 CENC 那一段：
+         * 两者密文布局与解密器完全不同，复用 AES_SAMPLE 会让 HLSStream 拿 SAMPLE-AES 的
+         * 解密器去解 CENC 样本（把流解坏且无日志）。
+         */
         const std::vector<ContentProtection> *protections = &manifest.contentProtection;
+        std::vector<DrmSchemes::Candidate> candidates;
+        candidates.reserve(protections->size());
+
         for (const ContentProtection &cp : *protections) {
-            if (cp.schemeIdUri.empty() || cp.schemeIdUri == "urn:mpeg:dash:mp4protection:2011") {
-                continue;
-            }
-            SegmentEncryption enc{};
-            enc.method = SegmentEncryption::AES_SAMPLE;
-            enc.keyFormat = cp.schemeIdUri;
-            enc.pssh = cp.pssh;
-            enc.keyId = cp.keyId;
-            if (!cp.laUrl.empty()) {
-                enc.keyUrl = cp.laUrl;
-            } else if (manifest.hasLicenseServer && !manifest.licenseServer.url.empty()) {
-                enc.keyUrl = manifest.licenseServer.url;
-            }
-            out.push_back(enc);
-            return; // first supported DRM system wins
+            DrmSchemes::Candidate candidate;
+            candidate.schemeIdUri = cp.schemeIdUri;
+            candidate.pssh = cp.pssh;
+            candidate.keyId = cp.keyId;
+            // 许可/密钥地址：这条自己写了就用它，否则用清单级的 licenseServer（如果声明了）。
+            // **不发明**：两处都没有就是空串，decide() 会据此判定"取不到密钥"。
+            candidate.licenseUrl = !cp.laUrl.empty() ? cp.laUrl
+                                   : (manifest.hasLicenseServer ? manifest.licenseServer.url : std::string());
+            candidates.push_back(candidate);
         }
+
+        const DrmSchemes::Decision decision = DrmSchemes::decide(candidates);
+
+        if (decision.index < 0) {
+            return;
+        }
+
+        SegmentEncryption enc{};
+        enc.method = SegmentEncryption::CENC;
+        if (decision.handledByPlatform) {
+            enc.keyFormat = decision.schemeIdUri;
+        }
+        enc.pssh = decision.pssh;
+        enc.keyId = decision.keyId;
+        enc.keyUrl = decision.licenseUrl;
+        out.push_back(enc);
     }
 
     // --------------------------------------------------------- playList building --

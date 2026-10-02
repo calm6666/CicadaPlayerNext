@@ -15,6 +15,7 @@
 #ifdef __OHOS__
 
 #include "OhosDrmHandler.h"
+#include "../DrmSchemes.h"
 #include <utils/frame_work_log.h>
 
 #include <multimedia/drm_framework/native_mediakeysystem.h>
@@ -26,10 +27,19 @@
 
 namespace Cicada {
 
-    static const char *kWidevineUuid = "edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
-    static const char *kPlayReadyUuid = "9a04f079-9840-4286-ab92-e65be0885f95";
-    static const char *kFairPlayUuid = "94ce86fb-07ff-4f43-adb8-93d2fa968ca2";
-    static const char *kClearKeyUuid = "e2719d58-a985-b3c9-781a-b030af78d30e";
+    /*
+     * 这四个常量原来是**裸 UUID**（不带 urn:uuid: 前缀），而清单/内核对 keyFormat 的
+     * 口径是**规范形式 `urn:uuid:<uuid>`**（mediaCodecDecoder / SuperMediaPlayer /
+     * DashStream 都按带前缀的字符串比）。于是 `is_supported()` 永远为假 ——
+     * OhosDrmHandler 整套 DRM Kit 的代码在 OHOS 上一次都没被触发过（真 bug）。
+     *
+     * 现在统一用规范形式，并且经 DrmSchemes::canonical 归一化后再比，
+     * 大小写/花括号/裸 UUID/别名（com.widevine.alpha 等）都能认出来。
+     */
+    static const char *kWidevineUuid = "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed";
+    static const char *kPlayReadyUuid = "urn:uuid:9a04f079-9840-4286-ab92-e65be0885f95";
+    static const char *kFairPlayUuid = "urn:uuid:94ce86fb-07ff-4f43-adb8-93d2fa968ca2";
+    static const char *kClearKeyUuid = "urn:uuid:e2719d58-a985-b3c9-781a-b030af78d30e";
 
     /** Buffer for the offline key id returned by ProcessMediaKeyResponse. */
     static const int32_t kOfflineKeyIdCapacity = 512;
@@ -66,10 +76,13 @@ namespace Cicada {
 
     bool OhosDrmHandler::is_supported(const DrmInfo &drmInfo)
     {
-        return drmInfo.format == kWidevineUuid
-               || drmInfo.format == kPlayReadyUuid
-               || drmInfo.format == kFairPlayUuid
-               || drmInfo.format == kClearKeyUuid;
+        // 归一化后再比：清单里的写法可能是大写 UUID / 裸 UUID / EME 别名。
+        const std::string scheme = DrmSchemes::canonical(drmInfo.format);
+
+        return scheme == kWidevineUuid
+               || scheme == kPlayReadyUuid
+               || scheme == kFairPlayUuid
+               || scheme == kClearKeyUuid;
     }
 
     int OhosDrmHandler::open()

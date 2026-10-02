@@ -20,6 +20,7 @@
 #include "sample_decrypt/ISampleDecryptor.h"
 #include "sample_decrypt/CENCDecrypter.h"
 #include <string>
+#include <set>
 #include <vector>
 #include <demuxer/manifest/MediaManifest.h>
 #define GEN_STREAM_ID(index, subId) (((subId) << 16) + (index))
@@ -128,6 +129,30 @@ namespace Cicada {
 
         bool isPlayList();
 
+        /*
+         * ============ 按需取 CENC 内容密钥（本轮新增）============
+         *
+         * 【为什么需要它】解密的查表键是**包上带的 KID**（`AV_PKT_DATA_ENCRYPTION_INFO`），
+         * 而清单层在"还没读到任何包"的时候并不总能知道这个 KID —— 很多 MPD 只写
+         * `<cenc:pssh>`，KID 只存在于 init 段的 `tenc` 里，FFmpeg 也不把 tenc 暴露到
+         * `AVStream`/codecpar 上（它只在**包**上给加密信息）。于是"先注册密钥再解密"
+         * 这条路在"清单没写 cenc:default_KID"的片源上必然走不通。
+         *
+         * 所以把方向倒过来：内核在**第一次**遇到某个没注册过密钥的 KID 时，
+         * 回调这个 resolver 问一句"这个 KID 的密钥是多少"。清单层（DashStream /
+         * HLSStream）在这里按它已经选定的那一份 ContentProtection 去取密钥。
+         *
+         * 【不是重试机制】每个 KID **只问一次**（`mCencResolveAttempted` 记录问过的 KID，
+         * 成功失败都记）。这是"这个 KID 问过了"的备忘录，不是重试循环：没有任何计时器、
+         * 没有次数上限、失败不会因为下一个包再试一次。
+         *
+         * 没装 resolver（或没注册过任何密钥）时读取路径的行为**一个字节都没变**：
+         * `readPacket` 里连 side data 都不解析。
+         */
+        using CencKeyResolver = std::function<bool(const std::string &keyIdHex, uint8_t *key, int *keySize)>;
+
+        void setCencKeyResolver(CencKeyResolver resolver);
+
         void setDemuxerCb(const std::function<void(std::string, std::string)> &func);
 
         void setDemuxerMeta(std::unique_ptr<DemuxerMeta> &meta);
@@ -198,10 +223,23 @@ namespace Cicada {
          */
         std::unique_ptr<CENCDecrypter> mCencDecrypter{nullptr};
 
-        // 一次性日志去重（同 HLSStream::mKeyFetchFailedLogged 的做法）：
+        // 一行日志去重（同 HLSStream::mKeyFetchFailedLogged 的做法）：
         // "真的解了一次"与"注册了密钥却解不开"各只打一条，避免每包刷屏。
         bool mCencDecryptAppliedLogged{false};
         bool mCencDecryptFailedLogged{false};
+
+        /*
+         * 按需取密钥的回调与"这个 KID 问过了"的备忘录（见 setCencKeyResolver）。
+         * 两者都追加在类末尾。
+         */
+        CencKeyResolver mCencKeyResolver{nullptr};
+        std::set<std::string> mCencResolveAttempted{};
+
+        /**
+         * 第一次遇到没注册过密钥的 KID 时问一次 resolver；成功则把密钥登记进来。
+         * 返回"现在能不能用这个 KID 解"。
+         */
+        bool resolveCencKey(const std::string &keyIdHex);
 
         /*
          * 对一个包尝试 CENC 就地解密；返回**实际解了没有**。

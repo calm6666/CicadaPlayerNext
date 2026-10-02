@@ -11,6 +11,11 @@
 #include <cstdlib>
 #include <codec/avcodecDecoder.h>
 #include <codec/decoderFactory.h>
+// isDrmVideo() 用 DrmHandlerPrototype::isSupport 判"本平台认不认这个 DRM scheme"，
+// 所以需要 drm/DrmInfo.h（组探针）与 drm/DrmHandlerPrototype.h（查询）。两者都是
+// 平台无关的共享头，各平台认不认由 framework/drm/ 下注册的 handler 决定。
+#include <drm/DrmHandlerPrototype.h>
+#include <drm/DrmInfo.h>
 #include <data_source/dataSourcePrototype.h>
 #include <demuxer/IDemuxer.h>
 #include <demuxer/manifest/MediaManifestParser.h>
@@ -7219,8 +7224,14 @@ int SuperMediaPlayer::setUpAudioDecoder(const Stream_meta *meta)
     uint64_t flags = DECFLAG_SW;
 
 #ifdef ANDROID
-    bool isWideVineVideo = (meta->keyFormat != nullptr && strcmp(meta->keyFormat, "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed") == 0);
-    if (isWideVineVideo) {
+    /*
+     * DRM（平台 CDM 负责解的那一路）在 Android 上必须走硬解：软解解码器
+     * （avcodecDecoder::is_drmSupport 恒 false）会被 codecPrototype::create 排除，
+     * 所以给解码器传了非空 DrmInfo 却选了软解，结果是一个解码器都建不出来。
+     * 判据从"是不是 Widevine"改成"是不是平台认的 DRM"，覆盖 PlayReady / ClearKey。
+     */
+    bool isDrmContent = isDrmVideo(meta);
+    if (isDrmContent) {
         flags |= DECFLAG_HW;
     }
     // 音频硬解（AAC→MediaCodec）在这台机器上实测是净亏损：MediaCodec 以
@@ -7418,15 +7429,17 @@ int SuperMediaPlayer::SetUpVideoPath()
         flags |= IVideoRender::FLAG_HDR;
 #endif
     }
-#ifdef ANDROID
-    bool isWideVine = isWideVineVideo(meta);
-#endif
+    /*
+     * 平台 CDM 解的那一路 DRM 必须用 dummy（安全）渲染面。
+     *
+     * 这里刻意**不加平台宏**：isDrmVideo 问的是"本平台注册的 DRM handler 认不认"，
+     * 没有注册 handler 的平台（Windows/Linux/macOS）恒为 false —— 而那些平台上
+     * DASH 的 CENC 由内核软解，keyFormat 本来就不会被填（见 DashStream 的说明），
+     * 所以这条判据在所有平台上都恰好是它该有的取值。
+     */
+    bool isDrmContent = isDrmVideo(meta);
 
-    if (tunnelRender
-#ifdef ANDROID
-        || isWideVine
-#endif
-    ) {
+    if (tunnelRender || isDrmContent) {
         flags |= IVideoRender::FLAG_DUMMY;
     }
 
@@ -8599,6 +8612,31 @@ bool SuperMediaPlayer::isWideVineVideo(const Stream_meta *meta)
 {
     bool isWideVineVideo = (meta->keyFormat != nullptr && strcmp(meta->keyFormat, "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed") == 0);
     return isWideVineVideo;
+}
+
+bool SuperMediaPlayer::isDrmVideo(const Stream_meta *meta)
+{
+    if (meta == nullptr || meta->keyFormat == nullptr) {
+        return false;
+    }
+
+    /*
+     * 把 meta 里的 DRM 参数整理成一份 DrmInfo，再问一句"本平台注册的 DRM handler
+     * 认不认它"。这与 SMPAVDeviceManager 组 DrmInfo 的口径**完全一致**（那边也是
+     * 只读这四个字段），所以"这里说它要硬解"与"那边会去建 DRM 会话"同真同假。
+     *
+     * 为什么需要它：只要给解码器传了非空的 DrmInfo，软解解码器（avcodecDecoder）
+     * 就会被 `codecPrototype::create` 排除，所以平台认的 DRM 内容**必须**走硬解；
+     * 而"平台认不认"这个答案原来在 Android 上被硬编码成"只有 Widevine"，于是
+     * 声明 PlayReady / ClearKey 的 DASH 清单在 Android 上会被判成软解路径并直接失败。
+     */
+    DrmInfo probe{};
+    probe.format = meta->keyFormat;
+    probe.uri = meta->keyUrl == nullptr ? "" : meta->keyUrl;
+    probe.pssh = meta->drmPssh == nullptr ? "" : meta->drmPssh;
+    probe.keyId = meta->drmKeyId == nullptr ? "" : meta->drmKeyId;
+
+    return DrmHandlerPrototype::isSupport(&probe);
 }
 
 bool SuperMediaPlayer::isHDRVideo(const Stream_meta *meta)

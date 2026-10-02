@@ -1,16 +1,20 @@
-# tools/drm_bench —— DRM 解密的两份实测工具
+# tools/drm_bench —— DRM 的实测工具
 
-这里的东西**不是产品代码**，是"回答两个问题"的证据工具：
+这里的东西**不是产品代码**，是"回答几个问题"的证据工具：
 
 1. `drm_bench.cpp` —— **性能**：软件解密要占多少 CPU。
 2. `cenc_verify.cpp` —— **正确性**：`CENCDecrypter` 在**真的 CENC 产物**上能不能
    把样本逐字节解回明文。
+3. `mpd_drm_check.cpp` —— 仓库自己的 `MPDParser` 对 `<ContentProtection>` 的解析。
+4. `drm_schemes_check.cpp`（本轮新增）—— **DASH 的 DRM 方案覆盖与选优**：
+   `DrmSchemes` 的登记表/canonical/decide，以及 `ContentKeyFetcher::parse` 对
+   三种许可证形状的识别。
 
-结论与完整的数字表在 `docs/DRM-SOFTWARE-DECRYPT-PERFORMANCE.md`，
-这里只讲怎么自己跑一遍。
+结论与完整的数字表在 `docs/DRM-SOFTWARE-DECRYPT-PERFORMANCE.md` 与
+`docs/DASH-DRM-SCHEMES.md`，这里只讲怎么自己跑一遍。
 
-两者都**链接仓库自己的解密类**（`AES_128Decrypter`、`CENCDecrypter`、
-`avAESDecrypt`），所以量出来/验出来的是产品里真正跑的那条路，
+它们都**链接仓库自己的实现**（`AES_128Decrypter`、`CENCDecrypter`、`avAESDecrypt`、
+`MPDParser`、`DrmSchemes`、`ContentKeyFetcher`），所以验出来的是产品里真正跑的那条路，
 而不是某个平行实现。
 
 ---
@@ -114,3 +118,46 @@ cenc_verify.exe %TEMP%\cencreal\clear.mp4 %TEMP%\cencreal\cenc.mp4 0011223344556
 
 见 `docs/DRM-SOFTWARE-DECRYPT-PERFORMANCE.md` §1（性能）与 §2（正确性，
 含那 1 个未查清的多 subsample 样本）。
+
+---
+
+## 4. DASH 的 DRM 方案覆盖与选优（`drm_schemes_check.cpp`）
+
+它**不需要任何片源**，只编译四个小的产品源文件 + `ContentKeyFetcher.cpp`，
+用假注册的平台 CDM（走真正的 `DrmHandlerPrototype` 注册路径）把
+`DrmSchemes::decide` 的排序判据逐条钉死：
+
+```bat
+call "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat"
+cd /d %TEMP%
+cl /nologo /EHsc /MT /O2 /utf-8 ^
+   /I "%ROOT%\framework" /I "%FF%\include" ^
+   /I "%ROOT%\external\boost" /I "%ROOT%\external\external\ffmpeg" ^
+   /I "%ROOT%\external\build\ffmpeg\win32\x86_64" ^
+   "%ROOT%\tools\drm_bench\drm_schemes_check.cpp" ^
+   "%ROOT%\framework\drm\DrmSchemes.cpp" ^
+   "%ROOT%\framework\drm\DrmHandlerPrototype.cpp" ^
+   "%ROOT%\framework\drm\DrmHandler.cpp" ^
+   "%ROOT%\framework\drm\DrmInfo.cpp" ^
+   "%ROOT%\framework\demuxer\sample_decrypt\ContentKeyFetcher.cpp" ^
+   /Fe:drm_schemes_check.exe
+set PATH=%FF%;%PATH%
+drm_schemes_check.exe
+```
+
+预期输出末行：`PASS: 55 checks, 0 failures`。
+
+**它验的是哪些判据**（每一条都对应一个真问题）：
+
+| 组 | 判据 | 对应的真问题 |
+|---|---|---|
+| 1 | `canonical()` 认大写/裸 UUID/花括号/32-hex/EME 别名，且**不改写认不出的写法** | 各家写 `schemeIdUri` 的写法不统一，字符串直比必漏；而"猜成某个已知系统"比漏更糟 |
+| 2 | 登记表 **31 条**（28 个保护系统 UUID + 3 个通用方案），逐条名字对得上 | 表里少一条 = 那条 DRM 的清单被当成"未知方案" |
+| 3 | `isCencCapable()` 的分界：HLS Clear Key / MPEG-2 TS CA / SEA **不是** CENC；未登记的 `urn:uuid:` **是** | 内核的 `CENCDecrypter` 对非 CENC 方案无能为力，必须显式说出来；而新出现的 DRM 系统要走同一条软解路 |
+| 4 | `decide()`：平台 CDM 优先、有密钥地址次之、指名系统再次之、同分取后者；**全都没有时给 -1/false** | "能硬解的都硬解，实在不行才软解"；以及"只有 mp4protection 的清单必须留空 keyFormat"（否则 `codecPrototype::create` 会把所有软解解码器排除） |
+| 5 | `ContentKeyFetcher::parse()` 认裸 16 字节 / W3C ClearKey JSON（base64**url**）/ 本服务器 JSON（hex），其余明确 `Unrecognized`/`Malformed` | ClearKey 的服务端返回的是 W3C JSON 而不是裸字节；认不出来就把半截字节当密钥 = 密文当明文 |
+
+`ContentKeyFetcher.cpp` 里的 `fetch()` 会引用 `dataSourcePrototype::create()` 与
+`__log_print()`；本工具**只调 `parse()`**，所以这两个符号由工具自己桩掉
+（`tools/drm_bench/drm_bench.cpp` 对日志符号是同一个手法）。如果哪一天 `parse()`
+开始碰数据源，这个工具会**链接失败** —— 那是故意的早报警。

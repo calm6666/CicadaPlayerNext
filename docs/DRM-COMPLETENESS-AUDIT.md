@@ -7,6 +7,10 @@
 >
 > 本文是"审计"，不是"设计"；设计与施工记录仍在
 > `docs/DRM-ENCRYPTION-DESIGN.md`（一期 §4.8、二期 §4.9）。
+>
+> **【本轮订正】** DASH 侧那几条（硬解/软解的判据、方案的识别范围）已经**重做**，
+> 完整设计与证据见 `docs/DASH-DRM-SCHEMES.md`。本文原来的"§1 硬解优先/软解兜底"
+> 一行与 §2 的几处描述已被那份文档取代，下面凡出现的地方都标了【订正】。
 
 ---
 
@@ -35,7 +39,10 @@
 | **CENC 软件解密器** | `framework/demuxer/sample_decrypt/CENCDecrypter.{h,cpp}` | **Bento4 `MPEG-CENC` 真产物：150/150 样本逐字节解回明文，PASS**；ffmpeg 产物 149/150（唯一例外见 §5） |
 | **CENC 接进真实读取路径** | `demuxer_service::setCencKey/hasCencKey/clearCencKeys` + `readPacket` → `applyCencDecryption` | **运行时实测**：不注册密钥 ⇒ 150/150 包原样放行、0 个等于明文（**不会抢走 CDM 那条路**）；注册密钥 ⇒ 150/150 逐字节等于明文 |
 | **DASH `ContentProtection` 解析** | `Representation::ContentProtection` + `MPDParser::parseContentProtections()`（AS/Rep 两层，只取直接子节点） | **用仓库自己的 `MPDParser` 解析手写 MPD，全部断言 PASS**：继承、Rep 覆盖 AS、`cenc:pssh`、带连字符 KID、空占位被忽略、**未受保护的音轨一条都不挂** |
-| **硬解优先 / 软解兜底的判据** | `DashStream::setDrmMetaFromContentProtection()` + `ensureSoftwareCencKey()`：先问 `DrmHandlerPrototype::isSupport()`，**认得了就不登记软解密钥** | 判据无平台宏；`DrmInfo` 非空是 Android MediaCodec 建 DRM 会话的唯一前提（`mediaCodecDecoder.cpp:258`） |
+| **硬解优先 / 软解兜底的判据** | 【订正，本轮重做】`framework/drm/DrmSchemes.{h,cpp}`：DASH-IF 登记表全量（31 条）+ 归一化 + 选优；`DashStream::drmDecision/applyDrmFromContentProtection/fetchSoftwareCencKey` 按它决定"谁来解" | 判据无平台宏；**只在该平台 CDM 认这个 scheme 时**才把 DRM 参数交给解码器 —— 否则 `codecPrototype::create` 的 `drmInfo == nullptr \|\| codec->is_drmSupport(drmInfo)` 会把**所有软解解码器**排除（`avcodecDecoder::is_drmSupport` 恒 false）。详见 `docs/DASH-DRM-SCHEMES.md` §5 |
+| **DASH DRM 方案覆盖** | 【订正，本轮新增】`DrmSchemes` 认得登记表里 **28 个保护系统 UUID + 3 个通用方案**，并区分"是不是 CENC 内容" | `tools/drm_bench/drm_schemes_check.cpp`：**55 条断言全过**（`PASS: 55 checks, 0 failures`） |
+| **按需取内容密钥** | 【订正，本轮新增】`demuxer_service::setCencKeyResolver/resolveCencKey` + `ContentKeyFetcher`（裸 16 字节 / W3C ClearKey JSON / hex JSON 三种形状） | 每个 KID 只问一次；解决"清单只写 pssh、KID 只在 init 段 tenc 里"时**永远登记不上软解密钥**的问题（原来 `meta->drmKeyId` 根本没有代码去填） |
+| **ClearKey DASH 的许可证** | 【订正，本轮新增】`server/drm-keyserver/clearkey.go` + `?format=clearkey`（`/key/{kid}` 与 `/license/{kid}`） | Go 单测新增 3 个（base64url 字母表、无填充、字段不串味、`scheme=` 冲突报 400、默认裸字节形状不变） |
 | **软件解密性能** | `tools/drm_bench/drm_bench.cpp` + `core_share.py` | CENC `cenc` 656 MB/s ⇒ 1080p/8Mbps 占单核 **0.15%**、4K/100Mbps **1.9%**；HLS AES-128 3250 MB/s。软解不是瓶颈 |
 | **curl `_T` 弃用迁移**（数据源，非 DRM 但影响取密钥） | `CURLConnection{.cpp,2.cpp}`、`curl_data_source{,2}.cpp` | **端到端实测**：真数据源经 HTTP 读出 `1048576`（与服务器 Content-Length 一致）、range 读正常 |
 
@@ -45,11 +52,11 @@
 
 | # | 位置 | 现状 | 为什么没验 |
 |---|---|---|---|
-| a | **Android Widevine 硬解** | 通路完整：`SMPAVDeviceManager.cpp:49-59` 组 `DrmInfo` → `mediaCodecDecoder.cpp:258` 建 DRM 会话 → `setDrmInfo` → `queueSecureInputBuffer`；`DrmUtils::isSupport()` 认 Widevine UUID | **需要真机 + 授权内容**。本机只有 Windows；模拟器通常没有 Widevine L1/L3 授权 |
-| b | **OHOS DRM Kit** | `framework/drm/OHOS/OhosDrmHandler.cpp` 认 Widevine/PlayReady/FairPlay/ClearKey 四个 UUID | 需要 OHOS 真机（本机有 DevEco，但 DRM 依赖设备能力） |
-| c | **iOS/macOS FairPlay** | **未实现**：`AppleVideoToolBox.cpp` 只有 `is_drmSupport` 钩子，没有任何 `AVContentKeySession` 代码 | 需要 FairPlay 证书 + 真实许可服务；且 Qt/macOS 走的是内核自绘 VTB，不是 AppleAVPlayer |
-| d | **CENC-in-DASH 全链路播放** | 解析、映射、注册、解密各环都单独验过；**但没串起来播过** | 需要把 CENC 分片 + MPD 喂进内核的 DASH 管线并出帧；本机没有现成 harness（`framework/tests` 需 `-DBUILD_TEST=ON`，Windows 下被 `framework/windows.cmake:119` 关掉） |
-| e | **转码脚本的 `--drm-keyserver` 全流程** | 脚本侧已实现（铸钥 → 取回 16 字节 → 写 key_info → 写清单） | 脚本硬编码依赖 `input.mp4`/固定产物布局（直接跑得到 `[错误] 输入视频 input.mp4 不存在`），需要准备完整输入目录；本轮未跑通 |
+| a | **Android Widevine / PlayReady / ClearKey 硬解** | 【订正，本轮扩到三家】通路完整：`SMPAVDeviceManager.cpp:49-59` 组 `DrmInfo` → `mediaCodecDecoder.cpp:258` 建 DRM 会话 → `setDrmInfo` → `queueSecureInputBuffer`；C++ 侧 `WideVineDrmHandler::is_supported` 认三家 UUID，Java 侧 `DrmSessionManager` 按 keyFormat 选 `MediaDrm` 的 UUID 并用 `isCryptoSchemeSupported` 做设备能力判定；`pssh`/`keyId` 现在真的传进 Java 了（JNI 签名从 2 个 String 改成 5 个） | **需要真机 + 授权内容**。本机只有 Windows；模拟器通常没有 Widevine L1/L3 授权。**Java 侧改动只做过 `javac`（android-36）类型检查，没有跑过真机** |
+| b | **OHOS DRM Kit** | 【订正，本轮修了一个恒假条件】`framework/drm/OHOS/OhosDrmHandler.cpp` 认 Widevine/PlayReady/FairPlay/ClearKey 四个 UUID。原来比的是**裸 UUID**（`"edef8ba9-…"`）而全工程口径是 `urn:uuid:…` ⇒ `is_supported` 恒假 ⇒ 这套代码**一次都没被触发过** | 需要 OHOS 真机（本机有 DevEco，但 DRM 依赖设备能力） |
+| c | **iOS/macOS FairPlay** | **未实现**：`AppleVideoToolBox.cpp` 只有 `is_drmSupport` 钩子，没有任何 `AVContentKeySession` 代码 | 需要 FairPlay 证书 + 真实许可服务，且 Apple 要求走它自己的渲染路径（本工程 Apple 侧是自绘 VTB）。见 `docs/DASH-DRM-SCHEMES.md` §8 |
+| d | **CENC-in-DASH 全链路播放** | 解析、映射、注册、解密各环都单独验过；**【订正】本轮修掉了三个会让它必然失败的真 bug**：(1) 无条件写 `keyFormat` 使 `codecPrototype::create` 排除所有软解解码器；(2) `meta->drmKeyId` 从来没有代码填，"清单没写 default_KID"的片源登记不上密钥 ⇒ 改成按需取密钥；(3) `ManifestDemuxer` 把 CENC 记成 HLS 的 `AES_SAMPLE`（会拿错解密器把流解坏） | **但依然没串起来播过。** 需要把 CENC 分片 + MPD 喂进内核的 DASH 管线并出帧；本机没有现成 harness（`framework/tests` 需 `-DBUILD_TEST=ON`，Windows 下被 `framework/windows.cmake:119` 关掉），也没有真 CENC 片源 |
+| e | **转码脚本的 `--drm-keyserver` 全流程** | 脚本侧已实现（铸钥 → 取回 16 字节 → 写 key_info → 写清单） | 脚本硬编码依赖 `input.mp4`/固定产物布局，需要准备完整输入目录 |
 
 ---
 
@@ -85,6 +92,21 @@
 **E. OHOS DRM Kit 回归**（清单 b）—— 同上。
 
 **F. FairPlay 实现**（清单 c）—— 需要证书与许可服务，属新立项。
+
+**G. 【本轮已收口的部分】**
+   · **DASH 方案覆盖**：`framework/drm/DrmSchemes.{h,cpp}`（登记表 31 条 + 归一化 + 选优）
+     —— 连同"选优、许可证形状"的 55 条断言，`tools/drm_bench/drm_schemes_check.cpp`
+     **全过**；
+   · **按需取密钥**：`demuxer_service::setCencKeyResolver` + `ContentKeyFetcher`
+     —— 解决"清单只写 pssh 就取不到密钥"；
+   · **ClearKey 的许可证**：Go 服务器 `?format=clearkey`（W3C 形状）+ 3 个新单测；
+   · **逐片 `#EXT-X-KEY`**：`转码脚本/transcode_all.py`（`_segment_anchors` /
+     `_insert_per_segment_key_lines` / `_write_media_playlist`）+ 验收器
+     `verify_segmentbase.py` 的逐片口径，另有离线自检
+     `转码脚本/_hls_key_selfcheck.py`（3 种清单形态 + 反向对照，**PASS**）；
+   · **HLS 的平台判定**：`DrmUtils::isSupport`（Android-only、只认 Widevine 一条、
+     带平台宏）**删除**，改问平台无关的 `DrmHandlerPrototype::isSupport`
+     —— 顺带修掉"OHOS 上连它自己实现的四种 DRM 都被跳过"。
 
 ---
 

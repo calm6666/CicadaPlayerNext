@@ -11,7 +11,16 @@
 #include "demuxer/play_list/segment_decrypt/AES_128Decrypter.h"
 #include "segment.h"
 #include "segment_decrypt/SegDecryptorFactory.h"
-#include "utils/DrmUtils.h"
+/*
+ * DRM：DrmHandlerPrototype 提供"本平台认不认这个 DRM scheme"的平台无关查询
+ * （认不认由各平台在 framework/drm/ 下注册的 handler 决定 —— Android 的
+ * WideVineDrmHandler、OHOS 的 OhosDrmHandler）。CENCDecrypter 的密钥由
+ * ContentKeyFetcher 按清单声明的地址在**读到第一个加密包时**按需取，见
+ * HLSStream::fetchCencKey 与 demuxer_service::setCencKeyResolver。
+ */
+#include "drm/DrmHandlerPrototype.h"
+#include "drm/DrmInfo.h"
+#include "demuxer/sample_decrypt/ContentKeyFetcher.h"
 #include "utils/af_string.h"
 #include "utils/errors/framework_error.h"
 #include "utils/frame_work_log.h"
@@ -184,8 +193,15 @@ namespace Cicada {
              * 已经置好的 mKeyFetchFailedLogged 去重，避免 read_thread 每 10ms 刷一条）。
              * 为什么是 -EIO 而不是继续读：读出去必然是垃圾，让上层拿到一个明确的 IO 错误
              * 比拿一堆垃圾去喂解码器干净得多 —— 这也是"不许假成功"的直接落点。
+             *
+             * 【CENC 必须排除在这条判据之外（本轮新增）】CENC 的"解密器没建出来"是**正常
+             * 状态**而不是失败：它的每样本 IV 与 subsample 表在容器里，解密只能逐样本做，
+             * 由 demuxer_service::readPacket 在读到包时就地解（软解），或者交给平台 CDM
+             * （硬解）。在**这一层**根本不该有解密器，所以"把分片字节原样交给内层 demuxer"
+             * 正是它要的行为。把它一起判成 -EIO 会让对象化清单（CMAF/CENC）这条路的
+             * 分片一个字节都读不出来 —— 那不是"拒绝假成功"，那是直接播不了。
              */
-            if (mProtectedBuffer) {
+            if (mProtectedBuffer && mCurrentEncryption.method != SegmentEncryption::CENC) {
                 if (!mKeyFetchFailedLogged) {
                     mKeyFetchFailedLogged = true;
                     AF_LOGE("segment decryption is not applied: the manifest declares encryption "
@@ -684,7 +700,29 @@ namespace Cicada {
         std::string skippedKeyFormat{};
 
         for (SegmentEncryption &item: mCurSeg->encryptions) {
-            if (item.keyFormat.empty() || DrmUtils::isSupport(item.keyFormat)) {
+            if (item.keyFormat.empty()) {
+                mCurrentEncryption = item;
+                encryptionAccepted = true;
+                break;
+            }
+
+            /*
+             * keyFormat 非空 ⇒ 这一条声明的是"由平台 DRM 系统来解"。认不认由
+             * DrmHandlerPrototype 判（各平台自己在 framework/drm/ 下注册 handler），
+             * 所以 L1 代码里没有任何平台宏。
+             *
+             * 原来这里用的是 DrmUtils::isSupport —— 那个函数只在 ANDROID 下认 Widevine
+             * 一条，于是 **OHOS 上连它自己已经实现的** Widevine/PlayReady/FairPlay/
+             * ClearKey 都会被判成"不支持"而整条跳过（真 bug：OhosDrmHandler 白写了）。
+             * 换成这个平台无关的查询，认得的范围就与真正注册的 handler 完全一致。
+             */
+            DrmInfo probe{};
+            probe.format = item.keyFormat;
+            probe.uri = item.keyUrl;
+            probe.pssh = item.pssh;
+            probe.keyId = item.keyId;
+
+            if (DrmHandlerPrototype::isSupport(&probe)) {
                 mCurrentEncryption = item;
                 encryptionAccepted = true;
                 break;
@@ -749,6 +787,32 @@ namespace Cicada {
         mPDemuxer->setDemuxerMeta(demuxerMeta);
         mPDemuxer->SetDataCallBack(read_callback, this, nullptr, nullptr, nullptr);
         mPDemuxer->setSampleDecryptor(this->mSampeAesDecrypter.get());
+
+        /*
+         * ============ CENC 的软解兜底：装"按需取密钥"的回调 ============
+         *
+         * 判据（全部是值，没有开关）：
+         *   · 本片声明的是 CENC；
+         *   · 清单给出了一个可以取到内容密钥的地址（keyUrl）。
+         * 满足才装。装了它，demuxer_service::readPacket 才会在读到**第一个带加密信息的
+         * 包**时回调这里取密钥（用包上那个 KID 作去重键），然后就地解密。
+         *
+         * 为什么按需取而不是在这里提前取：CENC 的每样本 IV/subsample 表在容器里，
+         * 而"用哪个 KID 查表"只有包上才知道（FFmpeg 不把 tenc 暴露到 AVStream 上）；
+         * 提前取就只能依赖清单里的 cenc:default_KID，而很多 MPD 只写 pssh。
+         *
+         * URL 在**装回调时按值捕获**：mCurrentEncryption 会随分片推进而变，而内层
+         * demuxer 是每分片重建的，捕获当时的 URL 语义最清楚（这一片就用这个地址）。
+         */
+        if (mCurrentEncryption.method == SegmentEncryption::CENC && !mCurrentEncryption.keyUrl.empty()) {
+            const std::string cencKeyUrl = Helper::combinePaths(mPTracker->getBaseUri(), mCurrentEncryption.keyUrl);
+
+            mPDemuxer->setCencKeyResolver(
+            [this, cencKeyUrl](const std::string &kidHex, uint8_t *key, int *keySize) -> bool {
+                return fetchCencKey(cencKeyUrl, kidHex, key, keySize);
+            });
+        }
+
         ret = mPDemuxer->createDemuxer(demuxer_type_unknown);
 
         if (ret < 0) {
@@ -765,14 +829,15 @@ namespace Cicada {
              *     "HLS 每个分片重建内层 demuxer、长期停在没出包的窗口里"的那个 bug；
              *   · 加密（提示 true）：保持第一个包上懒建的原行为，DRM 时 bsf 本就不该建。
              *
-             * 判据是 AES_SAMPLE（样本级加密）而不是 mProtectedBuffer（method != NONE）：
+             * 判据是"样本级加密"而不是 mProtectedBuffer（method != NONE）：
              * AES_128 / AES_PRIVATE 是**整片解密**，解密在 HLSStream 这一层做完才把明文喂给
-             * demuxer，包上没有加密 side data，bsf 该建；只有 AES_SAMPLE 的加密样本是
-             * demuxer 看得见、包上带 AV_PKT_DATA_ENCRYPTION_INFO 的（DRM 的 keyFormat
-             * 分支与平台 sample aes 解密分支都是如此）。这条信息此刻已经确定：上面
-             * updateDecrypter 已经按 mCurrentEncryption 选好了解密路径。
+             * demuxer，包上没有加密 side data，bsf 该建；只有 AES_SAMPLE（Apple SAMPLE-AES）
+             * 与 CENC 的样本是 demuxer 看得见、包上带 AV_PKT_DATA_ENCRYPTION_INFO 的。
+             * 这条信息此刻已经确定：上面 updateDecrypter 已经按 mCurrentEncryption 选好了解密路径。
              */
-            mPDemuxer->getDemuxerHandle()->setStreamEncrypted(mCurrentEncryption.method == SegmentEncryption::AES_SAMPLE);
+            const bool sampleLevelEncrypted = mCurrentEncryption.method == SegmentEncryption::AES_SAMPLE ||
+                                              mCurrentEncryption.method == SegmentEncryption::CENC;
+            mPDemuxer->getDemuxerHandle()->setStreamEncrypted(sampleLevelEncrypted);
         }
 
         //        if (mDemuxerMeta) {
@@ -1164,10 +1229,54 @@ namespace Cicada {
         return 0;
     }
 
+    /*
+     * ============ CENC 软解兜底：按清单声明的地址取内容密钥 ============
+     *
+     * 与 DashStream::fetchSoftwareCencKey 是**同一套判据**，共用 ContentKeyFetcher，
+     * 所以两条路（URL 直连的 .mpd / 对象化清单的 CMAF）对"什么样的响应才算密钥"的
+     * 认定不会分叉。它认三种形状：
+     *   · 响应体正好 16 字节 —— 裸密钥（本工程密钥服务器 /key/{kid} 的默认形状）；
+     *   · JSON 里有 "k"（W3C ClearKey 许可证，base64url）或 "key"（十六进制）；
+     *   · 其余一律判失败并说清原因，**绝不**把半截字节当密钥用。
+     *
+     * 日志只打一条：这个方法可能被同一个 KID 之外的不同 KID 各调一次，但每个 KID
+     * 在 demuxer_service 里已经只问一次，所以按"成败"各打一条就够。
+     */
+    bool HLSStream::fetchCencKey(const std::string &keyUrl, const std::string &kidHex, uint8_t *key, int *keySize)
+    {
+        const ContentKeyFetcher::Result result = ContentKeyFetcher::fetch(keyUrl, mOpts, mSourceConfig);
+
+        if (!result.ok()) {
+            if (!mCencKeyLogged) {
+                mCencKeyLogged = true;
+                AF_LOGE("cannot set up software CENC decryption for key id %s from %s: %s. Playback of "
+                        "this protected stream will fail on this platform\n",
+                        kidHex.c_str(), keyUrl.c_str(), result.detail.c_str());
+            }
+
+            return false;
+        }
+
+        if (!mCencKeyLogged) {
+            mCencKeyLogged = true;
+            AF_LOGI("CENC software decryption is set up (key id %s, key url %s): no platform CDM handles "
+                    "this scheme here, so decryption runs on the CPU\n", kidHex.c_str(), keyUrl.c_str());
+        }
+
+        if (key != nullptr) {
+            memcpy(key, result.key, 16);
+        }
+
+        if (keySize != nullptr) {
+            *keySize = result.keySize;
+        }
+
+        return true;
+    }
+
     void HLSStream::close()
     {
         stop();
-
         if (mPDemuxer) {
             mPDemuxer->close();
             std::lock_guard<std::mutex> lock(mHLSMutex);
@@ -1346,6 +1455,19 @@ namespace Cicada {
             }
         }
 
+        /*
+         * ============ CENC：这里**刻意什么都不建** ============
+         *
+         * CENC 不是整片加密，也不是 Apple 的 SAMPLE-AES —— 它的每样本 IV 与 subsample
+         * 表在**容器**里（tenc/senc/saiz/saio），解密必须逐样本做，而且要用包上带的 KID
+         * 去查密钥。所以解密动作只能发生在 demuxer_service::readPacket（内核软解），
+         * 或者在平台解码器里（硬解）。
+         *
+         * 这里能做、也必须做的只有一件事：**在内层 demuxer 上装好按需取密钥的回调**，
+         * 见下面 createDemuxer 里那段（判据是 method == CENC 且清单给了地址）。
+         * 本函数不做任何事是刻意的：建一个 SAMPLE-AES / AES-128 的解密器去解 CENC 样本
+         * 只会把流解坏，而且不会有任何日志。
+         */
         return ret;
     }
 

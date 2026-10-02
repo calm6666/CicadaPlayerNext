@@ -120,13 +120,23 @@ namespace Cicada{
         };
 
         bool is_drmSupport(const DrmInfo *drmInfo) override {
-            if(drmInfo == nullptr){
-                return false;
-            }
-
-            bool drmSupport = drmInfo->format == "urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"
-                               && DrmHandlerPrototype::isSupport(drmInfo);
-            return drmSupport;
+            /*
+             * 判据只有一条：本平台注册的 DRM handler（Android 上就是驱动 MediaDrm 的
+             * WideVineDrmHandler）认不认这个 scheme。
+             *
+             * 原来这里还额外硬编码了 `format == Widevine`，于是即使 handler 认了
+             * PlayReady / ClearKey，MediaCodec 也会被判成"不支持 DRM"而被排除 ——
+             * 那两家在 Android 上本来是可以硬解的（DrmSessionManager 里有对应的
+             * MediaDrm UUID）。
+             *
+             * 为什么这条判据是**必须**的：`codecPrototype::create` 的形态是
+             * `drmInfo == nullptr || codec->is_drmSupport(drmInfo)`，
+             * 而软解解码器（avcodecDecoder）恒返回 false —— 也就是说
+             * "drmInfo 非空 + 这里返回 false" ⇒ 一个解码器都选不出来。
+             * 所以这里的答案必须与"平台真的能解这个 scheme"完全一致。
+             */
+            return drmInfo != nullptr && !drmInfo->format.empty() &&
+                   DrmHandlerPrototype::isSupport(drmInfo);
         }
 
         static mediaCodecDecoder se;
