@@ -229,19 +229,6 @@ namespace Cicada {
         bool mCencDecryptFailedLogged{false};
 
         /*
-         * 按需取密钥的回调与"这个 KID 问过了"的备忘录（见 setCencKeyResolver）。
-         * 两者都追加在类末尾。
-         */
-        CencKeyResolver mCencKeyResolver{nullptr};
-        std::set<std::string> mCencResolveAttempted{};
-
-        /**
-         * 第一次遇到没注册过密钥的 KID 时问一次 resolver；成功则把密钥登记进来。
-         * 返回"现在能不能用这个 KID 解"。
-         */
-        bool resolveCencKey(const std::string &keyIdHex);
-
-        /*
          * 对一个包尝试 CENC 就地解密；返回**实际解了没有**。
          * 未注册密钥 / 包上没有加密信息 / 解密失败都返回 false（调用方不需要区分，
          * 因为三种情况的正确动作都是"把包原样交出去"）。
@@ -252,9 +239,22 @@ namespace Cicada {
         // side data 解析——普通包占绝大多数）。
         static bool packetHasEncryptionInfo(IAFPacket &packet);
 
+        /*
+         * 第一次遇到没注册过密钥的 KID 时问一次 resolver；成功则把密钥登记进来。
+         * 返回"现在能不能用这个 KID 解"。
+         */
+        bool resolveCencKey(const std::string &keyIdHex);
+
         std::unique_ptr<Manifest::MediaManifest> mManifestSource{nullptr};
 
         std::unique_ptr<Cicada::DemuxerMeta> mDemuxerMeta;
+
+        /*
+         * 按需取密钥的回调与"这个 KID 问过了"的备忘录（见 setCencKeyResolver）。
+         * 按本仓库惯例**追加在类末尾**：中间插入会移动后面成员的偏移，破坏增量构建。
+         */
+        CencKeyResolver mCencKeyResolver{nullptr};
+        std::set<std::string> mCencResolveAttempted{};
     };
 }
 
