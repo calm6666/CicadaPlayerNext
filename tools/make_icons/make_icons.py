@@ -61,7 +61,25 @@ DEFAULT_OUT = os.path.join(HERE, "out")
 
 # Existing platform source trees, relative to REPO and always written with
 # forward slashes in the report (they are read by humans and by CMake).
-ANDROID_RES = "platform/Android/source/paasApp/src/main/res"
+#
+# 【多前端：Android 图标必须写到**所有**带启动图标的模块】
+# 本仓库有三个 Android 模块声明了 android:icon / android:roundIcon，它们是
+# paasApp（原生 demo）、ComposePlayer、Flutter 的 example。以前这里只有一个
+# paasApp，另外两个就各自留着模板图标 —— 实测过：
+#   * ComposePlayer 是 Android Studio 的默认模板（青色 #26A69A 方块 + 白网格 +
+#     绿色机器人），在 API 26+ 的桌面上就是那个机器人；
+#   * Flutter example 是 Flutter 模板的蓝色 logo，而且完全没有自适应图标。
+# 只换 mipmap-*/ic_launcher.png 而不管 mipmap-anydpi-v26/ic_launcher.xml 是
+# "图标换了却看不出变化"的经典原因（API 26 起 anydpi-v26 优先，见 README），
+# 所以三个目标在这里一起生成。
+#
+# 顺序有意义：第一个是历史目标，ANDROID_RES 仍然指向它（其他地方按这个名字用）。
+ANDROID_RES_TARGETS: Tuple[Tuple[str, str], ...] = (
+    ("paasApp", "platform/Android/source/paasApp/src/main/res"),
+    ("ComposePlayer", "platform/Android/ComposePlayer/app/src/main/res"),
+    ("FlutterExample", "platform/Flutter/example/android/app/src/main/res"),
+)
+ANDROID_RES = ANDROID_RES_TARGETS[0][1]
 HARMONY_ENTRY_MEDIA = "platform/HarmonyOS/entry/src/main/resources/base/media"
 HARMONY_APP_MEDIA = "platform/HarmonyOS/AppScope/resources/base/media"
 IOS_APPICONSET = (
@@ -952,34 +970,39 @@ def build_plan():
     plan: List[Artifact] = []
 
     # --- Android: rounded-white launcher icons, five densities ------------
-    for density, px in ANDROID_DENSITIES:
-        for name in ANDROID_ICON_NAMES:
-            plan.append(
-                Artifact(
-                    "android",
-                    "android/%s/%s" % (density, name),
-                    px,
-                    "rounded",
-                    "%s/mipmap-%s/%s" % (ANDROID_RES, density, name),
+    # 三个 Android 目标各生成一份。out_rel 里带上目标名，这样：
+    #   * Artifact 的 out_rel 唯一（否则三份同名会互相覆盖，报告里也分不清）；
+    #   * out/android/<目标>/... 下三份可以互相 diff，一眼看出有没有哪个目标漏刷。
+    for slug, res_dir in ANDROID_RES_TARGETS:
+        for density, px in ANDROID_DENSITIES:
+            for name in ANDROID_ICON_NAMES:
+                plan.append(
+                    Artifact(
+                        "android",
+                        "android/%s/%s/%s" % (slug, density, name),
+                        px,
+                        "rounded",
+                        "%s/mipmap-%s/%s" % (res_dir, density, name),
+                    )
                 )
-            )
 
     # --- Android: adaptive-icon foreground (API 26+) ----------------------
     # Written to drawable-nodpi: that density-less folder is exactly the right
     # home for an adaptive foreground, because the adaptive icon's own 108 dp
     # canvas already defines the rendered size and Android must NOT rescale the
     # bitmap by density on top of that.
-    plan.append(
-        Artifact(
-            "android",
-            "android/ic_launcher_foreground.png",
-            ANDROID_ADAPTIVE_FOREGROUND_PX,
-            "flat",
-            "%s/drawable-nodpi/ic_launcher_foreground.png" % ANDROID_RES,
-            "adaptive-icon foreground (transparent, centred 62 %% glyph)",
-            fraction=GLYPH_FRACTION_ROUNDED,
+    for slug, res_dir in ANDROID_RES_TARGETS:
+        plan.append(
+            Artifact(
+                "android",
+                "android/%s/ic_launcher_foreground.png" % slug,
+                ANDROID_ADAPTIVE_FOREGROUND_PX,
+                "flat",
+                "%s/drawable-nodpi/ic_launcher_foreground.png" % res_dir,
+                "adaptive-icon foreground (transparent, centred 62 %% glyph)",
+                fraction=GLYPH_FRACTION_ROUNDED,
+            )
         )
-    )
 
     # --- HarmonyOS: entry ability icon + AppScope app icon ----------------
     # Real names found by walking platform/HarmonyOS and its media/ resource
@@ -1152,6 +1175,36 @@ def describe_source(shapes, ink_box, out_dir):
 # Main
 # ===========================================================================
 
+def check_android_dest_conflicts() -> None:
+    """生成 Android 的 .png 之前，先确认目标目录里没有同名的 .webp / .jpg。
+
+    【为什么必须拦】Android Studio 的模板给的是 `mipmap-*/ic_launcher.webp`，
+    而本脚本生成的是 `.png` —— 同一个 mipmap 目录里出现同名的两份文件，
+    就是"同一个资源有两个值"，AAPT2 会直接失败：
+
+        error: duplicate value for resource 'mipmap/ic_launcher' with config ''.
+
+    （另一条路是"不报错但图标没变"：Android 会挑其中一个，而 anydpi-v26 的
+    自适应图标又优先，于是看着完全没效果 —— 两个坑都真踩过：ComposePlayer 与
+    Flutter example。）
+
+    这里提前把话说清楚，而不是等构建到 resource 合并阶段才炸。
+    """
+    for slug, res_dir in ANDROID_RES_TARGETS:
+        for density, _ in ANDROID_DENSITIES:
+            for name in ANDROID_ICON_NAMES:
+                stem = os.path.splitext(name)[0]
+                for ext in (".webp", ".jpg", ".jpeg", ".gif"):
+                    clash = os.path.join(REPO, res_dir, "mipmap-%s" % density, stem + ext)
+                    if os.path.exists(clash):
+                        raise IconError(
+                            "%s 里还有 %s（本脚本要生成同名的 %s/mipmap-%s/%s）。"
+                            "同名资源两份会让 AAPT2 报 duplicate value for resource，"
+                            "请先删掉那个模板图标再跑。"
+                            % (slug, rel(clash), res_dir, density, name)
+                        )
+
+
 def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
     Image.init()  # populate Image.SAVE so the ICNS capability check is honest
 
@@ -1188,6 +1241,10 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
     written: List[Dict[str, object]] = []
     skipped: List[Dict[str, str]] = []
 
+    # 写盘之前先拦"同名资源两份"这个必然炸构建的情况，见函数里的说明。
+    if not only or "android" in set(only):
+        check_android_dest_conflicts()
+
     for artifact in plan:
         image = get(artifact.size, artifact.variant, artifact.fraction, artifact.content_fraction)
         out_path = os.path.join(out_dir, artifact.out_rel.replace("/", os.sep))
@@ -1217,7 +1274,10 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
             # keep resolving to the stock Android Studio vector and the icon
             # would still not change -- exactly the bug this is fixing.
             is_qt_appicon = artifact.dest_rel.startswith(QT_APPICON_DIR + "/")
-            is_android_adaptive = artifact.dest_rel.startswith(ANDROID_RES + "/drawable-nodpi/")
+            is_android_adaptive = any(
+                artifact.dest_rel.startswith(res_dir + "/drawable-nodpi/")
+                for _, res_dir in ANDROID_RES_TARGETS
+            )
             if (
                 install_mode == "all"
                 or (install_mode == "existing" and dest_exists)
@@ -1275,11 +1335,17 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
             '</shape>\n'
         )
 
-        for rel_dest, text, printable in (
-            ("%s/mipmap-anydpi-v26/ic_launcher.xml" % ANDROID_RES, adaptive_xml, "ic_launcher.xml"),
-            ("%s/mipmap-anydpi-v26/ic_launcher_round.xml" % ANDROID_RES, adaptive_xml, "ic_launcher_round.xml"),
-            ("%s/drawable/ic_launcher_background.xml" % ANDROID_RES, background_xml, "ic_launcher_background.xml"),
-        ):
+        # 三个 Android 目标都要写一遍那三个 XML（自适应图标 + 白色背景）。
+        android_xml_writes: List[Tuple[str, str, str]] = []
+        for _, res_dir in ANDROID_RES_TARGETS:
+            android_xml_writes.append(
+                ("%s/mipmap-anydpi-v26/ic_launcher.xml" % res_dir, adaptive_xml, "ic_launcher.xml"))
+            android_xml_writes.append(
+                ("%s/mipmap-anydpi-v26/ic_launcher_round.xml" % res_dir, adaptive_xml, "ic_launcher_round.xml"))
+            android_xml_writes.append(
+                ("%s/drawable/ic_launcher_background.xml" % res_dir, background_xml, "ic_launcher_background.xml"))
+
+        for rel_dest, text, printable in android_xml_writes:
             dest_path = os.path.join(REPO, rel_dest.replace("/", os.sep))
             if install_mode == "none":
                 skipped.append({"dest": rel_dest, "reason": "install mode is 'none'"})

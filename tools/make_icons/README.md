@@ -261,6 +261,14 @@ With the default `--install existing`, the generator overwrites these files
 
 * `platform/Android/source/paasApp/src/main/res/mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png`
 * `…/mipmap-{…}/ic_launcher_round.png`
+* the same ten files under
+  `platform/Android/ComposePlayer/app/src/main/res/` and
+  `platform/Flutter/example/android/app/src/main/res/` — **all three Android
+  modules that declare `android:icon` get the same bytes** (see below)
+* `…/{paasApp, ComposePlayer/app, Flutter/example/android/app}/src/main/res/drawable-nodpi/ic_launcher_foreground.png`
+* `…/src/main/res/mipmap-anydpi-v26/ic_launcher{,_round}.xml` and
+  `…/src/main/res/drawable/ic_launcher_background.xml` — the adaptive-icon XML
+  is rewritten for every Android target, not just paasApp
 * `platform/HarmonyOS/entry/src/main/resources/base/media/icon.png`
 * `platform/HarmonyOS/AppScope/resources/base/media/app_icon.png`
 * `platform/Apple/demo/iOS/CicadaDemo/CicadaDemo/CicadaResource/Assets.xcassets/AppIcon.appiconset/{icon-60@2x,icon-60@3x,icon-76,icon-76@2x,icon-83.5@2x}.png`
@@ -277,30 +285,81 @@ under the default mode. Re-run with `--install all` to create them in place:
 
 * `platform/HarmonyOS/entry/src/main/resources/base/media/startIcon.png` (114 px)
 * the ten extra iOS `AppIcon.appiconset` PNGs
-* `platform/Android/ComposePlayer/app/src/main/res/mipmap-<density>/…` — **not
-  generated at all**, see "Not covered" below
+* any Android target that does not have the icons yet. Note that `--install all`
+  was the mode used when ComposePlayer was first converted: its template icons
+  were `mipmap-*/ic_launcher{,_round}.webp`, so the `.png` destinations did not
+  exist and `--install existing` would have skipped them.
+
+### Android: three modules, one source of truth
+
+`ANDROID_RES_TARGETS` in the script lists every Android module that declares
+`android:icon` / `android:roundIcon`, and the plan emits the full set (five
+densities × two names, plus the adaptive foreground and the three XML files)
+for **each** of them:
+
+| target | res directory | manifest |
+| --- | --- | --- |
+| `paasApp` | `platform/Android/source/paasApp/src/main/res` | lines 14/16, already correct |
+| `ComposePlayer` | `platform/Android/ComposePlayer/app/src/main/res` | `android:icon` / `android:roundIcon` → `@mipmap/ic_launcher{,_round}` |
+| `FlutterExample` | `platform/Flutter/example/android/app/src/main/res` | `android:icon` / `android:roundIcon` → `@mipmap/ic_launcher{,_round}` |
+
+Verify a run landed everywhere by comparing hashes — all three copies must be
+byte-identical:
+
+```bash
+for f in mipmap-xxxhdpi/ic_launcher.png drawable-nodpi/ic_launcher_foreground.png \
+         mipmap-anydpi-v26/ic_launcher.xml drawable/ic_launcher_background.xml; do
+  sha256sum platform/Android/source/paasApp/src/main/res/$f \
+            platform/Android/ComposePlayer/app/src/main/res/$f \
+            platform/Flutter/example/android/app/src/main/res/$f
+done
+```
+
+**A target must not keep its template `.webp` next to the generated `.png`.**
+`ic_launcher.webp` and `ic_launcher.png` in the same `mipmap-<density>/` folder
+are two values for one resource name and AAPT2 fails the build
+(`duplicate value for resource 'mipmap/ic_launcher'`). The generator now refuses
+to run in that state and names the offending file — delete it first (that is
+exactly what had to be done for ComposePlayer, whose template shipped WebP).
+
+**One Android icon file is *not* generated**: `drawable-v24/ic_launcher_foreground.xml`
+(the cicada as a 108 × 108 vector, with the 72 × 72 safe zone). It predates the
+multi-target plan and is checked in by hand, so a new Android front-end must copy
+it from an existing one or its adaptive foreground silently falls back to
+whatever `@drawable/ic_launcher_foreground` resolves to. `paasApp`,
+`ComposePlayer` and `Flutter/example` all carry the same 1914-byte copy.
+
+After a run, all three targets must hold the same **fifteen** files:
+
+```text
+drawable/ic_launcher_background.xml
+drawable-nodpi/ic_launcher_foreground.png
+drawable-v24/ic_launcher_foreground.xml
+mipmap-anydpi-v26/ic_launcher.xml            mipmap-anydpi-v26/ic_launcher_round.xml
+mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher.png
+mipmap-{mdpi,hdpi,xhdpi,xxhdpi,xxxhdpi}/ic_launcher_round.png
+```
 
 ### Not covered, on purpose
 
-* `platform/Android/ComposePlayer/app/src/main/res/` is a *different* Android
-  demo and uses `ic_launcher.webp` / `ic_launcher_round.webp` plus adaptive-icon
-  XML (`mipmap-anydpi-v26/ic_launcher.xml`, `drawable/ic_launcher_foreground.xml`).
-  WebP and vector adaptive icons are out of scope for this PNG generator.
-* `platform/Flutter/` launcher icons.
 * `platform/Android/source/<module>/build/intermediates/<variant>/<task>/` — build
   outputs. The generator never writes there; a Gradle build regenerates them
   from `src/`.
+* `platform/HarmonyOS`, `platform/Apple` and `platform/QtPlayer` images other
+  than the app icon (in-app artwork is not this generator's business).
 
 ## Platform wiring that still has to happen
 
 These are **configuration** changes, not image files, so the generator does not
 make them. Current values are quoted as found in the repository.
 
-### Root cause on modern Android
+### Root cause on modern Android — **fixed for all three Android modules**
 
-`platform/Android/source/paasApp/src/main/res/mipmap-anydpi-v26/ic_launcher.xml`
-(and `ic_launcher_round.xml`) win over the density PNGs on API 26+, and they
-currently point at the stock Android Studio template:
+The historical failure mode, kept here because it explains why the generator
+also rewrites XML:
+
+`mipmap-anydpi-v26/ic_launcher.xml` (and `ic_launcher_round.xml`) win over the
+density PNGs on API 26+:
 
 ```xml
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
@@ -309,26 +368,39 @@ currently point at the stock Android Studio template:
 </adaptive-icon>
 ```
 
-with `res/drawable/ic_launcher_background.xml` painting a teal `#26A69A` square
-plus a white grid. Replacing the mipmap PNGs alone therefore changes nothing on
-API 26+ devices. To actually show the cicada you must also replace
-`ic_launcher_background.xml` (e.g. `#FFFFFF`) and `ic_launcher_foreground.xml`
-(the cicada, drawn into the 108 × 108 viewport with the 72 × 72 safe zone), or
-delete both `mipmap-anydpi-v26/*.xml` files so the density PNGs are used.
+With the Android Studio template, `drawable/ic_launcher_background.xml` painted
+a teal `#26A69A` square plus a white grid and the foreground was the robot, so
+**replacing the mipmap PNGs alone changed nothing on API 26+ devices.** That is
+why the generator now writes, for every Android target in
+`ANDROID_RES_TARGETS`:
+
+* `drawable/ic_launcher_background.xml` → a flat `#FFFFFF` shape
+* `drawable-v24/ic_launcher_foreground.xml` + `drawable-nodpi/ic_launcher_foreground.png`
+  → the cicada glyph
+* `mipmap-anydpi-v26/ic_launcher{,_round}.xml` → the same adaptive-icon XML
+
+Observed state before this was fixed (kept as a checklist for new front-ends):
+
+| module | what it shipped | symptom |
+| --- | --- | --- |
+| `paasApp` | stock template background + robot foreground | launcher showed the robot on API 26+ |
+| `ComposePlayer` | stock template (`ic_launcher.webp` + teal `#26A69A` background + robot vector) | same, plus the WebP/PNG conflict above |
+| `Flutter/example` | Flutter template PNGs, **no** `mipmap-anydpi-v26` at all | Flutter logo, and nothing to override |
 
 ### Android
 
-`platform/Android/source/paasApp/src/main/AndroidManifest.xml` — already correct,
-no change needed:
+All three manifests already declare the pair, so no manifest change was needed
+when converting ComposePlayer and the Flutter example:
 
 ```xml
-android:icon="@mipmap/ic_launcher"        <!-- line 14 -->
-android:roundIcon="@mipmap/ic_launcher_round"  <!-- line 16 -->
+android:icon="@mipmap/ic_launcher"
+android:roundIcon="@mipmap/ic_launcher_round"
 ```
 
-`platform/Android/ComposePlayer/app/src/main/AndroidManifest.xml` declares the
-same two attributes (lines 40 and 42) but resolves them to its own WebP /
-adaptive-icon resources.
+`platform/Flutter/example/android/app/src/main/AndroidManifest.xml` additionally
+carries `android:label="@string/app_name"` (the template wrote the literal
+`flutter_cicadaplayer_example` there) — a label, not an icon, but it is the same
+kind of "template leftover" and was cleaned up at the same time.
 
 ### HarmonyOS
 
