@@ -43,10 +43,8 @@ typedef OnThumbnailGetSuccess = void Function(
     Uint8List bitmap, Int64List range);
 typedef OnThumbnailGetFail = void Function();
 
-/// 只在 init() 的"兜底建纹理"那条路上用到：结果谁都不关心，
+/// 只在 [FlutterCicadaPlayer.init] 的"建纹理失败"那条路上用到：失败不在这里抛，
 /// 真正的错误由 CicadaTextureView 的 FutureBuilder 处理。
-void _swallowTextureResult(int _) {}
-
 void _swallowTextureError(Object error, StackTrace stackTrace) {}
 
 /// 播放器实例。一个实例 = 原生侧一个 CicadaPlayer + 一张零拷贝视频纹理。
@@ -109,14 +107,41 @@ class FlutterCicadaPlayer {
 
   FlutterCicadaPlayer.init(int id) {
     playerId = id;
+
+    /*
+     * 【顺序很关键：先让原生侧把播放器建出来，**再**订阅事件通道】
+     *
+     * 原生侧三条通道的 handler 不是一起注册的：
+     *   * 插件挂载时（onAttachedToEngine）只注册**工厂**通道
+     *     plugins.flutter_cicadaplayer_factory；
+     *   * 播放器通道 flutter_cicadaplayer 与事件通道 flutter_cicadaplayer_event
+     *     的 handler，是在**原生播放器对象构造时**注册的
+     *     （FlutterCicadaPlayer 构造函数里那两行 setMethodCallHandler / setStreamHandler），
+     *     而那个对象只在工厂通道的 createCicadaPlayer / createTexture 里被建出来。
+     *
+     * 所以原来"先 listen、后建纹理"的顺序是错的，会抛：
+     *     MissingPluginException(No implementation found for method listen
+     *                            on channel flutter_cicadaplayer_event)
+     * 而且**不会自愈**：receiveBroadcastStream 的 listen 只往原生发一次，抛掉之后
+     * 这条流不会再发第二次，于是 onPrepared / onRenderingStart 等事件一个都收不到
+     *（表现是画面一直黑着、日志一片安静）。
+     * 另外这条异常不会走 onError：EventChannel 内部是用 FlutterError.reportError 报的，
+     * 所以它会进全局错误处理器，界面上就是顶部那条红条。
+     *
+     * 现在改成 ensureTexture() 成功之后再订阅：createTexture 走的是**工厂**通道，
+     * 它返回时原生播放器一定已经构造完，两条通道的 handler 都已就绪。
+     *
+     * 失败**不**在这里抛：真正的错误由 CicadaTextureView 的 FutureBuilder 接住
+     *（那里能把画面降级成黑屏并保留一份可诊断的状态）；这里吞掉是为了避免
+     * 一个没人 await 的 Future 把异常抛到 zone 里变成未捕获异常。
+     */
+    ensureTexture().then(_listenEventChannel, onError: _swallowTextureError);
+  }
+
+  /// 原生播放器就绪之后才订阅事件通道（顺序原因见 [init] 里的注释）。
+  /// 参数就是纹理 id，这里用不到 —— 只是为了接住 ensureTexture 的结果。
+  void _listenEventChannel(int textureId) {
     eventChannel.receiveBroadcastStream().listen(_onEvent, onError: _onError);
-    // 兼容老调用方：老代码只调 init()，不调 ensureTexture()，这里补一次，
-    // 保证"没人管纹理"时也有一条可渲染的纹理。
-    //
-    // 失败**不**在这里抛：真正的错误由 CicadaTextureView 的 FutureBuilder 接住
-    //（那里能把画面降级成黑屏并保留一份可诊断的状态）；这里吞掉是为了避免
-    // 一个没人 await 的 Future 把异常抛到 zone 里变成未捕获异常。
-    ensureTexture().then(_swallowTextureResult, onError: _swallowTextureError);
   }
 
   /// 建纹理（幂等）。同一个实例重复调用只会发一次原生调用。

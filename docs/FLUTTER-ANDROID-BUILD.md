@@ -608,6 +608,57 @@ AndroidManifest: android:icon=@mipmap/ic_launcher  android:roundIcon=@mipmap/ic_
 > `tools/make_icons/make_icons.py` 的 `build_plan()` 再加一个 Android 输出目标，
 > 一条命令把 paasApp / ComposePlayer / Flutter 三处都刷成同一份 logo。
 
+### 5.15 【代码】Dart 在原生播放器还不存在时就订阅事件通道 ⇒ `MissingPluginException`
+
+**现象**（闪退修好之后的下一个错误，界面顶部那条红条就是它）：
+
+```
+FlutterError: MissingPluginException(No implementation found for method listen
+              on channel flutter_cicadaplayer_event)
+```
+
+**根因**：原生侧三条通道的 handler **不是一起注册的**。
+
+| 通道 | 何时注册 handler |
+|---|---|
+| `plugins.flutter_cicadaplayer_factory`（工厂） | 插件挂载时（`FlutterCicadaPlayerPlugin.onAttachedToEngine`） |
+| `flutter_cicadaplayer`（播放器） | **原生播放器对象构造时**（`FlutterCicadaPlayer` 构造函数里的 `setMethodCallHandler`） |
+| `flutter_cicadaplayer_event`（事件） | 同上（同一构造函数里的 `setStreamHandler`） |
+
+而原生播放器只在**工厂通道**的 `createCicadaPlayer` / `createTexture` 里被建出来
+（`FlutterCicadaPlayerPlugin.obtainPlayer()`）。原来的 Dart 构造函数里是：
+
+```dart
+eventChannel.receiveBroadcastStream().listen(...);   // ← 先订阅（此时原生侧还没有 handler）
+ensureTexture().then(...);                          // ← 后建纹理（这一步才把播放器建出来）
+```
+
+**顺序反了**。更要紧的是**它不会自愈**：`receiveBroadcastStream` 的 `listen` 只往原生发一次，
+抛掉之后这条流不会再发第二次 ⇒ `onPrepared` / `onRenderingStart` 等事件一个都收不到
+（表现是画面一直黑着、日志一片安静，而错误提示只有顶部那一条）。
+
+> 为什么这条错误不走 Dart 的 `onError`：`EventChannel` 的实现在 `onListen` 里是
+> `FlutterError.reportError(...)`，所以它进的是**全局错误处理器**，界面上就是那条红条。
+
+**修法**（`platform/Flutter/lib/flutter_cicadaplayer.dart`）：把订阅移到
+`ensureTexture()` **成功之后**。`createTexture` 走的是工厂通道，它返回时原生播放器一定已经
+构造完、两条通道的 handler 都已就绪：
+
+```dart
+ensureTexture().then(_listenEventChannel, onError: _swallowTextureError);
+
+void _listenEventChannel(int textureId) {
+  eventChannel.receiveBroadcastStream().listen(_onEvent, onError: _onError);
+}
+```
+
+（顺手删掉了不再使用的 `_swallowTextureResult`。）
+
+**由此得出一条调用约定**：**播放器通道（`flutter_cicadaplayer`）上的任何方法，
+都必须等纹理就绪之后再调** —— 也就是在 `CicadaTextureView` 的 `onCreated` 回调之后。
+example 的 `main.dart` 就是这么写的（`_startTicker`、`setUrl`、`prepare` 都在 `onCreated`
+之后或按钮点击时触发）。反过来在 `createCicadaPlayer()` 之后立刻 `setUrl` 就会重现这个异常。
+
 ---
 
 ## 6. 故障速查
@@ -632,6 +683,9 @@ AndroidManifest: android:icon=@mipmap/ic_launcher  android:roundIcon=@mipmap/ic_
 | `android:exported needs to be explicitly specified` | targetSdk ≥ 31 的要求 | 见 §5.5（给带 intent-filter 的 Activity 加 `android:exported="true"`） |
 | **装上一打开就闪退**，Dart 侧没有任何日志 | R8 把 JNI 要用的类名改了（release 默认开 R8，aar 又没有 consumer 规则） | 见 §5.13 |
 | 桌面图标不是产品 logo（或换了 png 也没变） | 模板图标 + 缺/错的 adaptive icon | 见 §5.14 |
+| 顶部红条：`MissingPluginException ... listen on channel flutter_cicadaplayer_event` | Dart 在原生播放器建出来之前就订阅了事件通道 | 见 §5.15 |
+| 界面黑着、日志一片安静（没有 onPrepared） | 同上的"listen 只发一次、抛了不再重发" | 见 §5.15 |
+| 顶部红条出现任意 Dart 异常 | `gFatalError` 的显示（release 下默认只有 logcat 有） | `adb logcat -s flutter` 看完整栈；平时它是黑屏 |
 
 ---
 
