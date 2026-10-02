@@ -17,7 +17,11 @@ buildscript {
     }
 
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.5.0'
+        // 从 3.5.0 抬到 8.7.3：Flutter 3.47 的 flutter.gradle 要求 AGP 7.3+，
+        // 而 3.5.0 连 compileSdk 34 / namespace 都不支持。
+        // 说明：作为插件（子工程）被 example 引入时，实际生效的是根工程的 AGP，
+        // 这里写一份只是为了本插件被单独打开时也能自洽。
+        classpath 'com.android.tools.build:gradle:8.7.3'
     }
 }
 
@@ -36,13 +40,20 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 
 android {
-    compileSdkVersion 34
+    // AGP 8 起 namespace 必填；取 AndroidManifest.xml 里原来的 package 值。
+    namespace 'com.fplayer.flutter_cicadaplayer'
+    compileSdkVersion 35
 
     defaultConfig {
         minSdkVersion 24
     }
-    lintOptions {
+    lint {
         disable 'InvalidPackage'
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     buildTypes{
@@ -57,6 +68,11 @@ android {
 }
 
 dependencies {
+    // CicadaPlayer 的 Android SDK 以本地 aar 形式提供（android/libs/*.aar）。
+    // 注意：本仓库里 android/libs 目前是**空的**，见交付说明里的"必须补的东西"。
     implementation fileTree(dir: 'libs', include: ['*.aar'])
     implementation 'com.google.code.gson:gson:2.8.6'
+    // PlayerSurface 用到了 TextureRegistry.SurfaceProducer.Callback 上的 @NonNull，
+    // 显式依赖 androidx.annotation，避免依赖 Flutter embedding 的传递依赖。
+    implementation 'androidx.annotation:annotation:1.7.1'
 }

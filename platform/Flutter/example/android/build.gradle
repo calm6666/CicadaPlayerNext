@@ -14,7 +14,9 @@ buildscript {
     }
 
     dependencies {
-        classpath 'com.android.tools.build:gradle:3.5.0'
+        // 从 3.5.0 抬到 8.7.3：Flutter 3.47 的模板要求 AGP 7.3+，
+        // 而 3.5.0 连 compileSdk 34 / namespace 都不支持，配置阶段就会失败。
+        classpath 'com.android.tools.build:gradle:8.7.3'
     }
 }
 

@@ -18,6 +18,7 @@ import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
+import io.flutter.plugin.common.PluginRegistry;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -34,6 +35,10 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
     private CicadaPlayer mCicadaPlayer;
     private MethodChannel mCicadaPlayerMethodChannel;
     private String mSnapShotPath;
+    /**
+     * 当前这张零拷贝纹理。视频尺寸回调要顺手把它报给 producer（见 PlayerSurface.updateVideoSize）。
+     */
+    private PlayerSurface mPlayerSurface;
 
     public FlutterCicadaPlayer(FlutterPlugin.FlutterPluginBinding flutterPluginBinding)
     {
@@ -48,9 +53,34 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
         initListener(mCicadaPlayer);
     }
 
+    /**
+     * 兼容 pre-1.12 的 registerWith 注册路径（见 FlutterCicadaPlayerPlugin.registerWith）。
+     * BinaryMessenger 一样是那个引擎的，所以两条通道的名字和语义完全一致。
+     */
+    public FlutterCicadaPlayer(PluginRegistry.Registrar registrar)
+    {
+        this.mFlutterPluginBinding = null;
+        this.mContext = registrar.activeContext();
+        mGson = new Gson();
+        mCicadaPlayer = CicadaPlayerFactory.createCicadaPlayer(mContext);
+        mCicadaPlayerMethodChannel = new MethodChannel(registrar.messenger(), "flutter_cicadaplayer");
+        mCicadaPlayerMethodChannel.setMethodCallHandler(this);
+        mEventChannel = new EventChannel(registrar.messenger(), "flutter_cicadaplayer_event");
+        mEventChannel.setStreamHandler(this);
+        initListener(mCicadaPlayer);
+    }
+
     public CicadaPlayer getCicadaPlayer()
     {
         return mCicadaPlayer;
+    }
+
+    /**
+     * 由 FlutterCicadaPlayerPlugin 在建好纹理后调用，让尺寸回调能报给 producer。
+     */
+    public void setPlayerSurface(PlayerSurface playerSurface)
+    {
+        mPlayerSurface = playerSurface;
     }
 
     private void initListener(final CicadaPlayer player)
@@ -76,11 +106,21 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
         player.setOnVideoSizeChangedListener(new CicadaPlayer.OnVideoSizeChangedListener() {
             @Override public void onVideoSizeChanged(int width, int height)
             {
+                // 零拷贝纹理的缓冲尺寸必须跟着视频走，否则 Flutter 按 0×0 建出来的纹理
+                // 和实际帧对不上。
+                if (mPlayerSurface != null) {
+                    mPlayerSurface.updateVideoSize(width, height);
+                }
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onVideoSizeChanged");
                 map.put("width", width);
                 map.put("height", height);
-                mEventSink.success(map);
+                // 为什么要判空：createTexture 会先把播放器建出来（那时候 Dart 侧
+                // 可能还没 listen EventChannel），而这之后如果立刻 setUrl/prepare，
+                // 尺寸回调可能早于 onListen 到达，mEventSink 还是 null。
+                if (mEventSink != null) {
+                    mEventSink.success(map);
+                }
             }
         });
 
@@ -542,6 +582,12 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
 
     private void createCicadaPlayer()
     {
+        // 只在还没有播放器时创建。为什么：Dart 侧两个通道都会发 createCicadaPlayer
+        // （工厂通道一次、播放器通道一次），而纹理那条路可能已经先建好了播放器；
+        // 这里再建一个会让事件流挂在另一个实例上。
+        if (mCicadaPlayer != null) {
+            return;
+        }
         mCicadaPlayer = CicadaPlayerFactory.createCicadaPlayer(mContext);
         initListener(mCicadaPlayer);
     }

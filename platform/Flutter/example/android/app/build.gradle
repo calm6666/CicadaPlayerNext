@@ -25,19 +25,23 @@ apply plugin: 'com.android.application'
 apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
 
 android {
-    compileSdkVersion 34
-
-    lintOptions {
-        disable 'InvalidPackage'
-    }
+    // AGP 8 起 namespace 是必填项（原来靠 AndroidManifest 的 package 属性推）。
+    // 与 AndroidManifest.xml / MainActivity 的包名保持一致。
+    namespace "com.fplayer.flutter_cicadaplayer_example"
+    compileSdkVersion 35
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId "com.fplayer.flutter_cicadaplayer_example"
         minSdkVersion 24
-        targetSdkVersion 34
+        targetSdkVersion 35
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
+    }
+
+    compileOptions {
+        sourceCompatibility JavaVersion.VERSION_17
+        targetCompatibility JavaVersion.VERSION_17
     }
 
     signingConfigs {

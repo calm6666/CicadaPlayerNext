@@ -4,9 +4,14 @@ version: 5.3.0
 author: Alibaba
 homepage: https://www.aliyun.com/?spm=a2c4g.11186623.J_8058803260.1.5bf377a98Mc6oC
 
+# 为什么下限抬到 Dart 3 / Flutter 3.10：
+#   * 本插件现在用 Flutter 的 **纹理注册表**（TextureRegistry / FlutterTexture）
+#     做视频零拷贝，SurfaceProducer 是 Flutter 3.10 才有的 API；
+#   * 工程里装的 Flutter 3.47 / Dart 3.13 自带空安全，旧的 >=2.7.0 <3.0.0 会让
+#     本包在 pub 解析阶段直接不可用（连 example 都拉不起来）。
 environment:
-  sdk: ">=2.7.0 <3.0.0"
-  flutter: ">=1.20.0 <2.0.0"
+  sdk: '>=3.0.0 <4.0.0'
+  flutter: '>=3.10.0'
 
 dependencies:
   flutter:

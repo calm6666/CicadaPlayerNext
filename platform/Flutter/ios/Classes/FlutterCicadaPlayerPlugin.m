@@ -12,7 +12,12 @@
 
 + (void)registerWithRegistrar:(NSObject<FlutterPluginRegistrar> *)registrar
 {
-    CicadaPlayerFactory *factory = [[CicadaPlayerFactory alloc] initWithMessenger:registrar.messenger];
+    /*
+     * 纹理表从 registrar 拿，交给工厂去做零拷贝视频纹理的注册/注销。
+     * 平台视图工厂保留（老 Dart 代码用 UiKitView 时还走得到），但新路径是 Texture widget。
+     */
+    CicadaPlayerFactory *factory = [[CicadaPlayerFactory alloc] initWithMessenger:registrar.messenger
+                                                                  textureRegistry:registrar.textures];
     [registrar registerViewFactory:factory withId:@"plugins.flutter_cicadaplayer"];
 }
 

@@ -13,10 +13,14 @@
 
 @interface CicadaPlayerFactory () {
     NSObject<FlutterBinaryMessenger> *_messenger;
+    /*
+     * 纹理表只读引用（assign）。Flutter 那边持有本对象（作为插件实例 / 视图工厂），
+     * 本对象反过来强引用纹理表就会成环。
+     */
+    NSObject<FlutterTextureRegistry> *_textureRegistry;
     FlutterMethodChannel *_channel;
     FlutterMethodChannel *_listPlayerchannel;
     FlutterMethodChannel *_commonChannel;
-    UIView *playerView;
     NSString *mSnapshotPath;
 }
 
@@ -28,10 +32,12 @@
 @implementation CicadaPlayerFactory
 
 - (instancetype)initWithMessenger:(NSObject<FlutterBinaryMessenger> *)messenger
+                  textureRegistry:(NSObject<FlutterTextureRegistry> *)textureRegistry
 {
     self = [super init];
     if (self) {
         _messenger = messenger;
+        _textureRegistry = textureRegistry;
         __weak __typeof__(self) weakSelf = self;
 
         _commonChannel = [FlutterMethodChannel methodChannelWithName:@"plugins.flutter_cicadaplayer_factory" binaryMessenger:messenger];
@@ -74,11 +80,94 @@
                                                                           viewIdentifier:viewId
                                                                                arguments:args
                                                                          binaryMessenger:_messenger];
-    playerView = player.view;
-    if (_cicadaPlayer) {
-        _cicadaPlayer.playerView = playerView;
-    }
     return player;
+}
+
+#pragma mark - 零拷贝纹理
+
+- (int64_t)registerZeroCopyTexture
+{
+    [self unregisterZeroCopyTexture];
+
+    /*
+     * 顺序：先注册纹理，再把播放器的渲染回调接上。
+     * 为什么必须是这个顺序：接上 renderDelegate 之后解码线程随时可能回调
+     * onVideoPixelBuffer:，那时 videoTexture 必须已经存在。
+     */
+    FlutterCicadaPlayerTexture *texture = [[FlutterCicadaPlayerTexture alloc] initWithTextureRegistry:_textureRegistry textureId:0];
+    int64_t textureId = [_textureRegistry registerTexture:texture];
+    texture.textureId = textureId;
+    _videoTexture = texture;
+
+    CicadaPlayer *player = self.cicadaPlayer;
+    player.renderDelegate = self;
+
+    if (textureId == 0) {
+        /*
+         * 注册失败（id 为 0 在本实现里意味着纹理表没给出有效 id）。这时候不能接
+         * renderDelegate：接了就等于把每一帧从 SDK 自己的渲染里摘走又没人显示（黑屏），
+         * 不如什么都不做，让 SDK 继续用它的默认渲染路径。
+         */
+        player.renderDelegate = nil;
+        _videoTexture = nil;
+        NSLog(@"[flutter_cicadaplayer] registerTexture returned 0, the zero-copy texture is "
+              "unavailable; the player keeps its own rendering path");
+    }
+
+    return textureId;
+}
+
+- (void)unregisterZeroCopyTexture
+{
+    if (_videoTexture == nil) {
+        return;
+    }
+
+    /*
+     * 摘回调必须排在注销之前：反过来的话，注销之后、摘回调之前到达的那一帧会调
+     * textureFrameAvailable:，而那个 id 已经无效了。
+     */
+    _cicadaPlayer.renderDelegate = nil;
+    [_textureRegistry unregisterTexture:_videoTexture.textureId];
+    [_videoTexture unregister];
+    _videoTexture = nil;
+}
+
+#pragma mark - CicadaRenderDelegate
+
+/**
+ * 硬解渲染帧回调：**iOS 零拷贝的唯一入口**。
+ *
+ * 这里拿到的就是解码器交给渲染模块的那个 CVPixelBuffer（IOSurface 支撑）。本函数只做两件事：
+ * 把它转交给 Flutter 纹理，然后返回 YES。
+ *
+ * 为什么返回 YES：framework 侧 SuperMediaPlayer::SendVideoFrameToRender
+ * （mediaPlayer/SuperMediaPlayer.cpp:5792-5798）拿到回调返回 YES 就直接
+ * `RenderCallback(ST_TYPE_VIDEO, ...)` 后 return，**不再走自己的渲染器**。这正是我们要的：
+ * 帧只有一条消费路径，不会出现"纹理和 SDK 自渲染各显示一份"的撕裂。
+ */
+- (BOOL)onVideoPixelBuffer:(CVPixelBufferRef)pixelBuffer pts:(int64_t)pts
+{
+    FlutterCicadaPlayerTexture *texture = _videoTexture;
+    if (texture == nil || pixelBuffer == NULL) {
+        return NO;
+    }
+
+    [texture onVideoPixelBuffer:pixelBuffer];
+    return YES;
+}
+
+/**
+ * 软解渲染帧回调（YUV420P，没有 CVPixelBuffer）。
+ *
+ * 这条路上**没有**零拷贝可走：数据是 IAFFrame 里的三段裸指针，要交给 Flutter 的纹理就必须
+ * 先变成一个 CVPixelBuffer —— 那就是一次 CPU 拷贝。所以这里刻意什么都不做、返回 NO，
+ * 让 SDK 用它自己的软解渲染路径把画面显示出来（画面正常，只是这一路不是零拷贝）。
+ * 详见交付说明里的"哪条路不是零拷贝"。
+ */
+- (BOOL)onVideoRawBuffer:(uint8_t **)buffer lineSize:(int32_t *)lineSize pts:(int64_t)pts width:(int32_t)width height:(int32_t)height
+{
+    return NO;
 }
 
 - (void)onMethodCall:(FlutterMethodCall *)call result:(FlutterResult)result atObj:(NSObject *)player
@@ -157,8 +246,42 @@
 {
     FlutterResult result = arr[1];
     CicadaPlayer *player = arr[2];
+    /*
+     * 先摘渲染回调再 destroy。
+     *
+     * 为什么：CicadaPlayer.mm 的 setRenderDelegate: 是把 delegate 的**裸指针**
+     *（__bridge void*）交给 framework 的 SetOnRenderFrameCallback，framework 不持有它。
+     * destroy 之后播放器对象和它的 player 都释放了，但渲染回调可能还有最后一帧在飞；
+     * 先摘掉可以把这个窗口关掉。disposeTexture 里也会摘一次（幂等）。
+     */
+    player.renderDelegate = nil;
     [player destroy];
     self.cicadaPlayer = nil;
+    result(nil);
+}
+
+- (void)createCicadaPlayer:(NSArray *)arr
+{
+    /*
+     * 兼容老 Dart 契约：以前 Dart 侧会在工厂通道和播放器通道各发一次
+     * createCicadaPlayer。现在播放器由 createTexture 那条路顺带建出来，这里只需要
+     * 摸一下 getter 保证实例存在（getter 内部会建），返回 nil 即可。
+     */
+    (void) self.cicadaPlayer;
+    FlutterResult result = arr[1];
+    result(nil);
+}
+
+- (void)createTexture:(NSArray *)arr
+{
+    FlutterResult result = arr[1];
+    result(@([self registerZeroCopyTexture]));
+}
+
+- (void)disposeTexture:(NSArray *)arr
+{
+    FlutterResult result = arr[1];
+    [self unregisterZeroCopyTexture];
     result(nil);
 }
 
@@ -650,7 +773,22 @@
 #pragma mark CicadaDelegate
 
 /**
- @brief 播放器状态改变回调
+ * @brief 视频尺寸变化回调（CicadaOCHelper.mm:257-265 转发过来）
+ *
+ * 为什么要额外发一条 textureSizeChanged：零拷贝纹理的尺寸是 Flutter 侧 Texture widget
+ * 自己按纹理来画的，Dart 要按真实宽高比重新布局（老实现是原生视图按 width/height 建视图，
+ * 没有这个问题）。onVideoSizeChanged 保留原样，避免改变既有事件契约。
+ */
+- (void)onVideoSizeChanged:(CicadaPlayer *)player width:(int)width height:(int)height rotation:(int)rotation
+{
+    if (self.eventSink == nil) {
+        return;
+    }
+    self.eventSink(@{kCicadaPlayerMethod: @"onVideoSizeChanged", @"width": @(width), @"height": @(height)});
+}
+
+/**
+ * @brief 播放器状态改变回调
  @param player 播放器player指针
  @param oldStatus 老的播放器状态 参考CicadaStatus
  @param newStatus 新的播放器状态 参考CicadaStatus

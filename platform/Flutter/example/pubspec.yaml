@@ -1,28 +1,34 @@
 name: flutter_cicadaplayer_example
 description: Demonstrates how to use the flutter_cicadaplayer plugin.
-version:  1.0.0+1
+version: 1.0.0+1
 
 # The following line prevents the package from being accidentally published to
 # pub.dev using `pub publish`. This is preferred for private packages.
-publish_to: 'none' # Remove this line if you wish to publish to pub.dev
+publish_to: 'none'
 
+# 【为什么要抬到 Dart 3】原值是 `sdk: ">=2.7.0 <3.0.0"`（只允许 Dart 2），
+# 而本机 Flutter 3.47.6 带的是 Dart 3.13.5，**只支持空安全**，于是 pub get 直接失败：
+#     The lower bound of "sdk: '>=2.7.0 <3.0.0'" must be 2.12.0 or higher
+#     to enable null safety.
+# 又因为 example 是 plugin 的 path 依赖，解析 example 时整个 workspace 一起失败
+# ⇒ **连 plugin 自己都没法 `flutter analyze`**。所以这个下界必须抬起来。
 environment:
-  sdk: ">=2.7.0 <3.0.0"
+  sdk: '>=3.0.0 <4.0.0'
 
 dependencies:
   flutter:
     sdk: flutter
 
-  dio: ^3.0.10
-  sqflite: ^1.3.0
-  path_provider: ^1.6.24
-  pull_to_refresh: ^1.6.3
-  fluttertoast: ^7.1.4
-  connectivity: ^2.0.2
-  xml_parser: ^0.1.2
-  qrcode_reader:
-    git:
-      url: "https://github.com/bcko/flutter_qrcode_reader.git"
+  # 【依赖现代化】原清单是 Dart 2 时代的，全部无法在 Dart 3 下解析：
+  #   dio ^3.0.10 / sqflite ^1.3.0 / path_provider ^1.6.24 / fluttertoast ^7.1.4
+  #   / connectivity ^2.0.2 / cupertino_icons ^0.1.3  → 换成当前可解析的版本；
+  #   connectivity → connectivity_plus（包已改名）。
+  dio: ^5.7.0
+  sqflite: ^2.4.1
+  path_provider: ^2.1.5
+  fluttertoast: ^8.2.8
+  connectivity_plus: ^6.1.0
+  cupertino_icons: ^1.0.8
 
   flutter_cicadaplayer:
     # When depending on this package from a real application you should use:
@@ -32,26 +38,13 @@ dependencies:
     # the parent directory to use the current plugin's version.
     path: ../
 
-  # The following adds the Cupertino Icons font to your application.
-  # Use with the CupertinoIcons class for iOS style icons.
-  cupertino_icons: ^0.1.3
-
 dev_dependencies:
   flutter_test:
     sdk: flutter
 
-# For information on the generic Dart part of this file, see the
-# following page: https://dart.dev/tools/pub/pubspec
-
-# The following section is specific to Flutter.
 flutter:
-
-  # The following line ensures that the Material Icons font is
-  # included with your application, so that you can use the icons in
-  # the material Icons class.
   uses-material-design: true
 
-  # To add assets to your application, add an assets section, like this:
   assets:
     - assets/encryptedApp.dat
     - assets/encryptedApp_ios.dat
@@ -61,29 +54,18 @@ flutter:
     - assets/xml/test_resources.xml
     - assets/xml/test_result.xml
 
-
-  # An image asset can refer to one or more resolution-specific "variants", see
-  # https://flutter.dev/assets-and-images/#resolution-aware.
-
-  # For details regarding adding assets from package dependencies, see
-  # https://flutter.dev/assets-and-images/#from-packages
-
-  # To add custom fonts to your application, add a fonts section here,
-  # in this "flutter" section. Each entry in this list should have a
-  # "family" key with the font family name, and a "fonts" key with a
-  # list giving the asset and other descriptors for the font. For
-  # example:
-  # fonts:
-  #   - family: Schyler
-  #     fonts:
-  #       - asset: fonts/Schyler-Regular.ttf
-  #       - asset: fonts/Schyler-Italic.ttf
-  #         style: italic
-  #   - family: Trajan Pro
-  #     fonts:
-  #       - asset: fonts/TrajanPro.ttf
-  #       - asset: fonts/TrajanPro_Bold.ttf
-  #         weight: 700
-  #
-  # For details regarding fonts from package dependencies,
-  # see https://flutter.dev/custom-fonts/#from-packages
+# ---------------------------------------------------------------------------
+# 【移出 dependencies 的三个包，以及为什么必须移】
+#
+#   pull_to_refresh ^1.6.3 —— Dart 2 时代包，没有空安全版本，Dart 3 下不可解析；
+#   xml_parser       ^0.1.2 —— 同上；
+#   qrcode_reader (git)    —— 直接依赖第三方 GitHub 仓库，版本随上游漂移，无法保证可解析。
+#
+# 这三个只要留在 dependencies 里，`flutter pub get` 就整体失败，
+# 于是**连"plugin 能不能 analyze / 编译"都验不了**。宁可 example 少三个演示页面，
+# 也不能让主线（零拷贝）的验证被堵死。
+#
+# 代价说清楚：`example/lib` 里引用这三个包的文件现在会编译不过
+# （下拉刷新页、XML 测试用例页、扫码页）。它们与"零拷贝播放"这条主线无关，
+# 需要单独一轮改造（换 package:xml / 换扫码实现 / 换下拉刷新实现）才能恢复。
+# ---------------------------------------------------------------------------
