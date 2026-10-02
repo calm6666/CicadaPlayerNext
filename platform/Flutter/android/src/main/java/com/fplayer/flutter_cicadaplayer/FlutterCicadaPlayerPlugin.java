@@ -59,23 +59,39 @@ public class FlutterCicadaPlayerPlugin implements FlutterPlugin, MethodCallHandl
 
     @Override
     public void onMethodCall(@NonNull MethodCall call, @NonNull Result result) {
-        switch (call.method) {
-            case "createCicadaPlayer":
-                // 播放器只在"建纹理"那条路上创建：纹理必须先于播放器存在，
-                // 所以这里不能单独建一个播放器出来。
-                obtainPlayer();
-                result.success(null);
-                break;
-            case "createTexture":
-                result.success(createTexture());
-                break;
-            case "disposeTexture":
-                disposeTexture();
-                result.success(null);
-                break;
-            default:
-                result.notImplemented();
-                break;
+        // 【本轮加这层 try/catch】理由同 FlutterCicadaPlayer.onMethodCall：
+        // 加载 native 库失败抛的是 java.lang.UnsatisfiedLinkError（Error，不是 Exception），
+        // Flutter 的 MethodChannel 只接 RuntimeException，于是它会直接在平台线程上冒出去
+        // 把整个进程干掉 —— 表现就是"装上一打开就闪退"，且不留下可读的 Flutter 日志。
+        // 包住之后变成 Dart 能看到的 PlatformException，至少能把原因显示出来。
+        try {
+            switch (call.method) {
+                case "createCicadaPlayer":
+                    // 播放器只在"建纹理"那条路上创建：纹理必须先于播放器存在，
+                    // 所以这里不能单独建一个播放器出来。
+                    obtainPlayer();
+                    result.success(null);
+                    break;
+                case "createTexture":
+                    result.success(createTexture());
+                    break;
+                case "disposeTexture":
+                    disposeTexture();
+                    result.success(null);
+                    break;
+                default:
+                    result.notImplemented();
+                    break;
+            }
+        } catch (Throwable t) {
+            // 固定 tag，方便 adb logcat -s FlutterCicadaPlayerPlugin 直接抓到原因。
+            android.util.Log.e("FlutterCicadaPlayerPlugin",
+                    "onMethodCall(" + call.method + ") 抛出了 " + t, t);
+            // 一个 Result 只能回复一次；上面若已经 success 过，这里再回复会抛 IllegalStateException。
+            try {
+                result.error("CICADA_PLUGIN_CALL_FAILED", call.method + " 失败: " + t, null);
+            } catch (Throwable ignored) {
+            }
         }
     }
 

@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 桌面显示的名字。与 Compose 侧同名会让两个 App 在桌面上分不清，
+         所以这里带个 Flutter 后缀；要与 Compose 完全一致就改成 CicadaPlayer。 -->
+    <string name="app_name">CicadaPlayer Flutter</string>
+</resources>

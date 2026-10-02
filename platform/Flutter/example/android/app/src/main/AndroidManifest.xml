@@ -13,15 +13,26 @@
   
 
     <application
-        android:label="flutter_cicadaplayer_example"
+        android:label="@string/app_name"
         android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true">
-        <!-- 上面**删掉了 android:name="io.flutter.app.FlutterApplication"**：
-             那是 Android v1 embedding 的 Application 类，新版 Flutter 引擎
-             （本工程 3.47）已经把它移除了，留着会在启动时 ClassNotFoundException。
-             v2 embedding 不需要自定义 Application。
+        <!-- 图标：原来用的是 Flutter 模板自带的 5 个 ic_launcher.png（442 B ~ 1443 B 的
+             Flutter 蓝色 logo），既没有自适应图标也没有圆形图标，所以桌面上看到的不是
+             CicadaPlayer 的图标。现在从 Compose 侧整套拷了过来
+             （res/drawable/ic_launcher_{background,foreground}.xml、mipmap-anydpi-v26/*.xml、
+             mipmap-*/ic_launcher{,_round}.webp），并在这里补上 roundIcon；
+             label 也从字面量 flutter_cicadaplayer_example 换成 @string/app_name。 -->
+        <!-- 上面**删掉了 android:name="io.flutter.app.FlutterApplication"**。
+             说明（先前这里写错过，特此更正）：这个类**在引擎 jar 里其实还在**
+             （javap 能查到，它是 v1 Android embedding 的 Application，onCreate 里做的是
+             FlutterMain.startInitialization）。删它的理由不是"类没了"，而是：
+             ① v2 embedding（本工程 manifest 里 flutterEmbedding=2）的初始化由
+                FlutterActivity/FlutterLoader 负责，Application 用系统默认的
+                android.app.Application 即可；
+             ② Flutter 官方的 v2 模板本来就没有 android:name 这一项。
              另外 usesCleartextTraffic="true" 是为了让测试能用 http:// 源 ——
-             targetSdk 35 下默认禁止明文 HTTP，不加这一条会直接连不上。 -->
+             targetSdk >= 28 起默认禁止明文 HTTP，不加这一条会直接连不上。 -->
         <activity
             android:name=".MainActivity"
             android:launchMode="singleTop"

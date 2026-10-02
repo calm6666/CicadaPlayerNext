@@ -61,6 +61,13 @@ android {
 
     defaultConfig {
         minSdkVersion 24
+        // 【必须】把 SDK 的混淆保留规则传给 App。原因见 consumer-rules.pro：
+        // Flutter 的 release 构建**默认打开 R8**（FlutterPlugin.kt:216 把 isMinifyEnabled 置 true，
+        // shouldShrinkResources 默认 true），而 CicadaPlayer 的 native 层是按**类名**
+        // FindClass 回调 Java 的（libCicadaPlayer.so 里写死了 22 个类名），名字被改掉
+        // 就是"装上一打开就闪退"。consumerProguardFiles 是 Android library 把
+        // "消费方必须遵守的混淆规则"传给 App 的标准方式。
+        consumerProguardFiles 'consumer-rules.pro'
     }
     lint {
         disable 'InvalidPackage'

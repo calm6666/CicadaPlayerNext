@@ -21,7 +21,28 @@ import 'package:flutter/material.dart';
 import 'package:flutter_cicadaplayer/flutter_cicadaplayer.dart';
 import 'package:flutter_cicadaplayer/flutter_cicadaplayer_factory.dart';
 
+/// 启动期/运行期"没人接住的错误"都会记到这里，然后显示在界面顶部的红条上。
+///
+/// 为什么需要：release 模式下 Flutter 默认只把异常写进 logcat，界面上什么都不显示 ——
+/// 看起来就是"黑屏/闪退"。这个 App 的用途是测播放器，把原因直接摆到屏幕上比让人去查
+/// logcat 快得多（尤其是在手上没有 adb 的时候）。
+final ValueNotifier<String?> gFatalError = ValueNotifier<String?>(null);
+
 void main() {
+  final WidgetsBinding binding = WidgetsFlutterBinding.ensureInitialized();
+
+  // 1) Flutter 框架层面的异常（build / layout / paint 里抛出来的）。
+  FlutterError.onError = (FlutterErrorDetails details) {
+    FlutterError.presentError(details);
+    gFatalError.value = 'FlutterError: ${details.exception}';
+  };
+
+  // 2) 异步里没人接的异常，以及平台侧回过来的错误。
+  binding.platformDispatcher.onError = (Object error, StackTrace stack) {
+    gFatalError.value = '未捕获异常: $error';
+    return true;
+  };
+
   runApp(const CicadaTestApp());
 }
 
@@ -81,6 +102,13 @@ class _TestHomePageState extends State<TestHomePage> {
   void initState() {
     super.initState();
     _bindCallbacks();
+    // 纹理创建失败会被 CicadaTextureView 降级成一块黑屏（它自己 catch 掉了，不抛），
+    // 于是"打不开画面"这件事在界面上完全没有线索。这里额外挂一个监听，把原因写进日志面板。
+    // 返回的是同一个缓存 Future（ensureTexture 幂等），所以不会重复建纹理。
+    _player.ensureTexture().then<void>(
+      (int id) => _addLog('纹理已创建 textureId=$id'),
+      onError: (Object e) => _addLog('！！纹理创建失败（很可能是 native 库没加载起来）: $e'),
+    );
   }
 
   @override
@@ -237,6 +265,27 @@ class _TestHomePageState extends State<TestHomePage> {
       ),
       body: Column(
         children: <Widget>[
+          // --------------------------------------------------- 致命错误红条
+          // 只在"有没人接住的错误"时出现。release 下界面默认什么都不显示，
+          // 有了它就等于把闪退原因直接摆在屏幕上。
+          ValueListenableBuilder<String?>(
+            valueListenable: gFatalError,
+            builder: (BuildContext context, String? err, Widget? _) {
+              if (err == null) {
+                return const SizedBox.shrink();
+              }
+              return Container(
+                width: double.infinity,
+                color: const Color(0xFFB00020),
+                padding: const EdgeInsets.all(8),
+                child: Text(
+                  err,
+                  style: const TextStyle(color: Color(0xFFFFFFFF), fontSize: 12),
+                ),
+              );
+            },
+          ),
+
           // ------------------------------------------------------------- 画面
           SizedBox(
             height: 240,

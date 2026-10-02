@@ -347,6 +347,32 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
 
     @Override public void onMethodCall(MethodCall methodCall, MethodChannel.Result result)
     {
+        // 【本轮加这层 try/catch】为什么必须捕获 Throwable 而不是 Exception：
+        // Flutter 的 MethodChannel 只捕获 RuntimeException（在
+        // MethodChannel$IncomingMethodCallHandler.onMessage 里），而加载 native 库失败抛的是
+        // java.lang.UnsatisfiedLinkError —— 它是 Error 不是 Exception，**不会被 Flutter 接住**，
+        // 会直接在平台线程上冒出去把整个进程干掉（表现就是"装上一打开就闪退"，一行日志都留不下）。
+        // 包住之后：native 侧的任何失败都会以 PlatformException 的形式回到 Dart，
+        // 由 Dart 侧显示/记录，而不是闪退。
+        try {
+            dispatchMethodCall(methodCall, result);
+        } catch (Throwable t) {
+            // 用 android.util.Log 而不是 SDK 自己的 Logger：这条日志的用途是"闪退时能查到"，
+            // android.util.Log 不需要任何初始化就一定写进 logcat，tag 也固定好 grep：
+            //     adb logcat -s FlutterCicadaPlayer
+            android.util.Log.e("FlutterCicadaPlayer",
+                    "onMethodCall(" + methodCall.method + ") 抛出了 " + t, t);
+            // 一个 Result 只能回复一次；万一上面已经 success 过，再回复会抛 IllegalStateException。
+            try {
+                result.error("CICADA_CALL_FAILED",
+                        methodCall.method + " 失败: " + t, null);
+            } catch (Throwable ignored) {
+            }
+        }
+    }
+
+    private void dispatchMethodCall(MethodCall methodCall, MethodChannel.Result result)
+    {
         switch (methodCall.method) {
             case "createCicadaPlayer":
                 createCicadaPlayer();
