@@ -34,6 +34,10 @@
      92 处 `#include "refactor_stage/..."` + 53 处 `#include "src/..."` 全部无法解析，
      CMake 里引用了未定义的 `vod_common` 目标（configure 直接失败）。它的价值是那份 **4350 行的
      `docs/refactor/DESIGN.md` + 881 行 DDL（31 张表）**——**当规格书读**。
+   * ⚠ **【本轮决定】不另起项目，直接在 `hvc` 上做增量改造**，理由与清单见 **§18**。
+     本文因此从"新服务蓝图"降级为"**hvc 的改造清单 + 验收判据**"：
+     §3（事实规格）、§9（加密/DRM）、§11.3（容量实测）、§17（风险）仍然全部适用；
+     §4/§5/§6 的架构与表设计请对照 `hvc` 现状阅读（它已经是那个形态，差的是 §18 那几条）。
 3. **三者共同的空洞正好是本项目最需要的三件事：**
    **DRM/分片加密（两家都是 0 实现）**、**"完成 = 可播"的契约（hvc 明确不成立）**、
    **能跑真 ffmpeg 的测试（两家都是 0）**。本设计把这三条列为第一优先级。
@@ -863,6 +867,108 @@ AV1/VP9、多音轨/字幕、成本与抢占式调度。
 | 5 | **源站签名 URL 的有效期 vs 长任务** | 已定策略（plan 阶段先落地本地副本），但"落地"本身的耗时与失败处理未实测 | 用一个会过期的签名 URL 做一次演练 |
 | 6 | **`-filter_complex` 在 8 路编码时的 CPU 开销** | 本机只测到 3 路（libx264）与 nvenc 单路 | 在目标机上按真实阶梯（4 档 × 2 编码）跑一次，量 CPU/显存 |
 | 7 | **对象存储的原子发布语义** | 方案是 `_staging/` + 批量 `CopyObject` | 需确认目标存储（MinIO/S3/OSS）的 `CopyObject` 一致性与批量上限 |
+
+---
+
+## 18. 结论变更：以 `hvc` 为基线做增量（本轮决定）
+
+> 这一节是**推翻本文初稿的"新写一个服务"**那一层，改成"改 `hvc`"。
+> 触发它的是一条实测证据 + 一条对初稿事实的纠正。
+
+### 18.1 决定性证据：三个工程里只有 `hvc` 真的能构建
+
+本机实测（`go` 1.25，工作目录 `D:\hilihili\server\hvc`）：
+
+| 命令 | 结果 |
+|---|---|
+| `go build ./...` | **exit 0** |
+| `go vet ./...` | **exit 0** |
+| `go test ./...` | **exit 0** —— 23 个有测试的包**全部 ok**（auth / bootstrap / callback / cluster / config / redis / mysql / gpu / rabbitmq / http(admin,public) / ws / live / manifest / model / scheduler(4 个子包) / server / service/live / usecase/transcode / worker / test(e2e,integration,benchmark)） |
+
+对照另外两个：
+
+| 工程 | 构建 | 测试 |
+|---|---|---|
+| `vod_live_transcoding` | 曾成功过，**最后一次 MSBuild 失败**（`unsuccessfulbuild`） | **0 个测试** |
+| `hili_video_cloud` | **configure 就失败**（CMakeLists 引用未定义的 `vod_common`） | **0 个测试** |
+
+也就是说：**"改 `hvc`"开工第一天就有一个可编译、可跑测试、可出 exe 的基线**；
+"重写"开工第一天什么都没有，而且要把上面那 23 个包的并发语义重新发明一遍。
+
+### 18.2 事实纠正：`hvc` 里**没有**拼接 SQL
+
+初稿里我把"SQL 全部字符串拼接"列成了待办 —— **那是 `vod_live_transcoding` 的问题，不是 `hvc` 的**。
+
+本机在 `hvc/internal/infra/db/mysql` 下实测：
+
+| 检索 | 命中 |
+|---|---|
+| `db.Raw(` | **0** |
+| `db.Exec(` | **0** |
+| `fmt.Sprintf("(SELECT\|UPDATE\|INSERT\|DELETE)` | **0** |
+| `gorm.` / `.Where(` / `.Model(` | **193** 处，全部是 `?` 占位符（例：`Where("job_id = ? AND status = ?", jobID, model.JobStatusQueued)`） |
+
+结论：`hvc` 的数据层是 **GORM + 参数占位**，**这一条待办可以直接划掉**。
+（拼接 SQL、无连接池、`status IN (3,4,5)` 魔法数字都是 C++ 那套的实现特征。）
+
+### 18.3 改造清单
+
+**A. 你点出的两条，其中一条要修正**
+
+| # | 项 | 判定 | 做法 |
+|---|---|---|---|
+| A1 | **回调必须等"整个分片全部上传完毕"** | ✅ **确实要改，而且是真缺陷** | 见 18.4 —— 改的不是"回调时机"一行，而是三处联动 |
+| A2 | **"拼接 SQL 全部优化"** | ❌ **不用做** | 见 18.2：`hvc` 里没有拼接 SQL |
+
+**B. 还需要改/补的（按优先级）**
+
+| # | 项 | 现状（证据） | 要做的事 |
+|---|---|---|---|
+| B1 | **分片加密 + DRM** | `hvc` 全树对 `aes/drm/widevine/clearkey/encrypt` **0 命中** | **新增模块**（不是改）：整片 AES-128 自己做（ffmpeg 没有这个 muxer 能力）、CENC 交给 `-encryption_scheme cenc-aes-ctr`、密钥来自本仓库已实现的 `drm-keyserver`。规范与验收见 §3.4/§9 |
+| B2 | **断点续跑** | 失败即 `ResetToQueued` 从零重跑（无步骤表） | 新增 `t_transcode_job_step`（每步一行 + `input_hash`）；接管后从上一成功步骤继续（§10.1） |
+| B3 | **清单物化** | 清单是按请求从 DB 分片实时拼的，worker 反而把 ffmpeg 产的 `manifest.mpd` 删掉 | 在 `PUBLISHED` 时把 HLS/DASH/JSON 清单**写成静态文件**并上传；动态拼装保留作兜底。这同时解决"CDN 无法缓存"和 A1 |
+| B4 | **死代码** | `internal/domain/*`（7 文件）零引用；`internal/infra/ffmpeg/command/*`（172 行）零引用；`worker/thumbnail`（能生成雪碧图）主链路从不调用 | 删或接线 |
+| B5 | **ffmpeg 参数三份重复** | `planner.BuildFFmpegArgs`（生效）、`infra/ffmpeg/command/*`（死）、`executor/runner.go` 内联 `-progress` | 收敛成一份；并把 §3.2/§3.3 的两条实测写进去：**`-use_timeline 1` 不能关**、**必须把子进程 cwd 设成 staging 目录**（否则分片会落到别处） |
+| B6 | **真 E2E 测试** | 156 个用例里 **0 个**跑 ffmpeg/DB/S3/HTTP；`test/e2e` 只做纯函数断言 | 把 §3.4 的 A1–A12 移植成 Go 包当**门禁**（先在 Python 产物上跑通，再用于 Go 产物） |
+| B7 | **水印** | 只有 CPU overlay（`buildWatermarkFilter` 是真滤镜链，可用）；硬件 overlay 只探测不使用 | 先用现成的 CPU 路径；硬件路径等有可对比成片再上 |
+| B8 | **容量模型** | 只按"每 GPU 会话数"（配置位）限制 | 改成按**实测吞吐**分箱：§11.3 实测同一块 1650 Ti 上 6 路与 12 路 1080p30 并发全成功，但 12 路墙钟正好是 6 路的 2 倍 ⇒ 吞吐在 ~6 路饱和（≈25× 实时） |
+| B9 | 可选 | 直播转码完全没做；边转边传也没做；缩略图未接线 | 本期可不做（§16.3） |
+
+### 18.4 A1 为什么不是"改一行回调"
+
+现在 `hvc` 的实际顺序（读码得到）：
+
+```
+worker: 扫描本地分片目录 → 逐条 segmentRepository.Save() → jobRepository.MarkCompleted() → 落 outbox(回调)
+                                                    ↓
+                       分片上传是之后由 DB 待传队列异步推进的（ListPendingUpload → MarkUploaded）
+                                                    ↓
+                       而清单是按请求从 DB 分片元数据实时拼的（manifest/builder.go）
+```
+
+于是存在一个窗口：**回调已经发出去了，分片还没传完，清单还不完整**。下游拿到回调立刻拉清单会拿到残缺内容。
+要真正修好，三处必须一起动：
+
+1. **状态机加一环**：`RUNNING → UPLOADING → PUBLISHED → CALLBACK_SENT`，
+   只有"该任务的全部 artifact 都是 uploaded"才允许进 `PUBLISHED`；
+2. **outbox 事件在 `PUBLISHED` 之后才落库**（现在的落库点在 `MarkCompleted` 旁边）；
+3. **清单在 `PUBLISHED` 时物化成静态文件**（顺带让 CDN 能直出）。
+
+判据（可直接写成测试）：**任意时刻"回调已送达"⇒"清单里引用的每一个分片都能被 GET 到并校验 sha256 通过"**。
+
+### 18.5 本文各节在新定位下的用法
+
+| 节 | 新定位 |
+|---|---|
+| §3 事实规格（8 阶段 / ffmpeg 参数 / A1–A12） | **照做**：这是 Python 已经验过的事实标准，`hvc` 要逐条对齐 |
+| §2 Go + ffmpeg 子进程的选型论证 | **作废一半**：`hvc` 本来就是 ffmpeg 子进程（选型无需再论证）；只保留"为什么不用 libav\*"的部分，用于劝退"把服务搬到 C++" |
+| §4/§5/§6 架构/表/接口 | **对照表**：`hvc` 已经是这个形态；只取 §5.1 里新增的 `t_transcode_job_step` 与 §5.2 的状态机修正 |
+| §9 加密与 DRM | **照做**（B1） |
+| §10 步骤化/幂等/续跑 | **照做**（B2/B3） |
+| §11.3 容量实测 | **照做**（B8） |
+| §12 可观测性 / §14 安全 | 作为 `hvc` 的检查清单 |
+| §16 复用/不借用清单 | **照做**，其中"直接复用"从"抄语义"变成"就在同一个代码库里改" |
+| §17 未决问题 | **照做** |
 
 ---
 

@@ -1,10 +1,7 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.fplayer.flutter_cicadaplayer_example">
-    <!-- io.flutter.app.FlutterApplication is an android.app.Application that
-         calls FlutterMain.startInitialization(this); in its onCreate method.
-         In most cases you can leave this as-is, but you if you want to provide
-         additional functionality it is fine to subclass or reimplement
-         FlutterApplication and put your custom class here. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- 注意：这里**不能**再写 package="..."。
+         AGP 8 起"在源清单里用 package 属性设命名空间"已被移除，构建会直接失败；
+         命名空间现在由 app/build.gradle 的 `namespace` 提供。 -->
 
   <uses-permission android:name="android.permission.CAMERA" />
   <uses-permission android:name="android.permission.INTERNET" />
@@ -16,16 +13,27 @@
   
 
     <application
-        android:name="io.flutter.app.FlutterApplication"
         android:label="flutter_cicadaplayer_example"
-        android:icon="@mipmap/ic_launcher">
+        android:icon="@mipmap/ic_launcher"
+        android:usesCleartextTraffic="true">
+        <!-- 上面**删掉了 android:name="io.flutter.app.FlutterApplication"**：
+             那是 Android v1 embedding 的 Application 类，新版 Flutter 引擎
+             （本工程 3.47）已经把它移除了，留着会在启动时 ClassNotFoundException。
+             v2 embedding 不需要自定义 Application。
+             另外 usesCleartextTraffic="true" 是为了让测试能用 http:// 源 ——
+             targetSdk 35 下默认禁止明文 HTTP，不加这一条会直接连不上。 -->
         <activity
             android:name=".MainActivity"
             android:launchMode="singleTop"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
-            android:windowSoftInputMode="adjustResize">
+            android:windowSoftInputMode="adjustResize"
+            android:exported="true">
+            <!-- android:exported="true" 是**必需**的：targetSdk >= 31（本工程 targetSdk 36）时，
+                 凡是带 intent-filter 的组件都必须显式声明它，否则清单合并直接失败：
+                     Manifest merger failed : android:exported needs to be explicitly specified
+                     for element <activity#...MainActivity>. -->
             <!-- Specifies an Android theme to apply to this Activity as soon as
                  the Android process has started. This theme is visible to the user
                  while the Flutter UI initializes. After that, this theme continues

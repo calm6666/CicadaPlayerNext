@@ -19,17 +19,6 @@ dependencies:
   flutter:
     sdk: flutter
 
-  # 【依赖现代化】原清单是 Dart 2 时代的，全部无法在 Dart 3 下解析：
-  #   dio ^3.0.10 / sqflite ^1.3.0 / path_provider ^1.6.24 / fluttertoast ^7.1.4
-  #   / connectivity ^2.0.2 / cupertino_icons ^0.1.3  → 换成当前可解析的版本；
-  #   connectivity → connectivity_plus（包已改名）。
-  dio: ^5.7.0
-  sqflite: ^2.4.1
-  path_provider: ^2.1.5
-  fluttertoast: ^8.2.8
-  connectivity_plus: ^6.1.0
-  cupertino_icons: ^1.0.8
-
   flutter_cicadaplayer:
     # When depending on this package from a real application you should use:
     #   flutter_cicadaplayer: ^x.y.z
@@ -55,17 +44,37 @@ flutter:
     - assets/xml/test_result.xml
 
 # ---------------------------------------------------------------------------
-# 【移出 dependencies 的三个包，以及为什么必须移】
+# 【本轮把这些依赖从 dependencies 里移走了，以及为什么】
 #
-#   pull_to_refresh ^1.6.3 —— Dart 2 时代包，没有空安全版本，Dart 3 下不可解析；
-#   xml_parser       ^0.1.2 —— 同上；
-#   qrcode_reader (git)    —— 直接依赖第三方 GitHub 仓库，版本随上游漂移，无法保证可解析。
+# 现在 example 的入口 `lib/main.dart` 是**新写的最小测试 App**，只 import
+# `flutter` 与 `flutter_cicadaplayer` —— 它不需要下面任何一个包。
+# 而留在 dependencies 里会带来两件真实代价：
 #
-# 这三个只要留在 dependencies 里，`flutter pub get` 就整体失败，
-# 于是**连"plugin 能不能 analyze / 编译"都验不了**。宁可 example 少三个演示页面，
-# 也不能让主线（零拷贝）的验证被堵死。
+#   1. 它们会把 Android 侧的插件模块拖进 Gradle 构建（Flutter 会为所有已解析的插件
+#      include 其 android 目录，与"Dart 能不能 reach 到"无关）：
+#        connectivity_plus / fluttertoast / path_provider_android / sqflite_android
+#        以及 jni / jni_flutter（path_provider_android 的传递依赖，走 native assets）
+#   2. 其中 Kotlin 写的那些会让 Flutter 3.47 校验 Kotlin 版本：
+#        "Your project's Kotlin version (2.0.21) is lower than Flutter's minimum
+#         supported version of 2.2.20."
+#      而本机 Gradle 缓存里只有 KGP 2.0.21 —— 要么为"一个用不到的插件"去下 2.2.20，
+#      要么把这些包移走。后者显然对。
 #
-# 代价说清楚：`example/lib` 里引用这三个包的文件现在会编译不过
-# （下拉刷新页、XML 测试用例页、扫码页）。它们与"零拷贝播放"这条主线无关，
-# 需要单独一轮改造（换 package:xml / 换扫码实现 / 换下拉刷新实现）才能恢复。
+# 移走的清单（原来都在 dependencies 里）：
+#   dio ^5.7.0 / sqflite ^2.4.1 / path_provider ^2.1.5 / fluttertoast ^8.2.8
+#   / connectivity_plus ^6.1.0 / cupertino_icons ^1.0.8
+#
+# 【要恢复旧 demo 时怎么做】把上面这几个包加回来，**并且**在
+#   example/android/settings.gradle 的 plugins 块里补一行
+#       id "org.jetbrains.kotlin.android" version "2.2.20" apply false
+# （KGP 2.2.20 需要联网下载）。同时要先完成那 323 个 Dart 2→3 迁移错误，
+# 否则 `main.dart` 指不回 `page/home_page.dart`。详见
+# CicadaPlayerNext/docs/FLUTTER-ANDROID-BUILD.md §4.1 与 §7。
+#
+# 【另外两个包更早就已移出】pull_to_refresh / xml_parser / qrcode_reader ——
+# 它们是 Dart 2 时代的（或 git 依赖），Dart 3 下解析不过：
+#   pull_to_refresh ^1.6.3 —— 没有空安全版本；
+#   xml_parser       ^0.1.2 —— 同上（替代品是 package:xml）；
+#   qrcode_reader (git)    —— 直接依赖第三方 GitHub 仓库，版本随上游漂移。
+# 恢复时分别换成：RefreshIndicator / package:xml / mobile_scanner。
 # ---------------------------------------------------------------------------

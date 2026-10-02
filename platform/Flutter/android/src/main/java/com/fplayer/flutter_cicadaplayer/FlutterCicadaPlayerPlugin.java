@@ -6,7 +6,6 @@ import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
 import io.flutter.plugin.common.MethodChannel.Result;
-import io.flutter.plugin.common.PluginRegistry.Registrar;
 import io.flutter.view.TextureRegistry;
 
 /**
@@ -24,15 +23,28 @@ import io.flutter.view.TextureRegistry;
  *
  * <p>顺序很关键：纹理必须比播放器先建好。原因见 {@link PlayerSurface}。这里用
  * {@link #obtainPlayer()} 保证两条通道拿到的是同一个播放器实例，不会因为调用先后而各建一个。
+ *
+ * <p>【本轮删掉了 Android v1 embedding 的注册路径】本类原来还有：
+ *   <ul>
+ *     <li>{@code import io.flutter.plugin.common.PluginRegistry.Registrar;}
+ *     <li>{@code public static void registerWith(Registrar registrar)}
+ *     <li>字段 {@code mTextureRegistry} / {@code mRegistrar} 以及 obtainPlayer() 里的 Registrar 分支
+ *   </ul>
+ * 这些在 Flutter 3.29 起**已从引擎里移除**（v1 Android embedding 被删），编译必然失败：
+ *   <pre>
+ *   error: 找不到符号  类 Registrar
+ *       public FlutterCicadaPlayer(PluginRegistry.Registrar registrar)
+ *   error: 对FlutterCicadaPlayer的引用不明确
+ *       new FlutterCicadaPlayer(flutterPluginBinding)
+ *         （两个构造器都匹配 —— Registrar 解析不到时编译器就是这种表现）
+ *   </pre>
+ * 现在只保留 v2（FlutterPlugin + FlutterPluginBinding）这一条路，纹理注册表一律从 binding 取。
  */
 public class FlutterCicadaPlayerPlugin implements FlutterPlugin, MethodCallHandler {
 
     private FlutterPluginBinding flutterPluginBinding;
     private FlutterCicadaPlayer mFlutterCicadaPlayer;
     private PlayerSurface mPlayerSurface;
-    /** 只有 pre-1.12 的 registerWith 注册路径会用到这两个（那时候拿不到 binding）。 */
-    private TextureRegistry mTextureRegistry;
-    private Registrar mRegistrar;
 
     @Override
     public void onAttachedToEngine(@NonNull FlutterPluginBinding flutterPluginBinding) {
@@ -43,26 +55,6 @@ public class FlutterCicadaPlayerPlugin implements FlutterPlugin, MethodCallHandl
                 new MethodChannel(flutterPluginBinding.getBinaryMessenger(),
                         "plugins.flutter_cicadaplayer_factory");
         mCicadaPlayerFactoryMethodChannel.setMethodCallHandler(this);
-    }
-
-    //   This static function is optional and equivalent to onAttachedToEngine. It supports the old
-    //   pre-Flutter-1.12 Android projects. You are encouraged to continue supporting
-    //   plugin registration via this function while apps migrate to use the new Android APIs
-    //   post-flutter-1.12 via https://flutter.dev/go/android-project-migration.
-    //
-    //   It is encouraged to share logic between onAttachedToEngine and registerWith to keep
-    //   them functionally equivalent. Only one of onAttachedToEngine or registerWith will be called
-    //   depending on the user's project. onAttachedToEngine or registerWith must both be defined
-    //   in the same class.
-    public static void registerWith(Registrar registrar) {
-        registrar.platformViewRegistry().registerViewFactory(
-                "flutter_cicadaplayer_render_view", new FlutterCicadaPlayerView(registrar));
-        MethodChannel mCicadaPlayerFactoryMethodChannel =
-                new MethodChannel(registrar.messenger(), "plugins.flutter_cicadaplayer_factory");
-        FlutterCicadaPlayerPlugin plugin = new FlutterCicadaPlayerPlugin();
-        plugin.mTextureRegistry = registrar.textures();
-        plugin.mRegistrar = registrar;
-        mCicadaPlayerFactoryMethodChannel.setMethodCallHandler(plugin);
     }
 
     @Override
@@ -97,10 +89,7 @@ public class FlutterCicadaPlayerPlugin implements FlutterPlugin, MethodCallHandl
         FlutterCicadaPlayer player = obtainPlayer();
         disposeTexture();
 
-        TextureRegistry textures = mTextureRegistry;
-        if (textures == null && flutterPluginBinding != null) {
-            textures = flutterPluginBinding.getTextureRegistry();
-        }
+        TextureRegistry textures = flutterPluginBinding.getTextureRegistry();
         PlayerSurface surface = new PlayerSurface(textures.createSurfaceProducer());
         mPlayerSurface = surface;
         player.setPlayerSurface(surface);
@@ -126,11 +115,8 @@ public class FlutterCicadaPlayerPlugin implements FlutterPlugin, MethodCallHandl
      */
     private FlutterCicadaPlayer obtainPlayer() {
         if (mFlutterCicadaPlayer == null) {
-            if (flutterPluginBinding != null) {
-                mFlutterCicadaPlayer = new FlutterCicadaPlayer(flutterPluginBinding);
-            } else if (mRegistrar != null) {
-                mFlutterCicadaPlayer = new FlutterCicadaPlayer(mRegistrar);
-            }
+            // 只有 v2 embedding 这一条路（v1 的 Registrar 分支随 registerWith 一起去掉了）。
+            mFlutterCicadaPlayer = new FlutterCicadaPlayer(flutterPluginBinding);
         }
         return mFlutterCicadaPlayer;
     }

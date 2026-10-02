@@ -1,14 +1,18 @@
+// 【本轮修】插件的应用方式改成声明式（见 settings.gradle 的说明）：
+//   · 原来是 apply plugin: 'com.android.application' + apply from: flutter.gradle；
+//   · 现在由 plugins 块应用 com.android.application 与 dev.flutter.flutter-gradle-plugin。
+// 本 App 是纯 Java，所以不应用 kotlin-android。
+plugins {
+    id "com.android.application"
+    id "dev.flutter.flutter-gradle-plugin"
+}
+
 def localProperties = new Properties()
 def localPropertiesFile = rootProject.file('local.properties')
 if (localPropertiesFile.exists()) {
     localPropertiesFile.withReader('UTF-8') { reader ->
         localProperties.load(reader)
     }
-}
-
-def flutterRoot = localProperties.getProperty('flutter.sdk')
-if (flutterRoot == null) {
-    throw new GradleException("Flutter SDK not found. Define location with flutter.sdk in the local.properties file.")
 }
 
 def flutterVersionCode = localProperties.getProperty('flutter.versionCode')
@@ -21,20 +25,30 @@ if (flutterVersionName == null) {
     flutterVersionName = '1.0'
 }
 
-apply plugin: 'com.android.application'
-apply from: "$flutterRoot/packages/flutter_tools/gradle/flutter.gradle"
-
 android {
     // AGP 8 起 namespace 是必填项（原来靠 AndroidManifest 的 package 属性推）。
     // 与 AndroidManifest.xml / MainActivity 的包名保持一致。
     namespace "com.fplayer.flutter_cicadaplayer_example"
-    compileSdkVersion 35
+
+    // compileSdk 从 35 抬到 36：本机 SDK 里只装了 platforms/android-30/34/36，
+    // **没有 android-35**，写 35 会报 "Failed to find target with hash string 'android-35'"。
+    // 36 是已安装的最新平台，AGP 8.13 支持它。
+    compileSdkVersion 36
+
+    // 【为什么必须显式指定 ndkVersion】
+    // Flutter 3.47 的 gradle 插件默认要求 NDK 27.0.12077973，而本机只装了
+    // 25.2.9519653，报错：
+    //     "Android sdkmanager did not install NDK 27.0.12077973 into D:\Android\Sdk."
+    // 但**本 App 自己没有任何 native 源码**：CicadaPlayer 的 .so 已经在 aar 里
+    // （android/libs/premierlibrary-release.aar），插件模块也没有 externalNativeBuild。
+    // 所以不需要 Flutter 默认的那个 NDK；用本机已装的即可。
+    ndkVersion "25.2.9519653"
 
     defaultConfig {
         // TODO: Specify your own unique Application ID (https://developer.android.com/studio/build/application-id.html).
         applicationId "com.fplayer.flutter_cicadaplayer_example"
         minSdkVersion 24
-        targetSdkVersion 35
+        targetSdkVersion 36
         versionCode flutterVersionCode.toInteger()
         versionName flutterVersionName
     }
@@ -74,4 +88,15 @@ android {
 
 flutter {
     source '../..'
+}
+
+// 【为什么要由 App 来提供 CicadaPlayer 的 aar】
+// 插件模块（platform/Flutter/android）是 Android library，AGP 8 不允许 library 依赖本地
+// .aar 文件（否则它产出的 AAR 会缺类），所以插件那边写的是 compileOnly —— 只保证编译期
+// 能看见 com.cicada.player.**。
+// **真正打包进 APK 是 App 的责任**，也就是下面这一行。
+// 路径说明：rootProject.projectDir = example/android；往上两级到 platform/Flutter，
+// 再进 android/libs 就是那份 aar（与插件里用的是同一份，不复制第二份）。
+dependencies {
+    implementation files("${rootProject.projectDir}/../../android/libs/premierlibrary-release.aar")
 }

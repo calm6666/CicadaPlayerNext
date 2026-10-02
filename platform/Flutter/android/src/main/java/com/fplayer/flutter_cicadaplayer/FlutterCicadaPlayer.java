@@ -18,7 +18,6 @@ import io.flutter.plugin.common.EventChannel;
 import io.flutter.plugin.common.MethodCall;
 import io.flutter.plugin.common.MethodChannel;
 import io.flutter.plugin.common.MethodChannel.MethodCallHandler;
-import io.flutter.plugin.common.PluginRegistry;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -53,22 +52,17 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
         initListener(mCicadaPlayer);
     }
 
-    /**
-     * 兼容 pre-1.12 的 registerWith 注册路径（见 FlutterCicadaPlayerPlugin.registerWith）。
-     * BinaryMessenger 一样是那个引擎的，所以两条通道的名字和语义完全一致。
+    /*
+     * 【本轮删掉了 pre-1.12 的那条注册路径】
+     * 原来这里还有一个 `public FlutterCicadaPlayer(PluginRegistry.Registrar registrar)` 构造器
+     * （配合 FlutterCicadaPlayerPlugin.registerWith），它属于 Android **v1 embedding**；
+     * Flutter 3.29 起 v1 embedding 已从引擎移除 ⇒ `PluginRegistry.Registrar` 这个类不存在 ⇒
+     * 编译报：
+     *     error: 找不到符号   类 Registrar
+     *     error: 对FlutterCicadaPlayer的引用不明确
+     *         new FlutterCicadaPlayer(flutterPluginBinding)
+     * 现在只保留 v2（FlutterPluginBinding）这一个构造器。
      */
-    public FlutterCicadaPlayer(PluginRegistry.Registrar registrar)
-    {
-        this.mFlutterPluginBinding = null;
-        this.mContext = registrar.activeContext();
-        mGson = new Gson();
-        mCicadaPlayer = CicadaPlayerFactory.createCicadaPlayer(mContext);
-        mCicadaPlayerMethodChannel = new MethodChannel(registrar.messenger(), "flutter_cicadaplayer");
-        mCicadaPlayerMethodChannel.setMethodCallHandler(this);
-        mEventChannel = new EventChannel(registrar.messenger(), "flutter_cicadaplayer_event");
-        mEventChannel.setStreamHandler(this);
-        initListener(mCicadaPlayer);
-    }
 
     public CicadaPlayer getCicadaPlayer()
     {
@@ -277,6 +271,25 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("method", "onSubtitleHide");
                 map.put("trackIndex", trackIndex);
                 map.put("subtitleID", id);
+                mEventSink.success(map);
+            }
+
+            /*
+             * 【本轮补上】SDK 的 OnSubtitleDisplayListener 有四个抽象方法，这里原来只实现了
+             * 三个，缺 onSubtitleHeader ⇒ 编译报：
+             *     error: <匿名…$8>不是抽象的, 并且未覆盖OnSubtitleDisplayListener中的抽象方法
+             *            onSubtitleHeader(int,String)
+             * 报错的原因是 **aar 比这个 Java 源新**：SDK 侧后来加了 onSubtitleHeader
+             * （见 premierlibrary 的 CicadaPlayer.java 里的接口定义），而 Flutter 插件没跟上。
+             * 这里照样转发给 Dart；Dart 侧的 _onEvent 里暂时没有这个 case，
+             * 未知 method 会被忽略（不会抛），后续要在 Dart 里处理时加一个 case 即可。
+             */
+            @Override public void onSubtitleHeader(int trackIndex, String header)
+            {
+                Map<String, Object> map = new HashMap<>();
+                map.put("method", "onSubtitleHeader");
+                map.put("trackIndex", trackIndex);
+                map.put("header", header);
                 mEventSink.success(map);
             }
         });

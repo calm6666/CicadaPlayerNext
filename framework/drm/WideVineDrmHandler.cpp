@@ -37,7 +37,7 @@ static jmethodID jMediaDrmSession_isForceInsecureDecoder = nullptr;
  * "是个 urn:uuid: 就认"：认了会在 DrmSessionManager.prepare() 里失败，而这个
  * "认不认"还要用来决定"要不要把软解让给平台"（认了就不登记软解密钥）。
  *
- * ★这三个常量必须与 `platform/Android/**/DrmSessionManager.java` 里的
+ * ★这三个常量必须与 `platform/Android 下的 DrmSessionManager.java` 里的
  * WIDEVINE_FORMAT / PLAYREADY_FORMAT / CLEARKEY_FORMAT 逐字一致 ——
  * 那边负责把它们映射成 MediaDrm 的 UUID 并真正建会话。
  */

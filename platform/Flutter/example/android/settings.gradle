@@ -1,11 +1,59 @@
-include ':app'
+// 【本轮修】原文件用的是**命令式**插件加载：
+//     apply from: "$flutterSdkPath/packages/flutter_tools/gradle/app_plugin_loader.gradle"
+// Flutter 3.29 起这种方式被移除，构建会直接失败：
+//     "You are applying Flutter's app_plugin_loader Gradle plugin imperatively using
+//      the apply script method, which is not possible anymore."
+// 下面迁移成官方要求的**声明式 plugins 块**（plugins block + includeBuild）：
+//   · includeBuild 把 Flutter 工具链自带的 gradle 插件作为一个 included build 引进来，
+//     `dev.flutter.flutter-gradle-plugin` / `dev.flutter.flutter-plugin-loader` 就来自它；
+//   · 插件的 **发现**（自动把 flutter_cicadaplayer 这类插件的 android 目录 include 进来）
+//     现在由 `dev.flutter.flutter-plugin-loader` 负责，不再需要手写 apply from；
+//   · 版本号取本机 Gradle 缓存里已有的 AGP 8.13.0，避免首次构建还要联网拉新版本
+//     （见 ~/.gradle/caches/modules-2/files-2.1/com.android.tools.build/gradle/）。
+//     Kotlin 插件**没有**声明，理由见下面 plugins 块里的注释。
+// 国内镜像（可选）：export USE_CHINA_MIRROR=true 时优先走阿里云。
 
-def localPropertiesFile = new File(rootProject.projectDir, "local.properties")
-def properties = new Properties()
+pluginManagement {
+    def flutterSdkPath = {
+        def properties = new Properties()
+        file("local.properties").withInputStream { properties.load(it) }
+        def flutterSdkPath = properties.getProperty("flutter.sdk")
+        assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
+        return flutterSdkPath
+    }()
 
-assert localPropertiesFile.exists()
-localPropertiesFile.withReader("UTF-8") { reader -> properties.load(reader) }
+    includeBuild("$flutterSdkPath/packages/flutter_tools/gradle")
 
-def flutterSdkPath = properties.getProperty("flutter.sdk")
-assert flutterSdkPath != null, "flutter.sdk not set in local.properties"
-apply from: "$flutterSdkPath/packages/flutter_tools/gradle/app_plugin_loader.gradle"
+    def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
+    repositories {
+        if (useChinaMirror) {
+            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
+            maven { url 'https://maven.aliyun.com/repository/google' }
+            maven { url 'https://maven.aliyun.com/repository/public' }
+        }
+        google()
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
+plugins {
+    id "dev.flutter.flutter-plugin-loader" version "1.0.0"
+    // AGP 从 8.7.3 抬到 8.13.0：Flutter 3.47 的校验要求 >= 8.11.1：
+    //   "Your project's Android Gradle Plugin version (8.7.3) is lower than Flutter's
+    //    minimum supported version of Android Gradle Plugin version 8.11.1."
+    // 选 8.13.0 而不是更高，是因为 8.13.0 已经在本机 Gradle 缓存里
+    // （~/.gradle/caches/modules-2/files-2.1/com.android.tools.build/gradle/），首次构建不用再下；
+    // 它与 Gradle 8.14.3（AGP 8.13 要求 Gradle >= 8.13）和 JDK 21 都匹配。
+    id "com.android.application" version "8.13.0" apply false
+
+    // 【为什么这里**没有** Kotlin 插件】
+    // 本 App 是纯 Java，而且 pubspec 里那些 Kotlin 写的插件（connectivity_plus /
+    // path_provider_android / sqflite_android）已经随"最小测试 App"一起移走了 ——
+    // 现在进 Gradle 的 Android 插件只有 flutter_cicadaplayer 一个，它是 Java。
+    // 一旦声明了 KGP，Flutter 3.47 就会校验它 >= 2.2.20，而本机缓存里只有 2.0.21
+    // ⇒ 为了一个用不到的插件去下一个新版本，不值。
+    // 恢复旧 demo 时再加回来：id "org.jetbrains.kotlin.android" version "2.2.20" apply false
+}
+
+include ":app"

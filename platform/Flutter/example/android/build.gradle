@@ -1,28 +1,20 @@
-// 国内镜像（可选）：export USE_CHINA_MIRROR=true 时优先走阿里云 Maven 镜像
-// jcenter 已停止维护，全部替换为 google() + mavenCentral()
-def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
-
-buildscript {
-    repositories {
-        if (useChinaMirror) {
-            maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
-            maven { url 'https://maven.aliyun.com/repository/google' }
-            maven { url 'https://maven.aliyun.com/repository/public' }
-        }
-        google()
-        mavenCentral()
-    }
-
-    dependencies {
-        // 从 3.5.0 抬到 8.7.3：Flutter 3.47 的模板要求 AGP 7.3+，
-        // 而 3.5.0 连 compileSdk 34 / namespace 都不支持，配置阶段就会失败。
-        classpath 'com.android.tools.build:gradle:8.7.3'
-    }
-}
-
+// 【本轮修】删掉了原来的 buildscript { classpath 'com.android.tools.build:gradle:8.7.3' }：
+// AGP 的版本现在由 settings.gradle 的 `plugins { id "com.android.application" version "8.7.3" }`
+// 统一决定。同时在两处声明同一个插件会带来"到底用哪份"的歧义，而且 settings 里的
+// 声明是 Flutter 3.29+ 官方模板要求的形态。
+//
+// 国内镜像（可选）：export USE_CHINA_MIRROR=true 时优先走阿里云 Maven 镜像。
+// jcenter 已停止维护，全部替换为 google() + mavenCentral()。
+//
+// 【为什么这里不写成 `def useChinaMirror = ...` 再在闭包里用】
+// `allprojects { repositories { ... } }` 里那个闭包的 delegate 是 Gradle 的
+// RepositoryHandler，而 Gradle 对配置闭包用 DELEGATE_FIRST 解析策略 —— 引用脚本级
+// 局部变量在某些嵌套层级下会变成"查 RepositoryHandler 的属性"，报
+//   Could not get unknown property 'useChinaMirror' for repository container ...
+// （插件的 build.gradle 上已经真实踩到过。）现读环境变量是方法调用，不涉及属性解析。
 allprojects {
     repositories {
-        if (useChinaMirror) {
+        if (System.getenv('USE_CHINA_MIRROR') == 'true') {
             maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
             maven { url 'https://maven.aliyun.com/repository/google' }
             maven { url 'https://maven.aliyun.com/repository/public' }
@@ -40,6 +32,6 @@ subprojects {
     project.evaluationDependsOn(':app')
 }
 
-task clean(type: Delete) {
-    delete rootProject.buildDir
+tasks.register("clean", Delete) {
+    delete rootProject.layout.buildDirectory
 }

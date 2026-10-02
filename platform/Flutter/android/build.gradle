@@ -1,13 +1,22 @@
 // 国内镜像（可选）：export USE_CHINA_MIRROR=true 时优先走阿里云 Maven 镜像
 // jcenter 已停止维护，全部替换为 google() + mavenCentral()
-def useChinaMirror = System.getenv('USE_CHINA_MIRROR') == 'true'
-
+//
+// 【本轮修：为什么把 useChinaMirror 这个变量删掉了，改成在闭包里现读环境变量】
+// 原来脚本顶部是 `def useChinaMirror = System.getenv(...) == 'true'`，然后在
+// `rootProject.allprojects { repositories { if (useChinaMirror) { ... } } }` 里用它。
+// 那个闭包的 delegate 是 Gradle 的 **RepositoryHandler**，而 Gradle 给配置闭包设的是
+// DELEGATE_FIRST 解析策略，于是属性查找先在 RepositoryHandler 上找、找不到就报：
+//     Could not get unknown property 'useChinaMirror' for repository container of type
+//     org.gradle.api.internal.artifacts.dsl.DefaultRepositoryHandler
+// 这个错误以前没暴露出来，是因为本插件在此之前**从来没被 Flutter 的插件加载器
+// 作为子工程真正评估过**（旧入口是命令式 apply，Flutter 3.29 起直接不可用）。
+// 改成在闭包里直接调用 System.getenv(...)（方法调用，不涉及属性解析），彻底绕开这个问题。
 group 'com.fplayer.flutter_cicadaplayer'
 version '1.0'
 
 buildscript {
     repositories {
-        if (useChinaMirror) {
+        if (System.getenv('USE_CHINA_MIRROR') == 'true') {
             maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
             maven { url 'https://maven.aliyun.com/repository/google' }
             maven { url 'https://maven.aliyun.com/repository/public' }
@@ -17,17 +26,19 @@ buildscript {
     }
 
     dependencies {
-        // 从 3.5.0 抬到 8.7.3：Flutter 3.47 的 flutter.gradle 要求 AGP 7.3+，
-        // 而 3.5.0 连 compileSdk 34 / namespace 都不支持。
-        // 说明：作为插件（子工程）被 example 引入时，实际生效的是根工程的 AGP，
+        // 与 example/android/settings.gradle 的 plugins 块保持一致：AGP 8.13.0。
+        // 说明：作为插件（子工程）被 example 引入时，实际生效的是根工程声明的那份 AGP；
         // 这里写一份只是为了本插件被单独打开时也能自洽。
-        classpath 'com.android.tools.build:gradle:8.7.3'
+        // 为什么是 8.13.0：Flutter 3.47 要求 AGP >= 8.11.1，而 8.13.0 已在本机 Gradle 缓存里，
+        // 首次构建不需要联网拉新版本。
+        classpath 'com.android.tools.build:gradle:8.13.0'
     }
 }
 
 rootProject.allprojects {
     repositories {
-        if (useChinaMirror) {
+        // 这里也现读环境变量：理由同上（闭包 delegate 是 RepositoryHandler）。
+        if (System.getenv('USE_CHINA_MIRROR') == 'true') {
             maven { url 'https://maven.aliyun.com/repository/gradle-plugin' }
             maven { url 'https://maven.aliyun.com/repository/google' }
             maven { url 'https://maven.aliyun.com/repository/public' }
@@ -40,9 +51,13 @@ rootProject.allprojects {
 apply plugin: 'com.android.library'
 
 android {
-    // AGP 8 起 namespace 必填；取 AndroidManifest.xml 里原来的 package 值。
+    // compileSdk 从 35 抬到 36：本机 SDK 只装了 platforms/android-30/34/36，
+    // 没有 android-35，写 35 会在配置阶段失败。
+    // ndkVersion 显式钉成本机已装的那个：Flutter 3.47 默认要 NDK 27（本机没有），
+    // 而本插件的 native 代码**不在**这里编（CicadaPlayer 的 .so 由 aar 提供）。
     namespace 'com.fplayer.flutter_cicadaplayer'
-    compileSdkVersion 35
+    compileSdkVersion 36
+    ndkVersion '25.2.9519653'
 
     defaultConfig {
         minSdkVersion 24
@@ -68,9 +83,21 @@ android {
 }
 
 dependencies {
-    // CicadaPlayer 的 Android SDK 以本地 aar 形式提供（android/libs/*.aar）。
-    // 注意：本仓库里 android/libs 目前是**空的**，见交付说明里的"必须补的东西"。
-    implementation fileTree(dir: 'libs', include: ['*.aar'])
+    // CicadaPlayer 的 Android SDK 以本地 aar 形式提供。
+    // 放 aar 的目录：platform/Flutter/android/libs/（**本轮新建**；
+    // aar 由 platform/Android/source 的 :premierlibrary:assembleCorePlayerRelease 产出后拷进来，
+    // 见 CicadaPlayerNext/docs/FLUTTER-ANDROID-BUILD.md §2）。
+    // 注意：**改了内核 C++/Java 就必须重编并重新拷 aar**，否则 APK 里装的是旧内核。
+    //
+    // 【为什么这里是 compileOnly 而不是 implementation】
+    // 本模块是 Android **library**（com.android.library）。AGP 8 明确不允许 library 直接依赖
+    // 本地 .aar 文件：
+    //     Direct local .aar file dependencies are not supported when building an AAR.
+    //     The resulting AAR would be broken because the classes and Android resources from
+    //     any local .aar file dependencies would not be packaged in the resulting AAR.
+    // 所以这里只要"编译期能看见 com.cicada.player.**"就够了；**由 App 负责把它打进 APK**
+    // （见 example/android/app/build.gradle 的 dependencies）。
+    compileOnly fileTree(dir: 'libs', include: ['*.aar'])
     implementation 'com.google.code.gson:gson:2.8.6'
     // PlayerSurface 用到了 TextureRegistry.SurfaceProducer.Callback 上的 @NonNull，
     // 显式依赖 androidx.annotation，避免依赖 Flutter embedding 的传递依赖。
