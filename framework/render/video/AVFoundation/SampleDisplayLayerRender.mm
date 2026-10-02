@@ -15,6 +15,45 @@
 #endif
 #include <utils/frame_work_log.h>
 
+/*
+ * ============ macOS 15 / iOS 18 把 AVSampleBufferDisplayLayer 的
+ *              status / flush / enqueueSampleBuffer: / flushAndRemoveImage
+ *              改成走 sampleBufferRenderer（4 条告警）============
+ *
+ * 【为什么不能直接把旧调用删掉换成新属性】本工程的部署目标很低：
+ * framework/macOSX.cmake:6 是 11.0，framework/iOS.cmake:14 是 **8.0**
+ * （build_tools/iOSConfig.sh:4 同样 8.0）。而 sampleBufferRenderer 只在
+ * macOS 13 / iOS 16 及以后存在，老系统上它**根本不存在**：直接使用会
+ * unrecognized-selector 崩溃。所以正确做法是"运行时问一句能力、新系统走新属性、
+ * 老系统保留旧调用"——旧调用在编译期必然带 deprecation 告警。
+ *
+ * 【为什么不写成 @available 分支】@available 的可用性元数据来自 SDK 头；本工程在
+ * 非 Apple 机器上无法核对它的版本号，而 respondsToSelector: 只依赖**运行时**属性
+ * 是否存在，与 SDK 版本解耦，语义更保守也更容易验证。
+ *
+ * 【为什么要就地抑制告警】这条路径是**刻意为老系统保留的**，不是"忘记迁移"。
+ * 用 clang 的 diagnostic push/ignored 把范围限定在一个函数内（而不是全文件/全工程
+ * 关掉 -Wdeprecated-declarations），并且留下这段说明 —— 将来抬高部署目标或
+ * 放弃老系统时，只要删掉这个函数与 4 个调用点即可，不会有任何遗漏。
+ */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+static AVSampleBufferRenderSynchronizer *cicadaSampleBufferRenderer(AVSampleBufferDisplayLayer *layer)
+{
+    if (layer == nil) {
+        return nil;
+    }
+
+    // 新系统（macOS 13+ / iOS 16+）：显示与入队统一由 renderer 承担。
+    if ([layer respondsToSelector:@selector(sampleBufferRenderer)]) {
+        return [layer sampleBufferRenderer];
+    }
+
+    // 老系统：没有 renderer，下面的调用点会退回 displayLayer 自己的旧方法。
+    return nil;
+}
+#pragma clang diagnostic pop
+
 @implementation SampleDisplayLayerRender {
     CALayer *parentLayer;
     AVLayerVideoGravity videoGravity;
@@ -479,7 +518,23 @@ void DisplayLayerImpl::setRotate(IVideoRender::Rotate rotate)
 
 - (void)clearScreen
 {
-    [self.displayLayer flushAndRemoveImage];
+    /*
+     * 清屏：新系统走 renderer 的 flushWithRemovalOfDisplayedImage:（它才是
+     * "把已显示的那一帧也去掉"的语义），老系统没有 renderer，只能用
+     * displayLayer 自己的 flushAndRemoveImage。二者语义一致，见文件头那段说明。
+     */
+    AVSampleBufferRenderSynchronizer *renderer = cicadaSampleBufferRenderer(self.displayLayer);
+
+    if (renderer != nil) {
+        [renderer flushWithRemovalOfDisplayedImage:^{
+        }];
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        [self.displayLayer flushAndRemoveImage];
+#pragma clang diagnostic pop
+    }
+
     if (renderingBuffer) {
         CVPixelBufferRelease(renderingBuffer);
     }
@@ -563,10 +618,33 @@ void DisplayLayerImpl::setRotate(IVideoRender::Rotate rotate)
     auto dict = (CFMutableDictionaryRef) CFArrayGetValueAtIndex(attachments, 0);
     CFDictionarySetValue(dict, kCMSampleAttachmentKey_DisplayImmediately, kCFBooleanTrue);
 
-    if (self.displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
-        [self.displayLayer flush];
+    /*
+     * 入队：新系统用 renderer 的 status / flush / enqueueSampleBuffer:，
+     * 老系统（macOS < 13 / iOS < 16）没有 renderer，退回 displayLayer 的旧方法。
+     * 两条路的语义完全相同，只是承载对象从 layer 换成了它的 renderer。
+     * 旧调用是**刻意为老系统保留**的，所以就地抑制那 3 条 deprecation。
+     */
+    AVSampleBufferRenderSynchronizer *renderer = cicadaSampleBufferRenderer(self.displayLayer);
+
+    if (renderer != nil) {
+        NSParameterAssert([renderer respondsToSelector:@selector(enqueueSampleBuffer:)]);
+
+        if (renderer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+            [renderer flush];
+        }
+
+        [renderer enqueueSampleBuffer:sampleBuffer];
+    } else {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+        if (self.displayLayer.status == AVQueuedSampleBufferRenderingStatusFailed) {
+            [self.displayLayer flush];
+        }
+
+        [self.displayLayer enqueueSampleBuffer:sampleBuffer];
+#pragma clang diagnostic pop
     }
-    [self.displayLayer enqueueSampleBuffer:sampleBuffer];
+
     CFRelease(sampleBuffer);
 }
 

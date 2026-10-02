@@ -20,6 +20,59 @@
 
 using namespace Cicada;
 
+/*
+ * ============ macOS 15 / iOS 18 把 mediaSelectionGroupForMediaCharacteristic:
+ *              改成异步的 loadMediaSelectionGroupForMediaCharacteristic:
+ *              completionHandler:（4 条告警，本文件 3 处 + render 侧 1 处）============
+ *
+ * 【为什么不能改成真的异步】本文件的调用点是**同步契约**：
+ *   · 构造 player 时用它枚举可选的音轨/字幕轨，紧接着就把结果填进 mMediaInfo 与
+ *     playerHandler.selectionOptionArray（顺序不能变，否则媒体信息会漏）；
+ *   · SetStreamIndex() 里要用它拿到 group 才能立刻调用
+ *     `selectMediaOption:inMediaSelectionGroup:`，而 SetStreamIndex 本身是同步 API。
+ * 所以这里用信号量把新 API "等成"同步：等的是**回调本身**，没有超时、没有重试、
+ * 没有轮询 —— 不是"等够时间就算了"的兜底，而是"必须等到这次加载有结果"。
+ *
+ * 【已知风险（本机无 Apple 工具链，未能在真机验证，务必留意）】
+ *   AVFoundation 可能在**主线程**回调 completionHandler。若这个 helper 恰好在主线程
+ *   被调用，就会主线程等主线程 ⇒ 死锁。旧实现（同步 API）没有这个问题，因为这正是
+ *   这次迁移引入的新约束。所以下面加了 `[NSThread isMainThread]` 判断：一旦在主线程
+ *   调用就**直接返回 nil** 并打一条 WARNING，把"拿不到轨道组"这件事暴露出来，
+ *   而不是把进程挂死。上面的两个调用点对 nil 都是安全的（枚举得到空、选择时
+ *   group 为 nil 不会误切轨）。
+ *   真机上请重点回归：**切换音轨/字幕**与**起播后 track 列表是否完整**。
+ */
+static AVMediaSelectionGroup *cicadaLoadMediaSelectionGroup(AVAsset *asset, AVMediaCharacteristic characteristic)
+{
+    if (asset == nil || characteristic == nil) {
+        return nil;
+    }
+
+    if ([NSThread isMainThread]) {
+        AF_LOGW("refusing to wait for the media selection group on the main thread "
+                "(the async API may complete on the main thread, which would deadlock)\n");
+        return nil;
+    }
+
+    __block AVMediaSelectionGroup *result = nil;
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    [asset loadMediaSelectionGroupForMediaCharacteristic:characteristic
+                                       completionHandler:^(AVMediaSelectionGroup *_Nullable group, NSError *_Nullable error) {
+      if (error != nil) {
+          AF_LOGW("loading the media selection group for %s failed: %s\n",
+                  [[characteristic description] UTF8String], [[error description] UTF8String]);
+      }
+
+      // 必须在 signal 之前赋值：等待方被唤醒后才读 result。
+      result = group;
+      dispatch_semaphore_signal(sem);
+    }];
+
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+    return result;
+}
+
 AppleAVPlayer AppleAVPlayer::se(1);
 AppleAVPlayer::AppleAVPlayer()
 {}
@@ -194,7 +247,8 @@ void AppleAVPlayer::Prepare()
     NSArray<AVMediaCharacteristic> *array = [asset availableMediaCharacteristicsWithMediaSelectionOptions];
     NSMutableArray *selectionOptionArray = [NSMutableArray array];
     [array enumerateObjectsUsingBlock:^(AVMediaCharacteristic _Nonnull obj, NSUInteger idx, BOOL *_Nonnull stop) {
-      AVMediaSelectionGroup *mediaGroup = [asset mediaSelectionGroupForMediaCharacteristic:obj];
+      // 用新的异步 API（内部等成同步），见 cicadaLoadMediaSelectionGroup 的说明。
+      AVMediaSelectionGroup *mediaGroup = cicadaLoadMediaSelectionGroup(asset, obj);
       [mediaGroup.options enumerateObjectsUsingBlock:^(AVMediaSelectionOption *_Nonnull options, NSUInteger idx, BOOL *_Nonnull stop) {
         [selectionOptionArray addObject:options];
       }];
@@ -275,11 +329,11 @@ StreamType AppleAVPlayer::SwitchStream(int index)
         AVMediaSelectionGroup *mediaGroup = nil;
         AVAsset *asset = player.currentItem.asset;
         if ([option.mediaType isEqualToString:AVMediaTypeSubtitle]) {
-            mediaGroup = [asset mediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicLegible];
+            mediaGroup = cicadaLoadMediaSelectionGroup(asset, AVMediaCharacteristicLegible);
         } else if ([option.mediaType isEqualToString:AVMediaTypeAudio]) {
-            mediaGroup = [asset mediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicAudible];
+            mediaGroup = cicadaLoadMediaSelectionGroup(asset, AVMediaCharacteristicAudible);
         } else if ([option.mediaType isEqualToString:AVMediaTypeVideo]) {
-            mediaGroup = [asset mediaSelectionGroupForMediaCharacteristic:AVMediaCharacteristicVisual];
+            mediaGroup = cicadaLoadMediaSelectionGroup(asset, AVMediaCharacteristicVisual);
         }
         [player.currentItem selectMediaOption:option inMediaSelectionGroup:mediaGroup];
     }

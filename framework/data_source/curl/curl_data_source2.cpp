@@ -27,6 +27,32 @@
 #include <cassert>
 #include <cstring>
 
+/*
+ * curl 7.55.0 起 CURLINFO_CONTENT_LENGTH_DOWNLOAD / CURLINFO_SIZE_DOWNLOAD 被标为
+ * deprecated，改用带 _T 后缀、输出 curl_off_t 的版本（-Wdeprecated-declarations）。
+ * 两者只是"double 换 curl_off_t"：原来的 double 表示整数字节长度是精确的，
+ * 换成 curl_off_t 后精度只会更好，且不再需要 (int64_t) 强转。
+ *
+ * 仍然按版本分支，而不是直接认定一定有 _T：本工程把 curl 钉在 8.14.1，但这一层是
+ * 通用数据源代码，写死"一定有 _T"会把可用版本范围凭空缩小。旧 curl 走原宏。
+ */
+#ifndef CICADA_CURL_INFO_LENGTH_T
+#define CICADA_CURL_INFO_LENGTH_T 0
+#if defined(LIBCURL_VERSION_NUM) && LIBCURL_VERSION_NUM >= 0x073700 /* 7.55.0 */
+#undef CICADA_CURL_INFO_LENGTH_T
+#define CICADA_CURL_INFO_LENGTH_T 1
+#endif
+#endif
+
+#if CICADA_CURL_INFO_LENGTH_T
+#define CICADA_CURLINFO_CONTENT_LENGTH CURLINFO_CONTENT_LENGTH_DOWNLOAD_T
+#define CICADA_CURLINFO_SIZE_DOWNLOAD  CURLINFO_SIZE_DOWNLOAD_T
+#else
+#define CICADA_CURLINFO_CONTENT_LENGTH CURLINFO_CONTENT_LENGTH_DOWNLOAD
+#define CICADA_CURLINFO_SIZE_DOWNLOAD  CURLINFO_SIZE_DOWNLOAD
+#endif
+
+
 
 // TODO: move to another file
 #if defined(WIN32) || defined(WIN64)
@@ -69,7 +95,7 @@ int CurlDataSource2::curl_connect(CURLConnection2 *pConnection, int64_t filePos)
     int ret;
     char *location = nullptr;
     char *ipstr = nullptr;
-    double length;
+    curl_off_t length;
     long response;
     CURL_LOGD("start connect %lld\n", filePos);
     pConnection->SetResume(filePos);
@@ -82,13 +108,13 @@ int CurlDataSource2::curl_connect(CURLConnection2 *pConnection, int64_t filePos)
 
     CURL_LOGD("connected\n");
 
-    if (CURLE_OK == curl_easy_getinfo(pConnection->getCurlHandle(), CURLINFO_CONTENT_LENGTH_DOWNLOAD, &length)) {
+    if (CURLE_OK == curl_easy_getinfo(pConnection->getCurlHandle(), CICADA_CURLINFO_CONTENT_LENGTH, &length)) {
         if (length < 0) {
-            length = 0.0;
+            length = 0;
         }
 
-        if (length > 0.0) {
-            mFileSize = pConnection->tell() + (int64_t) length;
+        if (length > 0) {
+            mFileSize = pConnection->tell() + length;
             //AF_LOGE("file size is %lld\n",mFileSize);
         } else {
             mFileSize = 0;
