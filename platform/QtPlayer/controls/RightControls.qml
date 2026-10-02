@@ -903,7 +903,9 @@ import QtPlayer
              * 参考面板的数值：宽 320、底 hsla(0,0%,8%,.9)、圆角 2、bottom 41px（全屏 74px）、
              * 水平居中对齐按钮（left:50% + translateX(-50%)）、max-height 580、列表区 max-height 520、
              * 行高 30、行内边距 0 20px、12px 字、hover rgba(1,1,1,.1)、
-             * 当前集 = 主题色文字 + 12px 三柱 PlayingIcon（assets/images/eplist-playing.svg，参考 icons/index.ts:843-848）。
+             * 当前集 = 主题色文字 + 12px 三柱 PlayingIcon（本轮从 assets/images/eplist-playing.svg
+             * 换成 Lottie 循环动画 assets/lottie-icon/bangumi_detail_playing{,_night}.json，
+             * 参考 icons/index.ts:843-848）。
              * 参考**没有**分组标题、没有滚动条样式、没有自动滚到当前集、也没有选中集的处理 ——
              * 这些我们都不自己加；只是列表超出 520px 时给它可滚动（参考是 overflow:hidden 直接裁掉，
              * 裁掉以后后面的集永远点不到，那不能算"一样"）。
@@ -1258,8 +1260,39 @@ import QtPlayer
                                      * 当前集前面的三柱图标：参考里**只有当前集**有这个 span
                                      * （index.ts:1364-1368；port 版给每一行都渲染了空 span，那是它的 bug）。
                                      * 槽宽 12、右边距 4（index.scss:2857-2864）。
+                                     *
+                                     * 【本轮改动】原来是一个静态 SVG（assets/images/eplist-playing.svg，
+                                     * 12x13、三根 #00a1d6 圆头柱），现在换成 Lottie 的"播放中"三柱并**循环播放**，
+                                     * 用根目录那个已经封装好的 LottieIcon（槽位序列 + 画布缩放 + 播完动作那一套），
+                                     * 不再直接摆 Image、也不自己写 LottieAnimation。
+                                     *
+                                     * 几个必须写清楚的点：
+                                     *  1. `complete: "loop"` ⇒ LottieIcon 内部把 anim.loops 置 -1（无限循环）。
+                                     *     这是该组件**唯一**能循环的方式：`complete: "next"` 配单槽会被
+                                     *     setSequenceSlot 里的"同槽早退"挡住，播完不会重播。
+                                     *     （万一在某个 Qt 版本上发现只播一遍就停，加一行
+                                     *      `onSlotFinished: if (visible) play()` 即可接上 ——
+                                     *      组件每次 finished 都会发 slotFinished。本轮没加，避免留无用的兜底。）
+                                     *  2. `autoplay` 绑到"当前集 **且** 面板打开"，不是写死 true：
+                                     *     Repeater 会给**每一集**都建一个 LottieIcon，而 LottieIcon 在
+                                     *     Component.onCompleted 里就会 applySlot(true) 并按 autoplay 起播 ——
+                                     *     写死 true 的话，列表里几十上百行会各自空转一个 60fps 动画。
+                                     *     绑上之后由 sequence 变化触发 onSequenceChanged → applySlot：
+                                     *     面板打开/切到这一集才播，面板关掉就自动 stop。
+                                     *  3. `canvasWidth/canvasHeight` 必须是 **json 自己的画布 80x80**，
+                                     *     不是显示尺寸 12x13。Qt 的 LottieAnimation 是按原始画布像素画进
+                                     *     item 的，给错就只露左上角一块（LottieIcon.qml 里记过这个坑）。
+                                     *  4. 实测这份 json 的图形占画布 宽 58/80、高 71/80（描边宽 10、柱子最长 61），
+                                     *     所以显示成 12x13 时可见三柱约 8.7 x 11.5px，与原来 SVG 的 10x10
+                                     *     基本相当（略细一点：描边 10/80*12 = 1.5px，原来 SVG 是 2px）。
+                                     *     想让它跟旧图标一模一样大，把宽高改成 13.8 左右即可。
+                                     *  5. 浅/深两份 json 按 QtPlayerTheme.dark 切：
+                                     *     浅色 bangumi_detail_playing.json（#FB7299）、
+                                     *     深色 bangumi_detail_playing_night.json（#D44E7D）。
+                                     *     两份都在 assets/lottie-icon/ 下，CMake 的 GLOB 带 CONFIGURE_DEPENDS，
+                                     *     会自动进 qrc，不用手动登记。
                                      */
-                                    Image {
+                                    LottieIcon {
                                         id: eplistPlayingIcon
 
                                         visible: eplistRow.current
@@ -1270,9 +1303,17 @@ import QtPlayer
                                         }
                                         width: 12
                                         height: 13
-                                        source: "../assets/images/eplist-playing.svg"
-                                        sourceSize: Qt.size(12, 13)
-                                        smooth: true
+                                        canvasWidth: 80
+                                        canvasHeight: 80
+                                        sequence: [
+                                            {
+                                                "source": QtPlayerTheme.dark
+                                                          ? "assets/lottie-icon/bangumi_detail_playing_night.json"
+                                                          : "assets/lottie-icon/bangumi_detail_playing.json",
+                                                "complete": "loop",
+                                                "autoplay": eplistRow.current && eplistMenu.visible
+                                            }
+                                        ]
                                     }
 
                                     Text {
