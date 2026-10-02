@@ -7,14 +7,20 @@
 // values verbatim.
 //
 
+/*
+ * LOG_TAG 必须在包含 frame_work_log.h **之前**定义：那个头里有
+ * `#ifndef LOG_TAG / #define LOG_TAG ""` 的兜底，先包含它再定义就会触发
+ * `-Wmacro-redefined`（macOS 上是 2 条，来自 2 个编译单元）。其它源文件
+ * （如 HLSStream.cpp / DashStream.cpp）本来就把它放在 include 之前，这里跟随同一惯例。
+ */
+#define LOG_TAG "MediaManifestParser"
+
 #include "MediaManifestParser.h"
 #include <utils/CicadaJSON.h>
 #include <utils/frame_work_log.h>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-
-#define LOG_TAG "MediaManifestParser"
 
 using namespace Cicada::Manifest;
 

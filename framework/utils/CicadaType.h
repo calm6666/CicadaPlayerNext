@@ -26,11 +26,30 @@
   #if __GNUC__ >= 4
     #define CICADA_CPLUS_EXTERN __attribute__((visibility ("default")))
     /*
-     * 取值保持工程原样：ffmpeg 自己的两份头文件对 attribute_deprecated 的取值都不同
-     * （external/install/.../attributes.h 在 C++ 下用 [[deprecated]]，而 vendored 的
-     * external/external/ffmpeg/... 用编译器原生写法），我们跟着任何一边改都会让另一边
-     * 报"宏重定义"。这是既有的、来自第三方头的告警（Windows C4005 / macOS
-     * -Wmacro-redefined），不作为本工程的代码问题处理。
+     * ============ attribute_deprecated 与 FFmpeg 的重定义（为什么要显式抑制）============
+     *
+     * 本工程**必须**自己定义这个宏：它是我们对外 API 的一部分
+     * （`mediaPlayer/media_player_api.h:45`、`framework/demuxer/IDemuxer.h:142`、
+     * `AVAFPacket.h:39`、`demuxer_service.h:144` 都用它标注"已废弃但保留"的接口），
+     * 所以不能为了避让 FFmpeg 而撤掉它。
+     *
+     * 而 FFmpeg 的 `libavutil/attributes.h:128-136` 也会**无条件**定义同名宏：
+     *     #if AV_HAS_STD_ATTRIBUTE(deprecated)
+     *     #    define attribute_deprecated [[deprecated]]     ← C++ 下走这一支
+     * 它外面没有 `#ifndef` 保护，于是无论谁先定义，后定义的那个都会触发
+     * `-Wmacro-redefined`（MSVC 是 C4005）—— 本文件里的 `#ifndef` 只能保护自己，
+     * 保护不了别人。
+     *
+     * 取值本身**不冲突**：`[[deprecated]]` 与 `__attribute__((deprecated))` 语义等价，
+     * 只是写法不同。真正会出问题的只有"我们包含了 FFmpeg 头再回到自己的声明"这种
+     * 顺序，而两者混用在本工程里已经跑了很久、行为正常。
+     *
+     * 结论：这是**第三方头之间的宏撞名**，不是本工程的代码问题，但用户要求零告警，
+     * 所以改为在**受影响的 target 上**加 `-Wno-macro-redefined` 显式抑制
+     * （见 `framework/macOSX.cmake` 里那段说明），而不是把它当成"已知问题"留在日志里。
+     * 这里保持原生写法（不改成 [[deprecated]]）：改了只会把同一条告警挪到另一侧
+     * （vendored 的 `external/external/ffmpeg` 用的是 `__attribute__` 分支），
+     * 而且 MSVC 分支还得继续用 `__declspec`。
      */
     #ifndef attribute_deprecated
     #define attribute_deprecated __attribute__((deprecated))

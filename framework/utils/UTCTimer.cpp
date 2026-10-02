@@ -166,7 +166,13 @@ UTCTimer::operator std::string()
     time_t t = mClock.get() / 1000000;
     char tmpBuf[BUFLEN];
     size_t len = strftime(tmpBuf, BUFLEN, "%Y-%m-%d %H:%M:%S", gmtime(&t));
-    sprintf(tmpBuf + len, ".%03d", (int) (mClock.get() % 1000000) / 1000);
+    /*
+     * snprintf 而不是 sprintf：后者在 macOS 15 SDK 上被标记为 deprecated
+     * （"provided for compatibility reasons only ... use snprintf(3) instead"），
+     * 而这里的写入量是有界的（".%03d" 最多 4 字节 + NUL），所以补一个显式的
+     * 剩余长度既消掉告警，也把"不会越界"写进代码本身。
+     */
+    snprintf(tmpBuf + len, BUFLEN - len, ".%03d", (int) (mClock.get() % 1000000) / 1000);
     return string(tmpBuf);
 }
 void UTCTimer::start()
@@ -367,6 +373,8 @@ NTPClient::operator std::string()
     time_t t = mTime / 1000000;
     char tmpBuf[BUFLEN];
     size_t len = strftime(tmpBuf, BUFLEN, "%Y-%m-%dT%H:%M:%S", gmtime(&t));
-    sprintf(tmpBuf + len, ".%03dZ", (int) (mTime % 1000000) / 1000);
+    // 同 operator std::string()：sprintf -> snprintf，消掉 macOS 15 SDK 的
+    // -Wdeprecated-declarations，并把边界写清楚。
+    snprintf(tmpBuf + len, BUFLEN - len, ".%03dZ", (int) (mTime % 1000000) / 1000);
     return string(tmpBuf);
 }

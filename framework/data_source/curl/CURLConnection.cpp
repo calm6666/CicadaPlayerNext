@@ -28,8 +28,20 @@ using namespace Cicada;
 
 #define FITS_INT(a) (((a) <= INT_MAX) && ((a) >= INT_MIN))
 
+/*
+ * FALSE / TRUE 用 #ifndef 保护：Windows 上 <windows.h>（经 curl 的头间接引入）
+ * 已经定义过这两个宏，而这里原来是**无条件** #define，于是 MSVC 报
+ *     warning C4005: "FALSE": 宏重定义
+ * （CURLConnection.cpp 与 CURLConnection2.cpp 各两条）。
+ * 两者取值在本文件关心的语义上完全一致（curl 的 CURLOPT_SSL_VERIFYPEER 等只看
+ * 0 / 非 0），所以"已经有了就用现成的"是安全且更干净的写法。
+ */
+#ifndef FALSE
 #define FALSE 0L
+#endif
+#ifndef TRUE
 #define TRUE  1L
+#endif
 
 #define CURL_LOGD(...)                                                                                                                     \
     do {                                                                                                                                   \

@@ -259,7 +259,13 @@ static void cicada_log_callback(int level, const char *buffer)
     }
 }
 
-static void initLog()
+/*
+ * 显式写 (void)：pthread_once 要的是 `void (*)(void)`，而 C 里空的形参列表 `()`
+ * 表示"参数未指定"，MSVC 因此报
+ *     warning C4113: "void (__cdecl *)()"和"void (__cdecl *)(void)"的参数列表不同
+ * （两处调用点共用同一个函数，共 2 条）。`(void)` 是 C 里"确实不接受参数"的正解。
+ */
+static void initLog(void)
 {
     if (mtlVer == NULL) {
         mtlVer = xstr(VERSION);

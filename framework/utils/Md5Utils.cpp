@@ -23,11 +23,18 @@ namespace Cicada {
         av_md5_final(ctx, outTmp);
         av_free(ctx);
         char out[33] = {0};
+        static const char kHex[] = "0123456789abcdef";
         int p = 0;
 
+        /*
+         * 直接填两位十六进制，而不是 `sprintf(out + p, "%02x", i)`：
+         * sprintf 在 macOS 15 SDK 上被标记为 deprecated（"use snprintf(3) instead"）。
+         * 这里逐个字符写是等价的、且完全不用格式化函数 —— 比换成 snprintf 再算剩余
+         * 长度更直接，也不会因为 out 缓冲只有 33 字节而需要再解释一次边界。
+         */
         for (unsigned char i : outTmp) {
-            sprintf(out + p, "%02x", i);
-            p += 2;
+            out[p++] = kHex[(i >> 4) & 0x0F];
+            out[p++] = kHex[i & 0x0F];
         }
 
         return std::string(out);

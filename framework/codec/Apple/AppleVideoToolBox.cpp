@@ -163,7 +163,8 @@ namespace Cicada {
         return 0;
     }
 
-    int AFVTBDecoder::init_decoder(const Stream_meta *meta, void *voutObsr, uint64_t flags, const DrmInfo* drmInfo)
+    int AFVTBDecoder::init_decoder(const Stream_meta *meta, void *CM_NULLABLE voutObsr, uint64_t flags,
+                                   const DrmInfo *CM_NULLABLE drmInfo)
     {
         if (meta->pixel_fmt == AF_PIX_FMT_YUV422P || meta->pixel_fmt == AF_PIX_FMT_YUVJ422P || meta->interlaced == InterlacedType_YES) {
             return -ENOTSUP;
@@ -684,7 +685,7 @@ namespace Cicada {
         }
     }
 
-    void AFVTBDecoder::onDecoded(IAFPacket *packet, std::unique_ptr<PBAFFrame> frame, OSStatus status)
+    void AFVTBDecoder::onDecoded(IAFPacket *CM_NULLABLE packet, std::unique_ptr<PBAFFrame> frame, OSStatus status)
     {
         if (packet == nullptr) {
             return;
