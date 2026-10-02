@@ -84,6 +84,21 @@ android {
             signingConfig signingConfigs.debug
         }
     }
+
+    // 【为什么要压缩 .so —— 这是 73MB 里最大的一块】
+    // AGP 8 的默认是 useLegacyPackaging = false，也就是 .so **不压缩**地放进 APK
+    //（同时 extractNativeLibs=false，安装后直接 mmap APK 里的库：启动快、不额外占空间）。
+    // 代价是 APK 里躺着的就是"原始大小"，实测 73.28MB 的 APK 里有 72.74MB 是未压缩的 native 库：
+    //     libffmpeg.so 11.95MB / libflutter.so 11.2MB / libCicadaPlayer.so 2.89MB ...
+    // 改成 true 之后这些库按 deflate 存（libffmpeg 11.95 -> 4.91，约 2.4 倍），APK 明显变小；
+    // 代价是**安装时**把 .so 解压到 /data，安装慢一点、多占一点空间，冷启动也可能略慢。
+    // 对一个"拷到手机上测"的 APK 来说体积优先，所以这里打开。
+    // 要还原成默认（不压缩，更适合上架 AAB / Play 分发）就把这个 packaging 块删掉。
+    packaging {
+        jniLibs {
+            useLegacyPackaging = true
+        }
+    }
 }
 
 flutter {

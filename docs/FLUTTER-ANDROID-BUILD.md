@@ -21,8 +21,68 @@
 
 ---
 
-## 1. 前置条件
+## 0.1 三层代码住在哪一层（"到 Flutter 了为什么还要写 Java"）
 
+一句话：**Flutter 只是 UI 与业务那一层，播放器这种"要调平台能力"的东西在 Flutter 里天生是
+"一半 Dart + 一半平台原生"，再加上本来就有的 C++ 内核，一共三层。**
+
+```
+platform/Flutter/
+├─ lib/                                  ★ 第一层：Flutter(Dart) —— 这才是"Flutter 代码"
+│    flutter_cicadaplayer.dart   578 行    FlutterCicadaPlayer / CicadaTextureView / 全部回调 typedef
+│    flutter_avpdef.dart         248 行    AVPMediaInfo / AVPTrackInfo / EventChanneldef 等数据类
+│    flutter_cicadaplayer_factory.dart 12 行 工厂
+│
+├─ android/src/main/java/…               ★ 第二层：Android 原生半边（Java，必须有）
+│    FlutterCicadaPlayer.java    899 行    MethodChannel / EventChannel 的 Android 实现
+│    FlutterCicadaPlayerPlugin.java 101 行 插件注册 + 建销毁纹理（工厂通道）
+│    PlayerSurface.java          100 行    SurfaceProducer（零拷贝纹理）
+│    FlutterCicadaPlayerView.java  69 行   旧平台视图（保留）
+├─ ios/Classes/…                         ★ 第二层：iOS 原生半边（ObjC，同职责）
+│    CicadaPlayerFactory.m       898 行 / FlutterCicadaPlayerTexture.m 148 行 / …
+│
+└─ example/lib/                          ★ 第一层：写 App 时的 Flutter 代码
+     main.dart                   392 行    本轮新写的测试 App（只 import flutter + 插件）
+     （page/ model/ widget/ … 是旧 demo，尚未做 Dart 3 迁移，见 §4.1）
+
+framework/ + platform/Android/source/…/java/com/cicada/player/…   ★ 第三层：内核（C++ / Java SDK）
+                                                                  两个平台共用，和 Flutter 无关
+```
+
+**为什么第二层必须是 Java/ObjC，不能用 Dart 替代**：
+
+1. Dart **不能直接调 C++/JNI**；`libCicadaPlayer.so` 是 JNI 库，Android 上必须由 Java 加载并持有。
+2. 纹理/画面是平台对象：Android 的 `TextureRegistry.SurfaceProducer` + `Surface`、
+   iOS 的 `FlutterTexture` + `CVPixelBuffer`，Dart 里没有对应概念。
+3. 事件回传要走 `MethodChannel`/`EventChannel`，这一端必须有平台实现来 `success(...)`。
+
+所以 **Dart 半边的职责是"声明 API + 收发消息"，Java/ObjC 半边的职责是"真的干活"**。
+调用链（Dart 里点一下"播放"发生了什么）：
+
+```
+Dart   CicadaTextureView(onCreated:) → FlutterCicadaPlayer.prepare()
+         ↓  MethodChannel('flutter_cicadaplayer').invokeMethod('prepare')
+Java   FlutterCicadaPlayer.onMethodCall("prepare") → mCicadaPlayer.prepare()
+         ↓  JNI
+C++    内核解码/渲染，把画面写进 PlayerSurface 给的那张 Surface（GPU→GPU，零拷贝）
+         ↑  EventChannel('flutter_cicadaplayer_event')
+Java   mEventSink.success({method:"onRenderingStart", …})
+Dart   _onEvent → onRenderingStart 回调 → setState → 画面出现
+```
+
+**那我（本轮）改的 Java 是什么**：不是"给 Flutter 写业务"，而是**修这个插件自己的平台半边**——
+它里面还留着 Flutter 3.29 已经删掉的 Android **v1 embedding**（`PluginRegistry.Registrar`）、
+`PlayerSurface` 的纹理回调从来没注册过、SDK 新加的 `onSubtitleHeader` 没实现。
+这些不修，Dart 那半边写得再对也跑不起来（详见 §5.10、§5.11）。
+
+**你以后写 Flutter 业务时只需要写 Dart**：像 `example/lib/main.dart` 那样
+`FlutterCicadaPlayerFactory().createCicadaPlayer()` + `CicadaTextureView` + 回调，
+一行 Java 都不用碰。只有当你要**新增一个平台能力**（比如屏幕旋转锁定、后台播放服务）时，
+才需要在第二层加方法并在 Dart 侧加对应的 `invokeMethod`。
+
+---
+
+## 1. 前置条件
 | 项 | 本机实际值 | 怎么确认 |
 |---|---|---|
 | JDK | `C:\Program Files\Java\jdk-21`（`JAVA_HOME` 已设） | `echo %JAVA_HOME%` |
@@ -80,28 +140,77 @@ D:\flutter\bin\flutter.bat pub get
 ::    --android-skip-build-dependency-validation 的原因见 §5.7：
 ::    本工程没有任何 Kotlin 源码，但 Flutter 3.47 仍要求 KGP >= 2.2.20，
 ::    而本机缓存只有 2.0.21、网速约 100KB/s。Gradle/AGP/JDK 三项我们已手工满足。
-D:\flutter\bin\flutter.bat build apk --release --android-skip-build-dependency-validation
+::
+::    --split-per-abi + --target-platform 是**体积**的关键（见 §3.1）：
+::    不写的话会把 arm64 + armeabi-v7a + x86_64 三套都塞进一个 APK（73.3MB）。
+D:\flutter\bin\flutter.bat build apk --release ^
+    --split-per-abi --target-platform android-arm64,android-arm ^
+    --android-skip-build-dependency-validation
 
-:: 产物（两处是同一个文件）：
-::   build\app\outputs\flutter-apk\app-release.apk
-::   build\app\outputs\apk\release\app-release.apk
+:: 产物（每个 ABI 一个）：
+::   build\app\outputs\flutter-apk\app-arm64-v8a-release.apk      13.3 MB  ← 真机装这个
+::   build\app\outputs\flutter-apk\app-armeabi-v7a-release.apk    12.4 MB
 ```
 
-**实测结果**：`✓ Built build\app\outputs\flutter-apk\app-release.apk (73.3MB)`，
-内容核对（`tar -tf`）：
+### 3.1 体积：73.3 MB → 13.3 MB（比同工程的 Compose 版还小）
+
+先说结论：**74MB 不是内核大，是"三套 ABI + .so 不压缩"堆出来的。**
+
+实测拆解（解 zip 得到的**原始**大小）：
+
+| 项 | 各 ABI 大小 | 说明 |
+|---|---|---|
+| `libflutter.so` | 11.2 (arm64) / 8.22 (v7a) / **12.45** (x86_64) | **Flutter 引擎**，每个 ABI 一份 |
+| `libapp.so` | 4.5 (arm64) / 4.97 (v7a) / **4.69** (x86_64) | Dart AOT 产物，每个 ABI 一份 |
+| `libffmpeg.so` | **11.95** (arm64) / 9.87 (v7a) | 内核依赖 |
+| `libCicadaPlayer.so` | 2.89 (arm64) / 2.00 (v7a) | 内核 |
+| 其余（dex / 资源 / 字体） | ~0.5 | 字体已被 tree-shake（1.6MB → 1.4KB） |
+
+对照同仓库 **Compose 版**（它也用了 ABI splits）：
+
+| | 内核 native | 引擎 | 其它 | 合计 |
+|---|---|---|---|---|
+| Compose `app-arm64-v8a-release.apk` | libffmpeg 11.95 + libCicadaPlayer 2.89 = **14.85** | 无（Java/Kotlin 不需要引擎 .so） | 8.46（dex + Compose 运行时） | **23.31 MB** |
+| Flutter arm64（同 ABI、同样不压缩） | **14.85**（一模一样） | libflutter 11.2 + libapp 4.5 = **15.7** | 0.5 | **≈31 MB** |
+
+也就是说：**内核那一份两边完全一样（14.85 MB），Flutter 多出来的就是引擎的 15.7 MB** ——
+这是 Flutter 的固有成本，不是我们代码的问题。剩下那 42 MB 是**多余的 ABI**：
+`lib/armeabi-v7a/*`（约 25 MB）+ `lib/x86_64/*`（约 17 MB）。
+
+实测四种配置：
+
+| 配置 | APK |
+|---|---|
+| 默认（三个 ABI、.so 不压缩） | **73.28 MB** |
+| `--target-platform android-arm64` | 42.92 MB ← 只砍掉了引擎/Dart 的 x86_64，**aar 里的 v7a 内核库还在**，见下面的坑 |
+| `--split-per-abi --target-platform android-arm64,android-arm` | 42.9 / …（拆分后 31 / 25 MB 级） |
+| 上面再叠 `useLegacyPackaging = true`（.so 压缩） | **13.33 MB（arm64）/ 12.36 MB（v7a）** ← 最终结果 |
+
+> ⚠ **一个容易踩的坑**：`flutter build apk --target-platform android-arm64` **只管 Flutter 自己的**
+> `libflutter.so` 与 `libapp.so`；**aar 里带的 jniLibs 不受它管**，AGP 照样会把
+> `lib/armeabi-v7a/libffmpeg.so` 打进去。所以 42.92 MB 那次里仍然躺着 v7a 的 11.87 MB 内核库。
+> 要真正按 ABI 拆分得用 `--split-per-abi`（它同时打开 AGP 的 ABI splits），
+> 或者在 gradle 里配 `splits { abi { ... } }` / `defaultConfig.ndk.abiFilters`
+>（ComposePlayer 用的正是 `splits`）。
+
+**最终 13.33 MB 的构成**（arm64）：
 
 ```
-lib/arm64-v8a/libCicadaPlayer.so   lib/arm64-v8a/libffmpeg.so   lib/arm64-v8a/libapp.so   lib/arm64-v8a/libflutter.so
-lib/armeabi-v7a/libCicadaPlayer.so lib/armeabi-v7a/libffmpeg.so lib/armeabi-v7a/libapp.so lib/armeabi-v7a/libflutter.so
-classes.dex
+lib/arm64-v8a/libffmpeg.so        11.95 MB -> 4.91 MB（deflate）
+lib/arm64-v8a/libflutter.so       11.20 MB -> 5.23 MB
+lib/arm64-v8a/libapp.so            4.50 MB -> 1.78 MB
+lib/arm64-v8a/libCicadaPlayer.so   2.89 MB -> 0.97 MB
+classes.dex                        0.59 MB -> 0.27 MB
 ```
 
-> ⚠ `libCicadaPlayer.so` / `libffmpeg.so` **只有 arm64-v8a 与 armeabi-v7a**（aar 里就没有 x86_64）。
-> 所以要装在**真机**上测；x86_64 模拟器会因为缺 .so 起不来。
->
-> 73.3 MB 偏大是正常的：两个 ABI 的 libffmpeg（12.5 MB + 10.3 MB）加两个 ABI 的
-> libCicadaPlayer 与 libflutter 都在里面。只想测一个 ABI 时用
-> `flutter build apk --release --target-platform android-arm64` 可以砍掉一半。
+`useLegacyPackaging = true` 写在 `example/android/app/build.gradle` 的 `packaging` 块里；
+代价是**安装时**会把 .so 解压到 `/data`（安装慢一点、多占空间、冷启动可能略慢）。
+要回到 AGP 8 的默认（不压缩，更适合上架 AAB）就把那个 `packaging` 块删掉。
+
+> 另外记一条：**x86_64 那份是坏的**（aar 里根本没有 x86_64 的 `libCicadaPlayer.so`），
+> 所以默认构建出的 APK 装到 x86_64 模拟器上必崩。用
+> `--target-platform android-arm64,android-arm` 把它排除掉，既省 17 MB 又避免一个
+> "装上去才知道坏"的变体。
 
 装到设备：
 
