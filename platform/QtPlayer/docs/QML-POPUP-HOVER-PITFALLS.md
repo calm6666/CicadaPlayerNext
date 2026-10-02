@@ -113,6 +113,56 @@
       按同一套坐标换算走同一个激活函数，当兜底。判据层是 hover 高亮实际在用的那层；
       按下事件只投递给一个 item，所以两条路不会同时触发、不会重复执行。
 
+23. **带绑定的 `readonly property`，在"属性刚变"的回调里读到的**是旧值** —— 不是新值**
+    （`LottieIcon` 实测；用户报的"选集列表那个 Lottie 三柱图标不动"就是它）。
+
+    `LottieIcon.qml` 里原本是这么写的：
+
+    ```qml
+    readonly property var currentSlot: { ... return sequence[slotIndex] ... }
+
+    onSequenceChanged: applySlot(true)     // 回调里读 currentSlot
+    ```
+
+    当 `sequence` **本身是个会变的绑定**（例如槽位里写
+    `"autoplay": 当前集 && 面板打开`）时，QML 对 `currentSlot` 的重算是惰性的：
+    在 `onSequenceChanged` 里读它，拿到的还是**上一次的缓存**。同一个函数里并排打印：
+
+    ```text
+    applySlot: auto=false   curSlot.autoplay=false   seq0.autoplay=true
+                            ^^^ 旧值                 ^^^ 已经是新值
+    ```
+
+    于是 `applySlot()` 按**旧槽位**判定"这一槽不该自动播"，动画停在第一帧 ——
+    而此时 `anim.status` 是 `Ready`、json 里的 `autoplay` 明明是 `true`，
+    查代码怎么看都对，只有"图标不动"这一个现象。
+    **只影响"绑定会变的 sequence"**：以前各调用点都写死常量序列（只赋值一次），
+    所以这个坑躺了很久没被发现。
+
+    **对策**：组件内部别读那个属性，改成直接查源数据的**函数**（函数每次调用现算，
+    与惰性重算无关）：
+
+    ```qml
+    function slotAt(index) { ... return sequence[index] ... }   // 内部一律用这个
+    readonly property var currentSlot: slotAt(slotIndex)        // 对外保留
+    ```
+
+    **排查这类"动画不动"的推荐手段**（20 行，不依赖任何帧号 API）：
+    `QT_QPA_PLATFORM=offscreen` + `QSG_RHI_BACKEND=software` 跑一个探针 qml，
+    每 400ms 对目标 `grabToImage` 存一张 PNG，比对外面文件哈希 ——
+    动没动一目了然。同一个用例：**修之前 10 张图只有 1 个哈希，修之后 8 个哈希**。
+
+    ```bat
+    set QT_QPA_PLATFORM=offscreen
+    set QSG_RHI_BACKEND=software
+    D:\Qt\6.11.1\msvc2022_64\bin\qml.exe probe.qml
+    ```
+
+    顺带两条同源结论（同一轮实测）：
+    - `loops: -1` 在 Qt 6.11.1 上是**真无限循环**：6 秒内 `finished` 一次都没发，
+      所以 `LottieIcon` 的 `onFinished`（`gotoAndStop(末帧)`）不会把循环动画钉死；
+    - 所以"循环不了"不该去改 `complete:"loop"`，先按上面的办法确认它到底有没有在跑。
+
 ## 七、新增浮层的推荐模板（照抄这个顺序写）
 
 ```qml

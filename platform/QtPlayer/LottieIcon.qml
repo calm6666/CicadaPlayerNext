@@ -64,18 +64,39 @@ Item {
     readonly property bool failed: anim.status === LottieAnimation.Error
 
     /*
-     * 当前槽。越界**或者数组里那一项是 undefined/null** 时都给空对象，调用方不用判空。
+     * 取第 index 个槽。**组件内部一律用这个函数，不要用下面的 currentSlot 属性。**
+     *
+     * 【为什么必须这样（Qt 6.11.1 实测）】currentSlot 是带绑定的 readonly 属性，
+     * QML 对它的重算是**惰性**的：在 onSequenceChanged / onSlotIndexChanged 这种
+     * "属性刚变"的回调里读它，拿到的还是**上一次的缓存值** —— 序列已经是新的了，
+     * currentSlot 还是旧的。实测日志（同一函数内并排打印两个值）：
+     *
+     *     applySlot: auto=false  curSlot.autoplay=false   seq0.autoplay=true
+     *                             ^^^ 旧值                ^^^ 已经是新值
+     *
+     * 于是 applySlot() 按**旧槽位**判定"这一槽不该自动播"，动画永远起不来
+     * （现象：Lottie 图标停在第一帧不动，而 status 是 Ready、autoplay 明明是 true）。
+     *
+     * 这个坑只在"sequence 本身是个会变的绑定"时才暴露：以前各调用点写的都是常量序列
+     * （sequence 只赋值一次），所以一直没被发现。改成函数之后每次读都直接查 sequence，
+     * 与惰性重算无关。
+     */
+    function slotAt(index) {
+        if (index < 0 || index >= sequence.length)
+            return ({})
+
+        var slot = sequence[index]
+        return (slot === undefined || slot === null) ? ({}) : slot
+    }
+
+    /*
+     * 当前槽。**对外保留这个属性**（历史用法 / 调试用），组件内部请用 slotAt(slotIndex)。
+     * 越界**或者数组里那一项是 undefined/null** 时都给空对象，调用方不用判空。
      * 【踩过的坑】只判越界不够：sequence 里只要有一个空位，sequence[slotIndex] 就是 undefined，
      * 于是 applySlot 里读 slot.source 直接抛
      * "TypeError: Cannot read property 'source' of undefined"（运行日志里那条）。
      */
-    readonly property var currentSlot: {
-        if (slotIndex < 0 || slotIndex >= sequence.length)
-            return ({})
-
-        var slot = sequence[slotIndex]
-        return (slot === undefined || slot === null) ? ({}) : slot
-    }
+    readonly property var currentSlot: slotAt(slotIndex)
 
     /*
      * 动画自己的画布尺寸 —— 就是 json 里的 "w"/"h"（每个图标不一样，别当成 88 一刀切）：
@@ -114,7 +135,7 @@ Item {
         if (!running || anim.status !== LottieAnimation.Ready)
             return
 
-        var slot = currentSlot
+        var slot = slotAt(slotIndex)
         var from = (slot.startFrame !== undefined && slot.startFrame > 0) ? slot.startFrame : 0
         anim.gotoAndPlay(from)
     }
@@ -125,7 +146,7 @@ Item {
 
     /* 停住并回到当前槽的起始帧（参考实现 stop() 的语义） */
     function stop() {
-        var slot = currentSlot
+        var slot = slotAt(slotIndex)
         if (slot.startFrame !== undefined)
             anim.gotoAndStop(slot.startFrame)
         else
@@ -166,7 +187,7 @@ Item {
 
     /* 离开：停在起始帧（音量那套 hover 动画要回到静止态） */
     function hideHover() {
-        var slot = currentSlot
+        var slot = slotAt(slotIndex)
         if (slot.startFrame !== undefined)
             anim.gotoAndStop(slot.startFrame)
         else
@@ -187,7 +208,7 @@ Item {
      * 所以挂载时的暂停态本来就是对的。动画只有在被真正 play() 之后才会走到末帧。
      */
     function restFrame() {
-        var slot = currentSlot
+        var slot = slotAt(slotIndex)
 
         if (slot.stopFrame !== undefined && slot.stopFrame >= 0)
             return slot.stopFrame
@@ -200,7 +221,7 @@ Item {
 
     /* 把当前槽的配置套到 LottieAnimation 上（注意 startFrame/endFrame 只读，只能跳帧） */
     function applySlot(autoPlayIt) {
-        var slot = currentSlot
+        var slot = slotAt(slotIndex)
 
         if (slot === undefined || slot === null)
             return
@@ -273,7 +294,7 @@ Item {
         }
 
         onFinished: {
-            var slot = root.currentSlot
+            var slot = root.slotAt(root.slotIndex)
             /* 显式停在某一帧：Qt 播完不保证留着末帧，状态类图标必须一直可见 */
             var last = Math.max(0, anim.getDuration(true) - 1)
             var stopAt = (slot.stopFrame !== undefined && slot.stopFrame >= 0) ? slot.stopFrame : last
