@@ -11,6 +11,12 @@
 // 复制而不是抽公共组件的代价：以后改标题栏要**两处一起改**。
 // 真要收敛的话，应该抽成一个 CaptionBar.qml 让两边都用。
 //
+// 【和 Main.qml / LiveMain.qml 一样的两条硬约定】（原因在 `transientParent` 那段注释里）
+//   1. **transientParent: null** —— 不写就会变成首页的从属窗口：任务栏里和首页合并成一个
+//      按钮、永远压在首页上面（用户报的"怎么还是合并在一起"就是这个）；
+//   2. **不写 flags: Qt.FramelessWindowHint** —— 去边框是 QWindowKit 按平台做的，
+//      自己加会把 WS_THICKFRAME 去掉，四边四角都不能拖拽缩放。
+//
 // 【中间是 WebView】用的是 QtWebView（不是 QtWebEngine）：
 //   * 它本身只是个壳，真正的实现在 plugins/webview/ 下按平台选后端；
 //     Windows 上是 WebView2（Edge 运行时，Win10/11 自带）；
@@ -36,6 +42,25 @@ Window {
     /* 别让人把窗口缩成一条缝（缩放下限；上限交给系统/最大化） */
     minimumWidth: 480
     minimumHeight: 360
+
+    /*
+     * 【必须写 transientParent: null —— 这是"窗口被合并在一起"的根因，别删】
+     *
+     * 本窗口是用 `Qt.createComponent(...).createObject(home.contentItem)` 建出来的：
+     * QObject 父对象是首页里的一个 item。**QML 的 Window 在这种情形下会把 transientParent
+     * 自动指到首页那个窗口**，于是本窗口变成首页的**从属窗口（owned window）**：
+     *   * 任务栏里不单独出现（和首页合并成一个按钮）；
+     *   * 永远压在首页上面、跟着首页一起最小化。
+     * 用户报的"打开的 webview 要和视频播放器页面一样是独立的，怎么还是合并在一起"就是这个。
+     *
+     * Main.qml（第 95~101 行）和 LiveMain.qml（第 14~34 行）都显式写了这一行，理由也写在那里；
+     * 这里照抄 —— **三个独立窗口必须一致**，漏一个就会出现"有的窗口独立、有的被合并"。
+     *
+     * 顺带把另一条也抄过来：**不要自己写 `flags: Qt.FramelessWindowHint`**。
+     * 去边框是 QWindowKit 按平台做的，自己加了会把 WS_THICKFRAME 去掉，
+     * 四边四角就都不能拖拽缩放（本文件下面那 8 个缩放热区正是为"能拖"服务的）。
+     */
+    transientParent: null
 
     /*
      * 【为什么内容区四周要留出这么多像素】—— 这是"窗口拖不动边缘"的根因，别删。
