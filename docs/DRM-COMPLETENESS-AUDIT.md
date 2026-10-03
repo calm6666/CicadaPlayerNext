@@ -72,7 +72,11 @@
 
 ## 4. 收口清单（按"我这边能不能验"排序）
 
-**A. 转码脚本 `--drm-keyserver` 全流程实跑**（清单 e）
+**A. 转码脚本 `--drm-keyserver` 全流程实跑**（清单 e）—— **【本轮已完成，见 §6】**
+   2026-10-03 实跑：编排打通，11 个密文分片 + 全套清单产出，openssl 独立解密逐字节一致、
+   密钥与清单 URI 逐字节一致；过程中修掉 2 个脚本 bug，并查出 3 处验收器误报（详见 §6）。
+   **剩下的收尾**：把那 3 处误报修掉（否则它作为门禁不可信），然后再把这条当"门禁"用。
+   （原计划文字保留如下）
    需要：准备 `input.mp4` + 输出目录布局，起 Go 服务器，跑
    `python transcode_all.py --hls-key-info <f> --drm-keyserver http://127.0.0.1:<port>`，
    然后用 `verify_segmentbase.py --expect-encrypted --key-file <f>` 验收。
@@ -125,3 +129,87 @@
 **Bento4 产出的 150/150 全对**，且它的样本是**单 subsample**
 （验证器会打印形状普查：`150 single-range, 0 multi-range`）——
 所以"多 subsample 路径"至今**没有**被一个权威产物验证过（这也是清单 B 值得做的原因）。
+
+---
+
+## 6. 清单 A 实跑记录（2026-10-03）：编排打通了，同时挖出 2 个脚本 bug + 3 个验收器误报
+
+### 6.1 怎么跑的、跑出了什么
+
+| 项 | 值 |
+|---|---|
+| 工作目录 | `D:\hilihili\.dsh_tmp\drmflow\A3`（仓库外临时目录） |
+| 输入 | `input.mp4` = ffmpeg `testsrc2` 12 秒 720p30 视频 + `sine` 音轨（4.5 MB） |
+| 密钥服务器 | `server/drm-keyserver`：`go run . -addr 127.0.0.1:9101 -data-dir <tmp>`（demo 模式，无 secret） |
+| 命令 | `python transcode_all.py --hls-key-info key_info.txt --drm-keyserver http://127.0.0.1:9101` |
+| 产物 | 11 个密文分片 · 5 条媒体列表（每条**逐片** `#EXT-X-KEY`）· `master.m3u8`（含 `#EXT-X-SESSION-KEY`）· `output.mpd`（5 个 AdaptationSet + `ContentProtection`）· `output-segmentbase.mpd` · 6 个 JSON 清单 · `_clear/` 明文对照 |
+
+**关键独立证据：openssl 当预言机**（用清单里那个 URI 背后的**服务器密钥** + 清单声明的**逐片 IV** 解交付的密文，比对 `_clear/`）：
+
+| 分片 | 明文 md5 | openssl 解出 md5 | 明文/密文字节 |
+|---|---|---|---|
+| `…video-h264-1280_720-1.m4s` | `55d9249e586fc20442377a4d2698ad60` | **同** | 2404522 / 2404528 |
+| `…video-h264-1280_720-2.m4s` | `36f2f18af0e6013574f0fd3240da7696` | **同** | 2278271 / 2278272 |
+| `…audio-1.m4s` | `20baefa9b01053e46e6af8319ac23040` | **同** | 93072 / 93088 |
+| `…audio-3.m4s` | `d68a4490c75ebbc675c866eb1ec7190e` | **同** | 1473 / 1488 |
+
+⇒ `AES-128-CBC + PKCS7 + 逐片 IV(…01/…02/…)` 的交付密文，能被一个**独立实现**逐字节解回明文；
+密文长度全部整除 16（PKCS7 补 1~16 字节）✓。
+
+**密钥一致性（红线）**：`GET /key/125ee3969fdcab16bf7247c1aa43474e` 返回的 16 字节与脚本落地的那把
+**逐字节相同**（`b9b004c135d3270ee2921cac55ea1878`）⇒「清单 URI 指向的密钥 == 实际加密用的密钥」成立。
+
+**验收器里 DRM 相关的断言全过**：A6（密文对照 11/11 都在 `_clear/`）、A9（JSON 的
+`encryption.keyUrl/iv` 与 `#EXT-X-KEY` 同源）、A10（segmentbase single 清单确实**没有** encryption）、
+A12（`master.m3u8` 的 `#EXT-X-SESSION-KEY` 与媒体列表一致）。
+
+### 6.2 脚本端两个真 bug（本轮都已修）
+
+1. **`convert-to-manifest.py` 落的是末片 IV ⇒ 交付被红线阻断**
+   `parse_media_m3u8()` 里每遇到一条 `#EXT-X-KEY` 就 `result['encryption'] = enc` 覆盖；
+   逐片写 KEY 之后，留下的一定是**末片**的 IV。而契约是「JSON 每路清单只有一个 `encryption.iv`，
+   对应**首片**」（`transcode_all.py` §4.6 A9 与 `_review_json_manifests` 的注释）。
+   实测报错：`test-dash-v4.json: encryption.iv='…0002' 与媒体播放列表 #EXT-X-KEY 里的 IV ['…0001'] 不一致`
+   —— 脚本"宁可不交付"的行为是对的，错的是这一段。
+   修法：只在**第一条** KEY 时赋值。★判据必须写 `result['encryption'] is None`，
+   **不能**写 `'encryption' not in result`：该函数开头就把 `'encryption': None` 预置进了 result，
+   那样写恒假 ⇒ 一条都不赋值 ⇒ 清单里干脆没有 `encryption`（这个坑本轮实测踩过一次）。
+2. **非交互运行必然 `EOFError`，把成功报成失败**
+   结尾无条件 `input("按 Enter 键退出...")`；CI / 重定向没有 stdin ⇒ 产物齐全、退出码却是 1。
+   修法：`if sys.stdin.isatty(): input(...)`（这不是开关，是"有没有人在看"）。
+
+### 6.3 验收器 `verify_segmentbase.py` 三处误报（是判据错，不是产物错）
+
+| # | 报错 | 实测反证 |
+|---|---|---|
+| 1 | `解密验证不一致 … PKCS7 … 密文长度 2404522 不是 16 的倍数` | **2404522 是明文长度**；密文是 2404528（整除 16、补 6 字节）。openssl 独立解密逐字节一致（§6.1）⇒ 它把明文长度当成了密文长度 |
+| 2 | `Initialization 缺失 … #EXT-X-MAP BYTERANGE 推断 [0-855] 与 initialization [0--] 不一致` | box 遍历实测**单文件**：`ftyp(32)+moov(824)=856 → sidx@856(64B) → moof@920`，与 MPD 的 `indexRange="856-919"` 严丝合缝；audio 同理（`769-844`，`ftyp(32)+moov(737)`）✓。它是拿**独立 init 文件**（840 B，另一套 box 布局：ftyp 28 + moov 812）去比**单文件**的 indexRange —— 两个文件各自自洽 |
+| 3 | `有分片共用同一个 IV（4 个 video rendition 的第 1 片都是 …01）` | 按脚本 §4.1 约定 `IV = 基 IV + 分片序号`，**不同 rendition 的同一序号本来就该是同一个 IV**；同一 rendition 内逐片唯一 ✓。这条判据与约定冲突，得先定口径再改 |
+
+**这三条必须先修**：它既是清单 B（B6 门禁）的基准，也是 1B/2/3 的验收基准 —— 基准自己误报，
+后面所有"通过"都不可信。
+
+### 6.4 复现（一条不差）
+
+```powershell
+# 1) 工作目录 + 输入
+mkdir D:\tmp\drmflow; cd D:\tmp\drmflow
+ffmpeg -y -f lavfi -i "testsrc2=size=1280x720:rate=30" -f lavfi -i "sine=frequency=440" `
+       -t 12 -c:v libx264 -preset veryfast -b:v 3000k -pix_fmt yuv420p -g 60 `
+       -c:a aac -b:a 128k -shortest input.mp4
+# 1b) 初始 key_info（3 行：URI / 密钥文件路径 / 可选 IV）+ 16 字节本地密钥
+#     —— 脚本 main() 先 load_hls_key_info() 再换成服务器那把，所以这份文件必须先存在
+
+# 2) 密钥服务器（另一终端）
+cd <repo>\server\drm-keyserver; go run . -addr 127.0.0.1:9101 -data-dir D:\tmp\drmdata
+
+# 3) 转码 + 铸钥 + 加密
+python <转码脚本>\transcode_all.py --hls-key-info key_info.txt --drm-keyserver http://127.0.0.1:9101
+
+# 4) 验收
+python <转码脚本>\verify_segmentbase.py . v4 --expect-encrypted --key-file <16字节密钥文件> --clear-dir _clear
+
+# 5) 独立复核（本轮的判据）——随机挑几片用 openssl 解，和 _clear/ 比 md5
+openssl enc -d -aes-128-cbc -K <32位hex密钥> -iv 00000000000000000000000000000001 `
+        -in <片>.m4s -out out.bin
+```
