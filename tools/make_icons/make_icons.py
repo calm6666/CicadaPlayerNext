@@ -1392,19 +1392,26 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
     # ------------------------------------------------------------------
     # Windows .ico
     #
-    # 【本轮改：Windows 图标改成和 macOS 一样】原来是 `get(256, "flat")` —— 只有图形、
-    # 没有底，96 % 的占比铺满整张画布。用户要求"Qt 上 Windows 的图标也换成 macOS 那种一样的"，
-    # 所以现在用 macOS 那套几何：白色圆角方块 + 按 Apple 网格缩进的内容区
-    #（824/1024，四周留透明边），图形占比沿用 rounded 档。
+    # 【尺寸：用**标准 Windows**，不要照搬 macOS 的网格】
+    # 迭代过程（两轮用户反馈）：
+    #   1) 最早是 `get(256, "flat")` —— 只有图形、没有底，96 % 占比铺满画布。
+    #      用户希望"像 macOS 那样"（有白色圆角方块），于是改成
+    #      `get(256, "rounded", MACOS_GLYPH_FRACTION, MACOS_CONTENT_FRACTION)`。
+    #   2) 但 macOS 那套是**按 Apple 的图标网格故意内缩**的（内容区只有 824/1024，
+    #      四周留透明边），放到 Windows 上就"整个图标连圆角矩形都比别的软件小一圈"，
+    #      任务栏里格格不入（用户原话："偏小…和其它软件显得格格不入"）。
+    #      所以**不能直接复用 macOS 的 content_fraction**。
     #
-    # 代价说清楚：.ico 里最小的那几档（16/24 px）缩到只剩约 8~12 px 的图形，
-    # 任务栏小尺寸下会显得偏小 —— 这正是"和 macOS 一致"的必然结果
-    #（macOS 那边 Dock 里就是这么显示的）。要 Windows 恢复"铺满"就把它改回
-    # get(256, "flat")。
+    # 现在：变体保持 rounded（白圆角方块 + 图形，设计是用户要的），
+    # 但 content_fraction 用默认的 1.0 —— 圆角方块**铺满整张画布**，
+    # 这正是 Windows 图标的常规做法（对比一下记事本/浏览器那些图标：图形基本顶到边）。
+    # 图形占比用 rounded 档（62 %），和 iOS/Android 的观感一致。
+    #
+    # 要回到"只有图形、没有白底"就把这一行改回 get(256, "flat")。
     # ------------------------------------------------------------------
     ico_out = os.path.join(out_dir, "windows", "Cicada.ico")
     ensure_dir(os.path.dirname(ico_out))
-    ico_base = get(256, "rounded", MACOS_GLYPH_FRACTION, MACOS_CONTENT_FRACTION)
+    ico_base = get(256, "rounded", GLYPH_FRACTION_ROUNDED)
     # Pillow resamples the base image down to every requested size, and writes
     # no metadata, so this file is reproducible.
     ico_base.save(ico_out, format="ICO", sizes=[(s, s) for s in WINDOWS_ICO_SIZES])
