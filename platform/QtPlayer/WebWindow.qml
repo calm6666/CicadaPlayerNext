@@ -388,8 +388,16 @@ Window {
 
                 anchors.verticalCenter: parent.verticalCenter
                 width: parent.width - 3 * 66 - 3 * parent.spacing - 120
+                /* 白底黑字：和首页那个 HTML 链接输入框一致（显式写死，不吃 Basic 样式的调色板默认值） */
+                color: "#000000"
+                background: Rectangle {
+                    color: "#ffffff"
+                    border.width: 1
+                    border.color: "#c9ccd3"
+                    radius: 3
+                }
                 placeholderText: qsTr("https://...")
-                placeholderTextColor: QtPlayerTheme.panelHintText
+                placeholderTextColor: "#6b7280"
                 selectByMouse: true
                 /* 地址栏显示当前真实地址（页面里跳转后跟着变） */
                 text: webView.url

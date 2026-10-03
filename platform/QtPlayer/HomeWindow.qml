@@ -367,21 +367,23 @@ Window {
                  */
                 width: webUrlRow.width - openWebButton.width - webUrlRow.spacing
                 /*
-                 * 【本轮修：白字白底看不见】TextField（Controls.Basic）的默认背景是**白色**的，
-                 * 而这条工具条是固定深色 #1b1e24 —— 只把文字设成白色就是"白字白底"。
-                 * 所以背景也要一起改成深色（比工具条略浅，看得出是个输入框），
-                 * 文字保持白色。不去依赖默认文字色：Basic 样式的默认色来自调色板，
-                 * 深浅主题下不一定好看，这里显式写死，和工具条一样与主题解耦。
+                 * 【配色：白底黑字】这一段记着这轮的两次反复，别改回去：
+                 *   1) 一开始只写了 color:#ffffff（想着工具条是深色）→ **白字白底**看不见，
+                 *      用户报"文字颜色是白色的，背景也是白色"；
+                 *   2) 改成深色底 + 白字能看清了，但用户要"白底黑字更好"（和系统输入框一致）；
+                 *   于是：白底 + 黑字（显式写死，不依赖 Basic 样式的调色板默认值）。
+                 * 不用 QtPlayerTheme 的颜色：这条工具条本身是固定深色 #1b1e24、不跟主题变，
+                 * 输入框也跟着固定，免得深浅两种主题下出现两种观感。
                  */
-                color: "#ffffff"
+                color: "#000000"
                 background: Rectangle {
-                    color: "#2a2e36"
+                    color: "#ffffff"
                     border.width: 1
-                    border.color: "#3d424c"
+                    border.color: "#c9ccd3"
                     radius: 3
                 }
                 placeholderText: qsTr("HTML 链接，如 www.bilibili.com —— 回车或点右侧按钮，用独立窗口打开")
-                placeholderTextColor: "#808090"
+                placeholderTextColor: "#6b7280"
                 selectByMouse: true
                 onAccepted: home.openWebUrl(text)
             }
