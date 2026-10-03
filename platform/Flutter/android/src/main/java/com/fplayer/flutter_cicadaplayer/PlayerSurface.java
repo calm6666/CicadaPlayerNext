@@ -95,35 +95,59 @@ final class PlayerSurface implements TextureRegistry.SurfaceProducer.Callback {
     }
 
     /**
-     * 告诉 Flutter 引擎"这张纹理有新内容了，请重绘一帧"。
+     * 请 Flutter 引擎渲染一帧。
      *
-     * <p>【为什么必须调】{@link TextureRegistry.SurfaceProducer} 只是把一张 Surface 交给解码器，
-     * 引擎并不知道什么时候往上面写了新帧。**不通知它**，Flutter 就只在"别的原因"需要重绘时
-     * 才顺手更新一次纹理 —— 现象是：
+     * <p>【注意：两个实现里它的含义完全不同】（读引擎字节码确认，别再想当然）
      * <ul>
-     *   <li>画面灰色不动（引擎从没主动取过帧）；
-     *   <li>界面上有 setState（进度、日志）时闪一下另一帧（那次重绘顺手取到一帧）。
+     *   <li>{@code ImageReaderSurfaceProducer}（SDK_INT >= 29 默认走这条）：
+     *       {@code scheduleFrame()} 只是 {@code FlutterRenderer.scheduleEngineFrame()} ——
+     *       也就是"请渲染一帧 Flutter 帧"。而**每张新图入队时它自己就会调这个**
+     *       （{@code onImage()} 末尾），所以这条路**不需要**应用每帧催；
+     *   <li>{@code SurfaceTextureSurfaceProducer}（老设备 / 强制 GL 纹理）：
+     *       {@code scheduleFrame()} 是 {@code FlutterJNI.markTextureFrameAvailable(id)}，
+     *       即"这张纹理有新内容" —— **这条路必须由应用每帧调**，否则引擎不知道有画面。
      * </ul>
-     * 所以每渲染一帧都要调一次（由 FlutterCicadaPlayer 的 OnVideoRenderedListener 驱动，
-     * 那里已经 post 到主线程）。此前本类**没有任何 scheduleFrame 调用**，
-     * 这就是"Flutter 上没图像、灰屏闪"的根因。
+     * 两条路都要正常，所以 {@link FlutterCicadaPlayer} 还是按"每渲染一帧调一次"来驱动它；
+     * 对第一条路多调的那几次会被 vsync 合并，没有额外代价。
+     *
+     * <p>本类里另外在"刚挂上/刚换过 Surface"之后顺手催一次，只是为了让引擎尽快渲染第一帧，
+     * 与上面那个每帧驱动无关。
      */
     void scheduleFrame() {
         mProducer.scheduleFrame();
     }
 
     /**
-     * 视频尺寸变化时告诉 producer。为什么必须报：producer 默认缓冲尺寸是 0×0，Flutter 会按它
-     * 建纹理；不给尺寸的话纹理尺寸和实际帧对不上。这里是解码器给出的**像素**尺寸，正是
-     * SurfaceProducer.setSize 期望的量纲（Dart 侧的 width/height 是逻辑像素，不能用）。
+     * 视频尺寸变化时告诉 producer，并**把新的 Surface 重新交给播放器**。
+     *
+     * <p>为什么必须报尺寸：producer 默认缓冲尺寸是 0×0，Flutter 会按它建纹理；
+     * 这里是解码器给出的**像素**尺寸，正是 {@code setSize} 期望的量纲（Dart 侧的
+     * width/height 是逻辑像素，不能用）。
+     *
+     * <p>【本轮修的关键：setSize 之后必须重新 getSurface() 并重新 setSurface】
+     * 读引擎实现（{@code FlutterRenderer$ImageReaderSurfaceProducer}，本机设备走这条 ——
+     * {@code createSurfaceProducer()} 在 SDK_INT >= 29 且没有 AHardwareBuffer 缺陷时返回它）：
+     * <ul>
+     *   <li>{@code setSize(w,h)} 只把 requestedWidth/Height 记下来、置
+     *       {@code createNewReader = true} 就 return —— **不会回调通知调用方**；
+     *   <li>真正新建 ImageReader（**连同新的 Surface**）发生在下一次 {@code getSurface()} 里
+     *       （{@code getActiveReader()} 看到 createNewReader 就换一个新 reader）。
+     * </ul>
+     * 所以 setSize 之后如果不重新取 Surface 交给播放器，播放器会继续往**已经被放弃的旧
+     * Surface** 里写，而引擎只从**新 reader** 取图 —— 一个字节都取不到。
+     * 现象就是："有进度、没图像、画面灰着还一闪一闪"。
+     *
+     * <p>对照：Flutter 官方 video_player 插件**根本不调 setSize**（尺寸交给播放器自己处理），
+     * 因此不会踩这个坑。我们既然要用解码器给的像素尺寸，就必须自己重新挂一次
+     * （代价是这一次 setSurface 会让内核重启解码器，发生在起播阶段，用户看不到）。
      */
     void updateVideoSize(int width, int height) {
         if (width <= 0 || height <= 0) {
             return;
         }
         mProducer.setSize(width, height);
-        // 尺寸变了立刻按新尺寸重画一帧（否则要等下一帧解码出来才更新）。
-        scheduleFrame();
+        // 取回（可能刚刚新建的）Surface 再交给播放器 —— 见上面的说明，这一步不能省。
+        attachProducerSurface();
     }
 
     /**

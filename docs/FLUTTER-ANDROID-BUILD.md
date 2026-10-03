@@ -728,35 +728,64 @@ if (!replying.hasReplied()) {
 3. **纹理那格会显示"就绪/创建中/失败"** —— `CicadaTextureView` 把建纹理失败降级成黑屏，
    光看黑屏分不清是没纹理还是没解码。
 
-### 5.17 【代码】没人告诉 Flutter 引擎"有新帧了" ⇒ 有声音没图像、画面灰着还一闪一闪
+### 5.17 【代码】有声音没图像、画面灰着还一闪一闪 —— **`setSize()` 之后没有重新取 Surface**
 
-**现象**（用户原话）："flutter 的视频播放没有图像，画面灰色的还一闪一闪的"。
+> **先纠正本文上一版的错误结论**：我一开始以为是"没人调 `scheduleFrame()`"，于是挂上
+> `OnVideoRenderedListener` 每帧催一次。**那不是根因**（见下面的字节码证据），
+> 用户反馈"还是没图像"。真正的根因是下面这条，`scheduleFrame` 只是顺带保留的防御。
 
-**根因**：`TextureRegistry.SurfaceProducer` 只是把一张 Surface 交给解码器；
-**引擎并不知道什么时候往上面写了新帧**。要让 Flutter 重绘这张纹理，必须显式调
-`SurfaceProducer.scheduleFrame()`。而 `PlayerSurface` 里**一个 `scheduleFrame()` 调用都没有**
-（本轮之前 0 处 ），于是：
+**现象**：有进度、也可能有声，但**没有图像**；画面**灰着**，界面上有 `setState`
+（进度条、日志刷新）时**闪一下**。
 
-* 引擎从没主动取过帧 ⇒ **画面灰着不动**（灰 = 纹理没被更新过）；
-* 界面上有 `setState`（进度条、日志面板）时 Flutter 顺手重绘一次、偶然取到一帧
-  ⇒ **一闪一闪**。
+**根因**：引擎的 `SurfaceProducer` 有两个实现，**`setSize()` 的语义完全不同**：
 
-**修法**（两处）：
+| 实现 | 什么时候用 | `setSize(w,h)` 干什么 |
+|---|---|---|
+| `FlutterRenderer$ImageReaderSurfaceProducer` | **SDK_INT ≥ 29 且无 AHardwareBuffer 缺陷时默认走这条**（本机设备就是） | 只把 `requestedWidth/Height` 记下来、置 `createNewReader = true` 就 `return` —— **不回调通知**；真正新建 ImageReader（**连同新的 Surface**）发生在**下一次 `getSurface()`** 里 |
+| `SurfaceTextureSurfaceProducer` | 老设备 / 强制 GL 纹理 | `SurfaceTexture.setDefaultBufferSize(w,h)`（不换 Surface） |
 
-| 文件 | 改动 |
-|---|---|
-| `PlayerSurface.java` | 新增 `scheduleFrame()`（转调 producer）；在 `attachProducerSurface()`（刚挂上/重建表面）与 `updateVideoSize()`（尺寸变了）各催一帧 |
-| `FlutterCicadaPlayer.java` | 挂 `CicadaPlayer.OnVideoRenderedListener`：**每渲染一帧**就 `scheduleFrame()`；从解码线程来的回调统一 `post` 到主线程再调 |
+证据（`javap -c` 读引擎 jar 的字节码）：
 
-**为什么 iOS 没这个问题**：iOS 侧 `FlutterCicadaPlayerTexture.m` 本来就在每帧调
-`[_registry textureFrameAvailable:_textureId]`（同一条契约）—— 只有 Android 漏了。
+```text
+FlutterRenderer$ImageReaderSurfaceProducer.setSize(int,int):
+    ...
+    29: aload_0 / 30: iconst_1 / 31: putfield createNewReader:Z     ← 只置一个标志
+    34..41: putfield requestedHeight / requestedWidth
+    44: return                                                      ← 没有任何回调
+FlutterRenderer$ImageReaderSurfaceProducer.getActiveReader():
+    7: getfield createNewReader:Z / 11: ifne 48                     ← 为真就新建 reader
+    26: ...reader.getSurface()                                      ← 新 Surface 在这里诞生
+FlutterRenderer$ImageReaderSurfaceProducer.onImage(...):
+    45: invokevirtual FlutterRenderer.scheduleEngineFrame()         ← 每张新图入队时引擎自己 schedule
+```
 
-**为什么不把 `onVideoRendered` 转发给 Dart**：这是"每帧一次"的回调（1080p30 就是 30 次/秒），
-转 Map 再走 EventChannel 完全没必要，Dart 侧也没有对应事件类型。
+所以：`onVideoSizeChanged` → `setSize(w,h)` → **如果之后不重新 `getSurface()` 并把新 Surface
+交给播放器**，播放器会继续往那个**已经被放弃的旧 Surface** 里写，而引擎只从**新 reader** 取图
+⇒ 一个字节都取不到 ⇒ 灰着、没图像。
 
-**验证**：出包成功；R8 把 `PlayerSurface.scheduleFrame()` 内联进了三个调用点，
-`mapping.txt` 里能看到 `-> onVideoRendered` / `-> onVideoSizeChanged` / `-> run` 三处，
-正好对应"每帧 / 尺寸变化 / post 的 Runnable"三个调用位置。
+**修法**（`PlayerSurface.updateVideoSize`）：`setSize(...)` 之后调 `attachProducerSurface()` ——
+它 `getSurface()` 拿到新 Surface 并在"实例真的换了"时重新 `setSurface` 给播放器：
+
+```java
+mProducer.setSize(width, height);
+attachProducerSurface();     // ← 不能省：新的 Surface 要在这一次 getSurface() 里才诞生
+```
+
+代价：这次 `setSurface` 会让内核重启解码器 —— 它发生在起播阶段（尺寸回调早于第一帧），用户看不到。
+
+**为什么官方 `video_player` 插件没这个问题**：它**根本不调 `setSize`**（尺寸交给播放器自己处理），
+所以永远踩不到这个坑。我们既然要用解码器给的像素尺寸，就必须自己重新挂一次。
+
+**`scheduleFrame()` 保留但降级为防御**（两条路语义不同，别再想当然）：
+
+* `ImageReaderSurfaceProducer.scheduleFrame()` = `FlutterRenderer.scheduleEngineFrame()`
+  （"渲染一帧 Flutter 帧"），而**每张新图入队时它自己就会调**；
+* `SurfaceTextureSurfaceProducer.scheduleFrame()` = `FlutterJNI.markTextureFrameAvailable(id)`
+  （"这张纹理有新内容"），**这条路必须应用每帧调**。
+
+两条路都要能用，所以 `FlutterCicadaPlayer` 里的 `OnVideoRenderedListener` 仍然每渲染一帧调一次
+`scheduleFrame()`：对第一条路多调的那几次会被 vsync 合并，没有额外代价；
+对第二条路（老设备）则是必需的。
 
 ### 5.18 【代码】加了"申请系统权限 + 系统选择器挑本地视频"（和 Compose 侧同一套）
 
