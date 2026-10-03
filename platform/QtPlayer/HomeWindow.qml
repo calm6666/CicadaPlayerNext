@@ -327,6 +327,44 @@ Window {
         height: 56
         color: "#1b1e24"
 
+        /*
+         * ===================================================================
+         * 【本轮新增：HTML 链接输入框】用户要求"首页加上一个输入框用于输入 html 链接，
+         * 打开后就打开一个新窗口"。
+         *
+         * 放在工具条**右端**（左边那排按钮已经排满，右边本来是空的）：
+         * 输入框 + 一颗"打开网页"。回车等同于点按钮（TextField.onAccepted）。
+         *
+         * 打开的窗口是 WebWindow.qml：和首页一样是**无边框窗口 + 同一条自绘标题栏**
+         *（那部分代码是逐行复制本文件的），中间是 WebView（Windows 后端 WebView2）。
+         * ===================================================================
+         */
+        Row {
+            anchors.verticalCenter: parent.verticalCenter
+            anchors.right: parent.right
+            anchors.rightMargin: 16
+            spacing: 8
+
+            TextField {
+                id: webUrlField
+
+                anchors.verticalCenter: parent.verticalCenter
+                width: 240
+                color: "#ffffff"
+                placeholderText: qsTr("HTML 链接，如 www.bilibili.com")
+                placeholderTextColor: QtPlayerTheme.panelHintText
+                selectByMouse: true
+                onAccepted: home.openWebUrl(text)
+            }
+
+            Button {
+                anchors.verticalCenter: parent.verticalCenter
+                text: qsTr("打开网页")
+                enabled: webUrlField.text.length > 0
+                onClicked: home.openWebUrl(webUrlField.text)
+            }
+        }
+
         Row {
             anchors.verticalCenter: parent.verticalCenter
             anchors.left: parent.left
@@ -1658,6 +1696,85 @@ Window {
 
         var w = liveWindow
         liveWindow = null
+        w.destroy()
+    }
+
+    /* =======================================================================
+     * 网页窗口（WebWindow.qml）：工具条右端「HTML 链接 + 打开网页」打开的独立窗口
+     *
+     * 写法**逐行照抄上面的直播窗口**（同样是"各自一个实例"），原因也一样：
+     *   * parent 用 home.contentItem（有父对象 → destroy() 走 deleteLater；不是 Window
+     *     → 不会变成从属窗口、任务栏里有独立按钮）；
+     *   * 等 visible 变假（= 关完了）再 Qt.callLater 销毁；
+     *   * 先置空引用、再 destroy（destroy() 会当场 delete，不能在 closing 里动手）。
+     * ======================================================================= */
+
+    property var webWindow: null
+
+    /* 首页「打开网页」唯一入口：建窗口 → 把地址写进去（WebWindow 会自己加载）→ 显示。
+       窗口建不出来（这份构建没开 CICADA_ENABLE_WEBVIEW）就退回**系统浏览器**打开，
+       不做"点了没反应"那种事。 */
+    function openWebUrl(url) {
+        var u = ("" + url).trim()
+
+        if (u.length === 0)
+            return
+
+        var w = ensureWebWindow()
+
+        if (w === null) {
+            console.warn("[home] 用系统浏览器打开：" + u)
+            Qt.openUrlExternally(u)
+            return
+        }
+
+        w.pageUrl = u
+        w.show()
+        w.raise()
+        w.requestActivate()
+    }
+
+    function ensureWebWindow() {
+        if (webWindow === null) {
+            var component = Qt.createComponent("qrc:/qt/qml/QtPlayer/WebWindow.qml")
+
+            if (component.status !== Component.Ready) {
+                /*
+                 * 走到这里最常见的原因：这份构建**没打开** CICADA_ENABLE_WEBVIEW
+                 *（QtWebView + WebView2 SDK 没装，见 CMakeLists 里那一段），
+                 * 于是 WebWindow.qml 不在 qrc 里 / `import QtWebView` 不可用。
+                 * 不当成错误：退回系统浏览器打开（openWebUrl 里处理）。
+                 */
+                console.warn("[home] 网页窗口不可用（这份构建没开 CICADA_ENABLE_WEBVIEW？）："
+                             + component.errorString())
+                return null
+            }
+
+            webWindow = component.createObject(home.contentItem)
+
+            if (webWindow !== null) {
+                webWindow.visibleChanged.connect(function () {
+                    if (home.webWindow !== null && !home.webWindow.visible)
+                        Qt.callLater(home.reapWebWindow)
+                })
+            }
+        }
+
+        if (webWindow === null)
+            console.warn("[home] 网页窗口对象为空")
+
+        return webWindow
+    }
+
+    function reapWebWindow() {
+        if (webWindow === null)
+            return
+
+        if (webWindow.visible)
+            return
+
+        var w = webWindow
+        webWindow = null
         w.destroy()
     }
 }

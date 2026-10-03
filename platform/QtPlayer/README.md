@@ -645,6 +645,49 @@ SVG/图片格式插件拖进来后，MSBuild 会按导入库的 `IMPORTED_LOCATI
 
 ---
 
+### 3.10 网页窗口（首页「HTML 链接」→ 独立窗口里的 WebView）
+
+首页工具条**右端**有一个输入框 + 一颗「打开网页」按钮：填一个 HTML 链接（`www.bilibili.com`
+这种不带协议的也行，会补 `https://`）→ 打开一个**独立的无边框窗口**，中间是系统 WebView。
+
+* 窗口形态和首页完全一致：`Window` + QWindowKit 接管 + **自绘标题栏**。
+  `WebWindow.qml` 里 `CaptionButton` 组件、`WindowAgent` 登记、标题栏矩形这三块是
+  **逐行复制 `HomeWindow.qml` 的**（用户要求"顶部的标题栏直接完整复制首页的代码"）。
+  代价写在那两个文件里：**以后改标题栏要两处一起改**（真收敛就该抽个 `CaptionBar.qml`）。
+* 工具条：后退 / 前进 / **刷新**（加载中变"停止"）/ 可编辑地址栏 + 回车跳转；
+  工具条下沿一条加载进度。
+* 窗口生命周期和直播窗口**逐行同一套**（`ensureWebWindow` / `reapWebWindow`：
+  `createObject(home.contentItem)`、`visible` 变假再 `Qt.callLater` 销毁、先置空再 `destroy`）。
+
+**用的是 QtWebView，不是 QtWebEngine**：它只是个壳，真正的实现在 `plugins/webview/` 下按平台选后端，
+Windows 上是 **WebView2**（Edge 运行时，Win10/11 自带）。注意区分两样东西：
+
+| | 是什么 | 什么时候需要 |
+|---|---|---|
+| WebView2 **运行时** | 系统里的 Edge WebView2 Runtime | **跑**的时候（Win10/11 默认已有） |
+| WebView2 **SDK** | `WebView2.h` + `WebView2LoaderStatic.lib` | **编**的时候（静态 Qt 的 Qt6WebView 会 `find_package(WebView2)`） |
+
+SDK 不在系统里也没关系，装法（一次，约 10 MB，不用装进系统）：
+
+```powershell
+# 1) 下 NuGet 包（.nupkg 就是 zip）：https://www.nuget.org/packages/Microsoft.Web.WebView2
+# 2) 解到 D:\webview2sdk，解完要能看到 build\native\include\WebView2.h
+# 3) 让 CMake 找到它（新开终端生效）
+setx WEBVIEW2_SDK_ROOT D:\webview2sdk
+```
+
+**没装 SDK 也不会把构建搞坏**：CMakeLists 里是 `QUIET` 找 + 用
+`TARGET Qt6::QWebView2WebViewPlugin` 判断，找不到就自动降级 —— 此时 `WebWindow.qml`
+不进 qrc，首页那颗按钮**退回用系统浏览器打开**（`HomeWindow.openWebUrl` 里处理），
+不做"点了没反应"。想彻底关掉这个功能：`-DCICADA_ENABLE_WEBVIEW=OFF`。
+
+> 静态构建下还有两处不能漏（都在 `CMakeLists.txt` 里，改的时候照着注释走）：
+> `main()` 里必须先调 `QtWebView::initialize()`（在引擎加载 QML **之前**，
+> 否则建窗口时才失败且报错指不到这里）；平台后端 **不是 QML 插件**，
+> `qt_import_qml_plugins` 扫不到，必须在静态插件清单里点名 `Qt6::QWebView2WebViewPlugin`。
+
+---
+
 ## 4. 为了零拷贝对框架做的改动（全部向后兼容）
 
 | 位置 | 改动 | 为什么 |

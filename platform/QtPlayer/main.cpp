@@ -20,6 +20,11 @@
 //
 #include <QGuiApplication>
 #include <QQmlApplicationEngine>
+/* 网页窗口（WebWindow.qml）用。只有在 CMake 打开 CICADA_ENABLE_WEBVIEW 时才有这个模块
+   （它依赖 WebView2 SDK，见 CMakeLists 里那一段说明），所以整个用编译期标志包起来。 */
+#ifdef CICADA_HAVE_WEBVIEW
+#  include <QtWebView/QtWebView>
+#endif
 #include <QQmlEngine>
 #include <QLoggingCategory>
 #include <QQuickWindow>
@@ -1056,6 +1061,22 @@ int main(int argc, char *argv[])
             graphicsApiName(QQuickWindow::graphicsApi()));
 
     registerCicadaVideoRender();
+
+    /*
+     * 【网页窗口】QtWebView 要先初始化：它本身只是个壳，真正的实现在 plugins/webview/ 下按
+     * 平台选后端（Windows 上是 WebView2/Edge）。文档明确要求：在 QGuiApplication 建好之后、
+     * **加载任何 QML 之前**调用一次，否则 QML 里 `import QtWebView` 拿到的 WebView 是空的
+     * （创建窗口时才失败，而且报错信息很难指向这里）。
+     *
+     * 这一段用编译期标志包起来：没加 -DCICADA_ENABLE_WEBVIEW=ON 时（默认）根本不链 QtWebView，
+     * 首页那颗「打开网页」按钮会退回用系统浏览器打开，见 HomeWindow.openWebUrl。
+     */
+#ifdef CICADA_HAVE_WEBVIEW
+    QtWebView::initialize();
+    AF_LOGI("QtWebView initialized (backend: webview2 on Windows)\n");
+#else
+    AF_LOGI("QtWebView disabled at build time (open web links with the system browser)\n");
+#endif
 
     QQmlApplicationEngine engine;
 

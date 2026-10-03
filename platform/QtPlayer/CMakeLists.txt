@@ -263,6 +263,49 @@ include(${CICADA_ROOT}/framework/module_config.cmake)
 # Qt6
 # ===========================================================================
 find_package(Qt6 6.5 REQUIRED COMPONENTS Quick WebSockets)
+
+# ===========================================================================
+# 网页窗口（WebWindow.qml）：首页「HTML 链接 / 打开网页」那个窗口
+#
+# 【依赖】QtWebView + **WebView2 SDK**。注意 WebView2 有两个东西，别混：
+#   * **运行时**（Edge WebView2 Runtime）—— Win10/11 自带，跑起来才需要；
+#   * **SDK**（WebView2.h + WebView2LoaderStatic.lib）—— **编译**时才需要，
+#     静态 Qt 的 Qt6WebView 配置会去 find_package(WebView2) 找它：
+#       D:/Qt-Static/msvc/lib/cmake/Qt6WebView/Qt6QWebView2WebViewPluginDependencies.cmake
+#           set(__qt_QWebView2WebViewPlugin_third_party_deps "WebView2;FALSE;;;")
+#
+# 【为什么不用 REQUIRED、而是探测】这台机器上原本没装 SDK（CMakeCache 里留着
+# WEBVIEW2_INCLUDE_DIR-NOTFOUND / WEBVIEW2_LIBRARY-NOTFOUND）。写成 REQUIRED 的话，
+# 没装 SDK 的机器会在**配置阶段**直接失败，把整个工程带崩 —— 一个附加功能不该有这个权力。
+# 所以：QUIET 找一次，用 TARGET Qt6::QWebView2WebViewPlugin 判断后端插件到底有没有；
+# 有就打开（把 WebWindow.qml 放进 qrc），没有就自动降级。
+#
+# 装 SDK（一次即可，~10 MB，不用装到系统里）：
+#     nuget 或 https://www.nuget.org/packages/Microsoft.Web.WebView2 下 .nupkg（就是 zip）
+#     解到 D:\webview2sdk        （解完要能看到 build\native\include\WebView2.h）
+#     setx WEBVIEW2_SDK_ROOT D:\webview2sdk      （新开终端生效）
+# 没装/没降级时功能不是"没了"：首页那颗按钮仍然可用，会退回**系统浏览器**打开
+#（见 HomeWindow.openWebUrl），不做"点了没反应"。
+# ===========================================================================
+option(CICADA_ENABLE_WEBVIEW "构建首页的网页窗口（需要 QtWebView + WebView2 SDK）" ON)
+
+set(CICADA_WEB_WINDOW_QML "")
+if (CICADA_ENABLE_WEBVIEW)
+    find_package(Qt6 6.5 QUIET COMPONENTS WebView)
+
+    if (TARGET Qt6::QWebView2WebViewPlugin)
+        # 这一行同时干两件事：把 WebWindow.qml 放进 qrc（否则 createComponent 找不到文件），
+        # 以及让 qt_import_qml_plugins 扫到 `import QtWebView`（静态构建靠它自动链 QML 插件）。
+        set(CICADA_WEB_WINDOW_QML "WebWindow.qml")
+        message(STATUS "QtPlayer: web window ENABLED (QtWebView + WebView2 SDK found)")
+    else ()
+        message(STATUS "QtPlayer: web window DISABLED (WebView2 SDK not found; "
+                       "首页「打开网页」会退回系统浏览器。装法见 CMakeLists 里那段说明："
+                       "解包 Microsoft.Web.WebView2 到 D:\\webview2sdk 并设 WEBVIEW2_SDK_ROOT)")
+    endif ()
+else ()
+    message(STATUS "QtPlayer: web window DISABLED by -DCICADA_ENABLE_WEBVIEW=OFF")
+endif ()
 qt_standard_project_setup()
 
 # ---------------------------------------------------------------------------
@@ -644,6 +687,20 @@ qt_add_qml_module(appQtPlayer
         HomeWindow.qml
 
         # ---------------------------------------------------------------------------
+        # 网页窗口（首页那个"HTML 链接"输入框打开的独立窗口）：
+        #   WebWindow.qml —— Window + QWindowKit（和 HomeWindow 同一条路）+ 顶部标题栏
+        #   （**逐行复制 HomeWindow 那套 CaptionButton / WindowAgent 登记**）+ 中间一个 WebView。
+        #
+        # 【为什么是变量而不是直接写文件名】这个窗口依赖 QtWebView + WebView2 SDK，
+        # 默认关（见上面 CICADA_ENABLE_WEBVIEW 那一大段说明）。打开时才把文件放进 qrc：
+        #   * qt_add_qml_module 只把 QML_FILES 里的文件放进 qrc，不在里面 → 不在 qrc 里
+        #     → HomeWindow 用 createComponent 建它会失败（那边会退回系统浏览器）；
+        #   * 这一行还负责让 qt_import_qml_plugins 扫到 `import QtWebView`
+        #     （静态构建下 QML 插件靠扫 QML_FILES 的 import 链自动链上）。
+        # ---------------------------------------------------------------------------
+        ${CICADA_WEB_WINDOW_QML}
+
+        # ---------------------------------------------------------------------------
         # 直播播放器（**一套独立的 UI**，用户要求不要在点播那套上改）：
         #   LiveMain       —— 直播窗口（无边框 + QWindowKit + 顶部热区浮出标题栏）
         #   LivePlayerView —— 直播主界面（画面 + 弹幕层 + 顶部房间信息 + 控制条 + 清晰度换流 + 自动重连）
@@ -719,6 +776,15 @@ set_property(SOURCE "${_cicada_qml_registration_src}" APPEND PROPERTY
 # QSGMaterial —— 除非换成非 D3D11 的后端并重新实测过。
 # ===========================================================================
 
+# 网页窗口（可选，见上面 CICADA_ENABLE_WEBVIEW 那段）：链 QtWebView 本体，
+# 并给 C++ 一个编译期标志 —— main.cpp 里 QtWebView::initialize() 必须在引擎加载 QML
+# 之前调用，但没开这个功能时不该依赖 QtWebView（也就不该去 include 它的头）。
+# 平台后端（Windows 上是 WebView2）在下面 _cicada_static_image_plugins 里点名。
+if (CICADA_ENABLE_WEBVIEW)
+    target_link_libraries(appQtPlayer PRIVATE Qt6::WebView)
+    target_compile_definitions(appQtPlayer PRIVATE CICADA_HAVE_WEBVIEW)
+endif ()
+
 # ===========================================================================
 # 静态 Qt：把 QML 插件和平台/图片格式插件**显式链接进来**
 #
@@ -752,7 +818,12 @@ if (CICADA_QT_STATIC)
             Qt6::QIcoPlugin
             Qt6::QTgaPlugin
             Qt6::QTiffPlugin
-            Qt6::QWbmpPlugin)
+            Qt6::QWbmpPlugin
+            # 网页窗口用的 WebView2 后端插件。QtWebView 本身只是个壳，真正的实现在
+            # plugins/webview/ 下按平台选：Windows 上就是它（Edge WebView2 运行时，
+            # Win10/11 自带）。它**不是 QML 插件**，所以 qt_import_qml_plugins 扫不到，
+            # 必须在这里点名；静态构建下不链它，运行时 WebView 会创建失败。
+            Qt6::QWebView2WebViewPlugin)
 
     set(_cicada_static_plugins_to_link "")
 
