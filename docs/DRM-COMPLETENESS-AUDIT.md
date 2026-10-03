@@ -178,16 +178,26 @@ A12（`master.m3u8` 的 `#EXT-X-SESSION-KEY` 与媒体列表一致）。
    结尾无条件 `input("按 Enter 键退出...")`；CI / 重定向没有 stdin ⇒ 产物齐全、退出码却是 1。
    修法：`if sys.stdin.isatty(): input(...)`（这不是开关，是"有没有人在看"）。
 
-### 6.3 验收器 `verify_segmentbase.py` 三处误报（是判据错，不是产物错）
+### 6.3 验收器 `verify_segmentbase.py` 五处误报（**全是判据写错，不是产物错**）—— 已全部修掉，现为 PASS
 
-| # | 报错 | 实测反证 |
-|---|---|---|
-| 1 | `解密验证不一致 … PKCS7 … 密文长度 2404522 不是 16 的倍数` | **2404522 是明文长度**；密文是 2404528（整除 16、补 6 字节）。openssl 独立解密逐字节一致（§6.1）⇒ 它把明文长度当成了密文长度 |
-| 2 | `Initialization 缺失 … #EXT-X-MAP BYTERANGE 推断 [0-855] 与 initialization [0--] 不一致` | box 遍历实测**单文件**：`ftyp(32)+moov(824)=856 → sidx@856(64B) → moof@920`，与 MPD 的 `indexRange="856-919"` 严丝合缝；audio 同理（`769-844`，`ftyp(32)+moov(737)`）✓。它是拿**独立 init 文件**（840 B，另一套 box 布局：ftyp 28 + moov 812）去比**单文件**的 indexRange —— 两个文件各自自洽 |
-| 3 | `有分片共用同一个 IV（4 个 video rendition 的第 1 片都是 …01）` | 按脚本 §4.1 约定 `IV = 基 IV + 分片序号`，**不同 rendition 的同一序号本来就该是同一个 IV**；同一 rendition 内逐片唯一 ✓。这条判据与约定冲突，得先定口径再改 |
+| # | 报错 | 根因（实测反证） | 修法 |
+|---|---|---|---|
+| 1 | `解密验证不一致 … 剥不掉 PKCS7 …` | `openssl enc -d` **默认自己就剥掉 PKCS7 了**，脚本又剥一次 ⇒ 报"PKCS7 块长度非法" | 先直接比（openssl 已剥），不等再试自己剥 |
+| 2 | `有分片共用同一个 IV（4 个 rendition 的第 1 片都是 …01）` | 去重是**跨 rendition 全局**做的；而 HLS 的 IV 本就按 media sequence 推导，**不同 rendition 同序号共用 IV 是规范行为** | 去重按**播放列表**做（同一路内才必须唯一） |
+| 3 | `#EXT-X-MAP 的 BYTERANGE 推出 [0-855] 与 initialization [0--] 不一致` | HLS 路径读的是 `ref["init"]`（MPD 的**字符串** `"0-855"`），解析好的整数对在 `ref["init_pair"]`（MPD 路径用的就是它） | HLS 路径改用 `init_pair` |
+| 4 | `Initialization 结束 - 与 indexRange 起点 856 不相邻` | MPD 路径把 `init_range` 拼成字符串后写 `init_range[1] != index_range[0] - 1` ⇒ 取到的是字符 `'-'`，判据恒真；而 MPD 里明明 `range="0-855"` 与 856 严丝合缝 | 先 `parse_range()` 解成整数对再比 |
+| 5 | `段的 (起点,长度,时长) 与 sidx 推出的逐条对不上（5.931 vs 5.930667）` | 做了**精确元组比较**，而播放列表的 `#EXTINF` 只存 3 位小数（下面那条 0.0005 容差判据根本没机会跑到） | 起点/长度精确比、时长用 0.0005 容差（与既有那条一致） |
 
-**这三条必须先修**：它既是清单 B（B6 门禁）的基准，也是 1B/2/3 的验收基准 —— 基准自己误报，
-后面所有"通过"都不可信。
+**修完的结果**（2026-10-03 实跑）：
+
+```text
+$ python verify_segmentbase.py . v4 --expect-encrypted --key-file localkey.bin --clear-dir _clear
+SEGMENTBASE-VERIFY: PASS          ← exit 0，0 条 FAIL
+```
+
+⇒ 清单 A 的验收基准从此可信：它既是清单 B（B6 门禁）的落点，也是 1B/2/3 的验收尺子。
+**注意**：验收器与转码脚本同在 `转码脚本/` 目录，按既有约定该目录**不入 git**（改动只在磁盘上），
+所以这两处的根因、修法与证据都记在本文件里 —— 换机器时要照这里重做。
 
 ### 6.4 复现（一条不差）
 
