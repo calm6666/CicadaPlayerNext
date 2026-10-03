@@ -33,6 +33,25 @@ Window {
     title: webView.title.length > 0 ? webView.title : qsTr("网页")
     color: QtPlayerTheme.windowBg
 
+    /* 别让人把窗口缩成一条缝（缩放下限；上限交给系统/最大化） */
+    minimumWidth: 480
+    minimumHeight: 360
+
+    /*
+     * 【为什么内容区四周要留出这么多像素】—— 这是"窗口拖不动边缘"的根因，别删。
+     *
+     * WebView 在 Qt 里是 QQuickWindowContainer：它会在 Qt 窗口内部**再建一个原生子窗口
+     *（HWND）** 来放 WebView2。原生子窗口会把落在它区域里的鼠标事件全部吃掉，
+     * 而 QWindowKit 的缩放是在**客户区内部**做命中测试的（无边框窗口没有系统边框，
+     * "能拖的边"就在客户区那几像素里）—— 于是整个内容区（含四边）都被 WebView 占了，
+     * 边缘永远收不到命中测试 ⇒ 拖不动、缩不了。
+     * 首页/播放器窗口没有原生子窗口，所以不犯这个病。
+     *
+     * 让出 resizeMargin 像素给 Qt 窗口本体，边缘那圈就重新属于窗口了：
+     * QWindowKit 自己的命中测试能生效，下面那 8 个热区也能兜底。
+     */
+    readonly property int resizeMargin: 6
+
     /* 要打开的链接。HomeWindow 建好窗口后写这个属性（写法见文件头）。 */
     property string pageUrl: ""
 
@@ -407,8 +426,8 @@ Window {
     }
 
     /* ---------------- 内容区：网页本体 ---------------- */
-    WebView {
-        id: webView
+    Rectangle {
+        id: webFrame
 
         anchors {
             left: parent.left
@@ -416,15 +435,96 @@ Window {
             top: progressBar.visible ? progressBar.bottom : toolbar.bottom
             bottom: parent.bottom
         }
+        /* 和工具条同色：四周那圈让给窗口本体的像素看起来像"浏览器外框"，不像漏了底色 */
+        color: "#1b1e24"
 
-        /*
-         * 加载失败要说人话：QtWebView 的 loadingChanged 会带一个 WebViewLoadRequest，
-         * status 是 Error 时把 errorString 打到控制台（窗口里没有 toast，先不引）。
-         */
-        onLoadingChanged: function (request) {
-            if (request.status === WebView.LoadFailedStatus) {
-                console.warn("[web] 加载失败（" + request.errorString + "）：" + request.url)
+        WebView {
+            id: webView
+
+            /* 四周缩进 resizeMargin —— 那圈像素必须属于 Qt 窗口，否则拖不动边缘（见文件头的说明） */
+            anchors.fill: parent
+            anchors.margins: webWindow.resizeMargin
+
+            /*
+             * 加载失败要说人话：QtWebView 的 loadingChanged 会带一个 WebViewLoadRequest，
+             * status 是 Error 时把 errorString 打到控制台（窗口里没有 toast，先不引）。
+             */
+            onLoadingChanged: function (request) {
+                if (request.status === WebView.LoadFailedStatus) {
+                    console.warn("[web] 加载失败（" + request.errorString + "）：" + request.url)
+                }
             }
         }
+    }
+
+    /* ===========================================================================
+     * 边缘缩放热区：4 条边 + 4 个角
+     *
+     * 为什么还要自己写一遍（QWindowKit 不是会做命中测试吗）：QWindowKit 那条路依赖平台
+     * 命中测试，而热区是**不依赖任何平台实现**的兜底 —— 和 Main.qml 里"标题栏顺手调
+     * Window.startSystemMove()"完全同一个思路（那边写了注释说明为什么不只靠命中测试）。
+     * 按下时把边告诉 Qt：startSystemResize(Qt.LeftEdge | Qt.TopEdge) 之类。
+     *
+     * 顺序有讲究：4 个角写在 4 条边**之后** —— 同级元素后声明的在上面，
+     * 角才能盖住边的端点（否则从角上拖只能单方向缩）。
+     * =========================================================================== */
+    MouseArea {
+        anchors { left: parent.left; right: parent.right; top: parent.top }
+        height: webWindow.resizeMargin
+        cursorShape: Qt.SizeVerCursor
+        onPressed: webWindow.startSystemResize(Qt.TopEdge)
+    }
+
+    MouseArea {
+        anchors { left: parent.left; right: parent.right; bottom: parent.bottom }
+        height: webWindow.resizeMargin
+        cursorShape: Qt.SizeVerCursor
+        onPressed: webWindow.startSystemResize(Qt.BottomEdge)
+    }
+
+    MouseArea {
+        anchors { top: parent.top; bottom: parent.bottom; left: parent.left }
+        width: webWindow.resizeMargin
+        cursorShape: Qt.SizeHorCursor
+        onPressed: webWindow.startSystemResize(Qt.LeftEdge)
+    }
+
+    MouseArea {
+        anchors { top: parent.top; bottom: parent.bottom; right: parent.right }
+        width: webWindow.resizeMargin
+        cursorShape: Qt.SizeHorCursor
+        onPressed: webWindow.startSystemResize(Qt.RightEdge)
+    }
+
+    MouseArea {
+        anchors { left: parent.left; top: parent.top }
+        width: webWindow.resizeMargin * 2
+        height: webWindow.resizeMargin * 2
+        cursorShape: Qt.SizeFDiagCursor
+        onPressed: webWindow.startSystemResize(Qt.TopEdge | Qt.LeftEdge)
+    }
+
+    MouseArea {
+        anchors { right: parent.right; top: parent.top }
+        width: webWindow.resizeMargin * 2
+        height: webWindow.resizeMargin * 2
+        cursorShape: Qt.SizeBDiagCursor
+        onPressed: webWindow.startSystemResize(Qt.TopEdge | Qt.RightEdge)
+    }
+
+    MouseArea {
+        anchors { left: parent.left; bottom: parent.bottom }
+        width: webWindow.resizeMargin * 2
+        height: webWindow.resizeMargin * 2
+        cursorShape: Qt.SizeBDiagCursor
+        onPressed: webWindow.startSystemResize(Qt.BottomEdge | Qt.LeftEdge)
+    }
+
+    MouseArea {
+        anchors { right: parent.right; bottom: parent.bottom }
+        width: webWindow.resizeMargin * 2
+        height: webWindow.resizeMargin * 2
+        cursorShape: Qt.SizeFDiagCursor
+        onPressed: webWindow.startSystemResize(Qt.BottomEdge | Qt.RightEdge)
     }
 }

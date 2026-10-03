@@ -324,24 +324,34 @@ Window {
             right: parent.right
             top: titleBar.bottom
         }
-        height: 56
+        height: 100                    /* 两排：第一排是原来那串按钮，第二排是下面的 HTML 链接输入框 */
         color: "#1b1e24"
 
         /*
          * ===================================================================
-         * 【本轮新增：HTML 链接输入框】用户要求"首页加上一个输入框用于输入 html 链接，
-         * 打开后就打开一个新窗口"。
+         * 【本轮改：HTML 链接单独占**第二排**】用户要求"首页加上一个输入框用于输入 html 链接，
+         * 打开后就打开一个新窗口"，随后反馈"web 的 url 应该放到第二排不要和按钮放一起，
+         * 直接重叠了"。
          *
-         * 放在工具条**右端**（左边那排按钮已经排满，右边本来是空的）：
-         * 输入框 + 一颗"打开网页"。回车等同于点按钮（TextField.onAccepted）。
+         * 原来我把它锚在工具条**右端**，但左边那排按钮很长（打开文件夹/清空列表/设置/
+         * DASH 地址/HLS 地址/DASH 对象/HLS 对象/直播地址/…），两边锚在同一条 56px 的
+         * 横带上就会**互相压住**。所以工具条加高成两排：
+         *   * 第一排（topMargin 12，高 32）—— 原来那串按钮，位置和观感不变；
+         *   * 第二排（topMargin 56）—— 输入框 + 「打开网页」，输入框**横向撑满**剩余宽度
+         *     （像浏览器的地址栏），右边跟一颗按钮，回车等同点按钮。
          *
          * 打开的窗口是 WebWindow.qml：和首页一样是**无边框窗口 + 同一条自绘标题栏**
          *（那部分代码是逐行复制本文件的），中间是 WebView（Windows 后端 WebView2）。
          * ===================================================================
          */
         Row {
-            anchors.verticalCenter: parent.verticalCenter
+            id: webUrlRow
+
+            anchors.top: parent.top
+            anchors.topMargin: 56
+            anchors.left: parent.left
             anchors.right: parent.right
+            anchors.leftMargin: 16
             anchors.rightMargin: 16
             spacing: 8
 
@@ -349,15 +359,36 @@ Window {
                 id: webUrlField
 
                 anchors.verticalCenter: parent.verticalCenter
-                width: 240
+                /*
+                 * 撑满除去右边按钮之外的全部宽度（像浏览器的地址栏）。
+                 * 用 id 而不是 parent.width：Row 自己锚住了左右、宽度是定值，
+                 * 而子项的宽度又会参与 Row 的 implicitWidth —— 用 id 写清楚是谁的宽度，
+                 * 免得读代码的人以为是循环绑定。
+                 */
+                width: webUrlRow.width - openWebButton.width - webUrlRow.spacing
+                /*
+                 * 【本轮修：白字白底看不见】TextField（Controls.Basic）的默认背景是**白色**的，
+                 * 而这条工具条是固定深色 #1b1e24 —— 只把文字设成白色就是"白字白底"。
+                 * 所以背景也要一起改成深色（比工具条略浅，看得出是个输入框），
+                 * 文字保持白色。不去依赖默认文字色：Basic 样式的默认色来自调色板，
+                 * 深浅主题下不一定好看，这里显式写死，和工具条一样与主题解耦。
+                 */
                 color: "#ffffff"
-                placeholderText: qsTr("HTML 链接，如 www.bilibili.com")
-                placeholderTextColor: QtPlayerTheme.panelHintText
+                background: Rectangle {
+                    color: "#2a2e36"
+                    border.width: 1
+                    border.color: "#3d424c"
+                    radius: 3
+                }
+                placeholderText: qsTr("HTML 链接，如 www.bilibili.com —— 回车或点右侧按钮，用独立窗口打开")
+                placeholderTextColor: "#808090"
                 selectByMouse: true
                 onAccepted: home.openWebUrl(text)
             }
 
             Button {
+                id: openWebButton
+
                 anchors.verticalCenter: parent.verticalCenter
                 text: qsTr("打开网页")
                 enabled: webUrlField.text.length > 0
@@ -366,7 +397,8 @@ Window {
         }
 
         Row {
-            anchors.verticalCenter: parent.verticalCenter
+            anchors.top: parent.top
+            anchors.topMargin: 12
             anchors.left: parent.left
             anchors.leftMargin: 16
             spacing: 12
