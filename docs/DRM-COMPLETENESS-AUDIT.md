@@ -223,3 +223,60 @@ python <转码脚本>\verify_segmentbase.py . v4 --expect-encrypted --key-file <
 openssl enc -d -aes-128-cbc -K <32位hex密钥> -iv 00000000000000000000000000000001 `
         -in <片>.m4s -out out.bin
 ```
+
+## 7. 清单 B 的素材：真 CENC-in-DASH 怎么造（2026-10-03）
+
+B 的素材**不能**用手写 MPD 凑（那正是 §2 里"没串起来播过"的原因之一）。用 Bento4 造**真产物**，
+密钥仍然走本仓库自己的 `drm-keyserver`，这样"清单 → 取密钥 → 软解"才是端到端的一条链。
+
+```powershell
+# 1) 铸一把 CENC 密钥（服务器返回 kid/key/scheme）
+$r = Invoke-WebRequest http://127.0.0.1:9101/admin/keys -Method POST `
+        -ContentType application/json -Body '{"label":"1B-cenc-dash","scheme":"cenc"}'
+# 本次实测：kid=e7b0126f5884e093781a1f6422487fc1  key=4982c752e52e9ae32f8327e1247860d4
+
+# 2) 分片 + CENC 加密（Bento4；注意 mp4dash 不支持 --quiet）
+mp4fragment --quiet input.mp4 frag.mp4
+mp4dash -o dash --encryption-key="$KID`:$KEY" --encryption-cenc-scheme=cenc frag.mp4
+#   产物：stream.mpd + {video/avc1,audio/mp4a.40.2}/{init.mp4,seg-N.m4s}
+```
+
+**Bento4 写出来的 `ContentProtection` 恰好是现实中最难的那一种**（既不写 pssh、也不写许可地址）：
+
+```xml
+<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011" value="cenc"
+                   cenc:default_KID="e7b0126f-5884-e093-781a-1f6422487fc1"/>
+```
+
+所以素材的第二半是**注入许可地址**（真实服务都会这么做；内核接受的属性名见
+`MPDParser.cpp:401`：`cenc:licenseUrl` / `licenseUrl` / `cenc:laurl` / `laurl` …）：
+
+```powershell
+# 生成 stream-drm.mpd：在 mp4protection 那条上补 cenc:licenseUrl 指向本仓库的密钥服务器
+... -replace '(<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"[^/>]*)(/>)',
+      '$1 cenc:licenseUrl="http://127.0.0.1:9101/key/e7b0126f5884e093781a1f6422487fc1"$2'
+```
+
+这条素材同时覆盖三个此前**只单独验过**的环节：`default_KID`（KID 只在 MPD 里、pssh 里没有）、
+`licenseUrl`（按地址取 16 字节裸密钥 ⇒ 走 `ContentKeyFetcher`）、以及 mp4protection-only 的
+"必须留空 keyFormat"那条判据（否则 `codecPrototype::create` 会把所有软解解码器排除）。
+
+**harness 的链接方式（不用手工编源文件）**：Windows 的 QtPlayer 构建已经产出这些静态库，
+直接链它们就是**产品里真正跑的那份代码**：
+
+```text
+platform/QtPlayer/build/msvc-static/mediaPlayer.out/framework.out/demuxer/Release/demuxer.lib
+                     .../framework.out/utils/Release/framework_utils.lib
+                     .../framework.out/data_source/Release/data_source.lib
+                     .../framework.out/drm/Release/framework_drm.lib
+                     .../framework.out/codec/Release/videodec.lib
+                     .../Release/media_player.lib
+```
+
+harness 形态（下一步施工）：`MPDParser` 解析 `stream-drm.mpd` → `ManifestDemuxer`（公开构造
+`ManifestDemuxer(std::unique_ptr<MediaManifest>)`）→ `GetStreamMeta`/`ReadPacket` 读包 →
+先验"没注册密钥时密文原样放行"（不抢 CDM 的路），再按 `DrmSchemes::decide` 拿到的 `licenseUrl`
+用 `ContentKeyFetcher::fetch` **真的从 9101 取回 16 字节**、注册后逐包比对明文，
+最后交给 libavcodec 解 H.264 **数出帧**（这才叫"出帧"，不是"没报错"）。
+
+---
