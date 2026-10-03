@@ -16,7 +16,6 @@
 // 需要单独做一轮 Dart 3 迁移（见文末 TODO）。
 
 import 'dart:async';
-import 'dart:io';   // 扫描本地文件要用 Directory / File（纯 dart:io，不需要任何插件）
 
 import 'package:flutter/material.dart';
 import 'package:flutter_cicadaplayer/flutter_cicadaplayer.dart';
@@ -277,82 +276,31 @@ class _TestHomePageState extends State<TestHomePage> {
     }
   }
 
-  /// 扫描"能播的本地文件"，点一下就播。
+  /// 挑一个本地视频：**申请系统媒体权限 → 打开系统文件选择器 → 直接播**。
   ///
-  /// 【为什么不做系统文件选择器】那要么引第三方插件（file_picker 之类，会把 Kotlin
-  /// 插件依赖带回来 —— 本工程刚为了不依赖 KGP 2.2.20 把这类包清掉），要么在插件里
-  /// 自己实现 ActivityAware + ACTION_OPEN_DOCUMENT（另一个功能，得单独做）。
-  /// 这里先用**完全不需要权限**的路子：
+  /// 与 Compose 侧（ComposePlayer 的 LocalVideoPicker）是同一套做法：权限按版本申请，
+  /// 选择器是系统的 ACTION_OPEN_DOCUMENT（video/*），拿回来的是 content:// Uri，
+  /// **内核自己按 Uri 读**（SDK 里的 ContentDataSource），不需要先拷贝一份文件。
   ///
-  ///   * `/sdcard/Android/data/<包名>/files` —— 应用自己的外部目录，
-  ///     任何 Android 版本都免权限可读写。放文件进去：
-  ///       adb push test.mp4 /sdcard/Android/data/com.fplayer.flutter_cicadaplayer_example/files/
-  ///   * `/sdcard/Movies`、`/sdcard/Download`、`/sdcard/DCIM/Camera` —— best-effort：
-  ///     Android 10+ 的 scoped storage 下要 READ_MEDIA_VIDEO，读不到会写一行日志说明。
-  Future<void> _scanFiles() async {
-    const String pkg = 'com.fplayer.flutter_cicadaplayer_example';
-    final List<String> dirs = <String>[
-      '/sdcard/Android/data/$pkg/files',
-      '/storage/emulated/0/Android/data/$pkg/files',
-      '/sdcard/Movies',
-      '/sdcard/Download',
-      '/sdcard/DCIM/Camera',
-    ];
-    const List<String> exts = <String>[
-      '.mp4', '.mkv', '.mov', '.flv', '.ts', '.m4s', '.webm', '.avi', '.m3u8',
-    ];
-
-    final List<String> found = <String>[];
-    _addLog('=== 扫描本地文件 ===');
-    for (final String dir in dirs) {
-      try {
-        final Directory d = Directory(dir);
-        if (!await d.exists()) {
-          continue;
-        }
-        int n = 0;
-        await for (final FileSystemEntity f in d.list(followLinks: false)) {
-          if (f is File &&
-              exts.any((String e) => f.path.toLowerCase().endsWith(e))) {
-            found.add(f.path);
-            n++;
-          }
-        }
-        _addLog('  $dir → $n 个可播文件');
-      } catch (e) {
-        // 最常见的就是 scoped storage 不给读（Android 10+ 的 Movies/Download/DCIM）。
-        _addLog('  × 读不了 $dir: $e');
+  /// 之前那版是"扫描 /sdcard 各目录"，实机上一无所获 —— Android 10+ 的 scoped storage
+  /// 下那些目录本来就不可读，而且也没有让用户主动选的入口。现在换成系统选择器：
+  /// 拿到的 Uri 自带读取授权，跟权限弹窗配合就是正常 App 的体验。
+  Future<void> _pickLocalVideo() async {
+    _addLog('=== 挑本地视频（申请权限 + 打开系统选择器）===');
+    try {
+      final String? uri = await _player.pickLocalVideo();
+      if (uri == null) {
+        _addLog('← 用户取消了选择');
+        return;
       }
+      _addLog('← 选中: $uri');
+      _pathCtrl.text = uri;
+      await _start(uri);
+    } catch (e) {
+      // 最常见的是 PERMISSION_DENIED —— 如实提示，不假装播了。
+      _addLog('✗ 挑本地视频失败: $e');
     }
-
-    if (!mounted) {
-      return;
-    }
-    if (found.isEmpty) {
-      _addLog('没扫到可播文件。最快的办法是把文件推进应用自己的目录（免权限）：');
-      _addLog('  adb push test.mp4 /sdcard/Android/data/$pkg/files/');
-      return;
-    }
-
-    final String? picked = await showDialog<String>(
-      context: context,
-      builder: (BuildContext context) => SimpleDialog(
-        title: const Text('选一个文件播放'),
-        children: found
-            .map((String p) => SimpleDialogOption(
-                  onPressed: () => Navigator.pop(context, p),
-                  child: Text(p, style: const TextStyle(fontSize: 12)),
-                ))
-            .toList(),
-      ),
-    );
-    if (picked == null || !mounted) {
-      return;
-    }
-    _pathCtrl.text = picked;
-    await _start('file://$picked');
   }
-
   void _startTicker() {
     _ticker?.cancel();
     _ticker = Timer.periodic(const Duration(milliseconds: 500), (_) async {
@@ -470,8 +418,8 @@ class _TestHomePageState extends State<TestHomePage> {
                     const SizedBox(width: 8),
                     Expanded(
                       child: ElevatedButton(
-                        onPressed: _scanFiles,
-                        child: const Text('扫描文件'),
+                        onPressed: _pickLocalVideo,
+                        child: const Text('选本地视频'),
                       ),
                     ),
                   ],

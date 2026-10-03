@@ -2,6 +2,8 @@ package com.fplayer.flutter_cicadaplayer;
 
 import android.content.Context;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 import com.cicada.player.CicadaPlayer;
 import com.cicada.player.CicadaPlayerFactory;
@@ -38,6 +40,12 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
      * 当前这张零拷贝纹理。视频尺寸回调要顺手把它报给 producer（见 PlayerSurface.updateVideoSize）。
      */
     private PlayerSurface mPlayerSurface;
+
+    /**
+     * 主线程 Handler：onVideoRendered 是从解码/渲染线程来的，而 scheduleFrame 必须在主线程调
+     * （见 initListener 里那段说明）。每帧一次 post，代价可以忽略。
+     */
+    private final Handler mMainHandler = new Handler(Looper.getMainLooper());
 
     public FlutterCicadaPlayer(FlutterPlugin.FlutterPluginBinding flutterPluginBinding)
     {
@@ -114,6 +122,42 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 // 尺寸回调可能早于 onListen 到达，mEventSink 还是 null。
                 // sendEvent 内部已经判空，这里直接调即可。
                 sendEvent(map);
+            }
+        });
+
+        /*
+         * 每渲染一帧就告诉 Flutter 引擎"这张纹理有新内容了"。
+         *
+         * 【为什么必须挂这个回调】SurfaceProducer 只是把一张 Surface 交给解码器，
+         * 引擎并不知道什么时候往上面写了新帧。不通知它，Flutter 只在**别的原因**
+         * 需要重绘时才顺手更新一次纹理 —— 表现就是用户报的：
+         * "没有图像、画面灰色、界面一刷新还一闪一闪的"
+         *（灰 = 引擎从没主动取过帧；闪 = 每次 setState/日志刷新时偶然取到一帧）。
+         * 实测确认：PlayerSurface 里此前**没有任何 scheduleFrame 调用**。
+         *
+         * 【刻意不转发给 Dart】这是"每帧一次"的回调（1080p30 就是 30 次/秒），
+         * 转成 Map 再走 EventChannel 的代价毫无必要，Dart 侧也没有对应的事件类型。
+         * 它在这里的唯一用途就是 scheduleFrame()。
+         *
+         * 【为什么绕主线程】scheduleFrame 最终动的是 Flutter 引擎的帧调度，
+         * 从解码/渲染线程直接调不安全，所以统一 post 到主线程。
+         */
+        player.setOnVideoRenderedListener(new CicadaPlayer.OnVideoRenderedListener() {
+            @Override public void onVideoRendered(long timeMs, long pts)
+            {
+                final PlayerSurface surface = mPlayerSurface;
+                if (surface == null) {
+                    return;
+                }
+                if (Looper.myLooper() == Looper.getMainLooper()) {
+                    surface.scheduleFrame();
+                } else {
+                    mMainHandler.post(new Runnable() {
+                        @Override public void run() {
+                            surface.scheduleFrame();
+                        }
+                    });
+                }
             }
         });
 

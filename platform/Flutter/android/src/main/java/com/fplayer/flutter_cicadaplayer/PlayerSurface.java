@@ -89,7 +89,27 @@ final class PlayerSurface implements TextureRegistry.SurfaceProducer.Callback {
         Surface surface = mProducer.getSurface();
         if (surface != null) {
             setPlayerSurface(surface);
+            // 刚挂上（或刚重建）的表面先催一帧，免得"等第一帧解码出来"这段时间一直灰着。
+            scheduleFrame();
         }
+    }
+
+    /**
+     * 告诉 Flutter 引擎"这张纹理有新内容了，请重绘一帧"。
+     *
+     * <p>【为什么必须调】{@link TextureRegistry.SurfaceProducer} 只是把一张 Surface 交给解码器，
+     * 引擎并不知道什么时候往上面写了新帧。**不通知它**，Flutter 就只在"别的原因"需要重绘时
+     * 才顺手更新一次纹理 —— 现象是：
+     * <ul>
+     *   <li>画面灰色不动（引擎从没主动取过帧）；
+     *   <li>界面上有 setState（进度、日志）时闪一下另一帧（那次重绘顺手取到一帧）。
+     * </ul>
+     * 所以每渲染一帧都要调一次（由 FlutterCicadaPlayer 的 OnVideoRenderedListener 驱动，
+     * 那里已经 post 到主线程）。此前本类**没有任何 scheduleFrame 调用**，
+     * 这就是"Flutter 上没图像、灰屏闪"的根因。
+     */
+    void scheduleFrame() {
+        mProducer.scheduleFrame();
     }
 
     /**
@@ -102,6 +122,8 @@ final class PlayerSurface implements TextureRegistry.SurfaceProducer.Callback {
             return;
         }
         mProducer.setSize(width, height);
+        // 尺寸变了立刻按新尺寸重画一帧（否则要等下一帧解码出来才更新）。
+        scheduleFrame();
     }
 
     /**

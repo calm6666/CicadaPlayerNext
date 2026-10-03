@@ -728,6 +728,56 @@ if (!replying.hasReplied()) {
 3. **纹理那格会显示"就绪/创建中/失败"** —— `CicadaTextureView` 把建纹理失败降级成黑屏，
    光看黑屏分不清是没纹理还是没解码。
 
+### 5.17 【代码】没人告诉 Flutter 引擎"有新帧了" ⇒ 有声音没图像、画面灰着还一闪一闪
+
+**现象**（用户原话）："flutter 的视频播放没有图像，画面灰色的还一闪一闪的"。
+
+**根因**：`TextureRegistry.SurfaceProducer` 只是把一张 Surface 交给解码器；
+**引擎并不知道什么时候往上面写了新帧**。要让 Flutter 重绘这张纹理，必须显式调
+`SurfaceProducer.scheduleFrame()`。而 `PlayerSurface` 里**一个 `scheduleFrame()` 调用都没有**
+（本轮之前 0 处 ），于是：
+
+* 引擎从没主动取过帧 ⇒ **画面灰着不动**（灰 = 纹理没被更新过）；
+* 界面上有 `setState`（进度条、日志面板）时 Flutter 顺手重绘一次、偶然取到一帧
+  ⇒ **一闪一闪**。
+
+**修法**（两处）：
+
+| 文件 | 改动 |
+|---|---|
+| `PlayerSurface.java` | 新增 `scheduleFrame()`（转调 producer）；在 `attachProducerSurface()`（刚挂上/重建表面）与 `updateVideoSize()`（尺寸变了）各催一帧 |
+| `FlutterCicadaPlayer.java` | 挂 `CicadaPlayer.OnVideoRenderedListener`：**每渲染一帧**就 `scheduleFrame()`；从解码线程来的回调统一 `post` 到主线程再调 |
+
+**为什么 iOS 没这个问题**：iOS 侧 `FlutterCicadaPlayerTexture.m` 本来就在每帧调
+`[_registry textureFrameAvailable:_textureId]`（同一条契约）—— 只有 Android 漏了。
+
+**为什么不把 `onVideoRendered` 转发给 Dart**：这是"每帧一次"的回调（1080p30 就是 30 次/秒），
+转 Map 再走 EventChannel 完全没必要，Dart 侧也没有对应事件类型。
+
+**验证**：出包成功；R8 把 `PlayerSurface.scheduleFrame()` 内联进了三个调用点，
+`mapping.txt` 里能看到 `-> onVideoRendered` / `-> onVideoSizeChanged` / `-> run` 三处，
+正好对应"每帧 / 尺寸变化 / post 的 Runnable"三个调用位置。
+
+### 5.18 【代码】加了"申请系统权限 + 系统选择器挑本地视频"（和 Compose 侧同一套）
+
+原来的做法是"扫描 `/sdcard` 各目录"，实机上一无所获 —— Android 10+ 的 scoped storage 下
+那些目录本来就不可读，而且**没有让用户主动选的入口**。现在按 Compose 侧
+（`ComposePlayer/.../LocalVideoPicker.kt` + `LocalMediaAccess`）照做：
+
+| 环节 | 做法 |
+|---|---|
+| 权限（按版本） | Android 13+ `READ_MEDIA_VIDEO`；**14+ 再加 `READ_MEDIA_VISUAL_USER_SELECTED`**（用户在"仅允许访问选中的照片和视频"那一档也算授权）；12- `READ_EXTERNAL_STORAGE`（清单里带 `maxSdkVersion="32"`） |
+| 选择器 | 系统 `ACTION_OPEN_DOCUMENT`（`video/*`），拿回 `content://` Uri；顺手 `takePersistableUriPermission`（Provider 不支持就算了，不算失败） |
+| 播放 | **不拷贝文件**：`content://` 直接 `setUrl()` —— 内核按 Uri 读（SDK 里有 `com.cicada.player.utils.ContentDataSource`，native 侧会 FindClass 它） |
+| 拒绝权限 | 如实回 `PlatformException("PERMISSION_DENIED")`，App 只提示不假装播 |
+
+**实现位置**：插件类改成同时实现 `ActivityAware` + `PluginRegistry.ActivityResultListener` +
+`RequestPermissionsResultListener`（请求权限和开选择器都要 Activity，而 `FlutterPlugin` 只给引擎）；
+Dart 侧加了 `FlutterCicadaPlayer.pickLocalVideo()`（复用工厂通道，不再单开一条）。
+example 的"扫描文件"按钮换成了"**选本地视频**"，清单也按上表补了权限。
+
+> 只实现了 Android 侧；iOS 侧要另写 `PHPickerViewController`/`UIImagePickerController`（本机也编不了 iOS）。
+
 ---
 
 ## 6. 故障速查
@@ -757,7 +807,9 @@ if (!replying.hasReplied()) {
 | 顶部红条出现任意 Dart 异常 | `gFatalError` 的显示（release 下默认只有 logcat 有） | `adb logcat -s flutter` 看完整栈；平时它是黑屏 |
 | **点"播 URL"什么都不发生**、没红条、状态一直"未创建" | 插件大多数方法**不回包**，Dart 的 await 卡死 | 见 §5.16（已修，并用 `→/←` 日志把"卡在哪一步"显示出来） |
 | 状态条 `事件: 0` 一直不动 | 原生一个事件都没发过来（不是解码慢） | 先看 §5.15 / §5.16，再用 `adb logcat -s FlutterCicadaPlayer` |
-| 想播本地文件但没有文件选择器 | 本工程故意不引插件（会带 Kotlin 依赖） | 用"扫描文件"按钮（走应用自己的外部目录，免权限）：<br>`adb push test.mp4 /sdcard/Android/data/com.fplayer.flutter_cicadaplayer_example/files/` |
+| 想播本地文件但没有文件选择器 | 本工程故意不引插件（会带 Kotlin 依赖） | 用"选本地视频"按钮（见 §5.18） |
+| **有声音没图像 / 画面灰着、一闪一闪** | 没人告诉引擎"有新帧了"（缺 `scheduleFrame`） | 见 §5.17（已修：挂 `OnVideoRenderedListener` 每帧催一次） |
+| 想挑手机里的视频，但"扫描"什么都找不到 | scoped storage 下 `/sdcard` 各目录读不到 | 见 §5.18（已改成"申请权限 + 系统选择器"） |
 
 ---
 

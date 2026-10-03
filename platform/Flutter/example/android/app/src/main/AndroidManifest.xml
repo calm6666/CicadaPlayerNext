@@ -7,8 +7,19 @@
   <uses-permission android:name="android.permission.INTERNET" />
   <uses-permission android:name="android.permission.WAKE_LOCK" />
   <uses-permission android:name="android.permission.READ_PHONE_STATE" />
-  <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
+  <!-- 【本轮改】读本地视频的权限按版本分级（与 Compose 侧 AndroidManifest 一致）：
+       · Android 13（API 33）+ ：READ_MEDIA_VIDEO；
+       · Android 14（API 34）+ ：再加 READ_MEDIA_VISUAL_USER_SELECTED，
+         这样用户在"仅允许访问选中的照片和视频"那一档也能用；
+       · Android 12（API 32）及以下：READ_EXTERNAL_STORAGE，所以它要带 maxSdkVersion=32
+         （不带的话新系统上会被当成"申请了过时权限"）。
+       运行时申请与系统选择器都在插件里（FlutterCicadaPlayerPlugin.pickLocalVideo）。 -->
+  <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+  <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+  <uses-permission
+      android:name="android.permission.READ_EXTERNAL_STORAGE"
+      android:maxSdkVersion="32" />
+  <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" android:maxSdkVersion="28" />
   <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
   
 

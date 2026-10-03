@@ -180,6 +180,24 @@ class FlutterCicadaPlayer {
     await factoryChannel.invokeMethod<void>('disposeTexture');
   }
 
+  /// 让用户挑一个本地视频：**申请系统媒体权限 → 打开系统文件选择器**，返回选中的地址。
+  ///
+  /// 返回的是系统给的 `content://...` Uri 字符串；用户取消时返回 null。
+  /// 拿到之后直接 `setUrl(uri)` 就能播 —— 内核自己按 Uri 读（SDK 里有
+  /// `com.cicada.player.utils.ContentDataSource`），**不需要先拷贝一份文件**。
+  ///
+  /// 权限按系统版本申请（Android 13+ 是 READ_MEDIA_VIDEO，14+ 再加
+  /// READ_MEDIA_VISUAL_USER_SELECTED，12- 是 READ_EXTERNAL_STORAGE）；
+  /// 用户拒绝时抛 PlatformException("PERMISSION_DENIED")，调用方如实提示即可，别假装播了。
+  ///
+  /// 这个方法与播放器实例无关，只是复用插件那条工厂通道，所以放在这里，
+  /// 省得再暴露一条通道。
+  ///
+  /// 注意：目前只有 Android 侧实现了（iOS 侧要另写 PHPicker/UIImagePickerController）。
+  Future<String?> pickLocalVideo() {
+    return factoryChannel.invokeMethod<String>('pickLocalVideo');
+  }
+
   void setOnPrepared(OnPrepared prepared) {
     this.onPrepared = prepared;
   }
