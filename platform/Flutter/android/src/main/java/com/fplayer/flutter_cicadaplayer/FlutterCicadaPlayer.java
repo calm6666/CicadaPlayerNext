@@ -84,7 +84,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onPrepared");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -93,7 +93,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onRenderingStart");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -112,9 +112,8 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 // 为什么要判空：createTexture 会先把播放器建出来（那时候 Dart 侧
                 // 可能还没 listen EventChannel），而这之后如果立刻 setUrl/prepare，
                 // 尺寸回调可能早于 onListen 到达，mEventSink 还是 null。
-                if (mEventSink != null) {
-                    mEventSink.success(map);
-                }
+                // sendEvent 内部已经判空，这里直接调即可。
+                sendEvent(map);
             }
         });
 
@@ -154,7 +153,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
         //                    }
         //                });
         //
-        //                mEventSink.success(map);
+        //                sendEvent(map);
         //
         //            }
         //        });
@@ -180,14 +179,14 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 infoMap.put("audioSamplerate", trackInfo.getAudioSampleRate());
                 infoMap.put("audioChannels", trackInfo.getAudioChannels());
                 map.put("info", infoMap);
-                mEventSink.success(map);
+                sendEvent(map);
             }
 
             @Override public void onChangedFail(TrackInfo trackInfo, ErrorInfo errorInfo)
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onChangedFail");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -196,7 +195,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onSeekComplete");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -206,7 +205,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
         //                Map<String,Object> map = new HashMap<>();
         //                map.put("method","onSeiData");
         //                //TODO
-        //                mEventSink.success(map);
+        //                sendEvent(map);
         //            }
         //        });
 
@@ -215,7 +214,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onLoadingBegin");
-                mEventSink.success(map);
+                sendEvent(map);
             }
 
             @Override public void onLoadingProgress(int percent, float netSpeed)
@@ -224,14 +223,14 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("method", "onLoadingProgress");
                 map.put("percent", percent);
                 map.put("netSpeed", netSpeed);
-                mEventSink.success(map);
+                sendEvent(map);
             }
 
             @Override public void onLoadingEnd()
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onLoadingEnd");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -241,7 +240,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onStateChanged");
                 map.put("newState", newState);
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -252,7 +251,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("method", "onSubtitleExtAdded");
                 map.put("trackIndex", trackIndex);
                 map.put("url", url);
-                mEventSink.success(map);
+                sendEvent(map);
             }
 
             @Override public void onSubtitleShow(int trackIndex, long id, String data)
@@ -262,7 +261,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("trackIndex", trackIndex);
                 map.put("subtitleID", id);
                 map.put("subtitle", data);
-                mEventSink.success(map);
+                sendEvent(map);
             }
 
             @Override public void onSubtitleHide(int trackIndex, long id)
@@ -271,7 +270,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("method", "onSubtitleHide");
                 map.put("trackIndex", trackIndex);
                 map.put("subtitleID", id);
-                mEventSink.success(map);
+                sendEvent(map);
             }
 
             /*
@@ -290,7 +289,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("method", "onSubtitleHeader");
                 map.put("trackIndex", trackIndex);
                 map.put("header", header);
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -302,7 +301,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("infoCode", infoBean.getCode().getValue());
                 map.put("extraValue", infoBean.getExtraValue());
                 map.put("extraMsg", infoBean.getExtraMsg());
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -314,7 +313,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                 map.put("errorCode", errorInfo.getCode().getValue());
                 map.put("errorExtra", errorInfo.getExtra());
                 map.put("errorMsg", errorInfo.getMsg());
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -323,7 +322,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onTrackReady");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
 
@@ -332,7 +331,7 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
             {
                 Map<String, Object> map = new HashMap<>();
                 map.put("method", "onCompletion");
-                mEventSink.success(map);
+                sendEvent(map);
             }
         });
     }
@@ -340,6 +339,27 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
     @Override public void onListen(Object arguments, EventChannel.EventSink events)
     {
         this.mEventSink = events;
+    }
+
+    /**
+     * 统一的发事件出口：**必须判空**，所有回调都走这里。
+     *
+     * <p>为什么不能直接 {@code mEventSink.success(...)}：原生播放器是在
+     * {@code createTexture} 里就构造好并把监听挂上的（构造函数里 {@code initListener}），
+     * 而 Dart 侧要等 {@code createTexture} 的 Future 返回之后才会 listen EventChannel ——
+     * 这中间如果播放器发了事件（例如刚创建就来的状态变化、尺寸回调），
+     * {@code mEventSink} 还是 null，直接在**原生回调线程**上抛空指针。
+     * 这种 NPE 是在 JNI 回调里抛的，非常难查（日志里只有一行 JNI 警告，进程可能直接 abort）。
+     *
+     * <p>另一个更早的坑（已修）：Dart 以前是"先 listen、后建纹理"，那时 listen 会因为原生侧
+     * 还没有 stream handler 而直接失败，于是 {@code mEventSink} **永远**是 null ——
+     * 所有事件都会走到这里。
+     */
+    private void sendEvent(Map<String, Object> event) {
+        EventChannel.EventSink sink = mEventSink;
+        if (sink != null) {
+            sink.success(event);
+        }
     }
 
     @Override public void onCancel(Object arguments)
@@ -354,8 +374,12 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
         // 会直接在平台线程上冒出去把整个进程干掉（表现就是"装上一打开就闪退"，一行日志都留不下）。
         // 包住之后：native 侧的任何失败都会以 PlatformException 的形式回到 Dart，
         // 由 Dart 侧显示/记录，而不是闪退。
+        //
+        // 外面再套一层 ReplyingResult：dispatchMethodCall 里有 45 个 case、只有 18 个回包，
+        // 其余"只执行动作"的分支会让 Dart 的 await 永远不返回（详见那个类的注释）。
+        ReplyingResult replying = new ReplyingResult(result);
         try {
-            dispatchMethodCall(methodCall, result);
+            dispatchMethodCall(methodCall, replying);
         } catch (Throwable t) {
             // 用 android.util.Log 而不是 SDK 自己的 Logger：这条日志的用途是"闪退时能查到"，
             // android.util.Log 不需要任何初始化就一定写进 logcat，tag 也固定好 grep：
@@ -364,10 +388,17 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
                     "onMethodCall(" + methodCall.method + ") 抛出了 " + t, t);
             // 一个 Result 只能回复一次；万一上面已经 success 过，再回复会抛 IllegalStateException。
             try {
-                result.error("CICADA_CALL_FAILED",
+                replying.error("CICADA_CALL_FAILED",
                         methodCall.method + " 失败: " + t, null);
             } catch (Throwable ignored) {
             }
+            return;
+        }
+
+        // 走到这里说明这一分支只执行了动作、没有回值（setUrl / prepare / play / stop /
+        // setLoop / pause / seekTo …）。Dart 侧是 await，不回包就是卡死，所以统一补一个 null。
+        if (!replying.hasReplied()) {
+            replying.success(null);
         }
     }
 
@@ -996,6 +1027,59 @@ public class FlutterCicadaPlayer implements EventChannel.StreamHandler, MethodCa
     {
         if (mCicadaPlayer != null) {
             mCicadaPlayer.setStreamDelayTime(index, time);
+        }
+    }
+
+    /**
+     * 包一层 {@link MethodChannel.Result}，用来记录"原生到底回过包没有"。
+     *
+     * <p>【为什么必须有这一层】这个插件过去的写法是"只执行动作、不回包"：
+     * {@code dispatchMethodCall} 里共 45 个 case，只有 18 个调了 {@code result.success}，
+     * 其余（{@code setUrl} / {@code prepare} / {@code play} / {@code stop} /
+     * {@code setLoop} / {@code pause} / {@code seekTo} …）执行完就 {@code break} 了。
+     *
+     * <p>而 Dart 侧这些方法都是 {@code await channel.invokeMethod(...)}：
+     * 原生不回包 ⇒ **Future 永远不完成** ⇒ 调用链当场卡死。
+     * 现象：点了"播 URL"什么都不发生，"状态"一直停在初始值，因为 {@code _start()}
+     * 卡在第一个 await（{@code stop()}）上，后面的 {@code setUrl} / {@code prepare}
+     * 根本没机会执行 —— 而界面上不报任何错，看起来就像"点击没反应"。
+     *
+     * <p>老 example 之所以"看起来能用"，是因为它是 fire-and-forget（不 await）：
+     * 那些 Future 一直挂着没人管，问题就被掩盖了。所以这个 bug 一直躺在这里，
+     * 直到有人按正常写法 await 它才暴露。
+     *
+     * <p>有了这层之后不需要去改那 45 个 case：谁没回过，{@code onMethodCall} 末尾
+     * 统一补一个 {@code success(null)}。
+     */
+    private static final class ReplyingResult implements MethodChannel.Result {
+
+        private final MethodChannel.Result mDelegate;
+        private boolean mReplied;
+
+        ReplyingResult(MethodChannel.Result delegate) {
+            mDelegate = delegate;
+        }
+
+        boolean hasReplied() {
+            return mReplied;
+        }
+
+        @Override
+        public void success(Object result) {
+            mReplied = true;
+            mDelegate.success(result);
+        }
+
+        @Override
+        public void error(String errorCode, String errorMessage, Object errorDetails) {
+            mReplied = true;
+            mDelegate.error(errorCode, errorMessage, errorDetails);
+        }
+
+        @Override
+        public void notImplemented() {
+            mReplied = true;
+            mDelegate.notImplemented();
         }
     }
 }

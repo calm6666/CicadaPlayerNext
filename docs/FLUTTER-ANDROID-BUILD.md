@@ -659,6 +659,75 @@ void _listenEventChannel(int textureId) {
 example 的 `main.dart` 就是这么写的（`_startTicker`、`setUrl`、`prepare` 都在 `onCreated`
 之后或按钮点击时触发）。反过来在 `createCicadaPlayer()` 之后立刻 `setUrl` 就会重现这个异常。
 
+### 5.16 【代码】插件有 26 个方法**不回包** ⇒ Dart 的 `await` 永远不返回（"点了播放没反应"）
+
+**现象**（本条与 §5.15 是先后两个独立问题）：顶部没有红条、也没有崩溃，点"播 URL"
+**什么都不发生**，状态条一直是 `状态: 未创建`、纹理那一格也没变化。看起来像"点击没生效"。
+
+**根因**：原生 `FlutterCicadaPlayer.dispatchMethodCall` 里共 **45 个 `case`，只有 18 个**
+调了 `result.success(...)`。其余（`setUrl` / `prepare` / `play` / `stop` / `pause` /
+`setLoop` / `seekTo` …）执行完动作就 `break`：
+
+```java
+case "setUrl":
+    String url = methodCall.arguments.toString();
+    setDataSource(url);          // ← 干完活就走了
+    break;                       // ← 没有 result.success()，Dart 那边永远等不到回包
+```
+
+而 Dart 侧这些方法都是 `await channel.invokeMethod(...)` ⇒ **Future 永远不完成**：
+
+```dart
+await _player.stop();        // ← 卡在这里，下面的全都没执行
+await _player.setUrl(url);
+await _player.prepare();
+```
+
+所以 `setUrl` / `prepare` **根本没被调用过**，原生自然一个事件都不发 —— 与"状态未创建"
+（`onStateChanged` 从没来过）完全吻合。
+
+> **为什么这个 bug 能躺这么久**：老的 example 是 fire-and-forget（`player.setUrl(url)`
+> 不 await），Future 挂着也没人管，看起来"能用"。直到有人按正常写法 `await` 才暴露出来 ——
+> 也就是说，**任何按文档正常 await 这个插件的 Flutter 应用都会踩到**。
+
+**修法**（`FlutterCicadaPlayer.java`）：不去改 45 个 case，而是在 `onMethodCall` 外面套一层
+`ReplyingResult`（记录"原生回过包没有"），末尾统一补一个 `success(null)`：
+
+```java
+ReplyingResult replying = new ReplyingResult(result);
+try {
+    dispatchMethodCall(methodCall, replying);
+} catch (Throwable t) { ...; replying.error(...); return; }
+if (!replying.hasReplied()) {
+    replying.success(null);      // 只执行动作的分支
+}
+```
+
+**顺带修的第二个隐患**：`mEventSink` 原来只在"尺寸回调"那一处判空，其余 ~18 处直接
+`.success(...)`。原生播放器在 `createTexture` 里就构造好并挂上监听了，而 Dart 要等
+`createTexture` 的 Future 返回后才 listen —— 这中间来的事件（状态变化、尺寸）会让
+原生回调线程抛空指针（JNI 回调里抛异常极难查）。现在所有回调统一走
+`sendEvent(Map)`，内部判空。
+
+**验证**：
+
+* `flutter analyze`：No issues found；
+* 出包成功（13.5 MB / 12.5 MB）；
+* 新代码确实进了包 —— R8 会把私有类/方法改名，所以在 `mapping.txt` 左侧核对原始名：
+  ```
+  com.fplayer.flutter_cicadaplayer.FlutterCicadaPlayer$ReplyingResult -> c0.m:
+  1:4:void sendEvent(java.util.Map):359:359 -> a
+  ```
+
+**example 里同时加了三个"下次能自己看出来"的东西**（都是这次踩坑的产物）：
+
+1. **每一步原生调用前后各写一行日志**：`→ setUrl` / `← setUrl ok`。
+   只有 `→` 没有 `←`，就是那次调用没回包 —— 一眼定位，不用猜。
+2. **状态条上加了 `事件: N`**（原生事件累计数）。点播放后它一直是 0，
+   就说明原生一个事件都没送来（而不是"解码慢"）。
+3. **纹理那格会显示"就绪/创建中/失败"** —— `CicadaTextureView` 把建纹理失败降级成黑屏，
+   光看黑屏分不清是没纹理还是没解码。
+
 ---
 
 ## 6. 故障速查
@@ -686,6 +755,9 @@ example 的 `main.dart` 就是这么写的（`_startTicker`、`setUrl`、`prepar
 | 顶部红条：`MissingPluginException ... listen on channel flutter_cicadaplayer_event` | Dart 在原生播放器建出来之前就订阅了事件通道 | 见 §5.15 |
 | 界面黑着、日志一片安静（没有 onPrepared） | 同上的"listen 只发一次、抛了不再重发" | 见 §5.15 |
 | 顶部红条出现任意 Dart 异常 | `gFatalError` 的显示（release 下默认只有 logcat 有） | `adb logcat -s flutter` 看完整栈；平时它是黑屏 |
+| **点"播 URL"什么都不发生**、没红条、状态一直"未创建" | 插件大多数方法**不回包**，Dart 的 await 卡死 | 见 §5.16（已修，并用 `→/←` 日志把"卡在哪一步"显示出来） |
+| 状态条 `事件: 0` 一直不动 | 原生一个事件都没发过来（不是解码慢） | 先看 §5.15 / §5.16，再用 `adb logcat -s FlutterCicadaPlayer` |
+| 想播本地文件但没有文件选择器 | 本工程故意不引插件（会带 Kotlin 依赖） | 用"扫描文件"按钮（走应用自己的外部目录，免权限）：<br>`adb push test.mp4 /sdcard/Android/data/com.fplayer.flutter_cicadaplayer_example/files/` |
 
 ---
 

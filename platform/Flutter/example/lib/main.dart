@@ -16,6 +16,7 @@
 // 需要单独做一轮 Dart 3 迁移（见文末 TODO）。
 
 import 'dart:async';
+import 'dart:io';   // 扫描本地文件要用 Directory / File（纯 dart:io，不需要任何插件）
 
 import 'package:flutter/material.dart';
 import 'package:flutter_cicadaplayer/flutter_cicadaplayer.dart';
@@ -90,6 +91,14 @@ class _TestHomePageState extends State<TestHomePage> {
   String _state = '未创建';
   String _size = '-';
   String _lastError = '-';
+  /// 纹理状态：创建中 / 就绪 / 失败(原因)。
+  /// 为什么单独记：CicadaTextureView 把建纹理失败降级成一块黑屏（它自己 catch 了），
+  /// 所以"画面不出来"必须在状态条上有字，光看黑屏分不清是没纹理还是没解码。
+  String _textureState = '创建中';
+  /// 事件通道收到的事件总数。**这个数字是判断事件通道通不通最快的办法**：
+  /// 点了播放之后它一直是 0，就说明原生那边一个事件都没发过来（或者通道没通），
+  /// 而不用去猜是解码慢还是画面黑。
+  int _eventCount = 0;
   int _durationMs = 0;
   int _positionMs = 0;
   /// 进度估算的两个状态：上次同步的毫秒数 + 从那一刻起的墙钟起点。
@@ -103,11 +112,21 @@ class _TestHomePageState extends State<TestHomePage> {
     super.initState();
     _bindCallbacks();
     // 纹理创建失败会被 CicadaTextureView 降级成一块黑屏（它自己 catch 掉了，不抛），
-    // 于是"打不开画面"这件事在界面上完全没有线索。这里额外挂一个监听，把原因写进日志面板。
-    // 返回的是同一个缓存 Future（ensureTexture 幂等），所以不会重复建纹理。
+    // 于是"打不开画面"这件事在界面上完全没有线索。这里额外挂一个监听，把原因写进日志面板
+    // **并且**写进状态条。返回的是同一个缓存 Future（ensureTexture 幂等），不会重复建纹理。
     _player.ensureTexture().then<void>(
-      (int id) => _addLog('纹理已创建 textureId=$id'),
-      onError: (Object e) => _addLog('！！纹理创建失败（很可能是 native 库没加载起来）: $e'),
+      (int id) {
+        if (mounted) {
+          setState(() => _textureState = '就绪(id=$id)');
+        }
+        _addLog('纹理已创建 textureId=$id');
+      },
+      onError: (Object e) {
+        if (mounted) {
+          setState(() => _textureState = '失败');
+        }
+        _addLog('！！纹理创建失败（很可能是 native 库没加载起来）: $e');
+      },
     );
   }
 
@@ -120,6 +139,14 @@ class _TestHomePageState extends State<TestHomePage> {
     // 释放原生播放器与纹理（谁建谁放）。
     _player.destroy();
     super.dispose();
+  }
+
+  /// 原生事件的统一入口：**先计数再记日志**。
+  /// 状态条上那个"事件: N"就是"事件通道到底通没通"的答案 ——
+  /// 点了播放之后它一直是 0，说明原生一个事件都没送来（不是解码慢）。
+  void _onEventLog(String msg) {
+    _eventCount++;
+    _addLog(msg);
   }
 
   void _addLog(String msg) {
@@ -141,15 +168,15 @@ class _TestHomePageState extends State<TestHomePage> {
 
   void _bindCallbacks() {
     _player.setOnPrepared(() {
-      _addLog('onPrepared');
+      _onEventLog('onPrepared');
       _player.play();
     });
     _player.setOnRenderingStart(() {
-      _addLog('onRenderingStart  ← 首帧上屏（零拷贝纹理真的画出来了）');
+      _onEventLog('onRenderingStart  ← 首帧上屏（零拷贝纹理真的画出来了）');
     });
     _player.setOnVideoSizeChanged((int w, int h) {
       setState(() => _size = '$w x $h');
-      _addLog('onVideoSizeChanged $w x $h');
+      _onEventLog('onVideoSizeChanged $w x $h');
     });
     _player.setOnStateChanged((int s) {
       const Map<int, String> names = <int, String>{
@@ -163,28 +190,46 @@ class _TestHomePageState extends State<TestHomePage> {
         7: 'error',
       };
       setState(() => _state = names[s] ?? 'state=$s');
-      _addLog('onStateChanged $s (${names[s] ?? '?'})');
+      _onEventLog('onStateChanged $s (${names[s] ?? '?'})');
     });
-    _player.setOnSeekComplete(() => _addLog('onSeekComplete'));
+    _player.setOnSeekComplete(() => _onEventLog('onSeekComplete'));
     _player.setOnCompletion(() {
-      _addLog('onCompletion');
+      _onEventLog('onCompletion');
       _syncPosition();
     });
     // 插件只暴露 setOnLoadingStatusListener（没有单独的 setOnLoadingProgress）。
     _player.setOnLoadingStatusListener(
       loadingProgress: (int percent, double speed) {
         if (percent % 10 == 0) {
-          _addLog('loading $percent%  ${speed.toStringAsFixed(1)} KB/s');
+          _onEventLog('loading $percent%  ${speed.toStringAsFixed(1)} KB/s');
         }
       },
     );
     _player.setOnError((int code, String extra, String msg) {
       setState(() => _lastError = '$code / $extra / $msg');
-      _addLog('onError code=$code extra=$extra msg=$msg');
+      _onEventLog('onError code=$code extra=$extra msg=$msg');
     });
     _player.setOnInfo((int infoCode, int extraValue, String extraMsg) {
-      _addLog('onInfo $infoCode $extraValue $extraMsg');
+      _onEventLog('onInfo $infoCode $extraValue $extraMsg');
     });
+  }
+
+  /// 一次原生调用，前后各写一行日志。
+  ///
+  /// 【为什么要这么啰嗦】这个插件的 Java 侧曾经有 26 个方法**不回包**，
+  /// 而 Dart 是 `await`：原生不回 ⇒ Future 永远不完成 ⇒ 调用链当场卡住，
+  /// 界面上既不报错也不前进（用户看到的就是"点了没反应"）。
+  /// 有了"→ 发出 / ← 返回"两行，一眼就能看出**卡在哪一步**：
+  /// 只有 `→` 没有 `←`，就是那次调用没有回包。
+  Future<void> _step(String name, Future<void> Function() action) async {
+    _addLog('→ $name');
+    try {
+      await action();
+      _addLog('← $name ok');
+    } catch (e) {
+      _addLog('✗ $name 失败: $e');
+      rethrow;
+    }
   }
 
   Future<void> _start(String url) async {
@@ -192,14 +237,20 @@ class _TestHomePageState extends State<TestHomePage> {
       _addLog('地址为空，已忽略');
       return;
     }
-    _addLog('setUrl: $url');
-    await _player.stop();
-    _seekBaseMs = 0;
-    _playingSince = null;
-    await _player.setEnableHardwareDecoder(_hwDecode);
-    await _player.setLoop(_loop);
-    await _player.setUrl(url);
-    await _player.prepare();
+    _addLog('=== 开始播放: $url ===');
+    try {
+      await _step('stop', _player.stop);
+      _seekBaseMs = 0;
+      _playingSince = null;
+      await _step('setEnableHardwareDecoder($_hwDecode)',
+          () => _player.setEnableHardwareDecoder(_hwDecode));
+      await _step('setLoop($_loop)', () => _player.setLoop(_loop));
+      await _step('setUrl', () => _player.setUrl(url));
+      await _step('prepare', _player.prepare);
+      _addLog('=== prepare 已发出，接下来应该看到 onPrepared / onStateChanged / onRenderingStart ===');
+    } catch (e) {
+      _addLog('！！播放流程中断: $e');
+    }
   }
 
   /// 进度是**客户端估算**：Flutter 插件没有暴露"取当前位置"的接口
@@ -224,6 +275,82 @@ class _TestHomePageState extends State<TestHomePage> {
     } else {
       _playingSince = null;
     }
+  }
+
+  /// 扫描"能播的本地文件"，点一下就播。
+  ///
+  /// 【为什么不做系统文件选择器】那要么引第三方插件（file_picker 之类，会把 Kotlin
+  /// 插件依赖带回来 —— 本工程刚为了不依赖 KGP 2.2.20 把这类包清掉），要么在插件里
+  /// 自己实现 ActivityAware + ACTION_OPEN_DOCUMENT（另一个功能，得单独做）。
+  /// 这里先用**完全不需要权限**的路子：
+  ///
+  ///   * `/sdcard/Android/data/<包名>/files` —— 应用自己的外部目录，
+  ///     任何 Android 版本都免权限可读写。放文件进去：
+  ///       adb push test.mp4 /sdcard/Android/data/com.fplayer.flutter_cicadaplayer_example/files/
+  ///   * `/sdcard/Movies`、`/sdcard/Download`、`/sdcard/DCIM/Camera` —— best-effort：
+  ///     Android 10+ 的 scoped storage 下要 READ_MEDIA_VIDEO，读不到会写一行日志说明。
+  Future<void> _scanFiles() async {
+    const String pkg = 'com.fplayer.flutter_cicadaplayer_example';
+    final List<String> dirs = <String>[
+      '/sdcard/Android/data/$pkg/files',
+      '/storage/emulated/0/Android/data/$pkg/files',
+      '/sdcard/Movies',
+      '/sdcard/Download',
+      '/sdcard/DCIM/Camera',
+    ];
+    const List<String> exts = <String>[
+      '.mp4', '.mkv', '.mov', '.flv', '.ts', '.m4s', '.webm', '.avi', '.m3u8',
+    ];
+
+    final List<String> found = <String>[];
+    _addLog('=== 扫描本地文件 ===');
+    for (final String dir in dirs) {
+      try {
+        final Directory d = Directory(dir);
+        if (!await d.exists()) {
+          continue;
+        }
+        int n = 0;
+        await for (final FileSystemEntity f in d.list(followLinks: false)) {
+          if (f is File &&
+              exts.any((String e) => f.path.toLowerCase().endsWith(e))) {
+            found.add(f.path);
+            n++;
+          }
+        }
+        _addLog('  $dir → $n 个可播文件');
+      } catch (e) {
+        // 最常见的就是 scoped storage 不给读（Android 10+ 的 Movies/Download/DCIM）。
+        _addLog('  × 读不了 $dir: $e');
+      }
+    }
+
+    if (!mounted) {
+      return;
+    }
+    if (found.isEmpty) {
+      _addLog('没扫到可播文件。最快的办法是把文件推进应用自己的目录（免权限）：');
+      _addLog('  adb push test.mp4 /sdcard/Android/data/$pkg/files/');
+      return;
+    }
+
+    final String? picked = await showDialog<String>(
+      context: context,
+      builder: (BuildContext context) => SimpleDialog(
+        title: const Text('选一个文件播放'),
+        children: found
+            .map((String p) => SimpleDialogOption(
+                  onPressed: () => Navigator.pop(context, p),
+                  child: Text(p, style: const TextStyle(fontSize: 12)),
+                ))
+            .toList(),
+      ),
+    );
+    if (picked == null || !mounted) {
+      return;
+    }
+    _pathCtrl.text = picked;
+    await _start('file://$picked');
   }
 
   void _startTicker() {
@@ -305,7 +432,8 @@ class _TestHomePageState extends State<TestHomePage> {
             color: const Color(0xFFF2F2F2),
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
             child: Text(
-              '纹理: ${_created ? '就绪' : '创建中'}   '
+              '纹理: ${_created ? '就绪' : _textureState}   '
+              '事件: $_eventCount   '
               '视频尺寸: $_size   状态: $_state\n'
               '进度(客户端估算): ${_fmt(curMs.toInt())} / ${_fmt(_durationMs)}   '
               '倍速: ${_rate.toStringAsFixed(1)}   '
@@ -337,6 +465,13 @@ class _TestHomePageState extends State<TestHomePage> {
                           _start(p.startsWith('/') ? 'file://$p' : p);
                         },
                         child: const Text('播本地文件'),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Expanded(
+                      child: ElevatedButton(
+                        onPressed: _scanFiles,
+                        child: const Text('扫描文件'),
                       ),
                     ),
                   ],
