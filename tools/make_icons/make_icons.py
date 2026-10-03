@@ -107,6 +107,24 @@ SUPERSAMPLE = 8
 CORNER_RADIUS_FRACTION = 0.2237          # 22.37 % of the canvas side
 GLYPH_FRACTION_ROUNDED = 0.62            # about 62 %
 
+#: Android only: a smaller glyph share than the rounded variants above.
+#:
+#: Why Android needs its own number (实测出来的，不是偏好):
+#:   * API 26+ 用的是**自适应图标** —— 108 x 108 dp 的画布，系统按各家 launcher 的
+#:     蒙版把它裁到中央大约 66 ~ 72 dp 才给人看（圆形蒙版最狠，约 66 dp，即画布的 61 %）。
+#:     所以图形占画布 62 % 时，它在**圆形蒙版里已经顶到边**（这只蝉的左右翅膀直接切掉），
+#:     看上去就是"中间的图形太大、跟后面的白底不协调"（用户报的原话）。
+#:   * 旧设备用的密度 PNG 没有蒙版，白圆角方块铺满画布，62 % 的图形同样贴边。
+#: 52 % 在两种情况下都留出了舒服的留白：圆形蒙版里约 78 % 的可见直径，
+#: 旧方块里四边各留约 24 %。挑这个值之前把 62 / 56 / 52 / 48 / 44 五档渲染成
+#: 对比图看过（legacy 方块 + 圆形蒙版两行），52 % 是两行都协调的那一档。
+#:
+#: 为什么不去改 GLYPH_FRACTION_ROUNDED 一刀切：iOS 的图标本体铺满画布、没有 Android
+#: 那种蒙版裁切，62 % 在 iOS 上是对的；macOS 另有 content_fraction（824/1024）再乘一次，
+#: 改成 52 % 会让 Dock 里的图标明显偏小 —— 和当年修"macOS 图标比别家大一圈"是同一类问题，
+#: 所以这里按平台分开，别互相牵连。
+GLYPH_FRACTION_ANDROID = 0.52            # about 52 %
+
 #: macOS only: the rounded square must NOT fill the canvas.
 #:
 #: Apple's macOS icon grid puts the icon's body on a smaller square centred in
@@ -983,6 +1001,8 @@ def build_plan():
                         px,
                         "rounded",
                         "%s/mipmap-%s/%s" % (res_dir, density, name),
+                        # Android 单独用更小的占比，理由见 GLYPH_FRACTION_ANDROID
+                        fraction=GLYPH_FRACTION_ANDROID,
                     )
                 )
 
@@ -999,8 +1019,8 @@ def build_plan():
                 ANDROID_ADAPTIVE_FOREGROUND_PX,
                 "flat",
                 "%s/drawable-nodpi/ic_launcher_foreground.png" % res_dir,
-                "adaptive-icon foreground (transparent, centred 62 %% glyph)",
-                fraction=GLYPH_FRACTION_ROUNDED,
+                "adaptive-icon foreground (transparent, centred 52 %% glyph)",
+                fraction=GLYPH_FRACTION_ANDROID,
             )
         )
 
@@ -1371,10 +1391,20 @@ def generate(out_dir, install_mode="existing", qt_appicon=True, only=None):
 
     # ------------------------------------------------------------------
     # Windows .ico
+    #
+    # 【本轮改：Windows 图标改成和 macOS 一样】原来是 `get(256, "flat")` —— 只有图形、
+    # 没有底，96 % 的占比铺满整张画布。用户要求"Qt 上 Windows 的图标也换成 macOS 那种一样的"，
+    # 所以现在用 macOS 那套几何：白色圆角方块 + 按 Apple 网格缩进的内容区
+    #（824/1024，四周留透明边），图形占比沿用 rounded 档。
+    #
+    # 代价说清楚：.ico 里最小的那几档（16/24 px）缩到只剩约 8~12 px 的图形，
+    # 任务栏小尺寸下会显得偏小 —— 这正是"和 macOS 一致"的必然结果
+    #（macOS 那边 Dock 里就是这么显示的）。要 Windows 恢复"铺满"就把它改回
+    # get(256, "flat")。
     # ------------------------------------------------------------------
     ico_out = os.path.join(out_dir, "windows", "Cicada.ico")
     ensure_dir(os.path.dirname(ico_out))
-    ico_base = get(256, "flat")
+    ico_base = get(256, "rounded", MACOS_GLYPH_FRACTION, MACOS_CONTENT_FRACTION)
     # Pillow resamples the base image down to every requested size, and writes
     # no metadata, so this file is reproducible.
     ico_base.save(ico_out, format="ICO", sizes=[(s, s) for s in WINDOWS_ICO_SIZES])
