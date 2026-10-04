@@ -5603,16 +5603,15 @@ bool SuperMediaPlayer::RenderVideo(bool force_render)
          * 只有这一帧已经走过 SendVideoFrameToRender，才认为清晰度切换真正完成 ——
          * 这样 Qt 端收到 READY 时，解码器、帧队列和实际输出尺寸已经一致。
          *
-         * 【READY 的两个出口，都是幂等的】
-         *   (1) 落点帧被采纳（acceptDiscontinuityLandingFrame()，单解码器模型的主出口）；
-         *   (2) 这里 —— 切档在途（mVideoSwitchInFlight）且这一帧真的交给了渲染路径
-         *       （SendVideoFrameToRender 已经调用）。它只是 (1) 的兜底：谁先到都只收尾一次，
-         *       finishQualitySwitch() 自己按在途闩幂等。
-         * 也就是说 READY 由"帧真的被送出去"驱动，而不是"帧被解出来"。
-         * 具体的收尾动作（READY / 清状态）全部在 finishQualitySwitch() 里，
-         * 这里只负责判定条件成立。
+         * 【READY 的判据：已提交 + 有帧真的交出】
+         *   · "已提交" = mCurrentVideoIndex == mVideoSwitchTargetIndex。边界对齐切档在目标流
+         *     第一个包到达时才提交（commitAlignedVideoSwitch()），提交之前 mCurrentVideoIndex
+         *     仍是旧档 ⇒ 等待分片边界期间渲染的旧档帧**不会**把 READY 提前报出去；
+         *   · "有帧真的交出" = 本处（SendVideoFrameToRender 已经调用）。
+         * 两条都是状态判据（流下标比较），没有计时器、没有 pts 跨轴比较。提交之后若还有
+         * 一两帧旧档排在帧队列里（帧队列上限极小），READY 可能早报一帧 —— 有界，且方向安全。
          */
-        if (mVideoSwitchInFlight) {
+        if (mVideoSwitchInFlight && mCurrentVideoIndex == mVideoSwitchTargetIndex) {
             AF_LOGI("quality switch rendered: stream=%d size=%dx%d (READY driver: this frame went through "
                     "SendVideoFrameToRender)\n",
                     mVideoSwitchTargetIndex, frameWidth, frameHeight);
@@ -6154,13 +6153,31 @@ int SuperMediaPlayer::ReadPacket()
         }
 
         /*
-         * 【单解码器模型】切档请求已受理、但 SwitchVideo() 还没把新档坐实之前
-         * （mCurrentVideoIndex 仍是旧档），新档的包**不能**进公共视频队列：那一刻
-         * 队列是喂给旧解码器的，混入另一种 codec/分辨率会立刻出错误帧（PPS/NALU
-         * 错误、画面冻结）。SwitchVideo() 自己会 OpenStream + Seek 到切换点，
-         * 所以这里直接丢不会缺数据。
+         * ============ 【边界对齐切档的提交点】============
+         *
+         * 目标流的第一个视频包到达，就说明解复用层已经完成分片边界换流：旧流读到本片末尾
+         * 返回 0 ⇒ DashManager.cpp:221 那一支执行（旧流 stop + selected 置假、目标流 selected
+         * 置真、目标流读位置对齐到旧流分片号 + 1、OpenStream 目标流）。
+         *
+         * 所以这里不再"丢弃目标流的包"，而是**提交**：
+         *   · commitAlignedVideoSwitch() 会按 meta 决定 flush/丢旧包/重建（能复用就一个字节
+         *     都不动），并把 mCurrentVideoIndex 坐实成目标档；
+         *   · 提交之后本包必须照常进公共视频队列（下面 :6168 的 AddPacket）。
+         *
+         * 提交之前**不丢任何包**：等待期间旧流是唯一在供包的流（它的 selected 仍是真），
+         * 丢它等于把画面停掉。旧实现无条件丢"非当前档"的包，会让目标流的每一个包都被丢掉、
+         * 切档永远不完成。
          */
+        if (mVideoSwitchInFlight && pFrame->getInfo().streamIndex == mVideoSwitchTargetIndex &&
+            mCurrentVideoIndex != mVideoSwitchTargetIndex) {
+            commitAlignedVideoSwitch(pFrame->getInfo().flags != 0);
+        }
+
         if (mVideoSwitchInFlight && pFrame->getInfo().streamIndex != mCurrentVideoIndex) {
+            /*
+             * 提交之后仍会走到这里的情形：提交那一刻目标档又被换掉了（用户连点、或 ABR 改了
+             * 主意）⇒ 这一路包属于已作废的目标档，丢弃。判据纯状态。
+             */
             pMedia_Frame->setDiscard(true);
             return ret;
         }
@@ -7075,6 +7092,136 @@ void SuperMediaPlayer::SwitchVideo(int64_t switchPos)
     AF_LOGI("quality switch: single-decoder switch applied in %lld ms (stream=%d switchPos=%lld); the landing "
             "filter now waits for the frame that contains switchPos\n",
             (long long) (af_getsteady_ms() - switchStartMs), targetStreamIndex, (long long) switchPos);
+}
+
+void SuperMediaPlayer::SwitchVideoAligned(int64_t switchPos)
+{
+    const int targetStreamIndex = mVideoSwitchTargetIndex;
+
+    if (targetStreamIndex < 0) {
+        AF_LOGW("switch video (aligned): no target stream (the in-flight request is gone) — nothing to do\n");
+        return;
+    }
+
+    /*
+     * 起播就切（没有旧档可交接）或者目标就是当前档：没有"分片边界"可等，退回立即路径。
+     * 这是**状态判据**，不是开关：mCurrentVideoIndex < 0 只在起播那一刻成立。
+     */
+    if (mCurrentVideoIndex < 0 || mCurrentVideoIndex == targetStreamIndex) {
+        SwitchVideo(switchPos);
+        return;
+    }
+
+    if (mDemuxerService == nullptr) {
+        AF_LOGW("switch video (aligned): no demuxer service\n");
+        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
+                                             "no demuxer service");
+        finishQualitySwitch(false, "no demuxer service");
+        return;
+    }
+
+    /*
+     * 只把请求交给解复用层，**不动任何播放状态**：
+     *   · 不 CloseStream(旧)：旧流的 selected 由解复用层在分片边界才置假
+     *     （DashManager.cpp:222-223），在那之前它继续 read/解码/出画 —— 网络差时画面不停；
+     *   · 不 Seek(目标)：边界块会把目标流的读位置对齐到"旧流分片号 + 1"（DashManager.cpp:236-237），
+     *     在这里多一次 seek 只会把已经对齐的读位置拽走；
+     *   · 不 FlushVideoPath / 不 DropPacketsByStream / 不起落点过滤：整个切换过程没有时间轴
+     *     不连续点（两路共用媒体时间轴，且在同一个分片边界交接），所以既不需要落点过滤，
+     *     也不需要丢旧帧 —— 交付点见 ReadPacket 里的提交块。
+     */
+    const int ret = mDemuxerService->SwitchStreamAligned(mCurrentVideoIndex, targetStreamIndex);
+
+    if (ret < 0) {
+        AF_LOGW("switch video (aligned): the demuxer refused the aligned switch %d -> %d (ret=%d)\n",
+                mCurrentVideoIndex, targetStreamIndex, ret);
+        mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
+                                             "aligned switch not armed");
+        finishQualitySwitch(false, "aligned switch not armed");
+        return;
+    }
+
+    AF_LOGI("quality switch: armed an ALIGNED switch %d -> %d at the next segment boundary (the old stream "
+            "keeps being read and rendered until then; no seek, no flush, no decoder touched yet)\n",
+            mCurrentVideoIndex, targetStreamIndex);
+}
+
+void SuperMediaPlayer::commitAlignedVideoSwitch(bool firstPacketIsKey)
+{
+    const int targetStreamIndex = mVideoSwitchTargetIndex;
+    const int oldStreamIndex = mCurrentVideoIndex;
+
+    if (targetStreamIndex < 0 || targetStreamIndex == oldStreamIndex) {
+        return;
+    }
+
+    /*
+     * 提交点 = 目标流第一个视频包（由 ReadPacket 的提交块判出）。
+     * 先把"当前档"坐实：这一行之后 mCurrentVideoIndex == mVideoSwitchTargetIndex 就是
+     * "已提交"的唯一判据，READY 出口（RenderVideo 里的 SendVideoFrameToRender 之后那一处）
+     * 用它把"等待期间旧档的帧"排除掉。
+     */
+    mCurrentVideoIndex = targetStreamIndex;
+
+    Stream_meta newMeta{};
+    const bool metaRead = (mDemuxerService != nullptr) &&
+                          (mDemuxerService->GetStreamMeta(&newMeta, targetStreamIndex, false) >= 0);
+    const bool metaMatched = metaRead && isVideoDecoderMetaMatched(&newMeta);
+
+    if (!metaMatched) {
+        /*
+         * 换解码器（codec / 分辨率变了，或 meta 读不到）：这一刻旧档的帧对新解码器是脏数据，
+         * 必须丢；解码器队列也要清。这是唯一必须付"几帧"代价的情形，无法避免。
+         */
+        if (oldStreamIndex >= 0) {
+            const int droppedOldPackets = mBufferController->DropPacketsByStream(BUFFER_TYPE_VIDEO, oldStreamIndex);
+
+            if (droppedOldPackets > 0) {
+                AF_LOGI("quality switch (aligned): dropped %d stale video packet(s) of the old stream %d "
+                        "at the boundary commit (the decoder is being replaced)\n",
+                        droppedOldPackets, oldStreamIndex);
+            }
+        }
+
+        FlushVideoPath(false, false, "quality switch aligned commit (decoder changed)");
+
+        if (metaRead && (newMeta.extradata == nullptr || newMeta.extradata_size == 0)) {
+            /* init 段由读线程稍后解析：沿用既有的"推迟到新档第一个包"机制
+             * （DecodeVideoPacket 里 mVideoDecoderRebuildPending 那一跳）。此刻
+             * mCurrentVideoIndex 已经是目标档，那一跳的判据会命中。 */
+            mVideoDecoderRebuildPending = true;
+            AF_LOGI("quality switch (aligned): target meta carries no extradata yet — deferring the in-place "
+                    "decoder rebuild to the first packet of the new stream\n");
+        } else if (metaRead && rebuildVideoDecoder(false) < 0) {
+            AF_LOGW("switch video (aligned): in-place decoder rebuild failed for stream %d\n", targetStreamIndex);
+            mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_FAILED, targetStreamIndex,
+                                                 "in-place decoder rebuild failed");
+            finishQualitySwitch(false, "in-place decoder rebuild failed");
+            return;
+        }
+    } else if (!firstPacketIsKey) {
+        /*
+         * 同一块解码器可以复用，但目标流不是从关键帧起步（片源不满足"分片首 IDR"）：
+         * 只清解码器与解码帧队列，让它从这一包重新建立参考 —— 不重建、不丢包队列。
+         */
+        FlushVideoPath(false, false, "quality switch aligned commit (non-key first packet)");
+        AF_LOGI("quality switch (aligned): the new stream does not start at a keyframe — flushed the decoder "
+                "only (no rebuild) so it re-syncs on this packet\n");
+    } else {
+        AF_LOGI("quality switch (aligned): decoder meta matches and the new stream starts at a keyframe — "
+                "committing with NO flush and NO packet drop (seamless, zero dropped frames)\n");
+    }
+
+    /*
+     * 旧流在解复用层已经 stop（DashManager.cpp:222 / HLSManager.cpp:212），这里把它的流资源
+     * 一起放开 —— 与立即路径 CloseStream(旧) 同义，只是挪到了提交点之后。
+     */
+    if (oldStreamIndex >= 0 && oldStreamIndex != targetStreamIndex && mDemuxerService != nullptr) {
+        mDemuxerService->CloseStream(oldStreamIndex);
+    }
+
+    mWillSwitchVideo = false;
+    mEof = false;
 }
 
 int64_t SuperMediaPlayer::getAudioPlayTimeStampCB(void *arg)

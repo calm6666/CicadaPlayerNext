@@ -616,10 +616,23 @@ namespace Cicada {
                  *   · **双路解码方案已废除**（切换慢、帧可能对不齐），全仓只有一路视频
                  *     解码器 + 一路音频解码器（SMPAVDeviceManager::mVideoDecoder /
                  *     mAudioDecoder），没有 pendingDecoder 这类成员；
-                 *   · 本函数只记录目标流 toStreamId，到分片边界再换；
+                 *   · 本函数记录目标流 toStreamId 与边界触发器 stopOnSegEnd，到分片边界再换；
                  *   · 提交点是"目标流首帧真正送入渲染器"，之后才 CloseStream 旧流；
-                 *   · stopOnSegEnd 只用于普通 seek：清晰度切换时若在边界就关旧流，
-                 *     目标那路解码器重建期间没有包可喂，表现为卡帧 / EOS / 音画不同步。 */
+                 *   · stopOnSegEnd 在这里就是"旧流读到本片末尾就停"的触发器（见下）。 */
+                /*
+                 * 【边界对齐切换的触发器：必须置真，否则本函数等于空操作】
+                 *
+                 * 与 DashManager::SwitchStreamAligned 同一处修复、同一理由：本文件读
+                 * toStreamId 的几处（:211 / :483 / :581）都被 `if (i->stopOnSegEnd)` 把着，
+                 * 只写 toStreamId 不会换流。
+                 *
+                 * 置真之后：HLSStream::stopOnSegEnd(true) 让旧流读到本分片末尾就报停，
+                 * 于是 :211 那一支执行 —— 旧流停掉并取消选中，目标流被选中、读位置对齐到
+                 * "旧流分片号 + 1"（:254-256），再 OpenStream(toStreamId)（:256）。
+                 * 换流点落在分片边界、目标流那片已在缓冲里 ⇒ 切过去不等网络。
+                 */
+                i->mPStream->stopOnSegEnd(true);
+                i->stopOnSegEnd = true;
                 i->toStreamId = to;
                 break;
             }

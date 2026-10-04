@@ -1629,12 +1629,21 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
 
     /*
-     * ② 立即切换（单解码器，§12.2）：关旧流 → 开新流 → 按流 seek 到切换点 → 只 flush 视频
-     *    → meta 不匹配才原地重建**同一块**解码器 → beginDiscontinuity(switchPos) 让单一落点
-     *    过滤接管。终态只有两种：落点帧上屏 ⇒ READY；真正的错误（Open/Seek/meta/重建失败）
-     *    ⇒ FAILED。没有预热等待、没有分片边界等待、没有任何死线。
+     * ② **边界对齐切换**（ABR 与手动共用的唯一出口）：只把"目标档 + 边界触发器"交给解复用层
+     *    —— 旧流继续 read/解码/渲染，直到它自己读到本分片末尾；解复用层在分片边界完成换流，
+     *    并把目标流的读位置对齐到"旧流分片号 + 1"（DashManager.cpp:221-247）。
+     *    目标流的第一个视频包到达时，由 ReadPacket 的提交块坐实当前档，并按 meta 决定
+     *    是否 flush / 丢旧档残留包 / 重建同一块解码器。
+     *
+     *    切过去的时候目标流那一片已经在缓冲里，所以不需要 seek、不需要清包、不会卡顿。
+     *    终态仍然只有两种：已提交且首帧交给渲染器 ⇒ READY；真正的错误（arm 失败 / meta 读不到 /
+     *    重建失败）⇒ FAILED。没有预热等待、没有任何死线。
+     *
+     *    ABR 走的也是本函数（AbrBufferAlgoStrategy::RequestSwitch → MediaPlayer::abrChanged →
+     *    CicadaSwitchStreamIndex → SuperMediaPlayer::SwitchStream → MSG_CHANGE_VIDEO_STREAM →
+     *    ProcessSwitchStreamMsg → 这里），所以这一行同时把 ABR 和手动改成边界对齐。
      */
-    mPlayer.SwitchVideo(switchPos);
+    mPlayer.SwitchVideoAligned(switchPos);
 }
 
 void SMPMessageControllerListener::switchAudio(int index)

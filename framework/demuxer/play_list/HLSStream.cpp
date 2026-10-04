@@ -1598,7 +1598,19 @@ namespace Cicada {
             mSeekLanding.flush();
 
             mIsEOS = true;
-            return -EAGAIN;
+            /*
+             * 【必须返回 0，不能返回 -EAGAIN —— 这是"切换不过去还卡死"的另一半】
+             *
+             * 边界换流的消费者挂在"读返回 0"上：HLSManager.cpp:206 是 `else if (ret == 0)`，
+             * 而 `i->stopOnSegEnd` 那一支（:211 → :256 OpenStream(toStreamId)）就在它里面。
+             * 这里原来返回 -EAGAIN ⇒ 上层把它当"暂时没数据"，sleep 10ms 再来一轮，
+             * **永远看不到 ret == 0** ⇒ 分片边界那次换流永远不发生，日志表现就是
+             * （旧注释写的）"切换不过去还卡死"。
+             *
+             * 改成 0 与 DashStream 完全对称：DashStream.cpp:850-856 在同一个状态下是
+             * `mIsEOS = true; return 0;`（DASH 的边界换流因此一直能通）。
+             */
+            return 0;
         }
 
         if (ret == gen_framework_errno(error_class_network, network_errno_http_range)) {

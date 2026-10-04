@@ -612,6 +612,25 @@ namespace Cicada {
 
         void SwitchVideo(int64_t startTime);
 
+        /*
+         * ============ 【边界对齐切档：ABR 与手动共用的唯一实现】============
+         *
+         * ABR（AbrBufferAlgoStrategy -> MediaPlayer::abrChanged -> CicadaSwitchStreamIndex
+         * -> SwitchStream -> MSG_CHANGE_VIDEO_STREAM）与手动点清晰度走的是**同一个**
+         * SMPMessageControllerListener::switchVideoStream()，所以这里改一处两条路一起生效。
+         *
+         * SwitchVideoAligned()：只把"目标档 + 边界触发器"交给解复用层（demuxer_service::
+         * SwitchStreamAligned）。旧流继续被 read/解码/渲染，直到它自己读到本分片末尾，
+         * 由 DashManager/HLSManager 在边界完成换流（并把目标流的读位置对齐到旧流分片号 + 1）。
+         *
+         * commitAlignedVideoSwitch()：目标流**第一个视频包**到达时执行（那时解复用层已经完成
+         * 边界换流）。按 isVideoDecoderMetaMatched() 决定要不要 flush / 丢旧档残留包 / 重建
+         * 同一块解码器；能复用就一个字节都不动（无缝、零丢帧）。纯状态判据，无计时器。
+         */
+        void SwitchVideoAligned(int64_t switchPos);
+
+        void commitAlignedVideoSwitch(bool firstPacketIsKey);
+
         int64_t getPlayerBufferDuration(bool gotMax, bool internal);
 
         void ProcessOpenStreamInit(int streamIndex);

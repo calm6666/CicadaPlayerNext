@@ -626,6 +626,22 @@ int DashManager::SwitchStreamAligned(int from, int to)
 			 * 注意这是**包级**缓冲保护，不是"旧画面继续渲染" —— 只有一路解码器，
 			 * 做不到后者。
 			 */
+            /*
+             * 【边界对齐切换的触发器：必须置真，否则本函数等于空操作】
+             *
+             * 本文件读 toStreamId 的三处（:221 / :468 / :575）**全都被 `if (i->stopOnSegEnd)`
+             * 把着**，而全仓没有任何一处把 stopOnSegEnd 置真 ⇒ 只写 toStreamId 就是"记了目标
+             * 却永远不换流"。
+             *
+             * 置真之后的链路：DashStream::stopOnSegEnd(true) 让旧流读到本分片末尾就返回 0
+             * （DashStream.cpp:801-807 的 mStopOnSegEnd 分支），于是 :218 的 ret == 0 走进
+             * :221 那一支 —— 旧流 stop + selected 置假，目标流 selected 置真并把读位置对齐到
+             * **旧流分片号 + 1**（:236-237），再 OpenStream(toStreamId)（:246）。
+             * 换流点因此恰好落在分片边界上：目标流被选中时它那一片已经在缓冲里，切过去不用
+             * 等网络 —— 这就是"分片边界切换不卡顿"的来源。
+             */
+            i->mPStream->stopOnSegEnd(true);
+            i->stopOnSegEnd = true;
             i->toStreamId = to;
             break;
         }
