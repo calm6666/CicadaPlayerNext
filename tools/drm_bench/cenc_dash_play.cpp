@@ -917,6 +917,36 @@ static std::string kidSummary(const std::vector<std::string> &kids)
     return out.empty() ? std::string("(没有任何包带 KID)") : out;
 }
 
+/*
+ * 只跑阶段②b：不手工注册密钥，让产品自己按 MPD 的 cenc:licenseUrl 去取。
+ *
+ * 【为什么要能"只跑这一段"】②b 在完整流程里崩（0xC0000005），而且密钥服务器**没有**
+ * 收到 /key/<kid> 请求 —— 说明崩在"产品自己取密钥"那条链上。但完整流程里它前面已经
+ * 跑过①/②a（进程内的后台线程、curl 连接管理器、demuxer 全局状态都动过），所以不能
+ * 排除"复用状态"这个因素。一次进程只做一件事，才能把这两层分开：
+ *   · 单独跑也崩 ⇒ 产品在"按 licenseUrl 取密钥"这条链上的问题；
+ *   · 单独跑不崩 ⇒ 是前面阶段留下的状态（harness 用法问题）。
+ */
+static int runOnlyStage2b(const char *drmMpd)
+{
+    printf("===== 只跑阶段②b（隔离崩溃；本进程一次 setCencKey 都不调）=====\n");
+    DashRun s2b;
+
+    if (!readThroughDash(drmMpd, nullptr, std::string(), s2b)) {
+        printf("FAIL: ②b 管线没能读完：%s\n", s2b.failReason.c_str());
+        return 1;
+    }
+
+    printf("  包数 %d，带 encryption info 的 %d，KID: %s\n",
+           s2b.packets, s2b.encryptedPackets, kidSummary(s2b.kids).c_str());
+    std::string form, extraForm, note;
+    const DecodeResult dec = decodeAll(s2b.payloads, s2b.extradata, form, extraForm, note);
+    dumpAnnexB("stage2b_productfetch.h264", s2b.payloads, s2b.extradata);
+    printf("  解出帧数 %d，亮度哈希 0x%016llx（%s）\n", dec.frames,
+           static_cast<unsigned long long>(dec.lumaHash), note.c_str());
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
     /*
@@ -938,6 +968,12 @@ int main(int argc, char **argv)
     const char *plainMpd = argv[2];
     const char *drmMpd = argv[3];
     const std::string keyHex = argv[4];
+
+    /* 第五个参数（可选）= 只跑哪一阶段。它是**值参数**（"2b" / 留空 = 全跑），不是开关：
+     * 加它的唯一目的是把②b的崩溃单独隔离出来（见 runOnlyStage2b 的说明）。 */
+    if (argc > 5 && std::string(argv[5]) == "2b") {
+        return runOnlyStage2b(drmMpd);
+    }
 
     uint8_t key[16];
 
