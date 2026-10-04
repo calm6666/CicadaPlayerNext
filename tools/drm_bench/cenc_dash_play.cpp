@@ -940,6 +940,29 @@ int main(int argc, char **argv)
     std::string s1Form, s1ExtraForm, s1DecoderNote;
     const DecodeResult s1Decode = decodeAll(s1.payloads, s1.extradata, s1Form, s1ExtraForm, s1DecoderNote);
 
+    /*
+     * 【本轮加的判据：阶段①的包到底是不是明文】
+     *
+     * 为什么必须有这一条：阶段①的读数出现了自相矛盾 —— 它报"解出 360 帧、亮度哈希与
+     * 明片参考完全相同"，而阶段②a 的包与它 360/360 全不同（说明两者不可能都是明文）。
+     * 只靠"包带 encryption info"**不能**判定"没被解密"：解密的实现只负责改字节，
+     * 不负责清掉包上的 AV_PKT_DATA_ENCRYPTION_INFO，所以"带 encryption info"与
+     * "字节是密文"是两件事。
+     *
+     * 判据：
+     *   · 与明片参考**逐包完全相同** ⇒ 内核在**没有密钥**的情况下也把字节解开了
+     *     ⇒ 这是**产品侧严重 bug**（软解抢了 CDM 那条路，且在无密钥时凭空"解"出明文）；
+     *   · 完全相同 0 ⇒ 阶段①读到的确实是密文，那"360 帧"就是本 harness 解码侧的计数
+     *     没按阶段重置（解出 0 帧才该是它的结果）。
+     */
+    {
+        size_t refS1Same = 0, refS1Compared = 0;
+        comparePayloads(refPayloads, s1.payloads, refS1Same, refS1Compared);
+        printf("  [包层]   与明片参考逐包比较：比较 %zu，完全相同 %zu"
+               "（完全相同 ⇒ 阶段①读到的就是明文 = 没密钥也解密了；0 ⇒ 它是密文）\n",
+               refS1Compared, refS1Same);
+    }
+
     printf("  [密钥层] 未注册任何密钥（见上面 setCencKey 那行：本阶段跳过）\n");
     printf("  [包层]   包数 %d，带 encryption info 的 %d，KID: %s\n",
            s1.packets, s1.encryptedPackets, kidSummary(s1.kids).c_str());
