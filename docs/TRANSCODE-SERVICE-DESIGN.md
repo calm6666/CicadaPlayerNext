@@ -970,6 +970,62 @@ worker: 扫描本地分片目录 → 逐条 segmentRepository.Save() → jobRepo
 | §16 复用/不借用清单 | **照做**，其中"直接复用"从"抄语义"变成"就在同一个代码库里改" |
 | §17 未决问题 | **照做** |
 
+### 18.6 A1 定稿：把"完成 + 回调"搬到**最后一片传完之后**（改动清单已核到行号）
+
+§18.4 说的窗口，实测就落在这两处（都在 `server/hvc/internal/worker/module.go`）：
+
+```text
+ ~400  segmentRepository.Save(...)                逐个把本地分片写进库
+  410  jobRepository.MarkCompleted(job.JobID)      ← 任务标记"已完成"
+428-440 组装 transcode.completed 事件
+  441  outboxRepository.Save(event)                ← 回调**立刻**落库
+ ---- 真正的上传在之后 ----
+  244  segmentRepository.ListPendingUpload(...)    （全局待传队列）
+  614  segmentRepository.MarkUploaded(...)         （每传完一片调一次）
+```
+
+⇒ 回调可能早于任意一片上传完成，下游拿到回调去拉清单会拿到残缺内容。
+
+**状态机**：`JobStatusUploading = 5` **已经存在**（`internal/model/status.go:9`），
+所以缺的只是顺序，不需要新增状态值。目标：`RUNNING → UPLOADING → (全部 artifact 已上传) → COMPLETED → outbox`
+
+**为什么不能简单地把整段搬到上传循环**：`buildCompletedPayload(ctx, job, probeResult, discoverResult)`
+依赖**转码阶段的两个内存对象**（探测结果、分片发现结果），上传循环里拿不到。
+两条路，**本设计选第一条**：
+
+| 方案 | 做法 | 代价 |
+|---|---|---|
+| **① 暂存 payload（选它）** | 转码阶段把 payload 写进**任务表的一列**（`completion_payload JSON NULL`）+ 状态改 `UPLOADING`，**不写 outbox**；上传循环里"本任务待传数 == 0"时读出来 → `MarkCompleted` → 写 outbox → 清列 | 一次迁移加一列；语义显式、可重入 |
+| ② 上传阶段重建 payload | 上传循环里按库里的分片/媒体信息重新组装 | 要把"哪些转码期信息进了库、哪些没进"全部核实清楚，耦合更紧 |
+
+**改动清单（5 个文件，按可编译顺序）**
+
+1. `sql/107_*_completion_payload_schema.sql`（照 100~106 的写法）：给任务表加
+   `completion_payload JSON NULL`（或等价列名，以任务表实际名字为准）。
+2. `internal/model/*.go`：任务模型加对应字段（`CompletionPayload string`，JSON 用字符串存）。
+3. `internal/infra/db/mysql/job_repository.go`：
+   · 新增 `MarkUploading(ctx, jobID)`（或复用已有的状态更新方法，改成写 `JobStatusUploading`）；
+   · 新增 `SavePendingCompletion(ctx, jobID, payloadJSON)`；
+   · 新增 `TakePendingCompletion(ctx, jobID) (string, error)`（读+清，便于幂等）。
+4. `internal/infra/db/mysql/segment_repository.go`：新增
+   **按任务**统计待传数 `CountPendingUploadByJob(ctx, jobID) int` —— 现有的
+   `ListPendingUpload` 是**全局**队列（`:152`），拿它判"本任务传完没有"是错的。
+5. `internal/worker/module.go`：
+   · `:410` 那一处改成：`SavePendingCompletion(...)` + 状态转 `UPLOADING`（**不** MarkCompleted、**不** 写 outbox）；
+     若此时该任务的待传数已经是 0（例如没有分片要传），**就地**走完"完成+回调"那条路（否则任务会永远停在 UPLOADING）。
+   · `:614`（`MarkUploaded` 之后）追加：`if CountPendingUploadByJob(jobID) == 0 { TakePendingCompletion → MarkCompleted → outbox.Save }`，
+     两次都幂等（`MarkCompleted` 已是条件更新；`TakePendingCompletion` 读后清）。
+   · 失败路径（`:537` 那个 failedEvent）不动。
+6. 测试：`internal/worker/module_callback_test.go` 已经在盯回调顺序，
+   **在这里加断言**：*"存在未上传分片时，outbox 里不能有 transcode.completed"* 与
+   *"最后一片 MarkUploaded 之后，outbox 才出现该事件"*。
+
+**验收判据（可直接写成测试）**：
+**任意时刻"回调已送达" ⇒ 清单里引用的每一个分片都能被 GET 到、且 sha256 校验通过。**
+
+> B2（断点续跑）与 B3（清单物化）与这条同源：B3 是"PUBLISHED 时把清单写成静态文件"，
+> 落在同一个 `TakePendingCompletion` 分支里最自然；B2 的 `t_transcode_job_step` 独立于本条。
+
 ---
 
 ## 附录 A：本文件里所有【实测】的原始记录
