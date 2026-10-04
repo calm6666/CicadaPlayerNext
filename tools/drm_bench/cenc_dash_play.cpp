@@ -659,8 +659,13 @@ static bool readThroughDash(const char *mpdPath, const uint8_t *key, const std::
                     continue;
                 }
 
-                /* ret <= 0：对播放列表要看"还有没有剩余分片"（见上面那段说明） */
-                const int remain = service.GetRemainSegmentCount(0);
+                /* ret <= 0：对播放列表要看"还有没有剩余分片"（见上面那段说明）。
+                 *
+                 * ★索引必须是**这条视频流自己的** out.videoIndex，不能写 0：
+                 *   本片源第 0 条不一定是视频（Bento4 的 stream.mpd 里它就是 video，
+                 *   但换一份 MPD 就可能不是），而"别的流的剩余分片数"永远读不完 ⇒
+                 *   实测白等满 120 秒（harness4.log：全程 244 秒里两次 120 秒空等）。 */
+                const int remain = service.GetRemainSegmentCount(out.videoIndex);
 
                 if (remain <= 0) {
                     break;
@@ -703,6 +708,41 @@ static bool readThroughDash(const char *mpdPath, const uint8_t *key, const std::
 
         printf("    [stage] 读完：%d 个包（其中 %d 个带 encryption info）\n",
                out.packets, out.encryptedPackets);
+
+        /*
+         * 【本轮修：extradata 必须在**读完包之后**再取一次】
+         *
+         * 实测（2026-10-04 harness4.log）：上面那次"读包之前"的 GetStreamMeta 里，
+         * CENC-DASH 的视频流报 extradata_size=0 ⇒ 解码器拿不到 SPS/PPS、一帧都解不出
+         *（h264 报 Invalid data found when processing input），而 HTTP 服务端日志
+         * 证明 video/avc1/init.mp4 **确实被取回来了**。
+         *
+         * 原因是**时序**，不是"没取到"：
+         *   · DASH 的 init 段是"读起来之后"才解析的；
+         *   · avFormatDemuxer 对**加密流**故意**不在 OpenStream 时建 bsf**
+         *     （avFormatDemuxer.cpp:552-556），extradata 要等内层解复用器真正开起来才有值；
+         *   · 包上也不会带（只有 AV_PKT_DATA_NEW_EXTRADATA 时才 setExtraData，
+         *     见 avFormatDemuxer.cpp:500-501）。
+         * 所以读完之后再取一次，才是这条流真正的 extradata；两次的字节数都打出来，
+         * 让"读之前为空、读之后有值"这件事一眼可见（而不是靠猜）。
+         */
+        if (out.videoIndex >= 0) {
+            Stream_meta metaAfter;
+            memset(&metaAfter, 0, sizeof(metaAfter));
+
+            if (service.GetStreamMeta(&metaAfter, out.videoIndex, false) >= 0
+                && metaAfter.extradata != nullptr && metaAfter.extradata_size > 0) {
+                printf("    [stage] 读完之后再取一次 GetStreamMeta：extradata=%d 字节"
+                       "（读之前那次是 %d 字节）\n",
+                       metaAfter.extradata_size, static_cast<int>(out.extradata.size()));
+                out.extradata.assign(metaAfter.extradata, metaAfter.extradata + metaAfter.extradata_size);
+                out.extradataFrom = "读完之后再取的 GetStreamMeta（init 段此时已解析）";
+            } else {
+                printf("    [stage] 读完之后再取一次 GetStreamMeta：仍然没有 extradata"
+                       "（那就要查 init 段的 avcC 有没有被解析出来了）\n");
+            }
+        }
+
         fflush(stdout);
 
         service.close();
