@@ -465,6 +465,47 @@ private:
     std::string mError{};
 };
 
+/*
+ * 把某一阶段的包按 Annex B 落盘，交给**另一个实现**（ffmpeg.exe）去数帧。
+ *
+ * 【为什么必须有这个】本 harness 自己的解码计数出现过自相矛盾的读数（阶段①的包已证明
+ * 是密文，却报"解出 360 帧、亮度哈希与明片参考完全相同"），而连"计数没按阶段重置"这个
+ * 解释也被代码否掉了（H264Counter 是 decodeAll 里的局部对象）。既然自己的读数解释不通，
+ * 就不要再猜：把字节原样落盘，让 ffmpeg 这个独立实现去说"到底出没出帧"。
+ */
+static void dumpAnnexB(const char *path, const std::vector<std::vector<uint8_t>> &payloads,
+                       const std::vector<uint8_t> &extradata)
+{
+    const EsForm form = detectForm(payloads);
+    int naluLengthSize = 4;
+    std::string note;
+    const std::vector<uint8_t> extra = extradataToAnnexB(extradata, &naluLengthSize, note);
+    FILE *fp = fopen(path, "wb");
+
+    if (fp == nullptr) {
+        printf("  [dump] 打不开 %s\n", path);
+        return;
+    }
+
+    if (!extra.empty()) {
+        fwrite(extra.data(), 1, extra.size(), fp);
+    }
+
+    std::vector<uint8_t> annexb;
+    size_t written = 0;
+
+    for (const auto &p : payloads) {
+        if (payloadToAnnexB(p, form, naluLengthSize, annexb)) {
+            fwrite(annexb.data(), 1, annexb.size(), fp);
+            written++;
+        }
+    }
+
+    fclose(fp);
+    printf("  [dump] %s：%zu/%zu 个样本落盘（包形态 %s，extradata %zu 字节）\n",
+           path, written, payloads.size(), form.annexb ? "Annex B" : "AVCC->AnnexB", extra.size());
+}
+
 static DecodeResult decodeAll(const std::vector<std::vector<uint8_t>> &payloads,
                               const std::vector<uint8_t> &extradata,
                               std::string &packetFormNote, std::string &extraFormNote,
@@ -642,6 +683,7 @@ static bool readThroughDash(const char *mpdPath, const uint8_t *key, const std::
          *（真超时会明确报出来，见下面的 failReason）。
          */
         const auto waitDeadline = std::chrono::steady_clock::now() + std::chrono::seconds(120);
+        int idlePolls = 0;      /* 连续无新包的次数（有界等待，见下面的判据） */
 
         for (;;) {
             packet.reset();
@@ -664,8 +706,22 @@ static bool readThroughDash(const char *mpdPath, const uint8_t *key, const std::
                  * ★索引必须是**这条视频流自己的** out.videoIndex，不能写 0：
                  *   本片源第 0 条不一定是视频（Bento4 的 stream.mpd 里它就是 video，
                  *   但换一份 MPD 就可能不是），而"别的流的剩余分片数"永远读不完 ⇒
-                 *   实测白等满 120 秒（harness4.log：全程 244 秒里两次 120 秒空等）。 */
+                 *   实测白等满 120 秒（harness4.log：全程 244 秒里两次 120 秒空等）。
+                 *
+                 * ★再加一条**有界等待**：即便上面那个计数不准，也不能白等 ——
+                 *   已经读到过包之后，连续 200 次（≈2 秒）没有新包就收工，
+                 *   并把这件事打出来（是"等够了"不是"读完了"，两者在日志里能分辨）。
+                 *   它是 harness 的安全阀，不是产品行为。 */
                 const int remain = service.GetRemainSegmentCount(out.videoIndex);
+
+                /* 已经读到过包之后，连续 200 次（约 2 秒）没有新包就收工。
+                 * 它是 harness 的安全阀，不是产品行为；日志里明确写【等够了】而不是
+                 * 【读完了】，两者必须能分辨（上面那个计数被实测证明不可靠）。 */
+                if (out.packets > 0 && ++idlePolls > 200) {
+                    printf("    [stage] 连续 %d 次没有新包（约 2 秒），按【等够了】收工"
+                           "（剩余分片计数=%d，不可靠）\n", idlePolls, remain);
+                    break;
+                }
 
                 if (remain <= 0) {
                     break;
@@ -939,6 +995,7 @@ int main(int argc, char **argv)
 
     std::string s1Form, s1ExtraForm, s1DecoderNote;
     const DecodeResult s1Decode = decodeAll(s1.payloads, s1.extradata, s1Form, s1ExtraForm, s1DecoderNote);
+    dumpAnnexB("stage1_cipher.h264", s1.payloads, s1.extradata);   /* 交给 ffmpeg 独立数帧 */
 
     /*
      * 【本轮加的判据：阶段①的包到底是不是明文】
@@ -1022,6 +1079,7 @@ int main(int argc, char **argv)
 
     std::string s2aForm, s2aExtraForm, s2aDecoderNote;
     const DecodeResult s2aDecode = decodeAll(s2a.payloads, s2a.extradata, s2aForm, s2aExtraForm, s2aDecoderNote);
+    dumpAnnexB("stage2a_decrypted.h264", s2a.payloads, s2a.extradata);   /* 交给 ffmpeg 独立数帧 */
 
     size_t s1s2aSame = 0, s1s2aCompared = 0;
     comparePayloads(s1.payloads, s2a.payloads, s1s2aSame, s1s2aCompared);
