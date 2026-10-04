@@ -611,10 +611,15 @@ namespace Cicada {
 
         for (auto &i : mStreamInfoList) {
             if (i->mPStream->getId() == from) {
-                /* 双 decoder 切换期间旧 HLS 流不能在分片边界提前关闭。
-                 * 目标路需要从 init/关键帧追到主时钟，旧路负责持续上屏；
-                 * 待 SuperMediaPlayer 确认目标帧已渲染后再 CloseStream。
-                 * stopOnSegEnd 仅用于普通 seek/非双路切换流程。 */
+                                /* 【清晰度切换：单解码器 + 延迟到分片边界 + 首帧进渲染才算提交】
+                 * 与 DashManager::SwitchStreamAligned 同一套，这里只列结论：
+                 *   · **双路解码方案已废除**（切换慢、帧可能对不齐），全仓只有一路视频
+                 *     解码器 + 一路音频解码器（SMPAVDeviceManager::mVideoDecoder /
+                 *     mAudioDecoder），没有 pendingDecoder 这类成员；
+                 *   · 本函数只记录目标流 toStreamId，到分片边界再换；
+                 *   · 提交点是"目标流首帧真正送入渲染器"，之后才 CloseStream 旧流；
+                 *   · stopOnSegEnd 只用于普通 seek：清晰度切换时若在边界就关旧流，
+                 *     目标那路解码器重建期间没有包可喂，表现为卡帧 / EOS / 音画不同步。 */
                 i->toStreamId = to;
                 break;
             }

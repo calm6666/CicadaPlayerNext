@@ -605,15 +605,27 @@ int DashManager::SwitchStreamAligned(int from, int to)
 
     for (auto &i : mStreamInfoList) {
         if (i->mPStream->getId() == from) {
-            /*
-             * 清晰度切换由 SuperMediaPlayer 的双路 decoder 状态机完成：
-             * 旧流必须继续 selected 并持续产包，直到目标 decoder 的首帧
-             * 真正送入渲染器。这里若设置 stopOnSegEnd，Seek() 会在旧流
-             * 到达分片边界时立即 CloseStream，pending decoder 就会失去
-             * 时钟对齐期间所需的旧路保护，表现为卡帧、EOS 或音画不同步。
-             * 普通 seek 仍然保留原有 stopOnSegEnd 路径；这里只记录目标，
-             * 实际关闭由 SuperMediaPlayer::RenderVideo() 在提交后执行。
-             */
+            			/*
+			 * 【清晰度切换：单解码器 + 延迟到分片边界 + 首帧进渲染才算提交】
+			 *
+			 * 【双路解码方案**已废除**，别再照它写】历史上有过"旧流继续解码、新流另起一路
+			 * 解码器"的方案（这也是本注释原来那句"双路 decoder 状态机"的来历），
+			 * 它被放弃的原因是：切换速度慢（要等两路都对齐）、而且**帧可能对不齐**。
+			 * 现在全仓只有一路视频解码器 + 一路音频解码器（见 SMPAVDeviceManager 的
+			 * mVideoDecoder / mAudioDecoder），没有 pendingDecoder 这种成员。
+			 *
+			 * 现行做法（本函数只做第一件事）：
+			 *   1) 这里**只记录目标流** toStreamId，不立刻换、也不设 stopOnSegEnd；
+			 *   2) 到分片边界时由 DashManager 自己换（见本文件里读 toStreamId 的那几处
+			 *      → OpenStream(toStreamId) → 日志 change stream X -> Y）；
+			 *   3) 提交点是"新流首帧真正送入渲染器"，之后才关闭旧流；
+			 *   4) 普通 seek 仍走原来的 stopOnSegEnd 路径。
+			 *
+			 * 为什么要留旧流：切流那一路解码器要 flush/重建，旧流若在分片边界就被
+			 * CloseStream，重建期间没有包可喂，表现为卡帧、EOS 或音画不同步。
+			 * 注意这是**包级**缓冲保护，不是"旧画面继续渲染" —— 只有一路解码器，
+			 * 做不到后者。
+			 */
             i->toStreamId = to;
             break;
         }
