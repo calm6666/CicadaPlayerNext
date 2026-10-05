@@ -222,7 +222,9 @@ void SegmentInformation::setSegmentTemplate(SegmentTemplate *templ)
 
 static void insertIntoSegment(DashSegment *container, size_t start, size_t end, int64_t time, int64_t duration)
 {
-    if (end == 0 || container->contains(end)) {
+    const bool isSegmentBaseContainer = (dynamic_cast<SegmentBase *>(container) != nullptr);
+
+    if (end == 0 || isSegmentBaseContainer || container->contains(end)) {
         DashSegment *subsegment = new DashSegment(container, start, (end != 0) ? end : 0);
         subsegment->startTime = time;
         subsegment->duration = duration;

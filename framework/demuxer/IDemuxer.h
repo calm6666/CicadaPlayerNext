@@ -321,6 +321,24 @@ namespace Cicada {
             (void) encrypted;
         }
 
+        /*
+         * 【这一路的数据是否真的读到末尾】
+         *
+         * EOF 有两种：容器/清单真的到底了，和"暂时取不到数据"（网络断了、请求失败、分片没就绪）。
+         * 单文件容器（本地文件 / 网络 mp4）没有分片记账，GetRemainSegmentCount() 对它恒为 -1，
+         * 播放器无法据此区分 ⇒ 网络抖动会被当成播完（mEof 一置，读循环再也不读，只能 seek/重启）。
+         *
+         * 所以由解复用器自己报：avFormatDemuxer 覆写为"AVIO 真的到了范围末尾，且没有传输错误"。
+         * 默认返回 true（=按老行为当播完），清单型解复用器（HLS/DASH/Manifest）不覆写，行为不变 ——
+         * 它们已经用 GetRemainSegmentCount 表达"还剩几片"。
+         *
+         * 本虚函数留在虚函数列表末尾（理由同上面的 SeekStream / setStreamEncrypted）。
+         */
+        virtual bool isDataExhausted() const
+        {
+            return true;
+        }
+
     public:
         int64_t estimateExclusiveEndPositionBytes(const string &url, int64_t timeMicSec, int64_t totalLength) override;
 

@@ -292,6 +292,21 @@ namespace Cicada {
             mDiscardPts = pts;
         }
 
+        /*
+         * 【按时间取"包含该时刻的那一片"的分片号】给切换清晰度的定位基准用。
+         *
+         * 语义与 DashStream::getSegmentNumByTime 相同（**包含**该时刻那一片），但实现细节不同：
+         * HLS 走 SegmentTracker::getSegmentNumberByTime（SegmentTracker.h:50 / .cpp:623，
+         * 最终落到 play_list/SegmentList.cpp:96），那个实现会**把第一个入参 time 就地改写成
+         * 该片的 startTime**（SegmentList.cpp:115-118 的 `startTime + duration > time` 判据 + `time = i->startTime`）。
+         * 关键：**num 拿到的仍是分片号**，startTime 只体现在被改写的入参上，不会混进 num
+         * ⇒ 调用方拿到 num 之后 +1 就是"下一个分片"，不需要再做任何时间换算。
+         *
+         * **非虚 + 追加在 public 段末尾**：不动 vtable、不动既有成员偏移。
+         * 返回 false 表示查不到（时间为空 / 分片表里没有覆盖该时刻的片）。
+         */
+        bool getSegmentNumByTime(int64_t timeUs, uint64_t &num);
+
     private:
         /*
          * ============ seek 落点延迟线（只对点播视频路生效）============

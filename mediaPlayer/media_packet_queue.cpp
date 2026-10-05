@@ -569,6 +569,7 @@ int64_t MediaPacketQueue::GetPts()
 
     return mQueue.front()->getInfo().pts;
 }
+
 void MediaPacketQueue::Rewind()
 {
     mCurrent = mQueue.begin();

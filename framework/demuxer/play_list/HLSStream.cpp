@@ -132,7 +132,12 @@ namespace Cicada {
                     }
                     --tryTimes;
                 };
-                return 0;
+                /*
+                 * 重试仍取不到（网络还没回来）⇒ 报"暂时没数据"，不能报 0(=EOF)：
+                 * 报 EOF 会让读线程置 mIsEOS 退出，播放器随后闩上 mEof，网络恢复也不会继续。
+                 * 用框架自己的 -EAGAIN（POSIX 上等于 AVERROR(EAGAIN)）。
+                 */
+                return -EAGAIN;
             } else {
                 return move_ret;
             }
@@ -267,13 +272,6 @@ namespace Cicada {
     int64_t HLSStream::seekSegment(off_t offset, int whence)
     {
         int64_t ret;
-
-        /*
-         * 判据与 readSegment() 同源（hasActiveDecrypter）：**只有本片声明整片加密、
-         * 且解密器确实在，才拒绝字节级 seek**。原来这里只判 mSegDecrypter != nullptr，
-         * 于是"上一片留下的残留解密器"会让明文片的 seek 也返回 -EINVAL —— 表现是
-         * 明文片源在密文片之后 seek 变得不可用（只能整片重开），而且完全没有日志。
-         */
         if (!hasActiveDecrypter()) {
             if (mExtDataSource) {
                 ret = mExtDataSource->Seek(offset, whence);
@@ -324,13 +322,6 @@ namespace Cicada {
         }
 
         mCurInitSeg = mCurSeg->init_section;
-        /*
-         * init 段的缓冲长度要按**它自己的字节范围**算：单文件模式（SegmentBase 的
-         * Initialization / EXT-X-MAP 的 BYTERANGE）下 init 只是那个大文件里的一段，
-         * 而 seekSegment(0, SEEK_SIZE) 返回的是**整个文件**大小（实测 154MB 的文件会白白
-         * malloc 154MB，而且长度与实际要回放的 init 对不上）。四种组合的判定顺序与
-         * DashStream::upDateInitSection() 保持一致。
-         */
         int64_t initStart = INT64_MIN;
         int64_t initEnd = INT64_MIN;
         mCurInitSeg->getDownloadRange(initStart, initEnd);
@@ -605,27 +596,11 @@ namespace Cicada {
 
     bool HLSStream::hasActiveDecrypter() const
     {
-        /*
-         * 唯一的"整片解密现在生效吗"判据，readSegment() 与 seekSegment() 都读它。
-         * 两个条件缺一不可：
-         *   · mSegDecrypter 真的建出来了（key 拉到、长度对）；
-         *   · 本片声明的方法**就是** AES_128。
-         * 只看前者会让上一片的残留解密器影响本片（把它当密文解 / 让 seek 失效）；
-         * 只看后者会在"key 拉取失败、解密器还没建"时以为解密生效，把密文当明文读出去。
-         */
         return mSegDecrypter != nullptr && mCurrentEncryption.method == SegmentEncryption::AES_128;
     }
 
     void HLSStream::releaseSampleAesDecrypter()
     {
-        /*
-         * 方法切换（AES_SAMPLE ⇄ 其它）时必须把样本级解密器放掉。
-         * 原来 mSampeAesDecrypter 一旦建出来就**再也不会**被检查方法：
-         * 于是"前一片是样本级加密、后一片不是"时，createDemuxer() 仍会把上一片的
-         * 样本级解密器交给内层 demuxer（`setSampleDecryptor(mSampeAesDecrypter.get())`），
-         * 而它的 mValidKeyInfo 还是上一片那把 key —— 这属于"用错 key 去解"，
-         * 表现为偶发花屏且无任何日志。
-         */
         if (mSampeAesDecrypter != nullptr) {
             AF_LOGW("releasing the sample-level (SAMPLE-AES) decrypter: this segment's encryption "
                     "method changed (now method=%d)\n", (int) mCurrentEncryption.method);
@@ -635,20 +610,6 @@ namespace Cicada {
 
     void HLSStream::clearDecrypterState()
     {
-        /*
-         * "本片一条加密记录都没接受"⇒ 把上一片留下的解密状态整体交还。
-         *
-         * 为什么连 mKeyUrl 一起清：它是 updateKey() 里"这条 URL 已经拉过 key"的记号。
-         * 留着它，下一次再遇到同一把 key 的密文片时 updateKey() 会立刻 return false、
-         * 而新 decrypter（若被重建）里**没有 key** ⇒ mValidKeyInfo 为假 ⇒ Read() 返回 -EINVAL。
-         * 清掉之后下次会重新拉一次 —— 触发点是"遇到密文片"这个事件，不是计时器，
-         * 也没有次数上限（与 updateKey() 里"失败不记住 URL"的语义完全一致）。
-         *
-         * mKey 字节本身不清：它不参与任何判据（判据是 hasActiveDecrypter），
-         * 且清了反而会让人误以为"需要重新填充密钥缓冲区"。
-         * mDRMMagicKey 也不清：它是"本流受保护"的标记（ReadPacket 的 setProtected 读它），
-         * 与"这一片要不要解密"是两件事。
-         */
         if (mSegDecrypter == nullptr && mSampeAesDecrypter == nullptr && mKeyUrl.empty()) {
             return; // 纯明文片源的常态：本来就是空的，不做任何事也不打日志
         }
@@ -656,10 +617,6 @@ namespace Cicada {
         mSegDecrypter.reset();
         mSampeAesDecrypter.reset();
         mKeyUrl.clear();
-        /*
-         * 一并复位"key 拉取失败已打过日志"的记号：本片是明文，那条失败已经与现场无关；
-         * 留着它会让**下一次真的失败**时少打一条关键 ERROR。
-         */
         mKeyFetchFailedLogged = false;
     }
 
@@ -672,29 +629,6 @@ namespace Cicada {
         if (mDemuxerMeta && mDemuxerMeta->id != mCurSeg->discontinuityNum) {
             mDemuxerMeta = nullptr;
         }
-
-        /*
-         * ============ 【★ 这一段决定"这个分片到底算不算加密"（本轮修）★】============
-         *
-         * 原来只有一个"接受第一条支持的记录"的循环，没有 else 分支，也没有在循环前复位：
-         *
-         *   · **本片没有声明任何加密**时（mCurSeg->encryptions 为空 —— 明文分片就是这样），
-         *     循环一次都不进，于是 mCurrentEncryption **原封不动地保留着上一片的值**。
-         *     后果是"密文片 + 明文片"混排的片源里，明文片会被当成密文片：
-         *     mProtectedBuffer 仍为 true、mSegDecrypter 仍在，整个明文片被 AES-128-CBC
-         *     "解密"一遍 ⇒ 解出来必然是垃圾（更糟的是 PKCS7 去填充会把尾部真实字节删掉）。
-         *   · 同理，加密记录**全部因 keyFormat 不支持被跳过**时（非 Android 平台上的
-         *     Widevine/FairPlay KID 记录就是这种），也沿用上一片的状态，而且**一条日志都没有**，
-         *     现场表现是"它以为自己播的是明文/它以为自己拿的还是上一把 key"。
-         *
-         * 现在：**每片独立判定**。先在循环前复位成"本片不加密"，只有真的接受了某条记录
-         * 才赋值；一条都没接受却确实声明了加密时，打一条带 keyFormat 的 ERROR，**不静默**。
-         *
-         * 为什么复位是安全的：明文片复位成 NONE 之后 mProtectedBuffer=false、
-         * mSegDecrypter 不再参与 readSegment（见那里的判据），这正是明文片该有的行为；
-         * 而加回密文片时 updateDecrypter() 会按新记录重建/复用 decrypter。
-         * 这里没有任何计时器、重试或超时 —— 判据全部来自"本片自己声明的加密记录"。
-         */
         mCurrentEncryption = SegmentEncryption();
         bool encryptionAccepted = false;
         std::string skippedKeyFormat{};
@@ -705,17 +639,6 @@ namespace Cicada {
                 encryptionAccepted = true;
                 break;
             }
-
-            /*
-             * keyFormat 非空 ⇒ 这一条声明的是"由平台 DRM 系统来解"。认不认由
-             * DrmHandlerPrototype 判（各平台自己在 framework/drm/ 下注册 handler），
-             * 所以 L1 代码里没有任何平台宏。
-             *
-             * 原来这里用的是 DrmUtils::isSupport —— 那个函数只在 ANDROID 下认 Widevine
-             * 一条，于是 **OHOS 上连它自己已经实现的** Widevine/PlayReady/FairPlay/
-             * ClearKey 都会被判成"不支持"而整条跳过（真 bug：OhosDrmHandler 白写了）。
-             * 换成这个平台无关的查询，认得的范围就与真正注册的 handler 完全一致。
-             */
             DrmInfo probe{};
             probe.format = item.keyFormat;
             probe.uri = item.keyUrl;
@@ -742,25 +665,6 @@ namespace Cicada {
                     "the current platform (keyFormat=%s): the segment will be treated as if it "
                     "carried no encryption record at all\n", skippedKeyFormat.c_str());
         }
-
-        /*
-         * ============ 从"密文片"回到"明文片"时把上一片的解密状态交还（本轮修）============
-         *
-         * 上面把 mCurrentEncryption 复位成 NONE 只解决了"判定"，还没解决"残留"：
-         * mSegDecrypter / mSampeAesDecrypter / mKeyUrl 都是**跨分片存活**的成员，
-         * 明文片进来时它们还停在上一片的状态上。只在 updateDecrypter() 里按 method 分支
-         * 是够不到这一层的（NONE 两个分支都不进），所以必须在这里、在**已经确定本片不加密**
-         * 的时刻显式交还。
-         *
-         * 判据用的是"本片一条加密记录都没接受"，而且加密确实被声明过或解密状态确实非空 ——
-         * 纯明文片源每片都会走到这里，此时 reset 是个空操作（成员本来就都是空的）。
-         *
-         * 为什么连 mKeyUrl 一起清：URL 是 updateKey() 的"已经拉过这把 key"的记号。
-         * 清掉之后，下一次再遇到密文片会**重新拉一次 key** —— 这不是重试机制，
-         * 而是"解密器要被重建"这一事实的必然要求（重建的解密器里没有 key）。
-         * mDRMMagicKey **不清**：它是"本流受保护"的标记（ReadPacket 里的 setProtected
-         * 判据读它），与"这一片要不要解密"是两件事。
-         */
         if (!encryptionAccepted) {
             clearDecrypterState();
         }
@@ -787,23 +691,6 @@ namespace Cicada {
         mPDemuxer->setDemuxerMeta(demuxerMeta);
         mPDemuxer->SetDataCallBack(read_callback, this, nullptr, nullptr, nullptr);
         mPDemuxer->setSampleDecryptor(this->mSampeAesDecrypter.get());
-
-        /*
-         * ============ CENC 的软解兜底：装"按需取密钥"的回调 ============
-         *
-         * 判据（全部是值，没有开关）：
-         *   · 本片声明的是 CENC；
-         *   · 清单给出了一个可以取到内容密钥的地址（keyUrl）。
-         * 满足才装。装了它，demuxer_service::readPacket 才会在读到**第一个带加密信息的
-         * 包**时回调这里取密钥（用包上那个 KID 作去重键），然后就地解密。
-         *
-         * 为什么按需取而不是在这里提前取：CENC 的每样本 IV/subsample 表在容器里，
-         * 而"用哪个 KID 查表"只有包上才知道（FFmpeg 不把 tenc 暴露到 AVStream 上）；
-         * 提前取就只能依赖清单里的 cenc:default_KID，而很多 MPD 只写 pssh。
-         *
-         * URL 在**装回调时按值捕获**：mCurrentEncryption 会随分片推进而变，而内层
-         * demuxer 是每分片重建的，捕获当时的 URL 语义最清楚（这一片就用这个地址）。
-         */
         if (mCurrentEncryption.method == SegmentEncryption::CENC && !mCurrentEncryption.keyUrl.empty()) {
             const std::string cencKeyUrl = Helper::combinePaths(mPTracker->getBaseUri(), mCurrentEncryption.keyUrl);
 
@@ -821,20 +708,6 @@ namespace Cicada {
 
         if (mPDemuxer->getDemuxerHandle()) {
             mPDemuxer->getDemuxerHandle()->setBitStreamFormat(this->mMergeVideoHeader, this->mMergerAudioHeader);
-            /*
-             * 【形态提示：这一段是不是样本级加密】必须在 initOpen 之前告诉内层 demuxer，
-             * 让它在"还没有任何包"时就能决定 head 合并 bsf 建不建：
-             *   · 非加密（提示 false，默认）：OpenStream 时就建 bsf，codecpar 从此刻起
-             *     就是 Annex B，此后任何时刻取 meta 都与包同形态 —— 这正是本次要修的
-             *     "HLS 每个分片重建内层 demuxer、长期停在没出包的窗口里"的那个 bug；
-             *   · 加密（提示 true）：保持第一个包上懒建的原行为，DRM 时 bsf 本就不该建。
-             *
-             * 判据是"样本级加密"而不是 mProtectedBuffer（method != NONE）：
-             * AES_128 / AES_PRIVATE 是**整片解密**，解密在 HLSStream 这一层做完才把明文喂给
-             * demuxer，包上没有加密 side data，bsf 该建；只有 AES_SAMPLE（Apple SAMPLE-AES）
-             * 与 CENC 的样本是 demuxer 看得见、包上带 AV_PKT_DATA_ENCRYPTION_INFO 的。
-             * 这条信息此刻已经确定：上面 updateDecrypter 已经按 mCurrentEncryption 选好了解密路径。
-             */
             const bool sampleLevelEncrypted = mCurrentEncryption.method == SegmentEncryption::AES_SAMPLE ||
                                               mCurrentEncryption.method == SegmentEncryption::CENC;
             mPDemuxer->getDemuxerHandle()->setStreamEncrypted(sampleLevelEncrypted);
@@ -925,13 +798,6 @@ namespace Cicada {
     int HLSStream::openSegment(const string &uri, int64_t start, int64_t end)
     {
         int ret;
-        /*
-         * setRange() 的 end 是**开区间**（CurlDataSource::Read 按 end - tell() 截断），
-         * 而段上的字节范围是闭区间（含最后一个字节）。这里 +1 换算，否则每条范围都少最后
-         * 一个字节：普通分片少 1 字节通常看不出来，但 init 段少 1 字节会丢掉 moov 末尾的
-         * mvex（分片 mp4 的标记盒）—— 解析器于是只解出轨道信息、之后再也读不到任何分片
-         * 数据（每段 open 成功却立刻 EOS）。DashStream::openSegment() 用的就是同一个换算。
-         */
         int64_t fixEnd = end;
         if (fixEnd != INT64_MIN) {
             fixEnd++;
@@ -1037,31 +903,6 @@ namespace Cicada {
         if (mKeyUrl == keyUrl) {
             return false;
         }
-
-        /*
-         * ============ 【★ key 拉取失败的失败语义（本轮修）★】============
-         *
-         * 这里原来在 Open() **之前**就写了 `mKeyUrl = keyUrl`，于是：
-         *   第一次拉 key 失败（密钥还没上传好 / HTTP 404 / 网络抖一下）⇒
-         *   下一次 updateKey() 一进来就被上面那句 `mKeyUrl == keyUrl` 挡住，直接 return false
-         *   ⇒ **同一个 URL 永远不会再试**，整条流从此再也解不开。
-         * 而"起播时密钥还没就绪"恰恰是 DRM 现场最常见的一类失败。
-         *
-         * 现在改成：**只有真的把 16 字节读到手，才记住这个 URL**（见函数末尾）。
-         * 失败时 mKeyUrl 保持原值，于是下一次开流/换分片走到 updateKey() 会**自然再试一次**。
-         * 这不是"重试机制"：没有次数、没有退避、没有计时器 —— 触发点是"下一次 updateKey()"
-         * 这个**事件**（换分片 / 重开流 / 切档都会走到）。
-         *
-         * 失败时还要把这次建出来的 dataSource 释放掉并把 mSegKeySource 置空：
-         *   · 半坏的 source 留着，后面 `mSegKeySource->GetOption("drmMagicKey")` 会从一个
-         *     失败对象上取值；
-         *   · 置空之后 mSegKeySource == nullptr，与"从来没试过"完全同态，
-         *     下一次 updateKey() 会重新 create（这也是"再试一次"能成立的前提）。
-         *
-         * 另外，失败**不碰** mSegDecrypter / mKey：多 key 轮换里换到一个坏 URL 时，
-         * 上一段那把可用的 key 仍然留在 decrypter 里（"保留上一个可用 key"），
-         * 不会因为一次失败就把已经能解的流冲成不可解。
-         */
         {
             std::lock_guard<std::mutex> lock(mHLSMutex);
             delete mSegKeySource;
@@ -1228,20 +1069,6 @@ namespace Cicada {
 
         return 0;
     }
-
-    /*
-     * ============ CENC 软解兜底：按清单声明的地址取内容密钥 ============
-     *
-     * 与 DashStream::fetchSoftwareCencKey 是**同一套判据**，共用 ContentKeyFetcher，
-     * 所以两条路（URL 直连的 .mpd / 对象化清单的 CMAF）对"什么样的响应才算密钥"的
-     * 认定不会分叉。它认三种形状：
-     *   · 响应体正好 16 字节 —— 裸密钥（本工程密钥服务器 /key/{kid} 的默认形状）；
-     *   · JSON 里有 "k"（W3C ClearKey 许可证，base64url）或 "key"（十六进制）；
-     *   · 其余一律判失败并说清原因，**绝不**把半截字节当密钥用。
-     *
-     * 日志只打一条：这个方法可能被同一个 KID 之外的不同 KID 各调一次，但每个 KID
-     * 在 demuxer_service 里已经只问一次，所以按"成败"各打一条就够。
-     */
     bool HLSStream::fetchCencKey(const std::string &keyUrl, const std::string &kidHex, uint8_t *key, int *keySize)
     {
         const ContentKeyFetcher::Result result = ContentKeyFetcher::fetch(keyUrl, mOpts, mSourceConfig);
@@ -1356,16 +1183,6 @@ namespace Cicada {
         } else if (packet_size < 0) {
             if (packet_size == -EAGAIN) {
                 //     AF_LOGD("read timed out");
-                /*
-                 * 【seek 落点延迟线】攒前缀时不能每个包都停 10ms。
-                 *
-                 * "不晚于目标的最后一个关键帧"可能要几十个包之后才出现（本片源一个 GOP ≈ 60 个包），
-                 * 每包停 10ms 就是 0.6 秒，正好把这次优化的收益吃光。
-                 * 判据是**进度**、不是时间：只有上一轮确实从 demuxer 取到了一个包
-                 * （SeekLandingStage::filter 把它收进延迟线时置的进度），才跳过这一次停顿；
-                 * demuxer 没数据（等网络）时进度为假，照旧 af_msleep(10) —— 不会空转、不是计时器。
-                 * 延迟线一放行或一复位，这个标志就被清掉，节奏立刻回到原样。
-                 */
                 if (!mSeekLanding.consumeProgress()) {
                     af_msleep(10);
                 }
@@ -1426,14 +1243,6 @@ namespace Cicada {
     {
         int ret = 0;
         mProtectedBuffer = mCurrentEncryption.method != SegmentEncryption::NONE;
-
-        /*
-         * 【方法切换时把样本级解密器放掉】单独放在分支之前，是为了覆盖
-         * "AES_SAMPLE 片之后跟了 AES_128 / AES_PRIVATE 片"这种情况 ——
-         * 那时下面两个分支都不会去动 mSampeAesDecrypter，而 createDemuxer() 随后又会
-         * 把它交给内层 demuxer（setSampleDecryptor），于是用**上一片那把 key** 去解。
-         * 判据是"存在样本级解密器 + 本片不是样本级加密"，与顺序、时序无关。
-         */
         if (mSampeAesDecrypter != nullptr &&
                 mCurrentEncryption.method != SegmentEncryption::AES_SAMPLE) {
             releaseSampleAesDecrypter();
@@ -1454,20 +1263,6 @@ namespace Cicada {
                 return ret;
             }
         }
-
-        /*
-         * ============ CENC：这里**刻意什么都不建** ============
-         *
-         * CENC 不是整片加密，也不是 Apple 的 SAMPLE-AES —— 它的每样本 IV 与 subsample
-         * 表在**容器**里（tenc/senc/saiz/saio），解密必须逐样本做，而且要用包上带的 KID
-         * 去查密钥。所以解密动作只能发生在 demuxer_service::readPacket（内核软解），
-         * 或者在平台解码器里（硬解）。
-         *
-         * 这里能做、也必须做的只有一件事：**在内层 demuxer 上装好按需取密钥的回调**，
-         * 见下面 createDemuxer 里那段（判据是 method == CENC 且清单给了地址）。
-         * 本函数不做任何事是刻意的：建一个 SAMPLE-AES / AES-128 的解密器去解 CENC 样本
-         * 只会把流解坏，而且不会有任何日志。
-         */
         return ret;
     }
 
@@ -1578,17 +1373,6 @@ namespace Cicada {
         }
 
         if (ret == 0 && mStopOnSegEnd) {
-            /*
-             * 【这条不是错误，别每 10ms 打一次】
-             *
-             * "切清晰度"时管理器会让旧流**在本分片边界停下**（HLSStream::stopOnSegEnd(true)），
-             * 这个分支就是"这一片读完了、上面要求停"，属于正常状态。
-             *
-             * 但 read_thread 对 -EAGAIN 的处理是 `af_msleep(10)` 后重试（见上面 read_thread），
-             * 而这里原来每轮都打一条 **AF_LOGE** —— 切一次清晰度要等旧分片读完（几十毫秒到
-             * 十几秒），日志里就是刷屏的红色 "mStopOnSegEnd"：用户实测"切换不过去还卡死"，
-             * 一半是这些日志、一半是等待本身。改成**每次要求停只打一行**，而且降到 D 级。
-             */
             if (!mStopOnSegEndLogged) {
                 mStopOnSegEndLogged = true;
                 AF_LOGD("stop on segment end（切清晰度：本片读完就停在片界，等管理器换流）\n");
@@ -1598,18 +1382,6 @@ namespace Cicada {
             mSeekLanding.flush();
 
             mIsEOS = true;
-            /*
-             * 【必须返回 0，不能返回 -EAGAIN —— 这是"切换不过去还卡死"的另一半】
-             *
-             * 边界换流的消费者挂在"读返回 0"上：HLSManager.cpp:206 是 `else if (ret == 0)`，
-             * 而 `i->stopOnSegEnd` 那一支（:211 → :256 OpenStream(toStreamId)）就在它里面。
-             * 这里原来返回 -EAGAIN ⇒ 上层把它当"暂时没数据"，sleep 10ms 再来一轮，
-             * **永远看不到 ret == 0** ⇒ 分片边界那次换流永远不发生，日志表现就是
-             * （旧注释写的）"切换不过去还卡死"。
-             *
-             * 改成 0 与 DashStream 完全对称：DashStream.cpp:850-856 在同一个状态下是
-             * `mIsEOS = true; return 0;`（DASH 的边界换流因此一直能通）。
-             */
             return 0;
         }
 
@@ -1621,18 +1393,6 @@ namespace Cicada {
             if (mReopen) {
                 AF_LOGD("reopen");
             }
-
-            /*
-             * 【seek 落点延迟线】本分片读完（把 demuxer 读到 EOS）时，延迟线里攒着的正是本片最后
-             * 那一段：这属于"目标落在本片最后一个 GOP"的情形，等不到"timePosition > 目标"的包，
-             * 判据只能在这里收口。整体按序交出，绝不能跟着分片一起丢掉。
-             *
-             * 【本轮修，与 DashStream 同一处】读完本片时 mReopen 往往正是 seek() 自己置的那个
-             * （seek() 只置 mReopen + arm(target)，真正的重开分片由本线程在下面 updateSegment() 里做）。
-             * 旧代码无条件 flush()（内部 reset() ⇒ 连 mTargetUs 一起清），目标于是在"含目标分片的
-             * 第一个包"到达之前就没了 ⇒ filter() 每包都在 mTargetUs == INT64_MIN 处静默放行 ⇒
-             * 延迟线从不 ENGAGE、解码器退回分片片首。现在按"这次收口是否属于刚 arm 的 seek"分流。
-             */
             mSeekLanding.flushOnHostReopen();
 
             ret = updateSegment();
@@ -1697,14 +1457,6 @@ namespace Cicada {
 
         if (packet != nullptr) {
             //  AF_LOGD("read a frame \n");
-
-            /*
-             * 【这块只服务"对齐切档"】mDiscardPts 的唯一设置点是 HLSManager 的对齐切档
-             * （目标流接过旧流的最后 pts），语义是"这次切档要从哪儿开始"。
-             * ⚠ 铁律：**绝不允许把 seek 目标塞进 mDiscardPts**。下面第二条判据会整片跳过
-             * （mReopen），拿 seek 目标当它就会把落点推到目标之后，直接破坏"首帧必须包含目标、
-             * 不晚于目标"。HLSStream::seek 开头已经把地板清成 INT64_MIN 做硬化。
-             */
             if (mDiscardPts != INT64_MIN) {
                 if (packet->getInfo().pts < mDiscardPts) {
                     if (mDiscardPts - packet->getInfo().pts > mPTracker->getTargetDuration() / 2) {
@@ -1808,15 +1560,6 @@ namespace Cicada {
             if (packet->getInfo().pts != INT64_MIN) {
                 mStreamStartTimeMap[streamIndex].lastFramePts = packet->getInfo().pts;
             }
-
-            /*
-             * 【seek 落点延迟线】包的时间轴（timePosition）、关键帧标记都已经算完了，落点判定就放在
-             * 这里 —— 在进入 mQueue 之前、也在上面那些既有处理之后，所以被延迟线收下的包不会打乱
-             * time2ptsDelta / lastFramePts / seamlessPoint 的既有状态机。
-             * 返回 false = 这一包被延迟线收下（本轮不产出，读线程立刻再来一轮，见 read_thread 的
-             * EAGAIN 分支）；返回 true = 这一包照原样交出去。
-             * 判据与边界见 demuxer/SeekLandingStage.h 的类注释（HLS 与 DASH 共用那一份实现）。
-             */
             if (!mSeekLanding.filter(packet)) {
                 packet = nullptr;
                 return -EAGAIN;
@@ -1871,19 +1614,6 @@ namespace Cicada {
             meta->height = height;
             meta->width = width;
         }
-
-        /*
-         * 【这一路变体的编码：master playlist 的 CODECS -> AFCodecID】
-         *
-         * HlsParser::createRepresentation() 已经把 EXT-X-STREAM-INF / EXT-X-MEDIA 的
-         * CODECS 属性存进 Representation::codecs（见 HlsParser.cpp 里 addCodecs 那次调用）。
-         * 这里把它交给同一个归一化函数转成 AFCodecID。
-         *
-         * 只在底层没给出编码时才填：已开流时 mPDemuxer 的编码来自真实容器
-         * （TS 的 PMT / fmp4 的 stsd），是权威值，不覆盖。清单里没有 CODECS
-         * 属性时 getCodecsString() 返回空串，归一化返回 NONE —— 也就是"这一路
-         * 没有编码信息"，应用层拿到空短名、不显示徽标，不允许猜。
-         */
         if (meta->codec == AF_CODEC_ID_NONE) {
             meta->codec = afCodecIDFromManifestCodecs(mPTracker->getCodecsString().c_str());
         }
@@ -1991,20 +1721,6 @@ namespace Cicada {
                 delete mSegKeySource;
                 mSegKeySource = nullptr;
             }
-
-            /*
-             * 【必须连 mKeyUrl 一起清（本轮修）】
-             *
-             * mKeyUrl 的语义是"**当前这把 key 是从哪个 URL 拿到的**"（updateKey 用它做
-             * "同 URL 不重复拉 / 换 URL 才重拉"的判据）。它从这一轮起**只在真的拿到 16 字节
-             * 之后**才被赋值（见 updateKey）。
-             *
-             * 而这里把 mSegKeySource 释放了 —— 如果 mKeyUrl 还留着，下一次 start() 走
-             * updateKey() 时 `mKeyUrl == keyUrl` 成立 ⇒ 直接 return false ⇒
-             * 调用方以为"key 已经就绪"，于是拿着**没有被填充过的 mKey** 去解密整片
-             * （正是这次要消灭的那类"假成功"）。
-             * 两者必须同生共死：source 没了，就当作"还没拿过 key"。
-             */
             mKeyUrl.clear();
 
             mIsOpened_internal = false;
@@ -2023,20 +1739,6 @@ namespace Cicada {
         bool reqReOpen = true;
         AF_LOGD("%s:%d stream (%d) seek us is %lld\n", __func__, __LINE__,
                 mPTracker->getStreamType(), us);
-
-        /*
-         * ============ mDiscardPts 的硬边界：它只属于"对齐切档"，绝不允许装 seek 目标 ============
-         *
-         * mDiscardPts 是"这次清晰度对齐要从哪儿开始"的地板，唯一的设置点是 HLSManager 的对齐切档
-         * （目标流接过旧流的最后 pts）。read_internal 对它的用法有两条：
-         *   · 低于地板：丢包（setDiscard）；
-         *   · 低得超过半片：**整片跳过**（mReopen）。
-         * 所以一旦有人把**seek 目标**塞进 mDiscardPts，"低于地板"的判据会变成"晚于目标的帧才算数"，
-         * 整片跳过那条更是会把落点推到目标**之后** —— 直接破坏"首帧必须是包含目标、且不晚于目标的
-         * 那一帧"这条铁律（精准 seek 的全部意义就在这一条）。
-         * 因此这里做硬化：seek 一开始就把地板清掉，让 seek 落点只由"包含目标的那一片 + 延迟线"决定；
-         * 正在途中的对齐切档也已经由 HLSManager::seek 的第 1 步收尾了，不需要这个地板。
-         */
         mDiscardPts = INT64_MIN;
         discardCount = 0;
 
@@ -2081,16 +1783,6 @@ namespace Cicada {
 
         AF_LOGD("%s:%d stream (%d) usSeeked is %lld seek num is %d\n", __func__, __LINE__,
                 mPTracker->getStreamType(), usSought, num);
-
-        /*
-         * 【落点诊断】这一行是"目标 Representation 到底被定位到哪"的唯一权威读数。
-         *
-         * 2026-09-21 的 HLS 实测：点 2160p 时请求 34.831s，这里拿到 segNum=5
-         * （= 33.366s，正确），但 0.5 秒后读取线程已经把 -9.m4s（70.9s）读进队列，
-         * 播放点却还在 34.9s —— 于是 RenderVideo() 认为"帧太早"一直不渲染，
-         * FPS 永久 0。上一条 usSeeked 打印的是**请求值**不是结果，容易误判，
-         * 所以在这里补上 tracker 真正选中的段号/段位置。
-         */
         AF_LOGI("[seek] hls %s: reqUs=%lld -> segNum=%llu curSegNum=%llu lastSegNum=%llu "
                 "duration=%lld live=%d initialized=%d\n",
                 mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
@@ -2135,15 +1827,6 @@ namespace Cicada {
                     mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
                     (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought);
         }
-
-        /*
-         * 【seek 落点延迟线：装弹】位置很关键：
-         *   · 必须在上面 clearDataFrames() 之后 —— 那一刻读线程已经 pause()，不会再写延迟线的 stage；
-         *   · 必须在下面 mThreadPtr->start() 之前 —— 线程一启动就可能立刻产出第一个包。
-         * 目标必须用入参 us，**不能用 usSought**：SegmentList::getSegmentNumberByTime 会把 usSought
-         * 改写成"该分片起点"（这是它给 HLS 提供的落点语义），拿它当目标的话，落点会退回到
-         * "最后一个 ≤ 分片起点"的关键帧，等于白做。
-         */
         mSeekLanding.arm(us, "HLS", mPTracker);
 
         mIsEOS = false;
@@ -2151,6 +1834,9 @@ namespace Cicada {
         mError = 0;
         if (mDemuxerMeta) {
             mDemuxerMeta->bContinue = false;
+        }
+        for (auto &streamStartTime : mStreamStartTimeMap) {
+            streamStartTime.second.lastFramePts = INT64_MIN;
         }
 
         if (mThreadPtr) {
@@ -2177,6 +1863,20 @@ namespace Cicada {
     uint64_t HLSStream::getCurSegNum()
     {
         return mPTracker->getCurSegNum();
+    }
+
+    bool HLSStream::getSegmentNumByTime(int64_t timeUs, uint64_t &num)
+    {
+        if (timeUs <= 0) {
+            return false;
+        }
+
+        /*
+         * 转发即可：这个 tracker 的实现会把 timeUs 就地改写成该片的 startTime，
+         * 但 num 始终是**分片号**（包含该时刻的那一片）⇒ +1 由调用方做。
+         */
+        uint64_t time = (uint64_t) timeUs;
+        return mPTracker->getSegmentNumberByTime(time, num);
     }
 
     int HLSStream::stopOnSegEnd(bool stop)
@@ -2218,15 +1918,6 @@ namespace Cicada {
 
         mSwitchNeedBreak = false;
         clearDataFrames();
-        /*
-         * 【seek 落点延迟线】reopenSegment 是"按分片号/分片位置重设读位置"（切档交接、SetCurSegNum
-         * 等），它**没有时间目标**：上一次 seek 留下的目标到这里已经不能代表现在要读的位置，必须连
-         * 目标一起清。否则一个陈旧的、恰好落在前方的目标会让延迟线丢掉这个分片的前缀。
-         *
-         * 【本轮修】与 DashStream 同一处：seek() 是"只置 mReopen + arm(target)"、由读线程完成重开的，
-         * 因此本函数在正常 seek 里不会被走到。万一被走到而 arm() 的一次性标记还在（= 这次重开仍属于
-         * 本次 seek），dropStageOnHostReopen() 只丢 stage、保留目标；否则按原语义 reset()。
-         */
         mSeekLanding.dropStageOnHostReopen();
         resetSource();
 

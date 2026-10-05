@@ -162,26 +162,6 @@ namespace Cicada {
             out.push_back(enc);
             return;
         }
-
-        /*
-         * ============ CENC（ISO/IEC 23001-7）via <ContentProtection> ============
-         *
-         * 【选哪一条】清单可以同时声明好几条（mp4protection + 各 DRM 系统），交给
-         * DrmSchemes::decide 选：平台 CDM 认的最高（硬解优先），否则选一条带
-         * 许可/密钥地址的（软解兜底）。排序判据见 framework/drm/DrmSchemes.h。
-         * 这里原来写的是"第一条不是 mp4protection 的就赢"，在 Android 上可能选中设备
-         * 根本不支持的 PlayReady，也会漏掉"只有 mp4protection + laurl"这类能软解的清单。
-         *
-         * 【keyFormat 只在平台认的时候才填】判据与 DashStream::applyDrmFromContentProtection
-         * 一字不差：`codecPrototype::create` 的判据是
-         * `drmInfo == nullptr || codec->is_drmSupport(drmInfo)`，而
-         * `avcodecDecoder::is_drmSupport` 恒返回 false —— 填一个没有 CDM 认识的 keyFormat
-         * 会把**所有软解解码器**排除掉。平台不认时留空，样本由内核解。
-         *
-         * 【为什么是 method = CENC 而不是 AES_SAMPLE】见 SegmentEncryption.h 里 CENC 那一段：
-         * 两者密文布局与解密器完全不同，复用 AES_SAMPLE 会让 HLSStream 拿 SAMPLE-AES 的
-         * 解密器去解 CENC 样本（把流解坏且无日志）。
-         */
         const std::vector<ContentProtection> *protections = &manifest.contentProtection;
         std::vector<DrmSchemes::Candidate> candidates;
         candidates.reserve(protections->size());
@@ -248,15 +228,6 @@ namespace Cicada {
         if (!info.segments.empty()) {
             for (const Segment &seg : info.segments) {
                 Segment resolved = seg;
-                /*
-                 * 单文件模式下所有段都来自**同一个文件**，baseUrl 就是这个文件本身
-                 * （见 MediaManifest.h 的 single 语义与 docs/MANIFEST-OBJECT-GUIDE.md 6.3）。
-                 * 所以：
-                 *   · url 留空 → 用文件；
-                 *   · url 只是文件名（相对）→ 仍然用文件，绝不把文件名再拼到文件 URL 后面
-                 *     （那样会得到 xxx.m4s/xxx.m4s 这种错地址）；
-                 *   · 只有绝对 URL（http/https/以 / 开头）才当作"这一段其实在别的文件里"。
-                 */
                 const bool absoluteUrl = seg.url.compare(0, 7, "http://") == 0 ||
                                          seg.url.compare(0, 8, "https://") == 0 ||
                                          (!seg.url.empty() && seg.url[0] == '/');
@@ -318,11 +289,6 @@ namespace Cicada {
                     info.indexRange.c_str());
             return segments;
         }
-
-        /*
-         * 偏移基准与 DashSegmentTracker::parseIndex 一致：sidx 里的偏移从"index 段结束之后"
-         * 算起，所以基准是 first_offset + indexEnd + 1。
-         */
         int64_t offset = static_cast<int64_t>(sidx.first_offset) + indexEnd + 1;
         const int64_t timescale = sidx.timescale > 0
                                   ? static_cast<int64_t>(sidx.timescale)
@@ -388,11 +354,6 @@ namespace Cicada {
             representation->targetDuration = static_cast<int64_t>(
                     (rep.hasSegmentInfo ? rep.segmentInfo.targetDuration : 4) * CLOCK_FREQ_US);
             if (rep.hasSegmentInfo) {
-                /*
-                 * 单文件（mode == "single"）也要设：段的 URL 会与 getBaseUri() 用 combinePaths
-                 * 合并，而段上带的是绝对文件 URL，合并后仍是它自己 —— 与 MPD 路径的 SegmentBase
-                 * 语义一致（baseUrl 就是那个唯一的文件）。
-                 */
                 representation->setBaseUrl(rep.baseUrl);
             }
             if (!rep.codecs.empty()) {
@@ -419,12 +380,6 @@ namespace Cicada {
                         segments = expandTemplate(segInfo, mManifest->duration, rep.baseUrl);
                     }
                 } else if (segInfo.mode == SegmentMode::Single) {
-                    /*
-                     * SegmentBase：rep.baseUrl 就是那个唯一的文件（init + media + sidx 都在里面），
-                     * 所有段都是它的字节范围。段表来源见 expandSegmentBase()：显式 segments[] 优先，
-                     * 否则按 indexRange 把 sidx 拉下来推段。一段也拿不到就跳过这个 representation
-                     * （下面打日志），不留下"清单能开、永远没数据"的空段表。
-                     */
                     segments = expandSegmentBase(rep.baseUrl, segInfo);
                     if (segments.empty()) {
                         AF_LOGE("manifest: video representation (mode=single) %s has no usable segment, "
@@ -436,13 +391,6 @@ namespace Cicada {
 
                 uint64_t sequence = segInfo.hasMediaSequence ? static_cast<uint64_t>(segInfo.mediaSequence)
                                     : static_cast<uint64_t>(segInfo.startNumber > 0 ? segInfo.startNumber : 1);
-
-                /*
-                 * init 段（EXT-X-MAP / SegmentBase 的 Initialization）。
-                 * single 模式下 initialization 是**字节范围**而不是 URL（见 MediaManifest.h
-                 * 的字段注释与 docs/MANIFEST-OBJECT-GUIDE.md 6.3）：文件就是 rep.baseUrl，
-                 * 范围挂在段上；写成 URL 的老写法仍然兼容。
-                 */
                 std::shared_ptr<segment> initSegment;
                 if (!segInfo.initialization.empty()) {
                     int64_t initStart = 0;
@@ -559,12 +507,6 @@ namespace Cicada {
                     pSegment->startTime = static_cast<uint64_t>(startTimeUs);
                     startTimeUs += pSegment->duration;
                     pSegment->init_section = initSegment;
-                    /*
-                     * 音频的 single 模式同样**必须**把每段的字节范围挂上去（与上面视频那条一字不差）。
-                     * 漏了它的后果不是"少读一点"，而是每个段都去读**整个音频文件**：数据源不带范围，
-                     * 每段都能读出开头那堆数据，于是永远在放同一段音频、而且永远读不到结尾 ——
-                     * 表现为"视频播完了音频还在继续、怎么拖都像同一段、永不暂停"（2026-09-28 用户实测）。
-                     */
                     if (!seg.byteRange.empty()) {
                         int64_t rangeStart = 0, rangeEnd = 0;
                         if (sscanf(seg.byteRange.c_str(), "%lld-%lld", (long long *) &rangeStart, (long long *) &rangeEnd) == 2) {
@@ -748,6 +690,11 @@ namespace Cicada {
             mPPlaylistManager->preferAudio(value != 0);
             return 0;
         }
+        if (key == "alignedSwitchPlayheadUs" && mPPlaylistManager) {
+            mPPlaylistManager->setAlignedSwitchPlayhead(value);
+            return 0;
+        }
+
         return IDemuxer::SetOption(key, value);
     }
 

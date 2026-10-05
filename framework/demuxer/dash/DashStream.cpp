@@ -9,30 +9,11 @@
 #include "data_source/dataSourcePrototype.h"
 #include "demuxer/DemuxerMeta.h"
 #include "demuxer/IDemuxer.h"
-/*
- * DRM 相关的三个头：
- *   · DrmSchemes  —— DASH <ContentProtection> 的**全量**方案注册表与选优（哪个 DRM 系统、
- *                    是不是 CENC 内容、本平台认不认、该谁去解）。这是**平台无关**的纯函数，
- *                    所以 L1 共享代码里不出现平台宏；认不认由各平台在 framework/drm/ 下
- *                    注册的 handler 决定。
- *   · DrmHandlerPrototype —— 上面那个"本平台认不认"查询的实现。
- *   · ContentKeyFetcher   —— 按清单声明的地址取 16 字节内容密钥（软解兜底）。
- *                           它同时接受裸字节、十六进制 JSON 与 W3C ClearKey 许可证 JSON。
- */
 #include "drm/DrmSchemes.h"
 #include "drm/DrmHandlerPrototype.h"
 #include "drm/DrmInfo.h"
 #include "demuxer/sample_decrypt/ContentKeyFetcher.h"
 #include "demuxer/play_list/Helper.h"
-/*
- * 【为什么必须包含】DashStream::seek() 里要取"tracker 真正选中分片的起点"：
- *     mPTracker->getCurrentRepresentation()->getMediaSegmentStartTime(num)
- * 而 DashSegmentTracker.h(:18) 只对 Representation 做了**前向声明** ⇒ 直接这样调用会报
- *   error: member access into incomplete type 'Cicada::Representation'
- * 这里包含它的**定义**（framework/demuxer/play_list/Representation.h:24，继承
- * Dash::SegmentInformation；getMediaSegmentStartTime 实现见
- * demuxer/dash/SegmentInformation.cpp:52）。回退：删掉本 include 即复现该编译错误。
- */
 #include "demuxer/play_list/Representation.h"
 #include "utils/af_string.h"
 #include "utils/errors/framework_error.h"
@@ -116,7 +97,14 @@ int DashStream::read_callback(void *arg, uint8_t *buffer, int size)
         if (updateRet == 0) {
             return pHandle->readSegment(buffer, size);
         } else if (updateRet == -EAGAIN) {
-            return 0;
+            /*
+             * 下一片暂时取不到（网络还没回来 / 分片还没就绪）⇒ 对 ffmpeg 必须报"暂时没数据"，
+             * 不能报 0：0 就是 EOF，会让 read_thread 置 mIsEOS 并退出读线程，之后 read() 恒返 0，
+             * 管理器判该流 EOS、播放器闩上 mEof ⇒ 网络恢复也不会继续（只能 seek/重启）。
+             * 用框架自己的 -EAGAIN：POSIX 上它等于 AVERROR(EAGAIN)（ffmpeg 会当作"再试"），
+             * 其它平台即使被当成普通错误，read_thread 也会走 mError + 重试那条路，同样不会置 EOS。
+             */
+            return -EAGAIN;
         } else {
             return updateRet;
         }
@@ -425,20 +413,6 @@ int DashStream::createDemuxer()
 
     if (mPDemuxer->getDemuxerHandle()) {
         mPDemuxer->getDemuxerHandle()->setBitStreamFormat(this->mMergeVideoHeader, this->mMergerAudioHeader);
-        /*
-         * 【形态提示：这一段是不是样本级加密】与 HLSStream::createDemuxer 同一处语义
-         * （必须在 initOpen 之前，见那里的详细说明）。
-         *
-         * 判据是"清单声明了 CENC 方案"，与"谁来解"无关：CENC 的样本由 FFmpeg 解复用时
-         * 带 AV_PKT_DATA_ENCRYPTION_INFO，`avFormatDemuxer::createBsf` 一看到加密 side data
-         * 就**不建** head 合并 bsf（并且会把提前建好的那个撤掉）。所以提前建 bsf 只会让
-         * "刚打开、还没出包"的那段窗口里 codecpar 是 bsf 之后的形态、而随后的包是容器原
-         * 形态 —— 那正是 avFormatDemuxer.cpp:546 里记的 DASH 偶发错位。如实按"加密"处理
-         * 就把这个窗口去掉了。
-         *
-         * 非 CENC 的声明（HLS Clear Key / CA / SEA）不按加密处理：内核这条路不解它们，
-         * 包上也不会有加密 side data，照明文对待才是真实的形态。
-         */
         mPDemuxer->getDemuxerHandle()->setStreamEncrypted(declaresCencProtectedContent());
     }
 
@@ -579,19 +553,6 @@ void DashStream::clearDataFrames()
     while (0 < mQueue.size()) {
         mQueue.pop_front();
     }
-
-    /*
-     * 【seek 落点延迟线】延迟线里攒着的包同样是"已经收下、还没交出去"的队列：位置一旦作废
-     * （seek / 换分片 reopen / stop），它必须跟着一起丢掉并复位，否则新的位置会带着旧的
-     * 落点状态继续跑。这个函数的三个调用点都在读线程 pause() 或 join 之后，
-     * 所以这里清 stage 不存在与读线程并发写的问题。
-     *
-     * 用 DropStage 而不是 Reset：**seek 目标要留着**。stop()（含 DashManager::CloseStream）
-     * 之后重新 start() 会在同一个分片上重开（mCurrentSegNumber 没动），目标依然有效；旧的
-     * 写法把目标一起清掉，于是"装了弹又被 stop 抹掉"的那些 seek 就悄悄退回分片首。
-     * 目标过期的情况由 SeekLandingStage::filter 的"第一包 pos > 目标 就放弃"兜住，不会误丢数据。
-     * 真正需要连目标一起清的只有 reopenSegment（位置是按分片号重设的，见那里的 Reset）。
-     */
     mSeekLanding.dropStage();
 }
 
@@ -667,16 +628,6 @@ int DashStream::read_thread()
     } else if (packet_size < 0) {
         if (packet_size == -EAGAIN) {
             //     AF_LOGD("read timed out");
-            /*
-             * 【seek 落点延迟线】攒前缀时不能每个包都停 10ms。
-             *
-             * "不晚于目标的最后一个关键帧"可能要几十个包之后才出现（本片源一个 GOP ≈ 60 个包），
-             * 每包停 10ms 就是 0.6 秒，正好把这次优化的收益吃光。
-             * 判据是**进度**、不是时间：只有上一轮确实从 demuxer 取到了一个包
-             * （SeekLandingStage::filter 把它收进延迟线时置的进度），才跳过这一次停顿；
-             * demuxer 没数据（等网络）时进度为假，照旧 af_msleep(10) —— 不会空转、不是计时器。
-             * 延迟线一放行或一复位，这个标志就被清掉，节奏立刻回到原样。
-             */
             if (!mSeekLanding.consumeProgress()) {
                 af_msleep(10);
             }
@@ -864,20 +815,6 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
             AF_LOGD("reopen");
             mReopen = false;
         }
-
-        /*
-         * 【seek 落点延迟线】本分片读完（把 demuxer 读到 EOS）时，延迟线里攒着的正是本片最后
-         * 那一段：这属于"目标落在本片最后一个 GOP"的情形，等不到"timePosition > 目标"的包，
-         * 判据只能在这里收口。整体按序交出，绝不能跟着分片一起丢掉。
-         *
-         * 【本轮修：这里曾经把 seek 的目标一起清掉】读完本片时 mReopen 往往正是 **seek() 自己**
-         * 置的那个（seek() 只置 mReopen + arm(target)，真正的重开分片由本线程在下面
-         * updateSegment() 里做）。旧代码无条件走 flush()（内部 reset() ⇒ 连 mTargetUs 一起清），
-         * 于是目标在"含目标分片的第一个包"到达**之前**就没了：filter() 之后每包都在
-         * mTargetUs == INT64_MIN 处静默放行 ⇒ 延迟线装了弹却从不 ENGAGE，解码器退回分片片首。
-         * 现在按"这次收口是否属于刚 arm 的 seek"分流：属于 ⇒ 交包但保留目标；不属于（切档交接 /
-         * SetCurSegNum / 普通换片）⇒ 维持旧的"连目标一起清"。
-         */
         mSeekLanding.flushOnHostReopen();
 
         ret = updateSegment();
@@ -969,43 +906,6 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
             if (packet->getInfo().pts != INT64_MIN) {
                 const int64_t manifestDelta = mStreamStartTimeMap[streamIndex].timePosition - packet->getInfo().pts;
                 const int64_t lastPts = mStreamStartTimeMap[streamIndex].lastFramePts;
-
-                /*
-                 * ============ 按 DASH 规范：PTO 是**每个 Representation 的常量** ============
-                 *
-                 * ISO/IEC 23009-1 / DASH-IF IOP 定义三条时间轴，换算关系是
-                 *     presentationTime = PeriodStart + (mediaTime − presentationTimeOffset)
-                 * 其中 `@presentationTimeOffset`（PTO）**每路 Representation 只有一个常量**、
-                 * 缺省 0；MPD 里 SegmentTimeline/@t 或 SegmentTemplate 累积出来的分片起始时间
-                 * 属于 Period/Presentation 轴，作用是**索引/寻址**（选段与 seek），
-                 * 不是"每个分片重新定义一次媒体↔节目的换算"。
-                 *
-                 * 我们这里原来的写法是**每段**用 mCurSeg->fixedStartTime 重算 time2ptsDelta，
-                 * 等于"每段重新推一次 PTO" —— 规范里没有这种事。它的实际效果是把
-                 * "MPD 声明的时间"与"媒体自己的时间戳"之间的不一致一段段吸收掉：
-                 *   · 真机实测（同一份 m4s，mpd/m3u8 两种清单，Android+Qt 都复现）：
-                 *     音频这一路两轴差恒 ≈ +10 ms（与 MPD 一致），而**视频**这一路
-                 *     每个分片差 427 ms（40/80/110/140/170 s 落点 = −1708/−3416/−4697/
-                 *     −5979/−7260 ms）⇒ 每段重算就把视频的漂移"隐藏"进节目轴，
-                 *     于是音频与视频被拆成两条速率不同的轴：**声音越来越慢、越播越偏**。
-                 *   · 按规范（PTO 恒定）处理时，两路都跟着**自己的媒体时间戳**推进，
-                 *     音画关系与媒体本身一致；HLS 那侧（HLSStream.cpp:1295 用播放列表累计
-                 *     时长，本片源与媒体一致、差恒 0）本来就是这个行为 ⇒ 同一份 m4s 走 HLS 没事。
-                 *
-                 * 处置：**只在媒体时间戳真的重置时**（换 Period / 编码器重启 —— 那才是
-                 * PTO 允许重新定义的时刻）才接受清单给的新锚点；连续时保持原 delta。
-                 * ⚠「跳段 / seek」不算重置：seek 前最后一个包与 seek 后第一个包的 pts
-                 * 必然差很远，所以旧判据（与"上一帧 pts + 帧长"差出 ±100ms 就算不连续）
-                 * **每 seek 一次就重锚一次**，等于把 MPD 的"名义段长 vs 真实段长"误差
-                 * 当偏移量灌进演示轴（真机实测：30s 落点 −1281250µs = 3×(−427083)、
-                 * 130s 落点 −5552083µs = 13×(−427083)，而 −427083µs 正是 MPD 声明
-                 * 10.000000s 与媒体真实 10.427083s 之差）。这正是"还是一样的"的原因。
-                 * 判据是纯状态判断（新包 pts 相对上一包**回退** > 5s），没有计时器；
-                 * DashStream::seek() 会把 lastFramePts 清成 INT64_MIN，保证 seek
-                 * （前进或后退）都不会被误判成 Period 切换。
-                 * timePosition 的算法仍是 pts + delta，下游（seek 落点、位置地板、
-                 * 读前闸门、渲染归一化）一行都不用改。
-                 */
                 const bool firstAnchor = (mStreamStartTimeMap[streamIndex].time2ptsDelta == INT64_MIN);
                 // mSeekSuppressResetOnce：seek 后第一个分片点不参与"媒体重置"判断
                 // （seek 前最后一个包与 seek 后第一个包的 pts 必然差很远，那不是 Period 切换）
@@ -1061,15 +961,6 @@ int DashStream::read_internal(std::unique_ptr<IAFPacket> &packet)
                 }
             }
         }
-
-        /*
-         * 【seek 落点延迟线】包的时间轴（timePosition）、关键帧标记都已经算完了，落点判定就放在
-         * 这里 —— 在进入 mQueue 之前、也在上面那些既有处理之后，所以被延迟线收下的包不会打乱
-         * time2ptsDelta / lastFramePts / seamlessPoint 的既有状态机。
-         * 返回 false = 这一包被延迟线收下（本轮不产出，读线程立刻再来一轮，见 read_thread 的
-         * EAGAIN 分支）；返回 true = 这一包照原样交出去。
-         * 判据与边界见 demuxer/SeekLandingStage.h 的类注释（HLS 与 DASH 共用那一份实现）。
-         */
         if (!mSeekLanding.filter(packet)) {
             packet = nullptr;
             return -EAGAIN;
@@ -1097,48 +988,8 @@ int DashStream::GetNbStreams() const
         return mPTracker == nullptr ? nullptr : mPTracker->getCurrentRepresentation();
     }
 
-    /*
-     * ============ 决定"这一路 CENC 由谁解"，并把结论交给上层 ============
-     *
-     * 【三个角色的分工，判据全部来自清单的值与平台能力，没有开关】
-     *   1. 清单里声明了什么 —— DASH <ContentProtection>（AdaptationSet 层 + Representation 层）。
-     *      可能同时声明好几条（例如 mp4protection + Widevine + PlayReady + ClearKey），
-     *      由 DrmSchemes::decide 选一条，排序判据见 framework/drm/DrmSchemes.h。
-     *      这里不再"最后一条赢"：那样在 Android 上可能选中设备根本不支持的 PlayReady。
-     *   2. 谁来解 —— 平台 CDM 认这条 scheme 就交给平台（Android MediaCodec + MediaCrypto、
-     *      OHOS DRM Kit），也就是"能硬解的都硬解"；平台不认而清单给了可取密钥的地址，
-     *      就由内核的 CENCDecrypter 在 demuxer_service::readPacket 里软解。
-     *   3. 两者都不行 —— 打一条说明原因的错误，**不静默**。
-     *
-     * 【为什么 keyFormat 只在平台认的时候才填（本轮修的真 bug）】
-     * `codecPrototype::create` 的判据是
-     *     `drmInfo == nullptr || codecQueue[i]->is_drmSupport(drmInfo)`
-     * 而 `avcodecDecoder::is_drmSupport` **恒返回 false**。所以只要给解码器传了一个
-     * 非空的 DrmInfo，软解解码器就会被**全部排除**，create 返回 nullptr，起播直接失败。
-     * 之前这里把 schemeIdUri 无条件写进 meta->keyFormat：一个只有
-     * `<ContentProtection schemeIdUri="urn:mpeg:dash:mp4protection:2011"/>` 的标准 MPD
-     * （没指名任何 DRM 系统）会让 keyFormat 变成一个任何 CDM 都不认识的字符串，
-     * 于是"软解兜底"这条路在**所有**平台上都走不通 —— 这正是"CENC-in-DASH 从没串起来
-     * 播过"的直接原因。
-     * 现在：平台认 ⇒ 填（把 DRM 参数交给解码器）；平台不认 ⇒ 一律留空（样本由内核解，
-     * 解码器拿到的是明文）。这与 HLS 侧既有的做法同源（HlsParser 只接受平台支持的
-     * keyFormat）。
-     *
-     * 【口径】进 keyFormat 的一定是**规范化的 DRM 系统标识**（urn:uuid:…），不是
-     * mp4protection 这种"不是 DRM 系统"的字符串，也不是大小写/别名混写的原样文本 ——
-     * 各平台 handler 与 mediaCodecDecoder::is_drmSupport 比的都是规范形式。
-     */
-
     DrmSchemes::Decision DashStream::drmDecision() const
     {
-        /*
-         * 缓存以"当前 Representation 的指针"为键，不是"算过一次就永远用"：
-         * 同一条 DashStream 会在一个 AdaptationSet 内部做 ABR 换档
-         * （mPTracker->getCurrentRepresentation() 会变），而 ContentProtection
-         * 允许被 Representation 层覆盖 AdaptationSet 层 —— 换了档就可能换了一份
-         * 声明。指针不变 ⇒ 复用；指针变了（含 null ⇄ 非 null）⇒ 重算。
-         * Representation 由 playList 持有，生命周期长于本对象，所以指针比较是稳的。
-         */
         Representation *rep = getCurrentRepresentation();
 
         if (mDrmDecisionValid && rep == mDrmDecisionRep) {
@@ -1202,12 +1053,6 @@ int DashStream::GetNbStreams() const
         const DrmSchemes::Decision decision = drmDecision();
 
         if (decision.index < 0 || !decision.handledByPlatform) {
-            /*
-             * 两种都走这里，且都**不写任何 DRM 字段**：
-             *   · 清单没声明内容保护（明文流）；
-             *   · 平台不认这个 scheme ⇒ 由内核软解，交给解码器的样本已经是明文。
-             * 软解所需的密钥在读到第一个带加密信息的包时按需取（见 fetchSoftwareCencKey）。
-             */
             return;
         }
 
@@ -1242,24 +1087,6 @@ int DashStream::GetNbStreams() const
 
         return decision.index >= 0 && DrmSchemes::isCencCapable(decision.schemeIdUri);
     }
-
-    /*
-     * ============ 软解兜底：按清单声明的地址取 16 字节内容密钥 ============
-     *
-     * 【什么时候会被调用】由 demuxer_service 在读到**第一个**带加密信息的包时回调
-     * （见 setCencKeyResolver）。之所以不在 GetStreamMeta 里"提前"按 KID 注册，是因为：
-     *   · 解密查表用的是**包上带的 KID**（AV_PKT_DATA_ENCRYPTION_INFO），而很多 MPD
-     *     只写 <cenc:pssh>，KID 只在 init 段的 tenc 里 —— FFmpeg 不把 tenc 暴露到
-     *     AVStream/codecpar 上（只在**包**上给加密信息），所以"提前按 KID 注册"在那些
-     *     片源上根本拿不到 KID；
-     *   · 反过来，包里既然带了 KID，按需取就一定拿得到正确的那个。
-     * 每个 KID 只会问一次（备忘录在 demuxer_service 里），所以这里不必自己去做去重。
-     *
-     * 【kidHex 参数】只用于"每个 KID 问一次"的去重；本工程的软解来源是清单里那**一个**
-     * laurl（不是按 KID 查的许可证服务），所以密钥内容由 URL 决定，与 kidHex 的取值无关。
-     * 这也意味着"同一 URL 下多把密钥"的片源不在这条路的覆盖范围内 —— 那种片源要靠平台
-     * 的 CDM，或者让许可证服务按 KID 区分（清单里也就是不同的 laurl）。
-     */
     bool DashStream::fetchSoftwareCencKey(const std::string &kidHex, uint8_t *key, int *keySize) const
     {
         if (!needsSoftwareCencDecryption()) {
@@ -1325,21 +1152,6 @@ int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
     if (!sub) {
         meta->type = (Stream_type) mPTracker->getStreamType();
     }
-
-    /*
-     * 【宽高必须**各自**补齐，不能只看 height】
-     *
-     * 这里 meta 是"已开流（mPDemuxer 存在）"时才可能被底层填过：宽高来自解码器对
-     * init 段/SPS 的解析。而**换档切换的窗口期**（新流 OpenStream 之后、第一个关键帧
-     * 解出来之前）底层很可能只填了 height 没填 width（或者反过来）—— 老代码的条件是
-     * `if (meta->height == 0)`：height 有值时整段跳过，于是 width 保持 0，上层拿到
-     * `0 x 2160` 这种残值。后果有两个，用户都遇到过：
-     *   * Qt 侧清晰度菜单按"宽x高"分档去重（platform/QtPlayer/src/CicadaPlayerItem.cpp
-     *     的 onMediaInfoGetCb），`0x2160` 和 `3840x2160` 分不进同一档 → **同一清晰度出现两个**；
-     *   * 标签/画幅比例跟着一起错。
-     * 所以两个字段分别判断：缺哪个补哪个（MPD 里的值本来就来自清单属性，见
-     * MPDParser.cpp:400-410 → Representation::getStreamInfo）。
-     */
     if (meta->width <= 0) {
         meta->width = width;
     }
@@ -1347,19 +1159,6 @@ int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
     if (meta->height <= 0) {
         meta->height = height;
     }
-
-    /*
-     * 【这一路 Representation 的编码：清单 @codecs -> AFCodecID】
-     *
-     * MPD 里 `@codecs`（MPDParser.cpp:417-418 → Representation::addCodecs）是
-     * **每一路 rendition 各自**的编码声明，而 meta 在"这条流还没 OpenStream"时
-     * 只有清单信息（mPDemuxer 为空）：不给它填这一项，应用层拿到的每一路流
-     * 编码就都是空的，同分辨率不同编码根本没法区分。
-     *
-     * 只在底层没给出编码时才用清单的值填 —— 已开流时 mPDemuxer 的编码来自
-     * init 段/SPS 解析，是容器里的**真值**，绝不能覆盖（弱一点说：换档窗口期
-     * 底层可能只填了宽高，此时清单值正好补上）。
-     */
     if (meta->codec == AF_CODEC_ID_NONE) {
         meta->codec = afCodecIDFromManifestCodecs(mPTracker->getCodecsString().c_str());
     }
@@ -1373,21 +1172,6 @@ int DashStream::GetStreamMeta(Stream_meta *meta, int index, bool sub) const
     }
 
     meta->suggestedPresentationDelay = mPTracker->getLiveDelay();
-
-    /*
-     * ============ DASH 的 DRM：先把清单声明交出去，再决定谁来解 ============
-     *
-     * 顺序很关键：这一步就是 Android / OHOS 硬解的**全部前提** ——
-     * SMPAVDeviceManager 只从 meta->keyFormat/keyUrl/drmPssh/drmKeyId 组 DrmInfo，
-     * DrmInfo 非空才会建平台 DRM 会话。写晚了，解码器就已经按"没有 DRM"建好了。
-     *
-     * 软解那条路**不需要**在这里注册密钥：密钥在读到第一个带加密信息的包时按需取
-     * （见 demuxer_service::setCencKeyResolver 与 fetchSoftwareCencKey）。这样也顺带
-     * 修掉了"MPD 只写 pssh、KID 只在 init 段 tenc 里"就取不到密钥的问题。
-     *
-     * 只在**视频**流上做：音频的 DRM 由同一条 MPD 的音频 Representation 自己在它
-     * 那一路的 GetStreamMeta 里处理；这里不替它做决定。
-     */
     if (!sub && meta->type == STREAM_TYPE_VIDEO) {
         applyDrmFromContentProtection(meta);
     }
@@ -1481,29 +1265,6 @@ int64_t DashStream::seek(int64_t us, int flags)
 
     //   int ret = mPTracker->init();
     bool b_ret = mPTracker->getSegmentNumberByTime(usSought, num);
-
-    /*
-     * 【seek 落点修复 / 回退点 A】把返回值从"请求值"改成"tracker 真正选中的分片起点"。
-     *
-     * 为什么：DashManager::seek() 的既有设计是"2. 先 seek 视频、取回 seekedUs；
-     * 3. 用 seekedUs 去 seek 其余流"（DashManager.cpp:481-512），它**完全依赖本函数的返回值**。
-     * 而本函数原来返回 usSought = 请求值（下面 :1153 一带的注释自己就写明"usSeeked 打的是请求值"），
-     * 于是第 3 步退化成"音频也 seek 到同一个请求目标" ⇒ 音频落在**音频自己的分片网格**、
-     * 视频落在**视频自己的分片网格**。实测 output.mpd（视频片 19.9866s、音频片 9.984s）：
-     * 目标 56.141s 时视频落点 39.973s、音频落点 49.92s ⇒ 音频首帧超前主时钟 10.03s，
-     * SuperMediaPlayer 的"音频超前就 hold"门（reason=1）静音整整 10s（用户报的"声音断一下再回来"）。
-     *
-     * 改成返回分片起点后：视频返回 39.973s ⇒ 第 3 步把音频 seek 到 39.973s ⇒ 音频落到
-     * 包含它的音频分片起点 39.936s（略**早于**视频落点，正是安全方向：音频不超前、
-     * 那道门不会被触发）。时间轴与视频包 timePosition / 播放器侧 landing 同一把尺子
-     * （见本文件 :846 `timePosition = mCurSeg->fixedStartTime`）。
-     *
-     * 只改这一条语义：不动请求目标、不动落点/位置上报（内核上报位置由不连续点基准给出，不再有地板）；
-     * 消费方安全性已核：Seek() 的返回值只被用作 `ret < 0` 错误判断
-     * （SMPMessageControllerListener.cpp:733-737、SuperMediaPlayer.cpp:8837-8847，
-     * 另两处直接丢弃返回值），且 DASH 多流路径的 manager 返回值恒为 0（DashManager.cpp:518）。
-     * 回退：删掉 landingUs 的计算、把末尾 `return landingUs;` 换回 `return usSought;`。
-     */
     int64_t landingUs = us;
 
     if (b_ret && mPTracker->getCurrentRepresentation() != nullptr) {
@@ -1546,13 +1307,6 @@ int64_t DashStream::seek(int64_t us, int flags)
     }
 
     AF_LOGD("%s:%d stream (%d) usSeeked is %lld seek num is %d\n", __func__, __LINE__, mPTracker->getStreamType(), usSought, num);
-
-    /*
-     * 【落点诊断】同 HLSStream::seek 里的说明：usSeeked 打的是**请求值**，
-     * tracker 真正选中的段号在这里才是权威读数。DASH 实测里
-     * "seek us is 17835000 / pending seek" 之后读取线程一路跑到 getCurSegNum=7，
-     * 需要这一行来区分"seek 没生效"和"seek 生效后又被读取线程跑远"。
-     */
     AF_LOGI("[seek] dash %s: reqUs=%lld -> segNum=%llu curSegNum=%llu duration=%lld live=%d initialized=%d\n",
             mPTracker->getStreamType() == STREAM_TYPE_VIDEO ? "video" : "audio/other",
             (long long) usSought, (unsigned long long) num,
@@ -1589,15 +1343,6 @@ int64_t DashStream::seek(int64_t us, int flags)
             mReopen = true;
         }
 
-        /*
-         * 【日志勘误，不改行为】这里打出的 segNum 是 tracker 的"游标"，而读取线程取下一段时
-         * 走的是 DashSegmentTracker::getNextSegment()，它**先 ++mCurrentSegNumber 再取段**
-         * （DashSegmentTracker.cpp:149）。于是 `setCurSegNum(num - 1)` 配上那次 ++ 正好读
-         * 第 num 段 —— 也就是**包含请求时刻的那一段**，这是对的。
-         * 但旧日志只打游标值，看上去就像"请求第 5 段却定位到第 4 段"（真机排查时被误读成
-         * 落点偏了一个分片）。所以这里把"第一段实际会读哪一段"一并打出来，避免下一次再被误读。
-         * 判据仍是纯状态（游标值 + 1 = num），不引入任何计时器 / 阈值。
-         */
         mPTracker->setCurSegNum(num - 1);
         AF_LOGI("[seek] dash %s: tracker cursor set to segNum=%llu (reqUs=%lld, reopened) — the read thread "
                 "advances with ++, so the FIRST segment read is segNum=%llu (this must be the segment that "
@@ -1606,14 +1351,6 @@ int64_t DashStream::seek(int64_t us, int flags)
                 (unsigned long long) mPTracker->getCurSegNum(), (long long) usSought,
                 (unsigned long long) num);
     }
-
-    /*
-     * 【seek 落点延迟线：装弹】位置很关键：
-     *   · 必须在上面 clearDataFrames() 之后 —— 那一刻读线程已经 pause()，不会再写延迟线的 stage；
-     *   · 必须在下面 mThreadPtr->start() 之前 —— 线程一启动就可能立刻产出第一个包。
-     * 目标用请求值 us（不是 landingUs）：延迟线要找的是"玩家要的那一帧"所在的 GOP，
-     * 分片起点只是解码起点，不能拿它当目标（否则落点会退回到"最后一个 ≤ 分片起点"的关键帧）。
-     */
     mSeekLanding.arm(us, "DASH", mPTracker);
 
     mIsEOS = false;
@@ -1622,17 +1359,10 @@ int64_t DashStream::seek(int64_t us, int flags)
     if (mDemuxerMeta) {
         mDemuxerMeta->bContinue = false;
     }
-
-    /*
-     * 【跨 seek 保持演示轴】seek 不是"媒体时间戳不连续"，只是换了个读取位置：
-     * 让 seek 后的第一个分片点不参与 readPacket 里"媒体重置"的判断，于是
-     * time2ptsDelta（等价于 −PTO 的那个常量）跨 seek 保持不变 —— 否则 MPD 的
-     * 名义段长误差会在每次 seek 时被当成新锚点灌进来（音画越播越偏的根因）。
-     * 这里只置一个开关，不动 lastFramePts/frameDuration，避免影响"pts 缺失时用
-     * lastFramePts + frameDuration 补值"的兜底分支。
-     * 回退：删掉下面这一行赋值即可恢复"每次 seek 重锚"的老行为。
-     */
     mSeekSuppressResetOnce = true;
+    for (auto &streamStartTime : mStreamStartTimeMap) {
+        streamStartTime.second.lastFramePts = INT64_MIN;
+    }
 
     if (mThreadPtr) {
         mThreadPtr->start();
@@ -1661,6 +1391,17 @@ uint64_t DashStream::getCurSegNum()
     return mPTracker->getCurSegNum();
 }
 
+bool DashStream::getSegmentNumByTime(int64_t timeUs, uint64_t &num)
+{
+    if (timeUs <= 0) {
+        return false;
+    }
+
+    /* 只做类型转换与转发：num 是**分片号**（包含该时刻的那一片），+1 由调用方做。 */
+    uint64_t time = (uint64_t) timeUs;
+    return mPTracker->getSegmentNumberByTime(time, num);
+}
+
 int DashStream::stopOnSegEnd(bool stop)
 {
     mStopOnSegEnd = stop;
@@ -1687,17 +1428,6 @@ int DashStream::reopenSegment(uint64_t num, OpenType openType)
 
     mSwitchNeedBreak = false;
     clearDataFrames();
-    /*
-     * 【seek 落点延迟线】reopenSegment 是"按分片号/分片位置重设读位置"（切档交接、SetCurSegNum 等），
-     * 它**没有时间目标**：上一次 seek 留下的目标到这里已经不能代表现在要读的位置，必须连目标一起清。
-     * 否则一个陈旧的、恰好落在前方的目标会让延迟线丢掉这个分片的前缀。
-     *
-     * 【本轮修】这里保留上面的语义，但要与"seek 自己的收口"区分开：seek() 是**只置 mReopen +
-     * arm(target)**、由读线程完成重开的（见本文件 read 路径里那个 flushOnHostReopen 调用），
-     * 因此本函数在正常 seek 里不会被走到。万一被走到而 arm() 的一次性标记还在（= 这次重开仍属于
-     * 本次 seek），dropStageOnHostReopen() 会只丢 stage、保留目标；否则按原语义 reset()。
-     * 两种情形都只消费一次标记，行为对非 seek 调用者逐字不变。
-     */
     mSeekLanding.dropStageOnHostReopen();
     resetSource();
 

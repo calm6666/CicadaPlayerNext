@@ -3,8 +3,6 @@
 //
 // Unified media manifest object model for object-based playback.
 //
-// This is the C++ counterpart of hili-player's `MediaManifest` TypeScript type
-// (front/hili-player/packages/plugins/src/vendor/types/manifest.ts). A single
 // object describes a complete HLS/DASH-like stream set — representations,
 // segment addressing (single file / template / explicit list), live config,
 // AES-128 segment encryption, and DRM content protection (Widevine, FairPlay,

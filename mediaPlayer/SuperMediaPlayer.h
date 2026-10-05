@@ -629,7 +629,7 @@ namespace Cicada {
          */
         void SwitchVideoAligned(int64_t switchPos);
 
-        void commitAlignedVideoSwitch(bool firstPacketIsKey);
+        void commitAlignedVideoSwitch(int64_t firstPacketPosUs, bool firstPacketIsKey);
 
         int64_t getPlayerBufferDuration(bool gotMax, bool internal);
 
@@ -1725,6 +1725,19 @@ namespace Cicada {
          * ABI 安全的）。
          */
         bool mVideoDecoderRebuildPending{false};
+
+        /*
+         * 【对齐切档：退役的旧档流号 —— 等到新档画面真的上屏才关它】
+         *
+         * 用户定的顺序：**切换中旧那路继续输出，只有真正切换之后才切到新的清晰度流，
+         * 旧流要等到新流彻底切过来才关闭。** 所以换档那一刻（目标流首个包到达）只把旧档
+         * 流号记在这里，真正的 CloseStream(旧) 放到切换终态出口 finishQualitySwitch()
+         * （READY / FAILED 共用）—— 那时新档的落点帧已经被采纳上屏。
+         *
+         * 初值 -1 = 没有待关的旧流；-1 以外都是真实流号，**不是开关**。
+         * 追加在成员列表最末尾（本工程硬规则：只有追加才是增量 ABI 安全的）。
+         */
+        int mVideoSwitchOldStreamIndex{-1};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

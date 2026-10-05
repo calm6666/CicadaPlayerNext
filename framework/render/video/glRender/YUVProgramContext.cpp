@@ -164,8 +164,12 @@ int YUVProgramContext::updateFrame(std::unique_ptr<IAFFrame> &frame) {
 
     if (frame != nullptr) {
         IAFFrame::videoInfo &videoInfo = frame->getInfo().video;
-        if (mFrameWidth != videoInfo.width || mFrameHeight != videoInfo.height ||
-            mDar != videoInfo.dar) {
+        /* 同 OESProgramContext：尺寸未知的帧不得覆盖已知尺寸，否则布局退回"铺满窗口"再恢复。 */
+        const bool sizeKnown = videoInfo.width > 0 && videoInfo.height > 0 && videoInfo.dar > 0;
+
+        if (sizeKnown &&
+            (mFrameWidth != videoInfo.width || mFrameHeight != videoInfo.height ||
+             mDar != videoInfo.dar)) {
             mDar = videoInfo.dar;
             mFrameWidth = videoInfo.width;
             mFrameHeight = videoInfo.height;

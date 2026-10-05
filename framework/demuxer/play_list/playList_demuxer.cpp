@@ -315,6 +315,16 @@ namespace Cicada {
             mPPlaylistManager->preferAudio(value);
             return 0;
         }
+
+        /*
+         * 【切换清晰度的定位基准：播放头节目时间】与 ManifestDemuxer::SetOption 同一支、
+         * 同一理由（两条路径各自持有自己的 PlaylistManager 实例，所以两处都要加；幂等）。
+         */
+        if (key == "alignedSwitchPlayheadUs" && mPPlaylistManager) {
+            mPPlaylistManager->setAlignedSwitchPlayhead(value);
+            return 0;
+        }
+
         return IDemuxer::SetOption(key, value);
     }
 }

@@ -98,6 +98,7 @@ namespace Cicada {
         int64_t getBufferDuration() const;
 
         void setPreferAudio(bool preferAudio);
+        bool getSegmentNumByTime(int64_t timeUs, uint64_t &num);
 
     private:
 
@@ -211,42 +212,7 @@ namespace Cicada {
         bool mIsPreload{false};
         bool mPreloadSucc{false};
         std::atomic<bool> mPreferAudio{false};
-
-        /*
-         * ============ seek 落点延迟线（只对点播视频路生效）============
-         *
-         * 唯一一份实现在 demuxer/SeekLandingStage.h（原来 DashStream 与 HLSStream 各有一份同形
-         * 拷贝，已删除、收敛成那一份）。完整说明 —— 含"精度权威在 renderer 的单一落点过滤，
-         * 这里只是降低解码前推距离的尽力优化、失败只慢不错"这句定性 —— 见那里的类注释。
-         * 一句话：DASH 也只能把 seek 定位到"包含目标的那一个分片"（10 秒一个独立文件），落点因此
-         * 是分片片首，实测比目标早 3~9 秒；分片内部的 IDR 又无法用字节范围落上去（分片里只有一个
-         * moof，没有可以从内部进入的 box 边界，内层 demuxer 也不可 seek）。延迟线于是在**包**这一
-         * 层把落点挪到"不晚于目标的最后一个关键帧"：它之前的包整体丢掉，之后的包按序交出。
-         *
-         * 三个引用是"放行时把包按原序交回 mQueue"需要的（锁与唤醒方式和 read_thread 推包一致）。
-         * 本仓库约定：新成员一律追加在类末尾（中间插入会移动偏移、破坏增量构建）。
-         */
         SeekLandingStage mSeekLanding{mQueue, mDataMutex, mWaitCond};
-
-        /*
-         * ============ DASH 的 DRM：清单声明 + 选优 + 软解兜底 ============
-         *
-         * 【分工】"谁来解 CENC"有两个可能的执行者，按**能力**决定，不是开关：
-         *   1. **平台 CDM**（Android MediaCodec+MediaCrypto、OHOS DRM Kit）——
-         *      只要 `DrmHandlerPrototype::isSupport()` 认选中的那个 scheme，
-         *      就把 format/uri/pssh/KID 交给 Stream_meta，由平台在安全世界里解。
-         *      这条优先（用户要求"能硬解的都硬解"）。
-         *   2. **内核软解**（CENCDecrypter）—— 只在平台不认这个 scheme、
-         *      而清单又明确给出了一个可以取到内容密钥的地址时启用，且样本由
-         *      demuxer_service 在读取路径上就地解。
-         *
-         * 【选优】清单可以同时声明多条 ContentProtection（mp4protection + 各 DRM 系统），
-         * 选哪一条由 `DrmSchemes::decide` 按"平台认不认 / 有没有可取密钥的地址 /
-         * 有没有指名具体 DRM 系统"排序决定，排序判据见 framework/drm/DrmSchemes.h。
-         * 结果缓存一次（mDrmDecision），因为 GetStreamMeta 会被反复调用。
-         *
-         * 新成员一律追加在类末尾（仓库约定，中间插入会移动偏移）。
-         */
 
         /** 选优结果（懒计算 + 缓存）。清单没声明任何内容保护时 index 为 -1。 */
         DrmSchemes::Decision drmDecision() const;
@@ -259,14 +225,6 @@ namespace Cicada {
 
         /** 清单是否声明了 CENC 保护的档位（决定内层 demuxer 的形态提示）。 */
         bool declaresCencProtectedContent() const;
-
-        /*
-         * 按清单声明的地址取内容密钥（软件兜底）。由 demuxer_service 在读到第一个带
-         * 加密信息的包时回调（见 demuxer_service::setCencKeyResolver）。
-         *
-         * kidHex 只用于"每个 KID 只问一次"的去重；密钥内容由清单里那一个 laurl 决定。
-         * 失败**不静默**：打一条 ERROR 说明"这条流解不开、以及为什么"。
-         */
         bool fetchSoftwareCencKey(const std::string &kidHex, uint8_t *key, int *keySize) const;
 
         Representation *getCurrentRepresentation() const;

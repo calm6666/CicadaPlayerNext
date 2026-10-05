@@ -1629,13 +1629,17 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     mPlayer.mPNotifier->NotifyVideoQualitySwitch(PLAYER_QUALITY_SWITCH_STARTED, index, "quality switch started");
 
     /*
-     * ② **边界对齐切换**（ABR 与手动共用的唯一出口）：只把"目标档 + 边界触发器"交给解复用层
-     *    —— 旧流继续 read/解码/渲染，直到它自己读到本分片末尾；解复用层在分片边界完成换流，
-     *    并把目标流的读位置对齐到"旧流分片号 + 1"（DashManager.cpp:221-247）。
+     * ② **边界对齐切换**（ABR 与手动共用的唯一出口）：把"目标档"和"**播放头节目时间**"交给
+     *    解复用层，然后就不管了 —— 旧流继续 read/解码/渲染，直到它自己读到本分片末尾；
+     *    解复用层在分片边界完成换流，并把目标流的起点设到"**播放头所在分片的下一个分片头**"
+     *    （DashManager/HLSManager 的 stopOnSegEnd 分支：getSegmentNumByTime(播放头) = k ⇒ k+1）。
      *    目标流的第一个视频包到达时，由 ReadPacket 的提交块坐实当前档，并按 meta 决定
      *    是否 flush / 丢旧档残留包 / 重建同一块解码器。
      *
-     *    切过去的时候目标流那一片已经在缓冲里，所以不需要 seek、不需要清包、不会卡顿。
+     *    这里用 SetOption 送播放头（非阻塞、走既有 IDemuxer::SetOption 虚函数链，不改任何签名）。
+     *    **不用 Seek**：Seek 会打开/取分片，是阻塞调用，放在提交这一刻就是"提交时动管线"，
+     *    真机表现正是"点下去画面卡死"。定位由解复用层在边界块里用**分片号**完成。
+     *
      *    终态仍然只有两种：已提交且首帧交给渲染器 ⇒ READY；真正的错误（arm 失败 / meta 读不到 /
      *    重建失败）⇒ FAILED。没有预热等待、没有任何死线。
      *
@@ -1643,6 +1647,10 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
      *    CicadaSwitchStreamIndex → SuperMediaPlayer::SwitchStream → MSG_CHANGE_VIDEO_STREAM →
      *    ProcessSwitchStreamMsg → 这里），所以这一行同时把 ABR 和手动改成边界对齐。
      */
+    if (mPlayer.mDemuxerService != nullptr && switchPos > 0) {
+        mPlayer.mDemuxerService->SetOption("alignedSwitchPlayheadUs", switchPos);
+    }
+
     mPlayer.SwitchVideoAligned(switchPos);
 }
 

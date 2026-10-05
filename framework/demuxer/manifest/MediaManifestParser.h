@@ -3,8 +3,8 @@
 //
 // JSON <-> MediaManifest conversion for object-based playback.
 //
-// The JSON schema matches hili-player's `MediaManifest` TypeScript type
-// (camelCase field names, see manifest.ts). Parsing is a one-shot conversion:
+// The JSON schema matches `MediaManifest` TypeScript type
+// Parsing is a one-shot conversion:
 // the JSON object is consumed directly, never serialized into m3u8/mpd text.
 //
 

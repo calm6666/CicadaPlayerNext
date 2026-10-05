@@ -68,6 +68,8 @@ namespace Cicada{
         HLSStream *mMuxedStream = nullptr;
         bool mStarted = false;
         int64_t mFirstSeekPos = INT64_MIN;
+        int mPendingPrefetchStream{-1};
+        int mAlignedSwitchBoundaryStream{-1};
     };
 }
 

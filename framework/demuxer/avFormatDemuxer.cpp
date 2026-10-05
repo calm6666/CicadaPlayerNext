@@ -345,6 +345,8 @@ namespace Cicada {
                     }
 
                     av_packet_free(&pkt);
+                    /* AVIO 真的读到了范围末尾（pb->error 既不是 EAGAIN 也不是负数）⇒ 这是真播完 */
+                    mDataExhausted = true;
                     return 0;// EOS
                 }
 
@@ -371,6 +373,9 @@ namespace Cicada {
 
             av_packet_unref(pkt);
         } while (true);
+
+        /* 读到包 ⇒ 数据还没读完：下一次 EOF 必须重新判定（seek 之后也一样） */
+        mDataExhausted = false;
 
         // FFmpeg >= 5.9 computes packet fields inside av_read_frame() itself;
         // the vendored av_compute_pkt_fields workaround is only for old FFmpeg.

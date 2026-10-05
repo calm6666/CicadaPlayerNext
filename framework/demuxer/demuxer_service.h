@@ -178,6 +178,13 @@ namespace Cicada {
         int GetNbSubStream(int index);
 
         int GetRemainSegmentCount(int index);
+
+        /*
+         * 【这一路的数据是否真的读到末尾】
+         * 转发给解复用器自己报（avFormatDemuxer 覆写为"AVIO 真的到了范围末尾且没有传输错误"）。
+         * 清单型解复用器没有覆写，默认 true ⇒ 行为与以前一致。
+         */
+        bool isDataExhausted();
         
         bool isRealTimeStream(int index);
 

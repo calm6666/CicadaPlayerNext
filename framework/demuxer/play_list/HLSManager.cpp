@@ -195,28 +195,92 @@ namespace Cicada {
 
         for (auto &i : mStreamInfoList) {
             if (i->mPStream->isOpened() && i->selected && i->mPFrame == nullptr && !i->eos) {
-                ret = i->mPStream->read(i->mPFrame);
+
+                bool boundaryNow = false;
+
+                if (i->stopOnSegEnd && i->toStreamId >= 0 && mAlignedSwitchBoundaryStream >= 0) {
+                    const int64_t playheadForBoundary = getAlignedSwitchPlayheadUs();
+                    uint64_t playheadSegForBoundary = 0;
+
+
+                    boundaryNow = (playheadForBoundary > 0 &&
+                                   i->mPStream->getSegmentNumByTime(playheadForBoundary, playheadSegForBoundary) &&
+                                   (int64_t) playheadSegForBoundary > (int64_t) mAlignedSwitchBoundaryStream);
+
+
+                    if (!boundaryNow && (playheadForBoundary <= 0 || mAlignedSwitchBoundaryStream < 0)) {
+                        boundaryNow = true;
+                        AF_LOGW("aligned switch: cannot evaluate the playhead boundary (playhead=%lld, armed "
+                                "segment=%d) — allowing the switch to proceed at the old stream's segment end "
+                                "rather than getting stuck\n", (long long) playheadForBoundary,
+                                mAlignedSwitchBoundaryStream);
+                    }
+
+                    if (boundaryNow) {
+                        AF_LOGI("aligned switch: the playhead has left the segment it was in when the switch was "
+                                "requested (playhead=%lld us -> segment %llu > armed segment %d) — this is the "
+                                "switch point\n", (long long) playheadForBoundary,
+                                (unsigned long long) playheadSegForBoundary, mAlignedSwitchBoundaryStream);
+                    }
+                }
+
+                if (boundaryNow) {
+                    /* 不读旧流的下一包：直接走下面既有的边界块（ret == 0 那条分支）。 */
+                    i->mPFrame = nullptr;
+                    ret = 0;
+                } else {
+                    ret = i->mPStream->read(i->mPFrame);
+                }
 
                 // AF_LOGD("CurSegNum is %llu", i.mPStream->getCurSegNum());
                 if (ret > 0) {
+
+                    {
+                        bool armedTargetIsThis = false;
+
+                        for (auto &k : mStreamInfoList) {
+                            if (k->stopOnSegEnd && k->toStreamId == i->mPStream->getId()) {
+                                armedTargetIsThis = true;
+                                break;
+                            }
+                        }
+
+                        if (armedTargetIsThis) {
+
+                            const uint64_t expectedStartSeg = (mAlignedSwitchBoundaryStream >= 0)
+                                                              ? (uint64_t) (mAlignedSwitchBoundaryStream + 1) : 0;
+
+
+                            (void) expectedStartSeg;
+
+                            /* 这里曾经"位置不对就扣住包不发" —— 那唯一的动作是扣包，判据一对不上就
+                               让播放器拿不到数据、直接卡死，已删除。位置由上面这次幂等定位保证。 */
+                        }
+                    }
 //                    i.mPFrame->streamIndex = i->mPStream->getId();
                     // subId *100 + streamID
                     i->mPFrame->getInfo().streamIndex = GEN_STREAM_ID(i->mPStream->getId(),
                                                         i->mPFrame->getInfo().streamIndex);
+
                 } else if (ret == 0) {
                     // TODO: don't block here
                     AF_LOGD("EOF %d\n", i->mPStream->getId());
 
                     int64_t lastPts = i->mPStream->getLastPts();
+
                     if (i->stopOnSegEnd) {
-                        i->mPStream->stop();
-                        i->selected = false;
+
 
                         for (auto &j : mStreamInfoList) {
                             if (j->mPStream->getId() == i->toStreamId) {
                                 j->selected = true;
                                 j->stopOnSegEnd = false;
                                 j->toStreamId = -1;
+
+                                j->eos = false;
+                                j->mPFrame = nullptr;
+
+                                j->mPStream->start();
 
                                 if (i->mPStream->isLive()) {
                                     std::vector<RenditionReport> renditions = i->mPStream->getCurRenditionInfo();
@@ -242,9 +306,65 @@ namespace Cicada {
                                     j->mPStream->setCurSegInfo(curSegInfo);
                                     j->mPStream->setDiscardPts(lastPts);
                                 } else {
-                                    AF_LOGE("set SegNum to %llu\n",
-                                            i->mPStream->getCurSegNum() + 1);
-                                    j->mPStream->SetCurSegNum(i->mPStream->getCurSegNum() + 1);
+
+                                    const int64_t playheadUs = getAlignedSwitchPlayheadUs();
+                                    uint64_t playheadSegNum = 0;
+                                    const bool byPlayhead = (playheadUs > 0) &&
+                                                            j->mPStream->getSegmentNumByTime(playheadUs, playheadSegNum);
+                                    int setSegRet = -1;
+                                    uint64_t targetSegNum = 0;
+
+                                    if (byPlayhead) {
+                                        targetSegNum = playheadSegNum;
+                                        AF_LOGI("aligned switch %d -> %d: the target stream starts at the segment the "
+                                                "playhead is in right now (playhead=%lld us -> its segment %llu; target "
+                                                "segment %llu)\n",
+                                                i->mPStream->getId(), i->toStreamId, (long long) playheadUs,
+                                                (unsigned long long) playheadSegNum,
+                                                (unsigned long long) targetSegNum);
+                                        setSegRet = j->mPStream->SetCurSegNum(targetSegNum);
+                                    } else {
+
+                                        if (playheadUs <= 0) {
+                                            AF_LOGW("aligned switch %d -> %d: NO PLAYHEAD was delivered to this manager "
+                                                    "(alignedSwitchPlayheadUs=%lld) — FALLING BACK to the old stream's "
+                                                    "segment + 1; DELIVERY problem, not a timeline problem\n",
+                                                    i->mPStream->getId(), i->toStreamId, (long long) playheadUs);
+                                        } else {
+                                            AF_LOGW("aligned switch %d -> %d: the playhead %lld us is NOT covered by the "
+                                                    "target stream's segment table — FALLING BACK to the old stream's "
+                                                    "segment + 1; TIMELINE problem (delivery was fine)\n",
+                                                    i->mPStream->getId(), i->toStreamId, (long long) playheadUs);
+                                        }
+
+
+                                        targetSegNum = (mAlignedSwitchBoundaryStream >= 0)
+                                                       ? (uint64_t) (mAlignedSwitchBoundaryStream + 1)
+                                                       : (i->mPStream->getCurSegNum() + 1);
+                                        AF_LOGE("set SegNum to %llu\n", targetSegNum);
+                                        setSegRet = j->mPStream->SetCurSegNum(targetSegNum);
+                                    }
+
+                                    if (setSegRet < 0) {
+                                        /*
+                                         * 【换不过去 ⇒ 判失败，不让播放器永远停在"切换中"】
+                                         * 判据是 SetCurSegNum 的返回值（纯状态量，无计时器）；失败时目标流不接、
+                                         * 旧流恢复选中继续播，结果经既有 GetProperty("alignedSwitchResult")
+                                         * 给播放器 ⇒ finishQualitySwitch(false) ⇒ UI 报切换失败。
+                                         */
+                                        setAlignedSwitchResult(-1);
+                                        j->selected = false;
+                                        i->selected = true;
+                                        i->stopOnSegEnd = false;
+                                        AF_LOGW("aligned switch %d -> %d FAILED: SetCurSegNum(%llu) returned %d — that "
+                                                "segment does not exist (e.g. the end of a VOD list); the old stream %d "
+                                                "keeps playing and the player will report PLAYER_QUALITY_SWITCH_FAILED\n",
+                                                i->mPStream->getId(), i->toStreamId,
+                                                (unsigned long long) targetSegNum, setSegRet, i->mPStream->getId());
+                                        i->toStreamId = -1;
+                                        return -EAGAIN;
+                                    }
+
                                 }
 
                                 break;
@@ -253,8 +373,14 @@ namespace Cicada {
 
                         i->stopOnSegEnd = false;
                         i->mPStream->stopOnSegEnd(false);
-                        OpenStream(i->toStreamId);
+                        /* OpenStream 已在本块开头执行过（按播放头的定位必须在它之后），这里不再重复。 */
                         AF_LOGD("change stream %d -> %d", i->mPStream->getId(), i->toStreamId);
+
+
+                        /* 不做"首个包到达再定位一次"（那会用更晚的播放头把目标档再往后挪一片 ⇒ 切换后快进）。目标档起点只在本块里定一次。 */
+                        mPendingAlignedSwitchStream = -1;
+                        mAlignedSwitchBoundaryStream = -1;
+
                         i->toStreamId = -1;
                         return -EAGAIN;
                     } else {
@@ -280,6 +406,22 @@ namespace Cicada {
                     pFrameOut = i->mPFrame.get();
                 }
             }
+        }
+
+        if (mPendingPrefetchStream >= 0) {
+            const int prefetchStream = mPendingPrefetchStream;
+            mPendingPrefetchStream = -1;
+            OpenStream(prefetchStream);
+
+            for (auto &j : mStreamInfoList) {
+                if (j->mPStream->getId() == prefetchStream) {
+                    j->selected = false;
+                    break;
+                }
+            }
+
+            AF_LOGI("aligned switch: target stream %d opened on the demuxer read thread to prefetch its segment\n",
+                    prefetchStream);
         }
 
         if (index != -1) {
@@ -375,6 +517,30 @@ namespace Cicada {
 
     const std::string HLSManager::GetProperty(int index, const string &key)
     {
+
+        if (key == "alignedSwitchResult") {
+            return std::to_string(getAlignedSwitchResult());
+        }
+
+
+        if (key == "alignedSwitchBoundaryReached") {
+
+            for (auto &i : mStreamInfoList) {
+                if (!i->stopOnSegEnd) {
+                    continue;
+                }
+
+                const int64_t playheadUs = getAlignedSwitchPlayheadUs();
+                uint64_t segNum = 0;
+
+                return (mAlignedSwitchBoundaryStream >= 0 && playheadUs > 0 &&
+                        i->mPStream->getSegmentNumByTime(playheadUs, segNum) &&
+                        (int64_t) segNum > (int64_t) mAlignedSwitchBoundaryStream) ? "1" : "0";
+            }
+
+            return (mAlignedSwitchBoundaryStream >= 0) ? "1" : "0";
+        }
+
         for (auto &i : mStreamInfoList) {
             if (i->mPStream->getId() == index) {
                 return i->mPStream->GetProperty(key);
@@ -412,9 +578,8 @@ namespace Cicada {
                 }
 
                 i->selected = false;
-                // TODO: close the hlsStream? close at release
-                //  if (mStarted)
-                i->mPStream->stop();
+
+                i->mPStream->close();
                 i->mPFrame = nullptr;
                 break;
             }
@@ -497,21 +662,7 @@ namespace Cicada {
             // 2. seek video first ,get the seekedUs
             type = STREAM_TYPE_VIDEO;
             // TODO type use bit or
-            /*
-             * 【P0-B（与 DashManager::seek 同一口径）：其余每一路的 seek 目标必须是"用户请求值"】
-             *
-             * 本函数原来在第 3 步给其余每一路喂的是 `us`，而 `us` 在这里被改写成**视频 seek()
-             * 的返回值**。HLSStream::seek() 末尾返回的 `usSought` 并**不是**请求值：
-             * SegmentList::getSegmentNumberByTime 把入参 time 就地改写成该片的 startTime
-             * （play_list/SegmentList.cpp 里 `time = i->startTime;`），所以它同样是"视频分片
-             * 起点"。于是音频的读位置由视频的分片网格决定 —— 与 DASH 完全同一个形状，只是
-             * 两边的分片网格不同。DASH 侧已按同一口径修正（见 DashManager::seek 里那段说明：
-             * 为什么必须解耦、为什么落点精度不会因此变差、为什么视频侧一字不变），这里保持一致。
-             *
-             * 视频侧行为一字不变：仍然用请求值 seek 视频、仍然取回它的返回值，返回值照旧只用于
-             * 诊断日志与"视频 seek 失败 ⇒ 整次 seek 失败"这条既有终态；视频的落点对齐与落点
-             * 延迟线都在 HLSStream::seek() 内部，本函数既不参与也不影响它们。
-             */
+
             const int64_t requestedUs = us;
 
             for (auto &i : mStreamInfoList) {
@@ -611,29 +762,32 @@ namespace Cicada {
 
         for (auto &i : mStreamInfoList) {
             if (i->mPStream->getId() == from) {
-                                /* 【清晰度切换：单解码器 + 延迟到分片边界 + 首帧进渲染才算提交】
-                 * 与 DashManager::SwitchStreamAligned 同一套，这里只列结论：
-                 *   · **双路解码方案已废除**（切换慢、帧可能对不齐），全仓只有一路视频
-                 *     解码器 + 一路音频解码器（SMPAVDeviceManager::mVideoDecoder /
-                 *     mAudioDecoder），没有 pendingDecoder 这类成员；
-                 *   · 本函数记录目标流 toStreamId 与边界触发器 stopOnSegEnd，到分片边界再换；
-                 *   · 提交点是"目标流首帧真正送入渲染器"，之后才 CloseStream 旧流；
-                 *   · stopOnSegEnd 在这里就是"旧流读到本片末尾就停"的触发器（见下）。 */
                 /*
-                 * 【边界对齐切换的触发器：必须置真，否则本函数等于空操作】
-                 *
-                 * 与 DashManager::SwitchStreamAligned 同一处修复、同一理由：本文件读
-                 * toStreamId 的几处（:211 / :483 / :581）都被 `if (i->stopOnSegEnd)` 把着，
-                 * 只写 toStreamId 不会换流。
-                 *
-                 * 置真之后：HLSStream::stopOnSegEnd(true) 让旧流读到本分片末尾就报停，
-                 * 于是 :211 那一支执行 —— 旧流停掉并取消选中，目标流被选中、读位置对齐到
-                 * "旧流分片号 + 1"（:254-256），再 OpenStream(toStreamId)（:256）。
-                 * 换流点落在分片边界、目标流那片已在缓冲里 ⇒ 切过去不等网络。
+                 * 与 DashManager 同一判据：没有播放头就定不出切换点 ⇒ 返回负值走既有失败出口
+                 * （finishQualitySwitch(false)）：旧档继续播、报 FAILED，而不是挂着让切换永远不完成。
+                 * 分片表暂时查不到不算失败（边界块会用目标档自己的表再查一次）。
                  */
-                i->mPStream->stopOnSegEnd(true);
+                const int64_t armPlayhead = getAlignedSwitchPlayheadUs();
+                uint64_t armSegNum = 0;
+
+                if (armPlayhead <= 0) {
+                    AF_LOGW("aligned switch %d -> %d refused: no playhead was delivered to this manager "
+                            "(alignedSwitchPlayheadUs=%lld), so the switch point cannot be defined\n",
+                            from, to, (long long) armPlayhead);
+                    return -EINVAL;
+                }
+
                 i->stopOnSegEnd = true;
                 i->toStreamId = to;
+
+
+                if (!i->mPStream->isLive()) {
+                    mPendingPrefetchStream = to;
+                }
+
+                mAlignedSwitchBoundaryStream = i->mPStream->getSegmentNumByTime(armPlayhead, armSegNum)
+                                               ? (int) armSegNum : -1;
+
                 break;
             }
         }

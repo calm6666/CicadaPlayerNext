@@ -212,39 +212,172 @@ int DashManager::ReadPacket(unique_ptr<IAFPacket> &packet, int index)
 
     for (auto &i : mStreamInfoList) {
         if (i->mPStream->isOpened() && i->selected && i->mPFrame == nullptr && !i->eos) {
-            ret = i->mPStream->read(i->mPFrame);
+
+            bool boundaryNow = false;
+
+            if (i->stopOnSegEnd && i->toStreamId >= 0 && mAlignedSwitchBoundaryStream >= 0) {
+                const int64_t playheadForBoundary = getAlignedSwitchPlayheadUs();
+                uint64_t playheadSegForBoundary = 0;
+
+
+                boundaryNow = (playheadForBoundary > 0 &&
+                               i->mPStream->getSegmentNumByTime(playheadForBoundary, playheadSegForBoundary) &&
+                               (int64_t) playheadSegForBoundary > (int64_t) mAlignedSwitchBoundaryStream);
+                if (!boundaryNow && (playheadForBoundary <= 0 || mAlignedSwitchBoundaryStream < 0)) {
+                    boundaryNow = true;
+                    AF_LOGW("aligned switch: cannot evaluate the playhead boundary (playhead=%lld, armed segment=%d) "
+                            "— allowing the switch to proceed at the old stream's segment end rather than getting "
+                            "stuck\n", (long long) playheadForBoundary, mAlignedSwitchBoundaryStream);
+                }
+
+                if (boundaryNow) {
+                    AF_LOGI("aligned switch: the playhead has left the segment it was in when the switch was "
+                            "requested (playhead=%lld us -> segment %llu > armed segment %d) — this is the "
+                            "switch point\n", (long long) playheadForBoundary,
+                            (unsigned long long) playheadSegForBoundary, mAlignedSwitchBoundaryStream);
+                }
+            }
+
+            if (boundaryNow) {
+                /* 不读旧流的下一包：直接走下面既有的边界块（ret == 0 那条分支）。 */
+                i->mPFrame = nullptr;
+                ret = 0;
+            } else {
+                ret = i->mPStream->read(i->mPFrame);
+            }
+
             if (ret > 0) {
+
+                {
+
+                    bool armedTargetIsThis = false;
+
+                    for (auto &k : mStreamInfoList) {
+                        if (k->stopOnSegEnd && k->toStreamId == i->mPStream->getId()) {
+                            armedTargetIsThis = true;
+                            break;
+                        }
+                    }
+
+                    if (armedTargetIsThis && mAlignedSwitchBoundaryStream >= 0) {
+                        const uint64_t expectedStartSeg = (uint64_t) (mAlignedSwitchBoundaryStream + 1);
+
+
+                        (void) expectedStartSeg;
+                    }
+                }
+
                 i->mPFrame->getInfo().streamIndex = GEN_STREAM_ID(i->mPStream->getId(), i->mPFrame->getInfo().streamIndex);
+
             } else if (ret == 0) {
                 AF_LOGD("EOF %d\n", i->mPStream->getId());
 
-                if (i->stopOnSegEnd) {
-                    i->mPStream->stop();
-                    i->selected = false;
 
-                    for (auto &j : mStreamInfoList) {
-                        if (j->mPStream->getId() == i->toStreamId) {
+                if (i->stopOnSegEnd) {
+
+                    const int toStreamId = i->toStreamId;
+                    const bool oldIsLive = i->mPStream->isLive();
+
+
+
+                    if (oldIsLive) {
+                        for (auto &j : mStreamInfoList) {
+                            if (j->mPStream->getId() == toStreamId) {
+                                j->selected = true;
+                                j->stopOnSegEnd = false;
+                                j->toStreamId = -1;
+                                uint64_t targetPosition = i->mPStream->getCurSegPosition() + 1;
+                                AF_LOGE("set SegPosition to %llu\n", targetPosition);
+                                j->mPStream->setCurSegPosition(targetPosition);
+                                break;
+                            }
+                        }
+                    }
+
+                    i->stopOnSegEnd = false;
+                    i->mPStream->stopOnSegEnd(false);
+
+                    AF_LOGD("change stream %d -> %d", i->mPStream->getId(), toStreamId);
+
+
+                    /* 不做"首个包到达再定位一次"：那会用更晚的播放头把目标档再往后挪一片 ⇒ 切换后快进。目标档起点只在本块里定一次。 */
+                    mPendingAlignedSwitchStream = -1;
+
+
+                    mAlignedSwitchBoundaryStream = -1;
+
+                    if (!oldIsLive) {
+
+                        for (auto &j : mStreamInfoList) {
+                            if (j->mPStream->getId() != toStreamId) {
+                                continue;
+                            }
+
                             j->selected = true;
                             j->stopOnSegEnd = false;
                             j->toStreamId = -1;
 
-                            if (i->mPStream->isLive()) {
-                                uint64_t targetPosition = i->mPStream->getCurSegPosition() + 1;
-                                AF_LOGE("set SegPosition to %llu\n", targetPosition);
-                                j->mPStream->setCurSegPosition(targetPosition);
+                            j->eos = false;
+                            j->mPFrame = nullptr;
+
+                            j->mPStream->start();
+
+                            const int64_t playheadUs = getAlignedSwitchPlayheadUs();
+                            uint64_t playheadSegNum = 0;
+                            const bool byPlayhead = (playheadUs > 0) &&
+                                                    j->mPStream->getSegmentNumByTime(playheadUs, playheadSegNum);
+                            int setSegRet = -1;
+                            uint64_t targetSegNum = 0;
+
+                            if (byPlayhead) {
+                                targetSegNum = playheadSegNum;
+                                AF_LOGI("aligned switch %d -> %d: the target stream starts at the segment the "
+                                        "playhead is in right now (playhead=%lld us -> its segment %llu; target "
+                                        "segment %llu)\n",
+                                        i->mPStream->getId(), toStreamId, (long long) playheadUs,
+                                        (unsigned long long) playheadSegNum, (unsigned long long) targetSegNum);
+                                setSegRet = j->mPStream->SetCurSegNum(targetSegNum);
                             } else {
-                                AF_LOGE("set SegNum to %llu\n", i->mPStream->getCurSegNum() + 1);
-                                j->mPStream->SetCurSegNum(i->mPStream->getCurSegNum() + 1);
+                                if (playheadUs <= 0) {
+                                    AF_LOGW("aligned switch %d -> %d: NO PLAYHEAD was delivered to this manager "
+                                            "(alignedSwitchPlayheadUs=%lld) — FALLING BACK to the old stream's "
+                                            "segment + 1; DELIVERY problem, not a timeline problem\n",
+                                            i->mPStream->getId(), toStreamId, (long long) playheadUs);
+                                } else {
+                                    AF_LOGW("aligned switch %d -> %d: the playhead %lld us is NOT covered by the "
+                                            "target stream's segment table — FALLING BACK to the old stream's "
+                                            "segment + 1; TIMELINE problem (delivery was fine)\n",
+                                            i->mPStream->getId(), toStreamId, (long long) playheadUs);
+                                }
+
+
+                                targetSegNum = (mAlignedSwitchBoundaryStream >= 0)
+                                               ? (uint64_t) (mAlignedSwitchBoundaryStream + 1)
+                                               : (i->mPStream->getCurSegNum() + 1);
+                                AF_LOGE("set SegNum to %llu\n", targetSegNum);
+                                setSegRet = j->mPStream->SetCurSegNum(targetSegNum);
+                            }
+
+                            if (setSegRet < 0) {
+
+                                setAlignedSwitchResult(-1);
+                                j->selected = false;
+                                i->selected = true;
+
+                                i->stopOnSegEnd = false;
+                                AF_LOGW("aligned switch %d -> %d FAILED: SetCurSegNum(%llu) returned %d — that "
+                                        "segment does not exist (e.g. the end of a VOD list); the old stream %d "
+                                        "keeps playing and the player will report PLAYER_QUALITY_SWITCH_FAILED\n",
+                                        i->mPStream->getId(), toStreamId,
+                                        (unsigned long long) targetSegNum, setSegRet, i->mPStream->getId());
+                                i->toStreamId = -1;
+                                return -EAGAIN;
                             }
 
                             break;
                         }
                     }
 
-                    i->stopOnSegEnd = false;
-                    i->mPStream->stopOnSegEnd(false);
-                    OpenStream(i->toStreamId);
-                    AF_LOGD("change stream %d -> %d", i->mPStream->getId(), i->toStreamId);
                     i->toStreamId = -1;
                     return -EAGAIN;
                 } else {
@@ -270,6 +403,26 @@ int DashManager::ReadPacket(unique_ptr<IAFPacket> &packet, int index)
                 pFrameOut = i->mPFrame.get();
             }
         }
+    }
+
+    if (mPendingPrefetchStream >= 0) {
+
+        const int prefetchStream = mPendingPrefetchStream;
+        mPendingPrefetchStream = -1;
+        OpenStream(prefetchStream);
+
+
+        for (auto &j : mStreamInfoList) {
+            if (j->mPStream->getId() == prefetchStream) {
+                j->selected = false;
+                break;
+            }
+        }
+        AF_LOGI("aligned switch: the target stream %d is opened NOW on the demuxer's read thread so it can "
+                "prefetch its segment before the boundary; it stays unselected (bypass) and becomes the active "
+                "stream only when the boundary block selects and positions it\n", prefetchStream);
+
+
     }
 
     if (index == -1 && mPList->isLive() && mPreferAudioEnabled && mBufferLevel == client_buffer_level_low) {
@@ -361,6 +514,30 @@ int DashManager::OpenStream(int index)
 
 const std::string DashManager::GetProperty(int index, const string &key)
 {
+
+    if (key == "alignedSwitchResult") {
+        return std::to_string(getAlignedSwitchResult());
+    }
+
+
+    if (key == "alignedSwitchBoundaryReached") {
+
+        for (auto &i : mStreamInfoList) {
+            if (!i->stopOnSegEnd) {
+                continue;
+            }
+
+            const int64_t playheadUs = getAlignedSwitchPlayheadUs();
+            uint64_t segNum = 0;
+
+            return (mAlignedSwitchBoundaryStream >= 0 && playheadUs > 0 &&
+                    i->mPStream->getSegmentNumByTime(playheadUs, segNum) &&
+                    (int64_t) segNum > (int64_t) mAlignedSwitchBoundaryStream) ? "1" : "0";
+        }
+
+        return (mAlignedSwitchBoundaryStream >= 0) ? "1" : "0";
+    }
+
     for (auto &i : mStreamInfoList) {
         if (i->mPStream->getId() == index) {
             return i->mPStream->GetProperty(key);
@@ -397,6 +574,8 @@ void DashManager::CloseStream(int id)
 
             i->selected = false;
             i->mPStream->stop();
+
+            i->mPStream->close();
             i->mPFrame = nullptr;
             if (i->mPStream->getStreamType() == STREAM_TYPE_AUDIO) {
                 mOpenAudioStreamCount--;
@@ -480,32 +659,7 @@ int64_t DashManager::seek(int64_t us, int flags, int index)
 
         // 2. seek video first ,get the seekedUs
         type = STREAM_TYPE_VIDEO;
-        /*
-         * 【P0-B：其余每一路的 seek 目标必须是"用户请求值"，不能是视频那一侧的落点】
-         *
-         * 本函数原来在第 3 步给其余每一路喂的是 `us`，而 `us` 在这里被改写成**视频 seek()
-         * 的返回值**。DASH 的返回值是"视频分片起点"（DashStream.cpp 的 landingUs），HLS 的
-         * 返回值同样是"自己那一片的分片起点"（SegmentList::getSegmentNumberByTime 会把入参
-         * time 就地改写成该片的 startTime）。于是音频的**读位置**由另一路（视频）的分片网格
-         * 决定：请求落在视频分片尾部时，音频被拽到比请求值早将近一整个视频分片的位置
-         * （实测 output.mpd：视频片 19.9866 s、音频片 9.984 s；日志里视频与音频的 reqUs 差
-         * -369 / -760 / -1932 / -2997 / -5176 ms，方向恒为音频更早）。
-         *
-         * 为什么这样是错的：每一路的分片网格是各自的，"包含请求值的那一片"才是它自己的正确
-         * 读起点。用视频的分片起点当音频的目标，等于要求音频按**别的流**的网格对齐，音频
-         * 自己的分片起点于是可能再往前落一整片 —— 这段前缀必须被解码后丢掉，既拉长 seek
-         * 的收敛时间，也让"音频与视频拿到同一个目标点"这条前提失效。
-         *
-         * 为什么这样改不会让落点精度变差：落点精度由播放器侧的单一判据负责
-         * （SuperMediaPlayer 的 shouldDropForDiscontinuity 与音频落点地板都与 targetUs 比较，
-         * 与"落点"无关），解复用层只决定"从哪里开始读、开始解"。这里把**同一个请求值**交给
-         * 每一路，每一路各自落到自己那一片的片首，播放器再按同一个 targetUs 把各自的前缀裁掉。
-         *
-         * 视频侧行为一字不变：第 2 步仍然用请求值 seek 视频、仍然取回它的返回值，返回值照旧
-         * 只用于诊断日志与"视频 seek 失败 ⇒ 整次 seek 失败"这条既有终态（失败时负值继续留在
-         * us 里传给第 3 步，与改动前逐字相同）；视频的落点对齐与落点延迟线都在
-         * DashStream::seek() 内部，本函数既不参与也不影响它们。
-         */
+
         const int64_t requestedUs = us;
 
         for (auto &i : mStreamInfoList) {
@@ -523,11 +677,7 @@ int64_t DashManager::seek(int64_t us, int flags, int index)
                         us = requestedUs;
                     }
 
-                    /*
-                     * 本次改动的验收读数：video_return 仍是视频的分片起点（视频侧一字未变），
-                     * 而 other_seek_target 与 user 相同 ⇒ 音频及其它每一路不再被视频的网格拽走。
-                     * 一次 seek 一条，天然有界，不需要限频。
-                     */
+
                     AF_LOGI("[dashseek] user=%lld video_return=%lld -> other_seek_target=%lld (stream=%d type=%d): "
                             "every stream is positioned by the SAME request value and lands on its own segment "
                             "grid; only the VOD video path stages its landing\n",
@@ -605,44 +755,32 @@ int DashManager::SwitchStreamAligned(int from, int to)
 
     for (auto &i : mStreamInfoList) {
         if (i->mPStream->getId() == from) {
-            			/*
-			 * 【清晰度切换：单解码器 + 延迟到分片边界 + 首帧进渲染才算提交】
-			 *
-			 * 【双路解码方案**已废除**，别再照它写】历史上有过"旧流继续解码、新流另起一路
-			 * 解码器"的方案（这也是本注释原来那句"双路 decoder 状态机"的来历），
-			 * 它被放弃的原因是：切换速度慢（要等两路都对齐）、而且**帧可能对不齐**。
-			 * 现在全仓只有一路视频解码器 + 一路音频解码器（见 SMPAVDeviceManager 的
-			 * mVideoDecoder / mAudioDecoder），没有 pendingDecoder 这种成员。
-			 *
-			 * 现行做法（本函数只做第一件事）：
-			 *   1) 这里**只记录目标流** toStreamId，不立刻换、也不设 stopOnSegEnd；
-			 *   2) 到分片边界时由 DashManager 自己换（见本文件里读 toStreamId 的那几处
-			 *      → OpenStream(toStreamId) → 日志 change stream X -> Y）；
-			 *   3) 提交点是"新流首帧真正送入渲染器"，之后才关闭旧流；
-			 *   4) 普通 seek 仍走原来的 stopOnSegEnd 路径。
-			 *
-			 * 为什么要留旧流：切流那一路解码器要 flush/重建，旧流若在分片边界就被
-			 * CloseStream，重建期间没有包可喂，表现为卡帧、EOS 或音画不同步。
-			 * 注意这是**包级**缓冲保护，不是"旧画面继续渲染" —— 只有一路解码器，
-			 * 做不到后者。
-			 */
             /*
-             * 【边界对齐切换的触发器：必须置真，否则本函数等于空操作】
-             *
-             * 本文件读 toStreamId 的三处（:221 / :468 / :575）**全都被 `if (i->stopOnSegEnd)`
-             * 把着**，而全仓没有任何一处把 stopOnSegEnd 置真 ⇒ 只写 toStreamId 就是"记了目标
-             * 却永远不换流"。
-             *
-             * 置真之后的链路：DashStream::stopOnSegEnd(true) 让旧流读到本分片末尾就返回 0
-             * （DashStream.cpp:801-807 的 mStopOnSegEnd 分支），于是 :218 的 ret == 0 走进
-             * :221 那一支 —— 旧流 stop + selected 置假，目标流 selected 置真并把读位置对齐到
-             * **旧流分片号 + 1**（:236-237），再 OpenStream(toStreamId)（:246）。
-             * 换流点因此恰好落在分片边界上：目标流被选中时它那一片已经在缓冲里，切过去不用
-             * 等网络 —— 这就是"分片边界切换不卡顿"的来源。
+             * 没有播放头就定不出"切换点"（切换点 = 播放头所在分片的下一分片起点）。
+             * 这时既不能立刻换（没有落点），也不能挂着（切换永远不完成、seek 被永久挂起）⇒
+             * 返回负值，让播放器走既有的失败出口 finishQualitySwitch(false)：旧档继续播、报 FAILED。
+             * 分片表暂时查不到不算失败（边界块会用目标档自己的表再查一次），所以只在播放头缺失时拒绝。
              */
-            i->mPStream->stopOnSegEnd(true);
+            const int64_t armPlayhead = getAlignedSwitchPlayheadUs();
+            uint64_t armSegNum = 0;
+
+            if (armPlayhead <= 0) {
+                AF_LOGW("aligned switch %d -> %d refused: no playhead was delivered to this manager "
+                        "(alignedSwitchPlayheadUs=%lld), so the switch point cannot be defined\n",
+                        from, to, (long long) armPlayhead);
+                return -EINVAL;
+            }
+
             i->stopOnSegEnd = true;
             i->toStreamId = to;
+
+            if (!i->mPStream->isLive()) {
+                mPendingPrefetchStream = to;
+            }
+
+            mAlignedSwitchBoundaryStream = i->mPStream->getSegmentNumByTime(armPlayhead, armSegNum)
+                                           ? (int) armSegNum : -1;
+
             break;
         }
     }
@@ -720,24 +858,7 @@ int64_t DashManager::getBufferDuration(int index) const
 
 std::list<AdaptationSet *> DashManager::FindSuitableAdaptationSets(Period* period)
 {
-    /*
-     * 【为什么要收下**全部**视频/音频 AdaptationSet，而不是"每种各挑第一条"】
-     *
-     * 下面 DashManager::init() 的模型是"**每个 Representation 一条流**"（每档清晰度 =
-     * 一条可切换的流，播放器那三档清晰度菜单读的就是这个流列表）。
-     *
-     * 而 MPD 有两种写法：
-     *   * 常见写法：一个 AdaptationSet 里挂整条清晰度阶梯（多条 Representation）——
-     *     只挑第一条 AdaptationSet 也够用，因为阶梯都在它里面；
-     *   * 另一种（参考实现 dash.js 的 manifest-to-dash 就明确这么写："每个 Representation
-     *     单独一个 AdaptationSet，与 MPD 原始格式一致"）：**一档一个 AdaptationSet**。
-     *
-     * 旧代码遇到第一条视频就 `continue`，于是第二种写法下**只剩下第一档**（而且是文件里
-     * 排最前的那档）。用户实测：播 DASH 时清晰度菜单里只有"自动 + 2160p"，其余档位全没了。
-     *
-     * 所以这里把视频/音频的 AdaptationSet 全部收进来 —— 每档都会在 init() 里变成一条流，
-     * 清晰度菜单自然就全了。第一种写法行为不变（本来就只有一个视频 AdaptationSet）。
-     */
+
     std::list<AdaptationSet *> &adaptSetList = period->GetAdaptSets();
     std::list<AdaptationSet *> ret;
 

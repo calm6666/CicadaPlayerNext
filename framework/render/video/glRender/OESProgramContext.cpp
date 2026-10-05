@@ -353,8 +353,13 @@ int OESProgramContext::updateFrame(std::unique_ptr<IAFFrame> &frame) {
 
     if (frame != nullptr) {
         IAFFrame::videoInfo &videoInfo = frame->getInfo().video;
-        if (mFrameWidth != videoInfo.width || mFrameHeight != videoInfo.height ||
-            mDar != videoInfo.dar) {
+        /* 尺寸未知的帧不得覆盖已知尺寸：写成 0 会让 updateDrawRegion() 退回"铺满窗口"的默认
+         * 四边形（从左边整幅画），下一帧再恢复等比居中 ⇒ 画面从左边闪一下弹一下（全屏最明显）。 */
+        const bool sizeKnown = videoInfo.width > 0 && videoInfo.height > 0 && videoInfo.dar > 0;
+
+        if (sizeKnown &&
+            (mFrameWidth != videoInfo.width || mFrameHeight != videoInfo.height ||
+             mDar != videoInfo.dar)) {
             mDar = videoInfo.dar;
             mFrameWidth = videoInfo.width;
             mFrameHeight = videoInfo.height;

@@ -2,7 +2,6 @@
 // ManifestDemuxer.h
 //
 // Object-based playback demuxer: converts a unified MediaManifest object
-// (the C++ counterpart of hili-player's MediaManifest, see
 // framework/demuxer/manifest/MediaManifest.h) into the internal playList
 // object model in one shot — zero m3u8/mpd text, zero manifest network I/O —
 // and delegates the actual segment scheduling/reading to the existing

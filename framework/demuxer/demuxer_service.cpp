@@ -511,6 +511,15 @@ namespace Cicada {
         return mDemuxerPtr->GetRemainSegmentCount(index);
     }
 
+    bool demuxer_service::isDataExhausted()
+    {
+        if (nullptr == mDemuxerPtr) {
+            return true;
+        }
+
+        return mDemuxerPtr->isDataExhausted();
+    }
+
     bool demuxer_service::isRealTimeStream(int index)
     {
         if (nullptr == mDemuxerPtr) {

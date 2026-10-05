@@ -104,6 +104,16 @@ namespace Cicada {
             mStreamEncrypted = encrypted;
         }
 
+        /*
+         * 覆盖 IDemuxer::isDataExhausted()：只有 AVIO 真的读到范围末尾（av_read_frame 报
+         * AVERROR_EOF，且 pb->error 既不是 EAGAIN 也不是负数）时才为真。见 avFormatDemuxer.cpp
+         * 读路径里那个 `return 0;// EOS` 的位置：置真在那儿，读到任何包就置假。
+         */
+        bool isDataExhausted() const override
+        {
+            return mDataExhausted;
+        }
+
     protected:
         explicit avFormatDemuxer(int dummy);
 
@@ -194,6 +204,9 @@ namespace Cicada {
          * 还没有任何包时起就已经是包的形态。true = 加密，保持第一个包上懒建的原行为。
          */
         bool mStreamEncrypted{false};
+
+        /* 追加在成员末尾：AVIO 是否真的读到了范围末尾（见 isDataExhausted()）。 */
+        bool mDataExhausted{false};
 
     };
 }

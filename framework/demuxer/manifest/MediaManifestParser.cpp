@@ -2,7 +2,7 @@
 // MediaManifestParser.cpp
 //
 // JSON parsing for the unified MediaManifest object model. Field names are the
-// camelCase names from hili-player's manifest.ts. All URL resolution happens
+// All URL resolution happens
 // later in ManifestDemuxer (single conversion point), so the parser stores
 // values verbatim.
 //
