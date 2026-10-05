@@ -1086,8 +1086,20 @@ class MultipartUploader(
         else -> e.message?.let { it.contains("Network") || it.contains("网络") } == true
     }
 
-    /** 发布任务列表快照（浅拷贝），驱动 Compose 重组。 */
+    /**
+     * 发布任务列表快照（浅拷贝），驱动 Compose 重组。
+     *
+     * 任务对象是**原地修改**的，所以必须先递增每个任务的 `revision`：StateFlow 只在
+     * `newValue != oldValue` 时发射，而 List 的比较落到 FileTask.equals（含 revision）——
+     * 不递增的话新旧列表逐元素相等，发布等于没发生，界面永远不刷新。
+     */
     private fun emitTasks() {
-        _fileTasks.value = _fileTasks.value.toList()
+        val list = _fileTasks.value
+
+        for (task in list) {
+            task.revision += 1
+        }
+
+        _fileTasks.value = list.toList()
     }
 }

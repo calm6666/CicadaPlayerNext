@@ -172,4 +172,22 @@ class FileTask(
         status == UploadTaskStatus.COMPLETED ||
             status == UploadTaskStatus.FAILED ||
             status == UploadTaskStatus.CANCELLED
+
+    // --------------------------------------------------------------- 可观察性
+    /**
+     * 发布版本号：本类所有字段都是**原地修改**的（progress/status/speed…），而对外发布走的是
+     * `MutableStateFlow<List<FileTask>>` 的浅拷贝（`_fileTasks.value = list.toList()`）。
+     * StateFlow 只在 `newValue != oldValue` 时才发射，`List.equals` 逐元素比较用的就是这里的
+     * `equals`；过去它是引用相等 ⇒ 复制出的新列表与旧的"相等" ⇒ **永远不发射** ⇒
+     * 界面收不到任何更新（进度条不动、一直显示"计算摘要中"、暂停/继续点了没反应）。
+     *
+     * 因此发布前把本字段 +1，并把它算进 equals：只要发布过，新旧列表就不相等 ⇒ 一定发射。
+     */
+    @Volatile var revision: Long = 0L
+
+    override fun equals(other: Any?): Boolean =
+        this === other ||
+            (other is FileTask && other.uid == uid && other.revision == revision)
+
+    override fun hashCode(): Int = uid.hashCode()
 }
