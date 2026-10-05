@@ -39,7 +39,7 @@
 `platform/QtPlayer/CMakeLists.txt:235`、`platform/JetpackComposePlayer/cicadaplayer/src/main/cpp/CMakeLists.txt:58`、
 `platform/Android/source/premierlibrary/CMakeLists.txt:28`、`platform/HarmonyOS/entry/src/main/cpp/CMakeLists.txt:27`、
 `platform/Apple/source/CMakeLists.txt:40`、`cmdline/CMakeLists.txt:66`；
-后端按 `framework/{Android,iOS,macOSX,windows,Linux,HarmonyOS,Emscripten}.cmake` 分叉。
+后端按 `framework/{Android,iOS,macOSX,windows,Linux,HarmonyOS}.cmake` 分叉。
 
 各端 seek 入口（**只用于定位该端要打/要验什么，不作为内核设计依据**）：
 `platform/QtPlayer/src/CicadaPlayerItem.cpp:2518`、
@@ -420,7 +420,7 @@ CI 载体：`cmdline` 播放器（`cmdline/example/syncPlayer.cpp:210,213`）—
 2. **后端层：平台差异被接口吸收。** 设备相关只体现在 `IAudioRender` / `IVideoRender` / `IDecoder` 的实现里：
    音频后端 = `framework/render/audio/{Android/AudioTrackRender, OHOS/OhosAudioRender, Apple/AFAudioUnitRender,
    Apple/AFAudioQueueRender, SdlAFAudioRender2}`；平台分叉只出现在
-   `framework/{windows,Linux,macOSX,Android,iOS,HarmonyOS,Emscripten}.cmake`。
+   `framework/{windows,Linux,macOSX,Android,iOS,HarmonyOS}.cmake`。
    ⇒ PC 与移动的差别被限制在"设备读写"，**不进入策略层**。
 3. **验收层：PC 先立断言，各端只做验收。** 把指标做成**平台无关的日志断言**，先在 PC 上跑通
    （`cmdline` 与 `QtPlayer` 本身就是 PC 端），再让各端壳端到端验收：

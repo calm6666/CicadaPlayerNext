@@ -126,7 +126,6 @@ flowchart LR
 | HarmonyOS NEXT | **OH_AVCodec 硬解 (surface mode, 零拷贝)** | **OH_AudioRenderer** | **DRM Kit: OH_MediaKeySystem/Session + SetMediakeySessionConfig** |
 | Windows | D3D11VA (FFmpeg hwaccel) | SDL | – |
 | Linux | VAAPI/VDPAU (FFmpeg hwaccel) | SDL/ALSA | – |
-| WebAssembly | 软件解码 | Web Audio | – |
 
 ## 5. 鸿蒙平台硬件解码栈
 

@@ -21,9 +21,6 @@ endif ()
 if (${CMAKE_SYSTEM_NAME} MATCHES Windows)
     message("build windows")
     set(TARGET_PLATFORM windows)
-elseif (${CMAKE_SYSTEM_NAME} MATCHES Emscripten)
-    message("build Emscripten")
-    set(TARGET_PLATFORM Emscripten)
 endif ()
 
 if (TARGET_PLATFORM)
@@ -34,11 +31,6 @@ message("TARGET_PLATFORM is ${TARGET_PLATFORM}")
 
 set(TOPDIR ${PROJECT_SOURCE_DIR}/..)
 include(${TARGET_PLATFORM}.cmake)
-
-if (EMSCRIPTEN)
-    add_compile_options(-s USE_PTHREADS=${USE_PTHREADS} -Os)
-    add_link_options(-s ERROR_ON_MISSING_LIBRARIES=0)
-endif ()
 
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D_FILE_OFFSET_BITS=64")
 set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D_FILE_OFFSET_BITS=64")
@@ -77,11 +69,7 @@ if (ENABLE_MUXER)
     add_subdirectory(muxer)
 endif ()
 
-if (NOT EMSCRIPTEN)
-    add_subdirectory(data_source)
-else()
-    add_subdirectory(WebAssemblyPlayer)
-endif ()
+add_subdirectory(data_source)
 
 
 set(CMAKE_CXX_STANDARD 11)
@@ -105,52 +93,6 @@ link_directories(
         ${COMMON_LIB_DIR})
 
 message(xxx $ENV{TOP_DIR})
-
-if (EMSCRIPTEN)
-    add_executable(WAPlayer WebAssemblyPlayer/WABitStreamDecoder.cpp)
-    target_link_libraries(WAPlayer PRIVATE
-            bitStreamDecoder
-            demuxer
-            videodec
-            avformat
-            avcodec
-            avutil
-            ssl
-            crypto
-            framework_utils
-            z
-            bz2
-            iconv)
-    if (EMSCRIPTEN)
-        set(EXPORTED_FUNCTIONS "[ \
-		'_BSDecoderSetReadCallBack', \
-		'_BSDecoderEOSCallBack', \
-        '_BSDecoderSetGetBuffer', \
-        '_BSDecoderSetInfoCallBackVideo', \
-        '_BSDecoderSetInfoCallBackAudio', \
-        '_BSDecoderSetFrameCallBack', \
-        '_BSDecoderPrepare', \
-        '_BSDecoderStart', \
-        '_BSDecoderFlush', \
-        '_BSDecoderStop', \
-        '_BSDecoderSetPollDataCallBack', \
-        '_BSDecoderSetErrorCallBack', \
-        '_BSDecoderSetPollRawBufferCallback', \
-        '_test' \
-    ]")
-        target_link_options(WAPlayer
-                PUBLIC
-                "SHELL:-s EXPORTED_FUNCTIONS='${EXPORTED_FUNCTIONS}'
-            -s WASM=1
-            -s ALLOW_MEMORY_GROWTH=1
-            -s TOTAL_MEMORY=67108864
-            -s EXTRA_EXPORTED_RUNTIME_METHODS='['addFunction']'
-            -s RESERVED_FUNCTION_POINTERS=14
-            -s ABORTING_MALLOC=0
-    ")
-    endif ()
-
-endif ()
 
 if (BUILD_TEST)
     #   add_subdirectory(tests)
@@ -219,7 +161,7 @@ if (BUILD_TEST)
     #        add_executable(filter_audio_test filter/avFilterAudio_test.cpp)
     #        target_link_libraries(filter_audio_test
     #                render
-    #                bitStreamDecoder
+    #
     #                demuxer
     #                videodec
     #                avformat
@@ -254,7 +196,7 @@ if (BUILD_TEST)
     #        add_executable(audioRender_test render/audioRender_test.cpp)
     #        target_link_libraries(audioRender_test
     #                render
-    #                bitStreamDecoder
+    #
     #                demuxer
     #                videodec
     #                avformat
