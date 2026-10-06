@@ -167,31 +167,6 @@ namespace Cicada {
         virtual void clearCache()
         {}
 
-        /*
-         * 【已读入的字节范围】本地/单文件源用这两个接口回答"读到哪了、总长多少"。
-         *
-         * 为什么需要它们：对外上报的"缓冲位置"目前只能拿 getBufferDuration()，而它的实现
-         * 依赖缓存模块（本地不走缓存时默认返回 0）⇒ 缓冲值退化成读前窗口里的包队列深度，
-         * 既不等于"已读入多少"，又会随队列锯齿抖动。有了已读偏移与总长，播放器就能把
-         * "已读入的字节范围"按线性比例映射到时间轴，得到一个既真实又单调的缓冲位置
-         * （往回 seek 后文件游标也回到落点 ⇒ 缓冲位置同步变小）。
-         *
-         * 默认 -1 表示"该源不提供"（分片流/网络流的"已缓冲"由分片缓存表达，不用这两个值）：
-         * 此时播放器退回原有算法，行为与以前一致。
-         *
-         * 本虚函数留在虚函数列表末尾（理由同 IDemuxer 里 SeekStream / setStreamEncrypted 的约定），
-         * 以后新增同类接口继续往这里追加。
-         */
-        virtual int64_t getReadPosition()
-        {
-            return -1;
-        }
-
-        virtual int64_t getTotalLength()
-        {
-            return -1;
-        }
-
     protected:
         std::atomic_bool mInterrupt{false};
         SourceConfig mConfig{};

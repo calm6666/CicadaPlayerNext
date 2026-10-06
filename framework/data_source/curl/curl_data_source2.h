@@ -46,24 +46,6 @@ namespace Cicada {
             return flag_report_speed;
         }
 
-        /*
-         * 已读入范围：与 CurlDataSource 同口径 —— 总长用建连时记下的 mFileSize，
-         * 读取游标问连接的 tell()。只读查询，不改动读取位置。
-         */
-        int64_t getReadPosition() override
-        {
-            if (mPConnection == nullptr) {
-                return -1;
-            }
-
-            return mPConnection->tell();
-        }
-
-        int64_t getTotalLength() override
-        {
-            return mFileSize;
-        }
-
     private:
         CURLConnection2 *initConnection();
 

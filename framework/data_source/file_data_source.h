@@ -29,14 +29,6 @@ namespace Cicada{
 
         size_t Read(void *buf, size_t nbyte) override;
 
-        /*
-         * 已读入范围：直接问文件描述符当前偏移与文件总长。
-         * 只读查询，不改动读取游标（getTotalLength 里临时 SEEK_END 之后会还原）。
-         */
-        int64_t getReadPosition() override;
-
-        int64_t getTotalLength() override;
-
     private:
         string mPath;
         int mFd;

@@ -6,7 +6,6 @@
 #define FRAMEWORK_FFMPEGDATASOURCE_H
 extern "C" {
 #include <libavformat/url.h>
-#include <libavformat/avio.h>
 }
 
 #include "IDataSource.h"
@@ -45,33 +44,6 @@ namespace Cicada {
         uint64_t getFlags() override
         {
             return flag_report_speed;
-        }
-
-        /*
-         * 已读入范围：本地文件（probe 就是"路径能 access 到"）与直连网络单文件都由本类提供，
-         * 用 ffmpeg 自己的 AVIO 回答这两个值：
-         *   avio_size() = 整个输入的总长（本地就是文件大小，容器/协议层已经算好）；
-         *   avio_tell() = 当前读取游标，也就是"已读到的字节偏移"。
-         * 都是只读查询，不动读取位置。基类默认返回 -1（分片流的"已缓冲"由分片缓存表达），
-         * 这里给真值之后，播放器才能按"已读入的字节范围"上报缓冲位置
-         * （往回 seek 时文件游标回退 ⇒ 缓冲位置同步变小）。
-         */
-        int64_t getReadPosition() override
-        {
-            if (mPuc == nullptr) {
-                return -1;
-            }
-
-            return avio_tell(mPuc);
-        }
-
-        int64_t getTotalLength() override
-        {
-            if (mPuc == nullptr) {
-                return -1;
-            }
-
-            return avio_size(mPuc);
         }
 
     private:
