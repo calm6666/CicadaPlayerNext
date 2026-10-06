@@ -2999,44 +2999,21 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
             const int64_t packetPosForAxis = pVideoPacket->getInfo().timePosition;
 
             if (packetPtsForAxis != INT64_MIN && packetPosForAxis >= 0) {
-                int64_t freshOffset = packetPosForAxis - packetPtsForAxis;
-
                 /*
-                 * 【轴归一化只对"原始 pts 轴不按节目速率推进"的片源生效】
+                 * 【统一口径：视频轴一律换算到解复用器给的 timePosition 轴】
                  *
-                 * 这段重建偏移本来是给 DASH rendition 写的（那种片源的 raw pts 轴不按节目速率走，
-                 * 不归一每个分片边界都会漂）。但单文件片源（本地/网络 mp4、FLV 直播）音视频共用
-                 * 一条程序时钟，**只归视频**等于人为造出一个固定偏移。实测日志就是这么炸的：
-                 *   video pts axis refreshed: stream=0 rawPts=115138000 timePosition=0
-                 *                             offset=-115138000
-                 *   drop frame: master played time is 115171218, video pts is 42000
-                 * 视频 raw pts 从 115.138s 起被压到 0，而音频/主时钟仍在原轴（115.17s）⇒ 每帧都被
-                 * 判"迟到"丢掉、每 8 帧才强制上屏一帧 ⇒ FLV 直播一跳一跳地卡。
+                 * offset = timePosition − rawPts，帧上屏前加回它（见下面 SendVideoFrameToRender 前那处
+                 * `pFrame->getInfo().pts += mActiveVideoPtsOffset`）⇒ 视频帧从此落在**节目轴**上，
+                 * 与位置/时长/seek 同一条轴。这正是这段代码本来的用途：
+                 *   - 单文件片源（本地/网络 mp4、FLV 直播）rawPts 可能远离 0（长跑直播能到 12.8 小时）
+                 *     ⇒ 换算成 timePosition（0 起算）后与主时钟同轴；
+                 *   - DASH/HLS 每个分片边界 rawPts 会跳 ⇒ 每包重算一次偏移，跨分片自然跟上。
                  *
-                 * 判据用**已有的轴观测数据**（下面那两个 deque 里存的历史样本），不用解复用器类型
-                 * （IDemuxer 并不继承 demuxerPrototype，getType() 在播放器侧取不到）：
-                 * 取上一包的 (rawPts, timePosition)，若两者推进量基本一致（1:1，允许 500ms 抖动）
-                 * ⇒ 这条轴本来就是节目的轴 ⇒ 保持恒等偏移（0），不做归一。
-                 * DASH 那种轴在分片内 1:1、跨分片跳变的情况依旧会被归一（分片边界上差值会超阈值）。
+                 * 曾经这里被改成"rawPts 与 timePosition 推进一致就取恒等（不换算）"，那是治标：
+                 * 非 0 起算的点播/直播会因此把视频留在原始轴，而主时钟在节目轴上 ⇒ 又是错位。
+                 * 主时钟侧的对等换算见 ProcessStartMsg（锚 0）与两处音频推进（减去音频原始基准）。
                  */
-                if (!mVideoAxisPts.empty()) {
-                    const int64_t previousPtsSample = mVideoAxisPts.back();
-                    const int64_t previousPosSample = mVideoAxisTimePos.back();
-                    const int64_t ptsStep = packetPtsForAxis - previousPtsSample;
-                    const int64_t posStep = packetPosForAxis - previousPosSample;
-
-                    if (llabs(ptsStep - posStep) <= 500 * 1000) {
-                        freshOffset = 0;
-                    }
-                } else {
-                    /*
-                     * 第一个包没有历史样本可比较 ⇒ 先不归一（保持"未设置"）：
-                     * 否则单文件直播的首包会被压出一个 -115s 级的偏移、那一帧直接判迟到。
-                     * DASH 那种轴在第 2 个包就会显出不一致并被正常归一，代价只是首包不动偏移。
-                     */
-                    freshOffset = INT64_MIN;
-                }
-
+                const int64_t freshOffset = packetPosForAxis - packetPtsForAxis;
                 const int64_t previousOffset = mActiveVideoPtsOffset;
                 const bool logThisRefresh = (previousOffset == INT64_MIN ||
                                              llabs(freshOffset - previousOffset) > 500 * 1000);
@@ -3638,7 +3615,20 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
                     (long long) (mAVDeviceManager != nullptr ? mAVDeviceManager->getAudioRenderPosition() : INT64_MIN));
         }
         if (mDiscontinuity.audioBaseUs.load() == INT64_MIN) {
-            pinAudioClockBase(pts);
+            /*
+             * 音频时钟基准 = 音频在**节目轴**上的内容位置（见头文件 Discontinuity::audioBaseUs 的说明）。
+             *
+             * 音频帧的 pts 是流自己的原始时间戳（长跑直播能到 12.8 小时），而节目轴从 0 起算
+             * ⇒ 这里必须减去音频的原始基准（mFirstAudioPts = 首个音频 pts − 它的 timePosition）。
+             * 否则主时钟会被拖回原始轴：它的参考正是这条音频时钟
+             * （下面 mMasterClock.setReferenceClock(getAudioPlayTimeStampCB, this)，
+             *   回调返回 audioBaseUs + 设备已消费量），于是视频帧（在节目轴上）全被判"迟到"丢掉 ——
+             * “FLV 直播非常卡”就是这个。
+             *
+             * 换算只写在这一处：seek 路径上的 pin 用的是 targetUs（mDiscontinuity.targetUs，
+             * 本来就在节目轴上），在那里再减一次基准就是错上加错。
+             */
+            pinAudioClockBase(pts - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
         }
 
         /*
@@ -4817,7 +4807,12 @@ void SuperMediaPlayer::FlushAudioPath()
         if (oldBaseUs != INT64_MIN && oldConsumedUs != INT64_MIN && consumedBeforeFlushValid) {
             pinAudioClockBase(oldBaseUs + (consumedBeforeFlushUs - oldConsumedUs));
         } else if (contentPosBeforeFlush != INT64_MIN) {
-            pinAudioClockBase(contentPosBeforeFlush);
+            /*
+             * contentPosBeforeFlush = mPlayedAudioPts，和 pts 同源（都是音频帧的原始时间戳）
+             * ⇒ 钉基准前同样减去音频原始基准，保证音频时钟（以及以它为参考的主时钟）始终在节目轴上。
+             * 上面那个 oldBaseUs 分支不用换算：oldBaseUs 本身就是已经换算过的节目轴值。
+             */
+            pinAudioClockBase(contentPosBeforeFlush - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
         } else {
             pinAudioClockBase(INT64_MIN);
         }
