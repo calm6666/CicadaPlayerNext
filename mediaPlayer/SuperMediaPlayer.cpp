@@ -4935,6 +4935,37 @@ void SuperMediaPlayer::PostBufferPositionMsg()
          */
         const int64_t position = getCurrentPosition();
 
+        /*
+         * 本地/单文件源：缓冲位置 = **已读入的字节范围**映射到时间轴（按总长线性换算）。
+         *
+         * 为什么不用 getBufferDuration() 那条路：它的实现依赖缓存模块（本地不走缓存时默认返回 0），
+         * 于是缓冲值退化成读前窗口里的包队列深度 —— 既不等于"已读入多少"，又会随队列锯齿小幅回缩。
+         * 判据是数据源能否报出读取游标与总长（IDataSource::getReadPosition/getTotalLength，
+         * 分片流与网络流返回 -1）⇒ 报不出来就照旧走下面的原算法，不影响 DASH/HLS。
+         * 往回 seek 后文件游标也回到落点 ⇒ 这里的值同步变小，界面看到的就是真实的已读范围。
+         */
+        if (mDuration > 0 && mDemuxerService != nullptr) {
+            const int64_t readBytes = mDemuxerService->getSourceReadPosition();
+            const int64_t totalBytes = mDemuxerService->getSourceTotalLength();
+
+            if (readBytes > 0 && totalBytes > 0) {
+                int64_t buffered = static_cast<int64_t>(static_cast<double>(mDuration) *
+                                                        static_cast<double>(readBytes) /
+                                                        static_cast<double>(totalBytes));
+
+                if (buffered > mDuration) {
+                    buffered = mDuration;
+                }
+
+                /* 落点刚开始读、游标还没追到播放头时（buffered < position）交给下面的原算法。 */
+                if (buffered >= position) {
+                    mBufferPosition = buffered;
+                    mPNotifier->NotifyBufferPosition((mBufferPosition <= mDuration ? mBufferPosition : mDuration) / 1000);
+                    return;
+                }
+            }
+        }
+
         if (duration >= 0) {
             mBufferPosition = position + duration;
         } else if (!mDiscontinuity.filterActive.load()) {

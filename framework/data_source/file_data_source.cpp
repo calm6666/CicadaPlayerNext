@@ -60,4 +60,42 @@ namespace Cicada {
     {
         return ::read(mFd, buf, nbyte);
     }
+
+    int64_t fileDataSource::getReadPosition()
+    {
+        if (mFd <= 0) {
+            return -1;
+        }
+
+        const off_t position = ::lseek(mFd, 0, SEEK_CUR);
+
+        if (position < 0) {
+            return -1;
+        }
+
+        return static_cast<int64_t>(position);
+    }
+
+    int64_t fileDataSource::getTotalLength()
+    {
+        if (mFd <= 0) {
+            return -1;
+        }
+
+        /* 必须先记住当前位置：SEEK_END 会改动读取游标，查完要还原，否则会把读取位置打乱。 */
+        const off_t current = ::lseek(mFd, 0, SEEK_CUR);
+
+        if (current < 0) {
+            return -1;
+        }
+
+        const off_t end = ::lseek(mFd, 0, SEEK_END);
+        ::lseek(mFd, current, SEEK_SET);
+
+        if (end < 0) {
+            return -1;
+        }
+
+        return static_cast<int64_t>(end);
+    }
 }

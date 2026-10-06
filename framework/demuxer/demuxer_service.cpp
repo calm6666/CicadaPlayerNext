@@ -520,6 +520,24 @@ namespace Cicada {
         return mDemuxerPtr->isDataExhausted();
     }
 
+    int64_t demuxer_service::getSourceReadPosition()
+    {
+        if (nullptr == mPDataSource) {
+            return -1;
+        }
+
+        return mPDataSource->getReadPosition();
+    }
+
+    int64_t demuxer_service::getSourceTotalLength()
+    {
+        if (nullptr == mPDataSource) {
+            return -1;
+        }
+
+        return mPDataSource->getTotalLength();
+    }
+
     bool demuxer_service::isRealTimeStream(int index)
     {
         if (nullptr == mDemuxerPtr) {

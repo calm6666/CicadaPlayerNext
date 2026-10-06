@@ -611,8 +611,16 @@ Item {
 
             width: QtPlayerTheme.progressThumbSize
             height: QtPlayerTheme.progressThumbSize
-            x: Math.max(0, Math.min(progressRow.width - width,
-                                    progressRow.width * progressRow.shownRatio - width / 2))
+            /*
+             * 圆心必须**严格落在进度点** ratio·W 上，所以不能再用 clamp 把整颗 dot 关进轨道里：
+             * 那样圆心的活动范围会变成 [r, W−r]，而已播放填充（下面 playedBar）是从 0 铺到
+             * ratio·W、两端都不收 —— 于是 0% 时 dot 比填充头偏右 r、100% 时比填充尾偏左 r
+             * （中间看不出来，只有头尾约 2% 受影响，就是"0% 和 100% 位置不对"）。
+             *
+             * 溢出量最多 r = progressThumbSize/2 = 10px，落在行内左右 12px 的
+             * progressRowPaddingH 留白里（QtPlayerTheme.qml:155），本行不裁切 ⇒ 不会被切掉。
+             */
+            x: progressRow.width * progressRow.shownRatio - width / 2
             /*
              * 圆点要对齐**轨道中心**，不是对齐整行中心：   
              * 里的居中项（controls.scss:154-182），所以它的中心 = 轨道中心 = 行顶上 2px。

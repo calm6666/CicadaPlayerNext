@@ -185,6 +185,14 @@ namespace Cicada {
          * 清单型解复用器没有覆写，默认 true ⇒ 行为与以前一致。
          */
         bool isDataExhausted();
+
+        /*
+         * 【已读入范围】转发给数据源：本地/单文件源会报"当前读取游标的字节偏移"与"文件总长"，
+         * 其余源（分片流、网络流）返回 -1 ⇒ 调用方退回原算法。见 IDataSource::getReadPosition。
+         */
+        int64_t getSourceReadPosition();
+
+        int64_t getSourceTotalLength();
         
         bool isRealTimeStream(int index);
 

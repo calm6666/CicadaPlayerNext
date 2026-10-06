@@ -44,6 +44,26 @@ namespace Cicada {
             return flag_report_speed;
         }
 
+        /*
+         * 已读入范围（本地单文件 / 可随机访问源，走 curl 的 file:// 也一样）：
+         *   总长 = 建连时记下的 mFileSize；读取游标 = 连接的 tell()（就是已读到的字节偏移）。
+         * 都是只读查询，不动读取位置。基类默认返回 -1，这里给出真值之后，播放器才能按
+         * "已读入的字节范围"上报缓冲位置（往回 seek 时游标回退 ⇒ 缓冲位置同步变小）。
+         */
+        int64_t getReadPosition() override
+        {
+            if (mPConnection == nullptr) {
+                return -1;
+            }
+
+            return mPConnection->tell();
+        }
+
+        int64_t getTotalLength() override
+        {
+            return mFileSize;
+        }
+
     private:
 
         CURLConnection *initConnection();
