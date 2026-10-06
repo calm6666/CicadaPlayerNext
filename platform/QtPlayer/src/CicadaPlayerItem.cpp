@@ -1294,6 +1294,16 @@ namespace cicadaqt {
                 previous.toString().toUtf8().constData());
 
         /* 换地址等于重新来一遍：先停掉旧的，再建新的。 */
+        /*
+         * 【换片先把对外的播放状态归零】位置/缓冲/总时长都只在播放器回调到达时才赋值，而回调要等
+         * 新片源真的开始解码才来；自动开播关闭时（m_autoPlay=false）播放器只 prepared、不 start
+         * ⇒ 回调不来 ⇒ 界面一直显示上一部的进度与总时长，直到用户点播放。
+         *
+         * 注意 m_pendingSeekMs 不动：应用层"续播到历史位置"就是靠 setSource 前后设置它实现的，
+         * 在这里清掉会把续播一起废掉。
+         */
+        resetPlaybackUiState();
+
         destroyPlayer();
         m_playerStarted = false;
         m_firstFrameEmitted = false;
@@ -4789,6 +4799,36 @@ namespace cicadaqt {
 
         m_bufferedPosition = positionMs;
         emit bufferedPositionChanged();
+    }
+
+    void CicadaPlayerItem::resetPlaybackUiState()
+    {
+        /*
+         * 位置：进度条的已播放段与 dot 都由它算。归零后 dot 回到最左、已播放段清空。
+         */
+        if (m_position != 0) {
+            m_position = 0;
+            emit positionChanged();
+        }
+
+        /*
+         * 缓冲位置：不清的话换片后界面会显示上一部已经缓冲到哪（缓冲条比已播放段长一截）。
+         */
+        if (m_bufferedPosition != 0) {
+            m_bufferedPosition = 0;
+            emit bufferedPositionChanged();
+        }
+
+        /*
+         * 总时长：不清的话时间标签会显示上一部的总时长（例如切到短片还显示 01:32:10），
+         * 而且 ratioOf() 会按旧总时长算比例 ⇒ 进度条位置也跟着错。归零后界面按"未知"显示。
+         */
+        if (m_duration != 0) {
+            m_duration = 0;
+            emit durationChanged();
+        }
+
+        AF_LOGD("reset playback ui state (position/buffered/duration -> 0)\n");
     }
 
     void CicadaPlayerItem::notifyBuffering(bool buffering)

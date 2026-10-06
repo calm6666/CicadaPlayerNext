@@ -797,6 +797,16 @@ namespace cicadaqt {
         void notifyDownloadSpeed(qint64 bitsPerSecond);
         /* 主线程：seek 完成/位置回调等（原有）。 */
         void notifyBufferedPosition(qint64 positionMs);
+
+        /*
+         * 把对外的播放状态（位置 / 缓冲位置 / 总时长）归零并发出变更信号。
+         *
+         * 为什么需要单独一个函数：这三项都只在**播放器回调**到达时才被赋值，而回调要等新片源
+         * 真的开始解码才来。自动开播关闭时，切换视频后播放器只 prepared、不 start ⇒ 三个回调
+         * 都不来，界面就会一直显示上一部的进度与总时长，直到用户点播放。换片那一刻必须先归零。
+         */
+        void resetPlaybackUiState();
+
         void notifyError(int code, const QString &message);
         /* 框架开始/结束一次 seek（Seeking / SeekEnd 回调）。 */
         void notifySeekStarted();
