@@ -700,11 +700,22 @@ void SMPMessageControllerListener::ProcessStartMsg()
         mPlayer.mUtil->reset();
 
         if (mPlayer.mPlayStatus != PLAYER_PAUSED) {
-            if (HAVE_AUDIO) {
-                mPlayer.mMasterClock.setTime(mPlayer.mFirstAudioPts);
-            } else {
-                mPlayer.mMasterClock.setTime(mPlayer.mFirstVideoPts);
-            }
+            /*
+             * 【主时钟锚在"节目轴"上，与视频帧同轴】
+             *
+             * mFirstAudioPts / mFirstVideoPts 记的是各自流的**原始基准**（= 首个 pts − 它的
+             * timePosition，见 DecodeAudioFrame / DecodeVideoPacket 处的记账：SuperMediaPlayer.cpp
+             * 的 mFirstAudioPts / mFirstVideoPts 赋值）。而视频帧的 pts 走的是 timePosition
+             * （从 0 起算）这条轴。实测日志里两者差了一整条流的时长：
+             *   drop frame, master played time is 46244931217, video pts is 167000
+             * 主时钟锚在 46244.9 秒（这条 FLV 直播自己的 12.8 小时原始时间戳），视频帧却是 0.167 秒
+             * ⇒ 每一帧都被判"迟到"丢掉、每 8 帧才强制上屏一帧（"FLV 直播非常卡"就是这么来的）。
+             *
+             * 节目轴的定义本来就是"从 0 开始"（位置/时长/seek 都在这条轴上），所以这里锚 0，
+             * 音视频两侧从此同轴。原来是"有音频锚 mFirstAudioPts、否则锚 mFirstVideoPts"——
+             * 两个基准都是原始轴上的值，改成 0 之后两个分支等价，不再需要分支。
+             */
+            mPlayer.mMasterClock.setTime(0);
         }
 
         mPlayer.ChangePlayerStatus(PLAYER_PLAYING);

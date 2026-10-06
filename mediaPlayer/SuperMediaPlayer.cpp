@@ -2234,7 +2234,14 @@ bool SuperMediaPlayer::DoCheckBufferPass()
                     FlushAudioPath();
                     AF_LOGD("drop left aduio duration is %lld,left aduio size is %d",
                             mBufferController->GetPacketDuration(BUFFER_TYPE_AUDIO), mBufferController->GetPacketSize(BUFFER_TYPE_AUDIO));
-                    mMasterClock.setTime(lastAudioPts);
+                    /*
+                     * 音频包/帧的 pts 是流自己的**原始时间戳**，而主时钟与视频帧走的是
+                     * timePosition（从 0 起算）那条节目轴 ⇒ 这里必须减去音频的原始基准
+                     * （mFirstAudioPts = 首个音频 pts − 它的 timePosition），否则主时钟会跳回
+                     * 原始轴，视频帧又全被判迟到（详见 ProcessStartMsg 里那段说明）。
+                     * 基准未初始化时（极早期）按原值走，避免减出垃圾值。
+                     */
+                    mMasterClock.setTime(lastAudioPts - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
                 }
             }
         }
@@ -2407,7 +2414,9 @@ void SuperMediaPlayer::LiveTimeSync(int64_t delayTime)
                 FlushAudioPath();
                 AF_LOGD("drop left audio duration is %lld,left audio size is %d", mBufferController->GetPacketDuration(BUFFER_TYPE_AUDIO),
                         mBufferController->GetPacketSize(BUFFER_TYPE_AUDIO));
-                mMasterClock.setTime(mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO));
+                /* 同上一处：音频原始 pts 要换算到节目轴（减去音频的原始基准）再喂给主时钟。 */
+                const int64_t audioPacketPts = mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO);
+                mMasterClock.setTime(audioPacketPts - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
             }
         }
     }
