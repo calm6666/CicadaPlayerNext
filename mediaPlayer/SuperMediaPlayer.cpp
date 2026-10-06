@@ -2234,14 +2234,7 @@ bool SuperMediaPlayer::DoCheckBufferPass()
                     FlushAudioPath();
                     AF_LOGD("drop left aduio duration is %lld,left aduio size is %d",
                             mBufferController->GetPacketDuration(BUFFER_TYPE_AUDIO), mBufferController->GetPacketSize(BUFFER_TYPE_AUDIO));
-                    /*
-                     * 音频包/帧的 pts 是流自己的**原始时间戳**，而主时钟与视频帧走的是
-                     * timePosition（从 0 起算）那条节目轴 ⇒ 这里必须减去音频的原始基准
-                     * （mFirstAudioPts = 首个音频 pts − 它的 timePosition），否则主时钟会跳回
-                     * 原始轴，视频帧又全被判迟到（详见 ProcessStartMsg 里那段说明）。
-                     * 基准未初始化时（极早期）按原值走，避免减出垃圾值。
-                     */
-                    mMasterClock.setTime(lastAudioPts - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
+                    mMasterClock.setTime(lastAudioPts);
                 }
             }
         }
@@ -2414,9 +2407,7 @@ void SuperMediaPlayer::LiveTimeSync(int64_t delayTime)
                 FlushAudioPath();
                 AF_LOGD("drop left audio duration is %lld,left audio size is %d", mBufferController->GetPacketDuration(BUFFER_TYPE_AUDIO),
                         mBufferController->GetPacketSize(BUFFER_TYPE_AUDIO));
-                /* 同上一处：音频原始 pts 要换算到节目轴（减去音频的原始基准）再喂给主时钟。 */
-                const int64_t audioPacketPts = mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO);
-                mMasterClock.setTime(audioPacketPts - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
+                mMasterClock.setTime(mBufferController->GetPacketPts(BUFFER_TYPE_AUDIO));
             }
         }
     }
@@ -3017,7 +3008,18 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
                 const int64_t previousOffset = mActiveVideoPtsOffset;
                 const bool logThisRefresh = (previousOffset == INT64_MIN ||
                                              llabs(freshOffset - previousOffset) > 500 * 1000);
-                mActiveVideoPtsOffset = freshOffset;
+                const bool perStreamAxis = (mDemuxerService != nullptr) &&
+                                           mDemuxerService->programAxisIsPerStream();
+                /*
+                 * 只有"这一路的 timePosition 是按流/按分片重定位过的轴"时才允许换算（见 IDemuxer::
+                 * programAxisIsPerStream）：DASH/HLS/对象式清单为真；本地/网络单文件与 FLV 直播为假 ——
+                 * 后者的 timePosition 只是把同一条原始轴平移一个常数，程序轴就是原始轴，
+                 * 换算会造出"视频帧在相对轴、音频与主时钟在原始轴"的系统性错位
+                 * （长跑直播时间戳远离 0 时表现为每帧判迟到、全部丢帧）。
+                 * 不换算时把偏移置成"未设置"：所有读它的地方（读前记账、帧上屏、尾包）都带
+                 * `!= INT64_MIN` 守卫 ⇒ 自然退化为恒等，不需要额外改那些点。
+                 */
+                mActiveVideoPtsOffset = perStreamAxis ? freshOffset : INT64_MIN;
                 mVideoAxisPts.push_back(packetPtsForAxis);
                 mVideoAxisTimePos.push_back(packetPosForAxis);
 
@@ -3259,8 +3261,15 @@ int SuperMediaPlayer::FillVideoFrame()
          * 只修正首帧会导致后续帧突然跳回原始 rendition PTS，RenderVideo() 便会
          * 把它们当成严重落后帧持续丢弃，日志表现为 0/1 FPS。 */
         bool framePtsTakenFromPacketAxis = false;
+        const bool axisIsPerStream = (mDemuxerService != nullptr) &&
+                                     mDemuxerService->programAxisIsPerStream();
 
-        if (pFrame->getInfo().pts != INT64_MIN) {
+        /*
+         * 帧 pts 的轴换算与上面"偏移"同一个开关：只有 DASH/HLS/对象式清单这类
+         * "每路流自己的轴被重定位过"的片源才把帧 pts 替换成包的 timePosition；
+         * 单文件（本地/网络 mp4、TS、FLV 直播）保持原始轴，与音频、主时钟同轴。
+         */
+        if (axisIsPerStream && pFrame->getInfo().pts != INT64_MIN) {
             while (!mVideoAxisPts.empty() && mVideoAxisPts.front() < pFrame->getInfo().pts) {
                 mVideoAxisPts.pop_front();
                 mVideoAxisTimePos.pop_front();
@@ -3615,20 +3624,7 @@ RENDER_RESULT SuperMediaPlayer::RenderAudio()
                     (long long) (mAVDeviceManager != nullptr ? mAVDeviceManager->getAudioRenderPosition() : INT64_MIN));
         }
         if (mDiscontinuity.audioBaseUs.load() == INT64_MIN) {
-            /*
-             * 音频时钟基准 = 音频在**节目轴**上的内容位置（见头文件 Discontinuity::audioBaseUs 的说明）。
-             *
-             * 音频帧的 pts 是流自己的原始时间戳（长跑直播能到 12.8 小时），而节目轴从 0 起算
-             * ⇒ 这里必须减去音频的原始基准（mFirstAudioPts = 首个音频 pts − 它的 timePosition）。
-             * 否则主时钟会被拖回原始轴：它的参考正是这条音频时钟
-             * （下面 mMasterClock.setReferenceClock(getAudioPlayTimeStampCB, this)，
-             *   回调返回 audioBaseUs + 设备已消费量），于是视频帧（在节目轴上）全被判"迟到"丢掉 ——
-             * “FLV 直播非常卡”就是这个。
-             *
-             * 换算只写在这一处：seek 路径上的 pin 用的是 targetUs（mDiscontinuity.targetUs，
-             * 本来就在节目轴上），在那里再减一次基准就是错上加错。
-             */
-            pinAudioClockBase(pts - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
+            pinAudioClockBase(pts);
         }
 
         /*
@@ -4807,12 +4803,7 @@ void SuperMediaPlayer::FlushAudioPath()
         if (oldBaseUs != INT64_MIN && oldConsumedUs != INT64_MIN && consumedBeforeFlushValid) {
             pinAudioClockBase(oldBaseUs + (consumedBeforeFlushUs - oldConsumedUs));
         } else if (contentPosBeforeFlush != INT64_MIN) {
-            /*
-             * contentPosBeforeFlush = mPlayedAudioPts，和 pts 同源（都是音频帧的原始时间戳）
-             * ⇒ 钉基准前同样减去音频原始基准，保证音频时钟（以及以它为参考的主时钟）始终在节目轴上。
-             * 上面那个 oldBaseUs 分支不用换算：oldBaseUs 本身就是已经换算过的节目轴值。
-             */
-            pinAudioClockBase(contentPosBeforeFlush - (mFirstAudioPts == INT64_MIN ? 0 : mFirstAudioPts));
+            pinAudioClockBase(contentPosBeforeFlush);
         } else {
             pinAudioClockBase(INT64_MIN);
         }
@@ -4977,36 +4968,52 @@ void SuperMediaPlayer::PostBufferPositionMsg()
         const int64_t position = getCurrentPosition();
 
         /*
-         * 本地/单文件源：缓冲位置 = **已读入的字节范围**映射到时间轴（按总长线性换算）。
+         * 【缓冲位置 = 已连续取到的内容在节目轴上的终点】
          *
-         * 为什么不用 getBufferDuration() 那条路：它的实现依赖缓存模块（本地不走缓存时默认返回 0），
-         * 于是缓冲值退化成读前窗口里的包队列深度 —— 既不等于"已读入多少"，又会随队列锯齿小幅回缩。
-         * 判据是数据源能否报出读取游标与总长（IDataSource::getReadPosition/getTotalLength，
-         * 分片流与网络流返回 -1）⇒ 报不出来就照旧走下面的原算法，不影响 DASH/HLS。
-         * 往回 seek 后文件游标也回到落点 ⇒ 这里的值同步变小，界面看到的就是真实的已读范围。
+         * 主流播放器都是这个口径：Shaka 的 getBufferedInfo() 给的是 {start,end} 绝对区间，
+         * ExoPlayer 的 getBufferedPosition() 是"时间线上已缓冲到的位置"，
+         * AVPlayer 的 loadedTimeRanges 是 CMTimeRange 数组 —— 都由"拥有那份数据的组件"给出，
+         * 播放器只负责取值并夹到合法范围。这里的数据所有者就是包队列：
+         *   · 每个包都带 timePosition（解复用器给的节目位置，与位置/时长同一条轴）；
+         *   · 队列本身就是"从当前读取点起的一段连续数据"（读前闸门限幅；seek / 换档会清队列）。
+         * ⇒ 队列内最大的 timePosition 就是终点。
+         *
+         * 不再把若干"相对时长"相加（队列时长 / 数据源缓冲时长 / 解码器 padding 三者口径不同），
+         * 也不再用"已读字节 ÷ 数据源总长 × 时长"：DASH/HLS 播放时数据源是**清单文件**，
+         * 它的字节比例与媒体进度无关（那正是"几秒就显示缓冲 90%"的来源）。
          */
-        if (mDuration > 0 && mDemuxerService != nullptr) {
-            const int64_t readBytes = mDemuxerService->getSourceReadPosition();
-            const int64_t totalBytes = mDemuxerService->getSourceTotalLength();
+        int64_t bufferedEnd = INT64_MIN;
 
-            if (readBytes > 0 && totalBytes > 0) {
-                int64_t buffered = static_cast<int64_t>(static_cast<double>(mDuration) *
-                                                        static_cast<double>(readBytes) /
-                                                        static_cast<double>(totalBytes));
+        if (mBufferController != nullptr) {
+            if (HAVE_AUDIO) {
+                bufferedEnd = std::max(bufferedEnd, mBufferController->GetPacketLastTimePos(BUFFER_TYPE_AUDIO));
+            }
 
-                if (buffered > mDuration) {
-                    buffered = mDuration;
-                }
-
-                /* 落点刚开始读、游标还没追到播放头时（buffered < position）交给下面的原算法。 */
-                if (buffered >= position) {
-                    mBufferPosition = buffered;
-                    mPNotifier->NotifyBufferPosition((mBufferPosition <= mDuration ? mBufferPosition : mDuration) / 1000);
-                    return;
-                }
+            if (HAVE_VIDEO) {
+                bufferedEnd = std::max(bufferedEnd, mBufferController->GetPacketLastTimePos(BUFFER_TYPE_VIDEO));
             }
         }
 
+        if (bufferedEnd != INT64_MIN && bufferedEnd > 0) {
+            mBufferPosition = bufferedEnd;
+
+            if (mDuration > 0 && mBufferPosition > mDuration) {
+                mBufferPosition = mDuration;
+            }
+
+            if (mBufferPosition < position) {
+                /* 队列还没覆盖到播放头（刚起播 / 刚落点 / 刚清队列）：以下界为准，不报倒退的假值。 */
+                mBufferPosition = position;
+            }
+
+            mPNotifier->NotifyBufferPosition(mBufferPosition / 1000);
+            return;
+        }
+
+        /*
+         * 队列为空（刚起播、刚 seek、或缓冲耗尽）：没有"已连续取到"的数据可报，
+         * 退回原口径，避免把缓冲条报成 0 或倒退。
+         */
         if (duration >= 0) {
             mBufferPosition = position + duration;
         } else if (!mDiscontinuity.filterActive.load()) {
