@@ -2990,7 +2990,44 @@ int SuperMediaPlayer::DecodeVideoPacket(unique_ptr<IAFPacket> &pVideoPacket)
             const int64_t packetPosForAxis = pVideoPacket->getInfo().timePosition;
 
             if (packetPtsForAxis != INT64_MIN && packetPosForAxis >= 0) {
-                const int64_t freshOffset = packetPosForAxis - packetPtsForAxis;
+                int64_t freshOffset = packetPosForAxis - packetPtsForAxis;
+
+                /*
+                 * 【轴归一化只对"原始 pts 轴不按节目速率推进"的片源生效】
+                 *
+                 * 这段重建偏移本来是给 DASH rendition 写的（那种片源的 raw pts 轴不按节目速率走，
+                 * 不归一每个分片边界都会漂）。但单文件片源（本地/网络 mp4、FLV 直播）音视频共用
+                 * 一条程序时钟，**只归视频**等于人为造出一个固定偏移。实测日志就是这么炸的：
+                 *   video pts axis refreshed: stream=0 rawPts=115138000 timePosition=0
+                 *                             offset=-115138000
+                 *   drop frame: master played time is 115171218, video pts is 42000
+                 * 视频 raw pts 从 115.138s 起被压到 0，而音频/主时钟仍在原轴（115.17s）⇒ 每帧都被
+                 * 判"迟到"丢掉、每 8 帧才强制上屏一帧 ⇒ FLV 直播一跳一跳地卡。
+                 *
+                 * 判据用**已有的轴观测数据**（下面那两个 deque 里存的历史样本），不用解复用器类型
+                 * （IDemuxer 并不继承 demuxerPrototype，getType() 在播放器侧取不到）：
+                 * 取上一包的 (rawPts, timePosition)，若两者推进量基本一致（1:1，允许 500ms 抖动）
+                 * ⇒ 这条轴本来就是节目的轴 ⇒ 保持恒等偏移（0），不做归一。
+                 * DASH 那种轴在分片内 1:1、跨分片跳变的情况依旧会被归一（分片边界上差值会超阈值）。
+                 */
+                if (!mVideoAxisPts.empty()) {
+                    const int64_t previousPtsSample = mVideoAxisPts.back();
+                    const int64_t previousPosSample = mVideoAxisTimePos.back();
+                    const int64_t ptsStep = packetPtsForAxis - previousPtsSample;
+                    const int64_t posStep = packetPosForAxis - previousPosSample;
+
+                    if (llabs(ptsStep - posStep) <= 500 * 1000) {
+                        freshOffset = 0;
+                    }
+                } else {
+                    /*
+                     * 第一个包没有历史样本可比较 ⇒ 先不归一（保持"未设置"）：
+                     * 否则单文件直播的首包会被压出一个 -115s 级的偏移、那一帧直接判迟到。
+                     * DASH 那种轴在第 2 个包就会显出不一致并被正常归一，代价只是首包不动偏移。
+                     */
+                    freshOffset = INT64_MIN;
+                }
+
                 const int64_t previousOffset = mActiveVideoPtsOffset;
                 const bool logThisRefresh = (previousOffset == INT64_MIN ||
                                              llabs(freshOffset - previousOffset) > 500 * 1000);
