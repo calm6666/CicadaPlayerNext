@@ -1175,7 +1175,12 @@ Item {
             delegate: ShrinkBar {
                 x: 23
                 anchors.bottom: parent.bottom
-                anchors.bottomMargin: 71
+                /* 普通模式 71px（照 scss 常量）；全屏抬到 96px —— 全屏控制栏
+                   高 73px（PlayerControlBar 的 fullscreen 档，照参考
+                   index.scss:4969 的 height:73）会盖住 71px 档，
+                   96 = 73 + 23px 间距（与普通档的间距构成一致），
+                   web 端 scss 的 [data-screen="full"]/["web"] 段同款 */
+                anchors.bottomMargin: interactionLayer.fullscreen ? 96 : 71
                 title: modelData.title
                 iconSource: modelData.icon
                 /* 显式引用 interactionLayer.clockSec（表达式直接依赖，

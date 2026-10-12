@@ -12,8 +12,10 @@
 //     InteractionLayer 的同步函数管，这里只展示 remaining）
 //   * 点击条目任意区域重新打开原卡片（清关闭标记 → 卡片立即重建显示）
 //
-// 位置 left:23px / bottom:71px（CSS 常量，照 scss）；缩放经 --scale CSS
-// 变量协议（transform-origin left bottom → Qt 的 Item.BottomLeft）。
+// 位置 left:23px / bottom:71px（CSS 常量，照 scss）；全屏下 bottom 抬到
+// 96px（全屏控制栏高 73px 会盖住 71px 档，由 InteractionLayer 的 delegate
+// 按 fullscreen 切换 bottomMargin）。缩放经 --scale CSS 变量协议
+// （transform-origin left bottom → Qt 的 Item.BottomLeft）。
 // ===========================================================================
 import QtQuick
 
