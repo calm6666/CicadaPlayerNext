@@ -27,9 +27,10 @@
 // 【已评后收拢（has-result）】项依次左移收拢（translateX 0/-20/-40/-60/-80px，
 //   延迟 0.2/0.3/0.4/0.5/0.6s，过渡 0.1s），结果区淡入。
 //
-// 【数值气泡（照 web 定稿）】悬停某项 → 该项及之前的全部气泡显示
-// （hoverIndex >= value 显隐）；点击评分后 hoverIndex 清零 → 气泡即刻
-// 全部消失（不常显）；已评后评分区禁用指针，气泡不再出现。
+// 【数值气泡（照 web 定稿）】悬停某项 → 仅该项自己的气泡显示
+// （hoverIndex === value 显隐；图标填充仍是该项及之前联动）；
+// 点击评分后 hoverIndex 清零 → 气泡即刻消失（不常显）；
+// 已评后评分区禁用指针，气泡不再出现。
 //
 // 【悬停热区】评分区单一 MouseArea + mouseX 位置换算（不用每项独立
 // MouseArea —— 相邻区域平行移动时 enter/exit 事件不可靠，用户实测
@@ -254,16 +255,16 @@ Rectangle {
 
                 /* 数值气泡（33x33、字 20px、背景 rgba(0,0,0,.6)、圆角 2、
                    margin-left 5、bottom 68 = 浮在卡片上方；
-                   悬停联动显示：悬停该项及之前的全部气泡（照 web 定稿
-                   hoverIndex >= value 的显隐协议）；点击评分后 hoverIndex
-                   清零 → 气泡即刻全部消失（不再常显）；
+                   悬停联动显示：仅悬停项自己的气泡显示（照 web 定稿
+                   hoverIndex === value 的显隐协议，图标填充仍是前 n 项
+                   联动、气泡只有悬停项一个）；点击评分后 hoverIndex
+                   清零 → 气泡即刻消失（不再常显）；
                    数字颜色 = 主题色（继承评分区的 color，随图标类型切换） */
                 Rectangle {
                     x: 5
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 68
-                    visible: score.hoverIndex > 0
-                             && score.hoverIndex >= scoreItem.value
+                    visible: score.hoverIndex === scoreItem.value
                     width: 33
                     height: 33
                     radius: 2
