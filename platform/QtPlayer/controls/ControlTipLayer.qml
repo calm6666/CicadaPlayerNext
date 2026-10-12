@@ -213,19 +213,21 @@ Item {
          */
         /* 宽 = 文字自然宽 + 左右内边距 8*2，上限 18em@12px = 216px */
         width: Math.min(tipText.implicitWidth + 16, 216)
-        /* 高 = 文字实际高 + 上下内边距 6*2（wrap 换行时 implicitHeight 跟着涨） */
-        height: tipText.implicitHeight + 12
+        /* 高 = 文字行盒高（lineCount×18，见 tipText 处的行高说明）+ 上下内边距 6*2 */
+        height: tipText.height + 12
         radius: 2
         color: "#000000"
 
         /* 显隐：activeName 非空且控制栏在显示。
-           参考 transition: opacity 0.3s linear —— timing 就是 linear，照抄 */
+           参考 transition: opacity 0.3s linear —— 【收紧到 150ms】参考的 0.3s
+           用户实测嫌“墨迹”（出现/消失都拖泥带水），tooltip 这种轻量提示
+           150ms 已足够顺滑不生硬，交互节奏的 300ms 显示延迟保持参考值不变。 */
         opacity: (tipLayer.activeName !== "" && tipLayer.bar !== null
                   && tipLayer.bar.shown) ? 1 : 0
 
         Behavior on opacity {
             NumberAnimation {
-                duration: 300
+                duration: 150
                 easing.type: Easing.Linear
             }
         }
@@ -235,15 +237,14 @@ Item {
          * 用 transform 而不是动 x/y —— 参考 CSS 就是 transform（位置 left/top 不过渡，
          * 只有这个相对位移参与 transition），动 x/y 会和 reposition() 的定位打架
          * （换按钮时位置直接跳，动画却让旧位置滑过去，观感就错了）。
-         * transform 的 timing 参考写的是 0.3s（未指定 timing function = CSS ease），
-         * 用 InOutQuad 近似（肉眼差异可忽略，注释留档）。
+         * 时长与 opacity 一并收紧到 150ms（参考 0.3s，理由见上面 opacity 处）。
          */
         transform: Translate {
             y: tipLayer.activeName !== "" ? 0 : 5
 
             Behavior on y {
                 NumberAnimation {
-                    duration: 300
+                    duration: 150
                     easing.type: Easing.InOutQuad
                 }
             }
@@ -258,16 +259,30 @@ Item {
              * 限宽换行（参考 max-width:18em + word-wrap:break-word/word-break:break-all）：
              * 官方推荐写法 —— width 取 min(implicitWidth, 上限)，implicitWidth 是
              * “不换行的自然宽”，不依赖 width，无绑定循环；超上限时 wrap 生效、
-             * implicitHeight 按换行后的行数重算。
-             * 上限 = 216 − 左右 padding 16 = 200。
+             * 行数重算。上限 = 216 − 左右 padding 16 = 200。
              */
             width: Math.min(implicitWidth, 200)
             wrapMode: Text.Wrap
             color: "#ffffff"
             font.pixelSize: 12
-            /* 参考 line-height:1.5（12px × 1.5 = 18px 行高） */
-            lineHeight: 1.5
-            lineHeightMode: Text.ProportionalHeight
+            /*
+             * 【行高 1.5 不能用 Text.ProportionalHeight 实现】QML 的 proportional
+             * 行高是“自然行高 × 1.5，但 ascent 不变” —— 额外的 0.5 倍空间全部
+             * 堆在**行下方**（QTextLine::setLineHeight 的语义），和 CSS line-height
+             * “18px 行盒、字形垂直居中”完全不同。之前照字面抄成 ProportionalHeight
+             * 1.5 → 单行气泡高 ≈35px，文字顶上只有 6px、底下却空 14px —— 用户实测
+             * “tip 太高、文字偏上、下面一大截空隙不协调”。
+             *
+             * 正确的等价实现：**显式行盒** —— height = lineCount × 18（12px × 1.5），
+             * 内容在行盒里 AlignVCenter。单行时气泡高恰 18+12=30px（与 CSS 逐像素
+             * 一致），字形上下均匀居中。lineCount 只依赖 text 和 width（不依赖
+             * height），绑定无循环。
+             * （多行是纯理论情况 —— 实际文案全部远短于 200px 限宽、永不换行；
+             * 若真换行，行距按自然行高、整体在行盒内居中，与参考的逐行 18px
+             * 行盒有肉眼难辨的差异，留档不追。）
+             */
+            height: lineCount * 18
+            verticalAlignment: Text.AlignVCenter
             /* ★ 普通属性 currentText（见文件头【渐隐期间文案/尺寸不要塌】） */
             text: tipLayer.currentText
         }

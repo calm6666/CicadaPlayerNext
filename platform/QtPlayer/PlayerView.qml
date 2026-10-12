@@ -193,6 +193,14 @@ Item {
     /* 鼠标最后停在哪一行（-1 = 不在窗口里），用来决定要不要把指针藏起来 */
     property real lastMouseY: -1
 
+    /*
+     * 光标是否悬停在交互卡片的关闭环热区上（activityArea 的 onPositionChanged
+     * 实时算，见下面 cursorShape 的第三态）。为什么要在这一层管：关闭环悬在
+     * 卡身矩形外，它自己的 MouseArea 收不到 hover（QML 命中只在父对象矩形内），
+     * hover 落到了 activityArea —— 小手光标只能由 activityArea 代理。
+     */
+    property bool pointerOnCloseCircle: false
+
     /* -----------------------------------------------------------------------
      * 画面 + 提示文字
      * ----------------------------------------------------------------------- */
@@ -717,13 +725,25 @@ Item {
          * 指针永远不藏（这就是"鼠标指针隐藏没实现"的原因）。
          *
          * 两种情况不能藏：外面有模态层开着；鼠标不在窗口里（lastMouseY 是 -1）。
+         *
+         * 【第三态：小手】悬停在交互卡片的关闭环热区上时给 PointingHandCursor
+         * （用户要求：展示模式鼠标移到关闭按钮上指针变小手）。环在卡身矩形外、
+         * 自己的 MouseArea 收不到 hover，只能由本层代理（pointerOnCloseCircle
+         * 由下面的 onPositionChanged 实时刷新）。藏指针的条件优先于它 ——
+         * 指针都藏了（控制栏收起且没动鼠标）就没有"看得见的小手"这回事，
+         * 鼠标一动控制栏回来、小手自然出现，两边不打架。
          */
         cursorShape: (!controlBar.shown && !playerView.overlayOpen && playerView.lastMouseY >= 0)
-                     ? Qt.BlankCursor : Qt.ArrowCursor
+                     ? Qt.BlankCursor
+                     : (playerView.pointerOnCloseCircle ? Qt.PointingHandCursor : Qt.ArrowCursor)
 
         onPositionChanged: (mouse) => {
             playerView.lastMouseY = mouse.y
             playerView.kickAutoHide()
+
+            /* 关闭环热区的小手命中（纯查询，无副作用 —— 见 hitInteractiveAt） */
+            var ip = activityArea.mapToItem(interactionLayer, mouse.x, mouse.y)
+            playerView.pointerOnCloseCircle = interactionLayer.hitInteractiveAt(ip.x, ip.y)
         }
 
         /*

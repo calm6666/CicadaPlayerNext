@@ -839,6 +839,8 @@ namespace cicadaqt {
             rec.id = entry.id != 0 ? entry.id : m_nextSelfId--;
             rec.timeMs = entry.timeMs;
             rec.text = QString::fromStdString(entry.text);
+            rec.color = cachedColorHex(entry.colorRGBA);
+            rec.type = typeNameOf(entry.type);
             m_selfRecords.append(rec);
             emit allItemsChanged();
             refreshActiveItems();
@@ -868,6 +870,10 @@ namespace cicadaqt {
             map.insert(QStringLiteral("timeMs"), QVariant::fromValue(item->timeMs));
             map.insert(QStringLiteral("text"), QString::fromStdString(item->text));
             map.insert(QStringLiteral("isSelf"), item->isSelf);
+            /* 弹幕本色 "#rrggbbaa"：列表按本色渲染文字（浅色主题下太亮的由 QML 侧映射） */
+            map.insert(QStringLiteral("color"), cachedColorHex(item->colorRGBA));
+            /* 类型名：列表的"顶/底"徽标用（scroll 不显示徽标） */
+            map.insert(QStringLiteral("type"), typeNameOf(item->type));
             list.append(map);
         }
 
@@ -877,6 +883,8 @@ namespace cicadaqt {
             map.insert(QStringLiteral("timeMs"), QVariant::fromValue(rec.timeMs));
             map.insert(QStringLiteral("text"), rec.text);
             map.insert(QStringLiteral("isSelf"), true);
+            map.insert(QStringLiteral("color"), rec.color);
+            map.insert(QStringLiteral("type"), rec.type);
             list.append(map);
         }
 
@@ -1016,6 +1024,8 @@ namespace cicadaqt {
             rec.id = sendOptions.id;
             rec.timeMs = sendOptions.timeMs > 0 ? sendOptions.timeMs : m_engine.clockMs();
             rec.text = text;
+            rec.color = cachedColorHex(sendOptions.colorRGBA);
+            rec.type = typeNameOf(sendOptions.type);
             m_selfRecords.append(rec);
             emit allItemsChanged();
         } else {

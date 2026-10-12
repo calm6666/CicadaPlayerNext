@@ -1174,6 +1174,23 @@ Window {
         cellHeight: 176
         model: library.items
 
+        /* 【桌面端滚动】禁掉内容拖拽（interactive: false）：桌面应用里网格滚动
+           只走**滚轮 + 拖滚动条**—— 按住卡片甩动是移动端触屏手势，鼠标场景下
+           和"点卡片"互相打架（按下想点、稍一移动变成拖整个网格，用户要求去掉）。
+           Flickable 的滚轮滚动不依赖 interactive，照常可用。 */
+        interactive: false
+
+        /* 禁拖拽之后必须有滚动条可拖（原来只能靠手势滚）。细条 6px、半透明，
+           hover/按下加亮，不抢卡片的视觉。 */
+        ScrollBar.vertical: ScrollBar {
+            contentItem: Rectangle {
+                implicitWidth: 6
+                radius: 3
+                color: parent.pressed ? QtPlayerTheme.playerAccent
+                       : (parent.hovered ? "#aa8a9099" : "#668a9099")
+            }
+        }
+
         delegate: Item {
             id: card
 

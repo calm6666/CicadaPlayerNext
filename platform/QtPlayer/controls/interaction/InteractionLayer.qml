@@ -451,6 +451,44 @@ Item {
         return false
     }
 
+    /*
+     * 【纯查询版命中测试】光标悬停要不要变成小手（Qt.PointingHandCursor）。
+     *
+     * 与 consumeDisplayClick 的分工：
+     *   * 关闭环热区在卡身矩形**外**，它自己的 MouseArea 收不到 hover（QML 只把
+     *     事件投给父对象矩形范围内的子项）→ hover 落在 activityArea 上，由
+     *     activityArea 的 onPositionChanged 调本函数、动态切换光标（用户要求：
+     *     展示模式鼠标移到关闭按钮上指针变小手）；
+     *   * 卡身**内**的可点区域（投票行/评分星星/三连/外链/guide 按钮）hover 正常，
+     *     由它们各自 MouseArea 的 cursorShape 负责，不经本函数。
+     *
+     * 与 consumeDisplayClick 的差别：**无副作用** —— hover 绝不能把卡片关了，
+     * 所以只测环热区、只在展示模式命中（编辑模式点环是吞掉不关闭，光标给箭头）。
+     */
+    function hitInteractiveAt(layerX, layerY) {
+        if (interactionLayer.editMode)
+            return false
+
+        for (var i = repeater.count - 1; i >= 0; i--) {
+            var slotItem = repeater.itemAt(i)
+
+            if (slotItem === null || !slotItem.visible)
+                continue
+
+            if (slotItem.kind === "guide")
+                continue
+
+            var px = layerX - slotItem.x
+            var py = layerY - slotItem.y
+
+            if (px >= slotItem.width - 15 && px <= slotItem.width + 25
+                    && py >= -25 && py <= 15)
+                return true
+        }
+
+        return false
+    }
+
     // ---------------------------------------------------------------------
     // 内容区（坐标系 = 整个播放区，不做内缩）
     //

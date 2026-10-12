@@ -73,6 +73,43 @@ Rectangle {
         }
     }
 
+    /* ------------------------------------------------------------------
+     * 弹幕文字的显示色（B 站列表排式：每条弹幕按**自身颜色**渲染文字）
+     *
+     * 【为什么之前深色下"颜色文字看不到"】列表所有文字统一用主题的 panelText
+     * （深色=纯白）—— 弹幕的白/红/蓝/绿各色信息完全丢失，一整列全是同一个白，
+     * 用户看起来就是"弹幕本色的文字看不到"。
+     *
+     * 合理设计（深浅两主题都成立）：
+     *   * 深色主题：直接用弹幕本色 —— 弹幕本来就是渲染在黑色画面上的，颜色
+     *     天生适配深底，红是红、蓝是蓝；
+     *   * 浅色主题：彩色弹幕保持本色，但**太亮的弹幕**（白色弹幕这类，
+     *     亮度 > 0.8）在白底上会消失 → 映射成 panelText 深字
+     *     （B 站浅色网页也是这么处理白弹幕的）；
+     *   * 自己发的：仍走 warnText 警示黄 + "我"徽标，和别条一眼区分。
+     *
+     * hex 形态是 "#rrggbbaa"（DanmakuController 的 danmakuColorToHex），
+     * 取前三位分量算感知亮度（0.299/0.587/0.114 加权）。
+     * ------------------------------------------------------------------ */
+    function danmakuTextColor(entry) {
+        if (entry.isSelf === true)
+            return QtPlayerTheme.warnText
+
+        var hex = entry.color !== undefined ? String(entry.color) : "#ffffffff"
+
+        if (!QtPlayerTheme.dark) {
+            var r = parseInt(hex.substring(1, 3), 16) / 255
+            var g = parseInt(hex.substring(3, 5), 16) / 255
+            var b = parseInt(hex.substring(5, 7), 16) / 255
+            var lum = 0.299 * r + 0.587 * g + 0.114 * b
+
+            if (lum > 0.8)
+                return QtPlayerTheme.panelText
+        }
+
+        return hex
+    }
+
     /* ------------------------------------------------------------------ */
     /* 布局：发送区 → 统计行 → 在屏列表 → 日志行 */
     /* ------------------------------------------------------------------ */
@@ -232,6 +269,13 @@ Rectangle {
                 model: danmakuPanel.onscreenItems
                 spacing: 4
 
+                /* 【桌面端滚动】禁掉内容拖拽（interactive: false）：这是桌面应用，
+                   列表滚动只走**滚轮 + 拖滚动条**（ScrollBar 在下面）—— 按住内容
+                   甩动是移动端触屏的手势，鼠标场景下"按住弹幕行拖一下整列跟着跑"
+                   反而误触（用户要求去掉）。Flickable 的滚轮滚动不依赖 interactive，
+                   照常可用。 */
+                interactive: false
+
                 ScrollBar.vertical: ScrollBar {}
 
                 /* 行：文案 + 类型徽标 + （自己发的）撤回按钮 */
@@ -271,10 +315,34 @@ Rectangle {
                             font.pixelSize: 11
                         }
 
+                        /*
+                         * 顶部/底部弹幕的类型徽标（B 站列表里"顶/底"小标签；
+                         * 滚动弹幕是主流、不占地方 —— 不显示）。底色用主题色
+                         * 28% 透明、字走 panelText，深浅主题下都可读。
+                         */
+                        Rectangle {
+                            visible: onscreenRow.modelData.type === "top"
+                                     || onscreenRow.modelData.type === "bottom"
+                            Layout.preferredWidth: 18
+                            Layout.preferredHeight: 16
+                            radius: 3
+                            color: Qt.alpha(QtPlayerTheme.playerAccent, 0.28)
+
+                            Text {
+                                anchors.centerIn: parent
+                                text: onscreenRow.modelData.type === "top"
+                                      ? qsTr("顶") : qsTr("底")
+                                color: QtPlayerTheme.panelText
+                                font.pixelSize: 10
+                            }
+                        }
+
                         Text {
                             Layout.fillWidth: true
                             text: onscreenRow.modelData.text
-                            color: onscreenRow.modelData.isSelf ? QtPlayerTheme.warnText : QtPlayerTheme.panelText
+                            /* 弹幕本色（见 danmakuTextColor：深色直接本色、
+                               浅色下太亮的映射深字、自己发的警示黄） */
+                            color: danmakuPanel.danmakuTextColor(onscreenRow.modelData)
                             font.pixelSize: 12
                             elide: Text.ElideRight
                         }

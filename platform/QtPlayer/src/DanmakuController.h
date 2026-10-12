@@ -172,9 +172,11 @@ namespace cicadaqt {
         Q_PROPERTY(QVariantMap hoveredItem READ hoveredItem NOTIFY frameChanged)
 
         /*
-         * 【弹幕列表面板】全量弹幕（不只 in 屏）：每条 { timeMs, text, isSelf, id }，
+         * 【弹幕列表面板】全量弹幕（不只 in 屏）：每条 { timeMs, text, isSelf, id, color, type }，
          * 按 timeMs 升序 —— 右栏弹幕列表面板照 B 站排式展示用（时间点前缀 +
-         * 自己发的加标签 + 可撤回）。
+         * 自己发的加标签 + 可撤回；color 是弹幕本色 "#rrggbbaa"（danmakuColorToHex
+         * 的产物），列表按它渲染文字 —— 深色主题下直接用，浅色主题下太亮的弹幕
+         * 由 QML 侧映射成深字）。
          *
          * 数据来源是两部分的**合并**：
          *   * 引擎 _items（mock XML / 本地文件载入的全量调度数据，itemAt/itemCount 只读导出）；
@@ -428,6 +430,10 @@ namespace cicadaqt {
             qint64 id = 0;
             qint64 timeMs = 0;
             QString text;
+            /* 弹幕本色 "#rrggbbaa"（cachedColorHex 的产物）：列表按本色渲染文字用 */
+            QString color = QStringLiteral("#ffffffff");
+            /* 类型名（typeNameOf 的产物："scroll"/"top"/"bottom"/"advanced"）：列表徽标用 */
+            QString type = QStringLiteral("scroll");
         };
         QList<SelfRecord> m_selfRecords;
         qint64 m_nextSelfId = -1;
