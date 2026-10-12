@@ -109,6 +109,20 @@ namespace cicadaqt {
         DanmakuAtlasEntry entry(const Request &request);
 
         /*
+         * 烤一张小图标进图集（GPU 模式"点赞手势"前缀用，见 DanmakuView 的 tip）。
+         *
+         * 和 entry() 的差别：画的是一张图片而不是文字，并且按 tintColor **染色** ——
+         * 参考实现里这个图标是 fill: currentColor（跟随弹幕文字颜色，
+         * danmaku.scss:271-277），所以缓存键里尺寸 / 颜色 / dpr 三样都要有。
+         *
+         * iconSource 是 QML 传来的 resolvedUrl（qrc:///… 或 file:///… 都行，
+         * 解析见 .cpp）；logicalSize 是图标的逻辑边长（0.64 × 弹幕字号），
+         * 内部按设备像素烤，和文字条目同一套 HiDPI 口径。
+         */
+        DanmakuAtlasEntry iconEntry(const QString &iconSource, const QColor &tintColor,
+                                    int logicalSize, qreal devicePixelRatio);
+
+        /*
          * 这一帧往图集里加过东西吗？加过就要重新上传纹理。
          * 取走之后标志清零（每帧问一次）。
          */

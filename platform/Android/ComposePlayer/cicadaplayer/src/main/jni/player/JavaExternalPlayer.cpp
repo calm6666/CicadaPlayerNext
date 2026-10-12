@@ -668,6 +668,11 @@ void JavaExternalPlayer::SetColorMatrix(const float matrix[9]) {
     (void) matrix;
 }
 
+/* 【音量均衡】空实现（理由见 .h 的注释）：播放交给宿主 Java 播放器，不经内核音频滤镜管线 */
+void JavaExternalPlayer::SetLoudness(int mode) {
+    (void) mode;
+}
+
 void JavaExternalPlayer::SetVideoBackgroundColor(uint32_t color) {
     jCallRvPlb("SetVideoBackgroundColor", color, false);
 }

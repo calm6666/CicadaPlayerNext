@@ -134,6 +134,18 @@ namespace Cicada {
          */
         virtual void SetVolume(float volume) = 0;
 
+        /*
+         * 【音量均衡（高动态/标准）】设置响度压缩档位 —— Web 端「音量均衡」三档的
+         * C++ 对位实现（docs/audio-loudness-modes.md §6 ④）：
+         *      0        关闭（默认，直通）
+         *      1        标准：提前触发 + 高比率压缩，拉平忽大忽小的响度（对白/夜间友好）
+         *      2        高动态：深阈值 + 低比率，只压峰值、保留动态起伏（音乐/电影）
+         * 经内核音频滤镜管线（acompressor，全参数运行时热更新）实现：切换不重建图、
+         * 不产生音频间隙；换片源/重建音频渲染器时框架自动重应用（同 SetVolume）。
+         * 直出类 ExternalPlayer（不经内核滤镜管线）为空实现。
+         */
+        virtual void SetLoudness(int mode) = 0;
+
         virtual float GetVideoRenderFps() = 0;
 
         virtual void EnterBackGround(bool back) = 0;

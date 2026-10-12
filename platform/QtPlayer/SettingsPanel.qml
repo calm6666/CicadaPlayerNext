@@ -468,7 +468,8 @@ Item {
                         }
                     }
 
-                    /* 四组。注：后端接口框架里还没有，目前只有面板自身状态（待接） */
+                    /* 四组单选：前三组（播放方式 / 视频比例 / 播放策略）后端接口框架里
+                       还没有、仍只有面板自身状态（待接）；「音量均衡」已接线（见下） */
                     SettingRadioGroup {
                         width: parent.width - 40
                         title: qsTr("播放方式")
@@ -496,13 +497,24 @@ Item {
                         currentValue: 0
                     }
 
+                    /*
+                     * 「音量均衡」—— 三档直接写进播放器的 loudnessMode 属性
+                     * （内核 acompressor 热更新，切换即时生效）：
+                     *   0 关闭（默认）/ 1 标准（拉平响度）/ 2 高动态（保留动态起伏）。
+                     * 读写都走 panel.player（和左页 mirror/loop 的接线同一个模式），
+                     * 面板不自己存状态，换片源也不会和播放器两处不一致。
+                     */
                     SettingRadioGroup {
                         width: parent.width - 40
                         title: qsTr("音量均衡")
                         options: [{ "label": qsTr("标准"), "value": 1 },
                                   { "label": qsTr("高动态"), "value": 2 },
                                   { "label": qsTr("关闭"), "value": 0 }]
-                        currentValue: 0
+                        currentValue: panel.player ? panel.player.loudnessMode : 0
+                        onPicked: (value) => {
+                                      if (panel.player)
+                                          panel.player.loudnessMode = value
+                                  }
                     }
 
                     /*

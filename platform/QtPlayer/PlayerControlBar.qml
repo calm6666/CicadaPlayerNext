@@ -92,6 +92,13 @@ Item {
      */
     property var previewFrames: []
 
+    /*
+     * 雪碧图预览参数（index.json 的 pvdata；null = 当前不是雪碧图模式 / 没拉到）。
+     * 和 previewFrames 一条路：应用层按全局开关 QtPlayerPreviewMode.mode 二选一喂，
+     * 这里原样转给进度条那一行（ProgressRow.previewSprite）。
+     */
+    property var previewSprite: null
+
     /* 高能进度条的开关（设置页那个复选框的直连版；参考里它是假的，见 ProgressRow 里的说明）。
        默认 true，但**没有数据时不会显示任何东西** —— 亮不亮由 ProgressRow 的 active 一起判。 */
     property bool highlightEnabled: true
@@ -474,6 +481,25 @@ function closeMenus() {
     }
 
     /* -----------------------------------------------------------------------
+     * 按钮 tooltip 的转发入口（实际逻辑在 controls/ControlTipLayer.qml）。
+     *
+     * 【为什么要转发一手】挂 tip 的按钮分散在三个子组件里（左组的上一个/下一个、
+     * 右组的全屏、弹幕开关），而 tipLayer 的 id 只在**本文件**这个文档里有效 ——
+     * QML 的 id 按文档隔离，LeftControls.qml 里写 tipLayer.xxx 是 ReferenceError
+     * （和 progressRow / settingsScrim 踩过的是同一类坑）。
+     * 子组件都持有 bar 引用，所以走 bar.requestTipShow(...)。
+     * 参数：name 是参考 Tooltips.ts 里的按钮名（ctrl:prev / ctrl:next /
+     * ctrl:fullscreen / danmaku_switch），item 是按钮本体（位置计算的锚点）。
+     * ----------------------------------------------------------------------- */
+    function requestTipShow(name, item) {
+        tipLayer.requestShow(name, item)
+    }
+
+    function requestTipHide(name) {
+        tipLayer.requestHide(name)
+    }
+
+    /* -----------------------------------------------------------------------
      * 遮罩：参考 .player-control-mask（controls.scss:8-20）
      *   height:100px；background:url(那张 PNG) repeat-x bottom
      * 关键在 **bottom**：原图（1px 宽、比容器高）底边对齐容器底边，超出的上半部分被裁掉，
@@ -563,6 +589,7 @@ function closeMenus() {
         pbpData: bar.pbpData
         highlightEnabled: bar.highlightEnabled
         previewFrames: bar.previewFrames
+        previewSprite: bar.previewSprite
     }
     Item {
         id: bottomRow
@@ -655,5 +682,20 @@ function closeMenus() {
 
                 bar: bar
             }
+    }
+
+    /* =======================================================================
+     * 按钮 tooltip 层（拆到 controls/ControlTipLayer.qml）
+     *
+     * 放在最后声明 = 画在按钮行之上（参考 z-index:12000 压住一切控制栏内容）。
+     * 气泡本身不接事件（参考 pointer-events:none），盖在上面不影响任何按钮。
+     * 挂 tip 的四颗按钮：左组 prev/next、右组 fullscreen、弹幕开关 dmSwitch ——
+     * 它们的 MouseArea 通过 bar.requestTipShow/Hide 挂钩（见上面两个转发函数）。
+     * ======================================================================= */
+    ControlTipLayer {
+        id: tipLayer
+
+        /* 同 ProgressRow 的 player 那个坑：这里写 bar: bar 是根 id，不是自引用 */
+        bar: bar
     }
 }

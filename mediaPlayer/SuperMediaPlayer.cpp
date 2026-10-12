@@ -467,6 +467,18 @@ void SuperMediaPlayer::SetVolume(float volume)
     mAVDeviceManager->setVolume(mSet->mVolume);
 }
 
+/* 【音量均衡】照 SetVolume 的直通写法（不走消息循环）：记档位 + 转发渲染器。
+   渲染器内部是延迟应用（渲染线程统一改滤镜），线程安全由那一边保证。 */
+void SuperMediaPlayer::SetLoudness(int mode)
+{
+    if (mode < 0 || mode > 2) {
+        return;
+    }
+
+    mSet->mLoudness = mode;
+    mAVDeviceManager->setLoudness(mode);
+}
+
 void SuperMediaPlayer::Start()
 {
     if ((PLAYER_INITIALZED == mPlayStatus) || (PLAYER_PREPARING == mPlayStatus) || PLAYER_PREPARINIT == mPlayStatus) {
@@ -1796,6 +1808,36 @@ void SuperMediaPlayer::doReadPacket()
                 break;
             }
             if (mVideoSwitchInFlight && mDemuxerService != nullptr) {
+                /*
+                 * 【2026-10-11 修：在途切换的失败结果必须在这里被轮询到】
+                 *
+                 * 解复用层边界块判"换不过去"时只写 alignedSwitchResult(-1) 然后回退旧流
+                 * （目标流不被选中、永远不发包）。原本这个结果只在**目标流的包到达时**才被
+                 * 检查（ReadPacket 的提交块）—— 失败的目标流恰恰不发包 ⇒ 失败永不上报 ⇒
+                 * mVideoSwitchInFlight 永久卡 true ⇒ abrChanged() 跳过所有 ABR tick
+                 * （用户症状："切回自动清晰度后再也不切档"）。所以在这里（读循环每圈、
+                 * 旧流仍在正常出包的路径上）主动轮询一次。
+                 *
+                 * 【顺序不能反：必须先读结果、后刷播放头】SetOption("alignedSwitchPlayheadUs")
+                 * 的语义是"一次新切换送入播放头"，它会同时把上一次的结果槽清零
+                 * （PlaylistManager::setAlignedSwitchPlayhead）。先刷播放头会把边界块刚写下的
+                 * 失败结果抹掉。失败结果只在"边界块写入之后、下一次刷播放头之前"这个窗口里
+                 * 可见 —— 每圈先轮询即可确定性地捕获。
+                 */
+                if (mVideoSwitchTargetIndex >= 0) {
+                    const std::string alignedResult =
+                            mDemuxerService->GetProperty(mVideoSwitchTargetIndex, "alignedSwitchResult");
+
+                    if (!alignedResult.empty() && alignedResult[0] == '-') {
+                        AF_LOGW("quality switch (aligned): the demuxer reported the boundary switch to stream %d "
+                                "as failed (result=%s) — reporting PLAYER_QUALITY_SWITCH_FAILED; the old stream "
+                                "keeps playing and ABR may retry\n",
+                                mVideoSwitchTargetIndex, alignedResult.c_str());
+                        finishQualitySwitch(false, "the demuxer could not switch at the segment boundary");
+                        return;
+                    }
+                }
+
                 mDemuxerService->SetOption("alignedSwitchPlayheadUs", getCurrentPosition());
             }
         }
@@ -2534,6 +2576,8 @@ void SuperMediaPlayer::finishQualitySwitch(bool ready, const char *reason)
     runDeferredPauseFrameRestore();
     replayDeferredUserSeek();
     mVideoSwitchInFlight = false;
+    /* 【2026-10-11】在途状态收口的同时清零武装时刻：0 = 没有在途切换（见成员声明处的说明）。 */
+    mVideoSwitchStartedSteadyMs = 0;
 }
 void SuperMediaPlayer::logSeekPipelineState(const char *why)
 {
@@ -5521,6 +5565,10 @@ int SuperMediaPlayer::setUpAudioDecoder(const Stream_meta *meta)
 
     //setVolume to current setting after create new.
     SetVolume(mSet->mVolume);
+
+    /* 【音量均衡】音量均衡档位也跟着重应用（换片源/重建音频渲染器后滤镜是新建的，
+       默认构建关闭档 —— 不重发的话用户设的档位会悄悄回 0，和音量丢同一种 bug） */
+    SetLoudness(mSet->mLoudness.load());
 
     if (mSet->bMute) {
         mMsgCtrlListener->ProcessMuteMsg();

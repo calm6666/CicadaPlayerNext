@@ -143,6 +143,14 @@ public:
 
     void SetVolume(float volume) override;
 
+    /*
+     * 【音量均衡 / 回退点】ICicadaPlayer::SetLoudness 是纯虚的 ⇒ 这个
+     * "ExternalPlayer"（播放交给宿主 Java 播放器，不经内核音频滤镜管线）必须给实现才能编译。
+     * 空实现：响度压缩在内核 acompressor 里做，这条路根本不经过它
+     * （与 SetColorMatrix 的 C10 限制同一类）。
+     */
+    void SetLoudness(int mode) override;
+
     float GetVideoRenderFps() override;
 
     void EnterBackGround(bool back) override;

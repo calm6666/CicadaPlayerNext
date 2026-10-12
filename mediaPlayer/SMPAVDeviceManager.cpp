@@ -227,6 +227,16 @@ int SMPAVDeviceManager::setVolume(float volume)
     // TODO: save the value
     return 0;
 }
+
+/* 【音量均衡】照 setVolume 转发（渲染器未就绪时返回 0：档位记在 mSet->mLoudness，
+   setUpAudioDecoder 建/换渲染器后会重应用，不会丢） */
+int SMPAVDeviceManager::setLoudness(int mode)
+{
+    if (mAudioRender) {
+        return mAudioRender->setLoudness(mode);
+    }
+    return 0;
+}
 uint64_t SMPAVDeviceManager::getAudioRenderQueDuration()
 {
     if (mAudioRender) {

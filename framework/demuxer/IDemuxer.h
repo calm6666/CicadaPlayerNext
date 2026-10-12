@@ -339,6 +339,30 @@ namespace Cicada {
             return true;
         }
 
+        /*
+         * 【我这套 timePosition 是不是"按流/按分片重定位过"的轴】
+         *
+         * timePosition 是解复用器算出来的节目位置（0 起算），各家的算法不同：
+         *   · avFormatDemuxer（本地/网络单文件、TS、FLV 直播）：
+         *       timePosition = pts − mCtx->start_time  —— 只是把**同一条**原始轴平移一个常数，
+         *       也就是说"程序轴 = 流的原始轴"；音频与视频共用它。
+         *   · DashStream / HLSStream（DASH/HLS）：
+         *       timePosition = pts + time2ptsDelta（每个分片/每路流重新定位）
+         *       —— 这里的原始 pts 轴**不是**程序轴，必须换算。
+         *
+         * 播放器要用这个声明来决定"要不要把帧的 pts 换算到 timePosition 轴"：
+         * 对前者换算会造成"视频帧在相对轴、音频与主时钟在原始轴"的系统性错位
+         * （长跑直播时间戳远离 0 时表现为每帧判迟到、全部丢帧）；
+         * 对后者不换算则会让每路流各自漂移。默认 false = 老行为（不换算），
+         * playList_demuxer / ManifestDemuxer 覆写为 true。
+         *
+         * 本虚函数留在虚函数列表末尾（理由同上面的 SeekStream / isDataExhausted）。
+         */
+        virtual bool programAxisIsPerStream() const
+        {
+            return false;
+        }
+
     public:
         int64_t estimateExclusiveEndPositionBytes(const string &url, int64_t timeMicSec, int64_t totalLength) override;
 

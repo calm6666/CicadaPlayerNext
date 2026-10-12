@@ -341,6 +341,16 @@ void CicadaSetVolume(playerHandle *pHandle, float volume)
     }
 }
 
+/* 【音量均衡】响度压缩档位（照 CicadaSetVolume 转发，见 media_player_api.h 注释） */
+void CicadaSetLoudness(playerHandle *pHandle, int mode)
+{
+    GET_PLAYER;
+
+    if (player) {
+        player->SetLoudness(mode);
+    }
+}
+
 float CicadaGetVolume(playerHandle *pHandle)
 {
     GET_PLAYER;

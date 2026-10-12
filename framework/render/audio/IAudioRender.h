@@ -8,6 +8,7 @@
 
 #include <base/media/IAFPacket.h>
 #include <utils/AFMediaType.h>
+#include <cerrno>   /* setLoudness 默认实现的 -ENOTSUP */
 
 namespace Cicada{
 
@@ -145,6 +146,24 @@ namespace Cicada{
          */
 
         virtual int setSpeed(float speed) = 0;
+
+        /*
+         * 【音量均衡（高动态/标准）】设置响度压缩档位（Web 端「音量均衡」三档的对位实现，
+         * docs/audio-loudness-modes.md）：
+         *      0        关闭（默认，直通）
+         *      1        标准：提前触发 + 高比率，拉平忽大忽小的响度（对白/夜间友好）
+         *      2        高动态：深阈值 + 低比率，只压峰值、保留动态起伏（音乐/电影）
+         * 经 filterAudioRender 内挂的 acompressor 滤镜实现（全参数运行时热更新，
+         * 切换不重建图）；直连 IAudioRender 的实现（如 OHOS）不支持，保持默认返回。
+         *
+         * @return
+         *       0      success
+         *       < 0    not support
+         */
+        virtual int setLoudness(int mode)
+        {
+            return -ENOTSUP;
+        };
 
         /**
          * pause/resume the play back

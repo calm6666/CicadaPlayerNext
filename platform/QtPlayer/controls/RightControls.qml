@@ -145,7 +145,13 @@ import QtPlayer
                     id: fullscreenArea
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
-                    onEntered: fullscreenIcon.play()
+                    onEntered: {
+                        fullscreenIcon.play()
+                        /* 移入 300ms 后弹 tip；文案是动态的（进入/退出全屏，
+                           由 ControlTipLayer.textOf 按 bar.fullscreen 现算） */
+                        bar.requestTipShow("ctrl:fullscreen", fullscreenButton)
+                    }
+                    onExited: bar.requestTipHide("ctrl:fullscreen")
                     onClicked: bar.fullscreenRequested()
                 }
             }

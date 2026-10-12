@@ -150,6 +150,12 @@ float CicadaPlayerGetSpeed(playerHandle *pHandle);
 */
 void CicadaSetVolume(playerHandle *player, float volumne);
 
+/*
+* Set the loudness compressor mode: 0 off / 1 standard / 2 high-dynamic
+* (audio volume balance, docs/audio-loudness-modes.md)
+*/
+void CicadaSetLoudness(playerHandle *player, int mode);
+
 /**
  * Get the playback volume, 0-1
  */

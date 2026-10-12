@@ -172,6 +172,11 @@ import QtPlayer
                         anchors.fill: parent
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
+                        /* 弹幕开关的 tip：参考 SendBar.ts 的 showSwitchTip —— 同一套
+                           300ms 延迟显示 / 立即隐藏，位置规则特殊（按钮上方 8px，
+                           其余按钮是 23/32px），在 ControlTipLayer.reposition 里分派 */
+                        onEntered: bar.requestTipShow("danmaku_switch", dmSwitch)
+                        onExited: bar.requestTipHide("danmaku_switch")
                         onClicked: bar.danmakuEnabled = !bar.danmakuEnabled
                     }
                 }

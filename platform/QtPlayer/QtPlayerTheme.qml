@@ -510,10 +510,10 @@ QtObject {
     readonly property color scrim: dark ? "#aa000000" : "#88000000"
     readonly property color panelBg: dark ? "#1e1e26" : "#ffffff"
     readonly property color panelBorder: dark ? "#3a3a48" : "#d5d8de"
-    /* 面板里的标题/标签文字 */
-    readonly property color panelText: dark ? "#d0d0e0" : "#2a2d33"
-    /* 面板里的小字说明 */
-    readonly property color panelHintText: dark ? "#808090" : "#6b7280"
+    /* 面板里的标题/标签文字（深色主题统一纯白 —— 用户要求黑主题下文字都用白色） */
+    readonly property color panelText: dark ? "#ffffff" : "#2a2d33"
+    /* 面板里的小字说明（深色主题 70% 白，随 panelText 一起提亮） */
+    readonly property color panelHintText: dark ? "#B3FFFFFF" : "#6b7280"
     /* 一排"多选一"按钮的常态 / 选中底色 */
     readonly property color choiceBg: dark ? "#2a2a35" : "#e3e6eb"
     readonly property color choiceActiveBg: dark ? playerAccentActive : playerAccentFaint

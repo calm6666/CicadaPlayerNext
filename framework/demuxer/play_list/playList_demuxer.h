@@ -103,6 +103,16 @@ namespace Cicada{
 
         int64_t getBufferDuration(int index) const override;
 
+        /*
+         * HLS/DASH：timePosition 是按分片/按流重定位出来的轴
+         * （HLSStream.cpp:1550 / DashStream.cpp:938 的 pts + time2ptsDelta），
+         * 原始 pts 不是程序轴 ⇒ 播放器必须把帧 pts 换算过去。
+         */
+        bool programAxisIsPerStream() const override
+        {
+            return true;
+        }
+
         void setUrlToUniqueIdCallback(UrlHashCB cb, void *userData) override;
 
     private:

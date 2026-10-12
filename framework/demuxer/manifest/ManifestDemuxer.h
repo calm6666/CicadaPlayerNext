@@ -109,6 +109,15 @@ namespace Cicada {
 
         int64_t getBufferDuration(int index) const override;
 
+        /*
+         * 对象式清单（MediaManifest）走的是 playList 对象模型，其分片/流的 pts 轴同样被重定位过
+         * ⇒ 与 HLS/DASH 一致，声明为"按流"的轴。
+         */
+        bool programAxisIsPerStream() const override
+        {
+            return true;
+        }
+
         void setUrlToUniqueIdCallback(UrlHashCB cb, void *userData) override;
 
     private:

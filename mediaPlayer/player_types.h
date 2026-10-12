@@ -62,6 +62,12 @@ namespace Cicada {
                                 0.0f, 0.0f, 1.0f};
         int64_t mAutoSwitchTime{INT64_MIN};
         atomic<float> mVolume{1.0};
+        /*
+         * 【音量均衡（高动态/标准）】响度压缩档位：0 关闭（默认）/ 1 标准 / 2 高动态
+         * （docs/audio-loudness-modes.md §5 参数表）。与 mVolume 同一读写模式：
+         * SetLoudness 可从任意线程写，setUpAudioDecoder 重建音频渲染器时重应用。
+         */
+        std::atomic<int> mLoudness{0};
         playerListener mPlayerListener{};
         atomic<float> rate {1.0};
         std::string http_proxy{};

@@ -22,11 +22,13 @@
 // 无边框窗口（QWindowKit）
 // ----------------------
 // 窗口没有系统标题栏。界面顶部那一条（标题 + 主题按钮 + 最小化/最大化/关闭）由本文件里的
-// titleBar 代替，而且它是**默认隐藏**的：鼠标移到窗口最上面那 36px 才浮出来，
-// 底色 transparent（直接压在画面上），全屏时永远不出来。
-// 起因是用户的三条要求：**无标题栏、顶部透明、右上角三颗按钮只在鼠标移到顶部时显示**。
-// 所以这个窗口和首页（HomeWindow.qml）刻意不一样 —— 首页是常显的标题栏。
-// 实现要点（三条，缺一条就出问题）见下面 topHotZone / titleBar 那一段的注释。
+// titleBar 代替，**常驻显示**：非全屏时永远占着顶部 36px（标题栏在上、播放器/右栏在下，
+// 互相不遮挡），带不透明底色；全屏时高度归零收起。
+// 【演进】最早是"默认隐藏、鼠标进顶部 36px 才浮出来"的沉浸式（用户当时要求顶部透明 +
+// 右上角按钮只在鼠标移到顶部时显示）；后来用户要求带背景、再后来（本轮）要求改成常驻
+// "标题栏在上、播放器在下"，避免浮出来时挡住下面内容的按钮 —— 现在和首页
+// （HomeWindow.qml）一样是常显标题栏，热区/HoverHandler 那套显隐逻辑已整体移除。
+// 实现要点见下面 titleBar 那一段的注释。
 //
 // QWindowKit 只负责**窗口系统**那一层：
 //   * Windows：原生 WM_NCHITTEST，所以贴边布局、双击标题栏最大化、右键系统菜单、
@@ -233,7 +235,14 @@ Window {
      *   * 选了片子：窗口底色是 videoBg（**永远黑**）→ 换成 onVideoText。
      *     少了这一条，浅色主题下深灰色的关闭/最大化图标压在黑画面上等于看不见。
      */
-    readonly property bool hasSource: player.source.toString() !== ""
+    /*
+     * 【hasSource 要把"清单对象"也算上】JSON 清单播放走 setManifest，**不写 source**：
+     * 旧判据下 hasSource 恒 false → 窗口底色停在浅色 windowBg —— 用户实测的
+     * "传入 json 播放视频容器背景是白色的"（画面比窗口小的部分露白边）就是它。
+     * streaming（manifestJson 非空）在 setSource 时会被清掉、换清单时置位，
+     * 两条路互斥且必有一条为真 —— 拿它补上，本地/网络/清单三种片源一视同仁。
+     */
+    readonly property bool hasSource: player.source.toString() !== "" || player.streaming
     /*
      * 顶栏现在是**带背景**的浮层（QtPlayerTheme.captionBarBg），标题和图标压的不再是
      * 黑画面而是那条底色 —— 所以直接用主题里"压在标题栏底色上"的那套颜色就行，
@@ -242,97 +251,27 @@ Window {
     readonly property color captionForeground: QtPlayerTheme.captionGlyph
     readonly property color captionTitleColor: QtPlayerTheme.titleText
 
-    /* 顶部栏的高度。它是"鼠标进顶部热区才显示"，收起时**高度也归零**（见 titleBar）。 */
+    /* 顶部栏的高度。非全屏时常驻显示（标题栏在上、播放器在下，不再遮挡）；
+       全屏时高度归零（QWindowKit 据此认为"没有标题栏"，见 titleBar 处的注释）。 */
     readonly property int titleBarHeight: 36
 
     /*
      * 顶部栏现在显不显示。
      *
-     * 判据见下面 titleBarHovered（三个来源取或：顶部热区的被动 HoverHandler、
-     * 三颗按钮自己的 hover、以及一条不依赖 hover 分发的坐标兜底）。
-     * 全屏时永远为假（用户要求：全屏不显示那三颗按钮）。
+     * 【本轮（用户要求）】改成**常驻**：非全屏时永远显示（标题栏在上、播放器在下），
+     * 不再是"鼠标进顶部热区才浮出来"的沉浸式。全屏时仍然收起（高度 0）：
+     * 全屏看片不该有一条压在画面上的标题栏。
      */
-    property bool titleBarShown: false
+    readonly property bool titleBarShown: !root.fullscreen
 
     /* 是不是全屏。控制栏、顶部栏、诊断文字现在都读这一个值。 */
     readonly property bool fullscreen: root.visibility === Window.FullScreen
 
     /*
      * 外面有没有"盖住整个窗口的浮层"开着（设置页 / 文件对话框）。
-     * 两个作用：① 控制栏这时不自动收起、也不藏鼠标指针；② 顶部栏这时不露头
-     * （它会被遮罩盖住，露出来只会留下一个"鼠标早就离开顶部了、它却还开着"的脏状态）。
+     * 播放器读它决定"要不要自动收起控制栏、藏不藏鼠标指针"。
      */
     readonly property bool overlayOpen: settingsPage.opened || root.fileDialog !== null
-
-    /*
-     * 顶部热区的**第二条判据**（兜底，故意的双保险）。
-     *
-     * 上面那条 topHotHover 走的是"一个被动 HoverHandler 抢在画面活动层前面拿到 hover"，
-     * 这条路我按 Qt Quick 的"hover 归最上层能收 hover 的元素"来设计的；万一哪天
-     * 覆盖顺序变了、或者 Qt 的 hover 分发改了行为，代价是**顶部栏再也浮不出来 ——
-     * 用户既拖不动窗口也关不掉它**。这个后果太重，所以再补一条完全不依赖 hover 分发的判据：
-     *
-     *     光标在画面区里（activityArea 自己的 containsMouse）
-     *     且它最后停下的 y 坐标在顶部这 36px 之内
-     *
-     * PlayerView 本来就在实时维护这两个值（`pointerInside` / `lastMouseY`，
-     * 见那个文件里 activityArea 的 onPositionChanged / onExited），不需要新增任何东西。
-     *
-     * 两条判据刚好互补：HoverHandler 拿到 hover 时它就为真；HoverHandler 没拿到时
-     * hover 就还在 activityArea 手里，这条就为真。**必有一条成立**，所以顶部栏一定浮得出来。
-     */
-    readonly property bool topZoneFallback: playerView.pointerInside
-                                            && playerView.lastMouseY >= 0
-                                            && playerView.lastMouseY < root.titleBarHeight
-
-    /* 显示条件。三个"不显示"：鼠标不在顶部、全屏、有浮层盖着。 */
-    readonly property bool titleBarHovered: (topHotHover.hovered || titleBar.captionHovered
-                                             || titleBar.surfaceHovered
-                                             || root.topZoneFallback)
-                                            && !root.fullscreen && !root.overlayOpen
-
-    /*
-     * titleBarHovered 一变就把显隐跟着定下来。
-     *
-     * 这句话写在**根对象**上，而不是给热区挂 onEntered/onExited：判据是两个对象的合成，
-     * 只在热区那几个信号里改状态迟早会漏（比如"从热区直接移到关闭按钮上"，
-     * 热区确实 exited 了，但按钮进来了，不该收）—— 合成出来的布尔量一变就重算最稳。
-     */
-    onTitleBarHoveredChanged: {
-        if (titleBarHovered) {
-            titleBarShown = true
-            titleBarHideTimer.stop()
-        } else {
-            titleBarHideTimer.restart()
-        }
-    }
-
-    /* 进全屏就立刻收掉，退出全屏后要重新把鼠标移上去才会出来。 */
-    onFullscreenChanged: {
-        if (fullscreen) {
-            titleBarShown = false
-            titleBarHideTimer.stop()
-        }
-    }
-
-    /*
-     * 收起的容错延时。
-     *
-     * 【为什么不是"移出即收"】判据要跨两个对象（顶部热区 / 三颗按钮各自的 hover），
-     * 中间必然有一两帧两边都不为真的空档；不延时的话顶部栏会闪。
-     * 300ms 和参考实现里那些浮层菜单的容错（100ms 挪动 + 300ms 关闭）是一个量级。
-     */
-    Timer {
-        id: titleBarHideTimer
-
-        interval: 300
-        repeat: false
-
-        onTriggered: {
-            if (!root.titleBarHovered)
-                root.titleBarShown = false
-        }
-    }
 
     /*
      * 标题栏上的一颗按钮（最小化 / 最大化 / 关闭，以及主题那颗太阳/月亮）。
@@ -357,20 +296,17 @@ Window {
         property bool dark: QtPlayerTheme.dark
 
         /*
-         * 图标线条的颜色。默认是主题里那套"压在窗口底色上"的深/浅色；播放器窗口的顶部栏
-         * 是**透明**的（直接压在画面上），那边会换成 onVideoText —— 否则浅色主题下
-         * 深灰图标压在黑画面上根本看不见。
+         * 图标线条的颜色。默认是主题里那套"压在窗口底色上"的深/浅色；播放器窗口的
+         * 顶部栏现在带不透明底色（captionBarBg），直接用这一套就看得清。
+         * （早年顶部栏透明、压在黑画面上时这里曾换成 onVideoText —— 那套已废弃。）
          */
         property color glyphColor: QtPlayerTheme.captionGlyph
 
         /*
-         * 鼠标是不是停在这颗按钮上（**透出去给外面用**）。
-         *
-         * 【为什么必须透出去】顶部栏是"鼠标进顶部才显示"的。显示出来之后，光标一旦停到
-         * 某颗按钮上，hover 就归这颗按钮了（Qt Quick 的 hover 是**最上层独占**，见下面
-         * pointerInPlayer 那段踩坑记录），那条用来"发现鼠标进来了"的被动 HoverHandler
-         * 收不到 hover → 被判成"鼠标已经离开" → 顶部栏刚露出来就被收回去，表现是**一直闪**。
-         * 所以显隐判据必须把"任一颗按钮自己的 hover"也算进去。
+         * 鼠标是不是停在这颗按钮上（只读别名，供组件外查询）。
+         * 早年"顶部栏鼠标进顶部才显示"时显隐判据必须把它算进去（hover 最上层独占，
+         * 光标停到按钮上热区就收不到 hover，只看热区顶部栏会一直闪）—— 标题栏
+         * 改常驻后不再有这个消费方，别名留着作为组件 API。
          */
         readonly property alias hovered: pointer.containsMouse
 
@@ -378,10 +314,10 @@ Window {
 
         width: 46
         /*
-         * 底色：常态**透明** —— 标题栏是沉浸式的（那一整条没有背景色，直接压在画面上），
-         * 按钮也就不该有块底色；只有悬停/按下时给一层半透明色（见主题里的 captionHover）。
-         * 相应地，图标里**不再有"挖洞"的画法**（原来还原图标和月亮要靠按钮底色去遮一条线），
-         * 这样按钮底色是透明还是半透明都不影响图标形状。
+         * 底色：常态**透明**，悬停/按下时给一层半透明色（见主题里的 captionHover /
+         * captionPressed）—— 按钮自己不带固定底色，压在标题栏的 captionBarBg 上。
+         * 相应地，图标里**不再有"挖洞"的画法**（原来还原图标和月亮要靠按钮底色去遮
+         * 一条线），这样按钮底色是透明还是半透明都不影响图标形状。
          */
         color: pointer.pressed ? QtPlayerTheme.captionPressed
                                : (pointer.containsMouse ? QtPlayerTheme.captionHover : "transparent")
@@ -648,6 +584,7 @@ Window {
         abortProgressMeta()
         playerView.viewPoints = []
         playerView.pbpData = null
+        playerView.interactionData = null
 
         /*
          * 正常情况下"拉"交给 playing 的上升沿（见下面那个 Connections）；
@@ -808,12 +745,67 @@ Window {
         }, "pbp")
 
         /*
-         * 悬停气泡的**位置帧**：接口的 preview.bin（和上面两条同一次取数、同一个基址）。
-         * 照参考实现（front/player/src/api/preview.ts）：它是 UTF-8 文本，
-         * `TextDecoder("utf-8").decode(arrayBuffer).split("\u001F")` → string[]，
-         * arr[0] 是空占位、arr[k]（k≥1）= 第 5*(k-1) 秒那一帧的 data URL
-         * → 气泡里用 `arr[floor(悬停秒/5) + 1]` 取（controls/index.ts:1410-1417）。
+         * 悬停气泡的**位置帧**：按预览图模式（首页切换的全局开关 QtPlayerPreviewMode）
+         * 二选一 —— bin（逐帧 data URL）/ sprite（雪碧图 index.json + 裁切）。
+         * 拉取逻辑抽到 fetchPreviewFrom：模式在播放器窗口开着的时候被切，
+         * 那个 Connections 会用同一函数重拉（弹幕/分段那些不用动）。
          */
+        fetchPreviewFrom(base)
+
+        /*
+         * 交互卡片（展示模式）：结构照 hili-player 的 InteractionPluginData，
+         * 四个数组（guideList/linkList/voteList/scoreList）齐不齐都行 ——
+         * InteractionLayer 里 rebuildModel 对缺的类别当空处理。
+         */
+        getProgressJson(base + "/x/player/interaction" + query, token, function (data) {
+            playerView.interactionData = (data && typeof data === "object") ? data : null
+        }, "interaction")
+    }
+
+    /*
+     * 预览图拉取（bin / sprite 二选一，模式 = QtPlayerPreviewMode.mode）：
+     *
+     *   * "bin"：GET /videoshot/preview.bin（UTF-8 文本，\u001F 切开）→ previewFrames。
+     *     arr[0] 是空占位，arr[k]（k≥1）= 第 5*(k-1) 秒那一帧 —— 取帧下标有 +1 偏移。
+     *   * "sprite"：GET /videoshot/index.json → data.pvdata{ img_url, img_x_len,
+     *     img_y_len, img_x_size, img_y_size } → previewSprite（img_url 是相对路径，
+     *     这里就拼成绝对 URL；ProgressRow 里用 Image.sourceClipRect 裁出那一格，
+     *     下标 = floor(秒/5) **无 +1**）。img_url 指回 preview.bin = 雪碧图没生成，
+     *     按不可用降级（previewSprite = null，气泡退回 bin/截屏那条路）。
+     *
+     * 两条路互斥喂入：切模式时先把另一条清空，ProgressRow 的气泡按"哪条有数据走哪条"。
+     */
+    function fetchPreviewFrom(base) {
+        if (base === "")
+            return
+
+        var query = "?aid=" + encodeURIComponent(mediaAid) + "&cid=" + encodeURIComponent(mediaCid)
+        var token = progressMetaToken
+
+        if (QtPlayerPreviewMode.mode === "sprite") {
+            getProgressJson(base + "/videoshot/index.json" + query, token, function (data) {
+                var pv = (data && data.pvdata !== undefined) ? data.pvdata : null
+
+                /* 雪碧图没生成时 mock 的 img_url 指回 preview.bin（server.js 里同一个
+                   常量）→ 按不可用降级，别让气泡去拉一张 404 */
+                if (pv === null || pv.img_url === "/videoshot/preview.bin") {
+                    console.warn("[mock] 雪碧图没生成（img_url 指回 preview.bin），预览降级")
+                    playerView.previewSprite = null
+                    return
+                }
+
+                playerView.previewFrames = []
+                playerView.previewSprite = {
+                    imgUrl: base + pv.img_url,
+                    imgXLen: pv.img_x_len,
+                    imgYLen: pv.img_y_len,
+                    imgXSize: pv.img_x_size,
+                    imgYSize: pv.img_y_size
+                }
+            }, "index.json")
+            return
+        }
+
         getProgressText(base + "/videoshot/preview.bin" + query, token, function (text) {
             var frames = text.split("\u001F")
 
@@ -824,8 +816,22 @@ Window {
                 return
             }
 
+            playerView.previewSprite = null
             playerView.previewFrames = frames
         }, "preview.bin")
+    }
+
+    /*
+     * 预览图模式被切（首页那颗按钮，播放器窗口开着的时候）：
+     * 静默重拉预览这一份 —— 弹幕 / 分段 / 高能进度条 / 交互卡片与模式无关，不动。
+     */
+    Connections {
+        target: QtPlayerPreviewMode
+
+        function onModeChanged() {
+            if (root.baseUrl !== "")
+                fetchPreviewFrom(root.baseUrl)
+        }
     }
 
     /*
@@ -1680,13 +1686,13 @@ Window {
     Component.onCompleted: {
         windowAgent.setup(root)
         /*
-         * 【顶部栏启动时是收起的（高度 0 + 不可见），这样注册没问题】
+         * 【标题栏非全屏常驻可见，注册始终有效】
          * QWindowKit 不是"注册那一刻记一个矩形"，而是每次命中测试现算：
          * isInTitleBarDraggableArea() 里先看 `m_delegate->isVisible(titleBar)`，
          * 再看 mapGeometryToScene() 出来的矩形（abstractwindowcontext.cpp:102-136）。
-         * 所以高度归零时它认为"这个窗口没有标题栏"（顶部那条是普通客户区，
-         * 鼠标移动才送得到 QML，顶部栏才浮得出来）；等它浮出来变成可见，
-         * 同一片区域立刻又是拖动区，拖它移动窗口/双击最大化都是系统行为。
+         * 标题栏常驻可见 → 这一条永远是拖动区（拖它移动窗口/双击最大化都是系统行为）；
+         * 进全屏时它高度归零 → QWindowKit 认为"这个窗口没有标题栏"，顶部那一条
+         * 变回普通客户区（全屏下顶部留给 PlayerTopBar，不再有拖动区）。
          */
         windowAgent.setTitleBar(titleBar)
         if (!root.nativeCaptionButtons) {
@@ -1747,17 +1753,38 @@ Window {
      * 下面三个只读别名是给本文件里老代码留的兼容：原来直接用 id（player / bar / danmakuLayer）
      * 引用的地方照旧能编译，不用为了这次拆分改上百处。
      */
+    /*
+     * 【左右两栏（常驻）】用户要求：播放器窗口固定"左播放器 + 右 API 面板"
+     * （弹幕列表 + 交互卡片的编辑/展示，模式切换在 ApiPanel 顶部，不再依赖
+     * 首页的开关），中间一条可拖的分隔条。右栏只在两种情况收起：
+     *   * 全屏 —— 整窗就是纯播放器（和加这个功能之前完全一致）；
+     *   * 点了播放器右缘中间的折叠箭头（apiPanelCollapsed，再点一下展开）。
+     */
+    readonly property bool showApiPanel: !root.fullscreen && !root.apiPanelCollapsed
+
+    /* 右栏是否被折叠箭头收起（点箭头切换；全屏不碰这个状态，退全屏后按它还原） */
+    property bool apiPanelCollapsed: false
+
+    /* 右栏宽度（分隔条拖动改写，夹在 260–420 之间） */
+    property real apiPanelWidth: 340
+
     PlayerView {
         id: playerView
 
         /*
-         * **铺满整个窗口**（原来顶部让给 titleBar 36px）。
+         * **顶到常驻标题栏的下缘**（标题栏在上、播放器在下 —— 用户要求，不再遮挡）。
          *
-         * 顶部栏现在是"鼠标进顶部才浮出来"，而且要求**顶部透明**（压在画面上，不是单独占一条），
-         * 所以画面区必须一直顶到窗口最上面 —— 否则顶部会留下一条 36px、和画面不同色的空带，
-         * 一显一隐地跳。
+         * 之前沉浸式标题栏（鼠标进顶部才浮出来、压在画面上）要求画面区顶到窗口最上面，
+         * 否则顶部会留一条和画面不同色的空带；现在标题栏常驻占位（36px），播放器
+         * 从它下面开始，浮不出来也挡不住 —— 右栏出现（非全屏且未折叠）时右边
+         * 让给分隔条（panelDivider），分隔条右边是 API 面板。
          */
-        anchors.fill: parent
+        anchors {
+            left: parent.left
+            top: titleBar.bottom
+            bottom: parent.bottom
+            right: root.showApiPanel ? panelDivider.left : parent.right
+        }
 
         source: ""
         sourceTitle: player.source.toString() === "" ? "" : root.sourceName()
@@ -1798,6 +1825,177 @@ Window {
             /* 点某一集 = 换到那一集播（同一个窗口换源，不新建窗口） */
             if (root.library)
                 root.playFromLibrary(root.library, index)
+        }
+    }
+
+    /* =======================================================================
+     * 右栏 API 面板 + 可拖分隔条（仅编辑模式出现；手动布局，不用 SplitView ——
+     * SplitView 会把子项塞进自己的 contentItem，控制栏那套 anchors/timer 语义
+     * 全部跟着变，风险远大于收益）
+     * ======================================================================= */
+
+    /* 分隔条：5px 宽的热条，拖它改 apiPanelWidth（260–420 夹取）。
+       顶部从标题栏下缘开始（标题栏在上、左右两栏都在它下面，互不遮挡） */
+    Rectangle {
+        id: panelDivider
+
+        visible: root.showApiPanel
+        width: 5
+        anchors {
+            top: titleBar.bottom
+            bottom: parent.bottom
+        }
+        /* 位置 = 窗口右边 - 右栏宽 - 自己的宽（拖动时 drag 直接写 x，宽度反算） */
+        x: root.width - root.apiPanelWidth - width
+        color: dividerHover.hovered || dividerDrag.pressed ? "#3DFFFFFF" : "#14FFFFFF"
+
+        /* 命中区比视觉宽一点（9px），好抓 */
+        MouseArea {
+            id: dividerDrag
+
+            anchors.fill: parent
+            anchors.margins: -2
+            cursorShape: Qt.SplitHCursor
+            drag.target: panelDivider
+            drag.axis: Drag.XAxis
+            /* 夹取 = 宽度夹取（260–420）换算到 x 上 */
+            drag.minimumX: root.width - 420 - panelDivider.width
+            drag.maximumX: root.width - 260 - panelDivider.width
+
+            onPositionChanged: {
+                if (pressed)
+                    root.apiPanelWidth = Math.max(260, Math.min(420,
+                                                    root.width - panelDivider.x - panelDivider.width))
+            }
+
+            /* 拖动是命令式写 x（已把绑定打断）：松手后恢复绑定，
+               窗口 resize / 宽度再改时分隔条继续跟着走 */
+            onReleased: panelDivider.x = Qt.binding(function () {
+                return root.width - root.apiPanelWidth - panelDivider.width
+            })
+        }
+
+        HoverHandler {
+            id: dividerHover
+        }
+    }
+
+    /* 右栏本体：宽 = apiPanelWidth，右边贴窗口右边。
+       顶部从标题栏下缘开始 —— 右栏自己的 Tab 行（交互卡片/弹幕 + 编辑/展示）从此
+       不会被标题栏盖住（用户实测"顶部标题栏挡住了下面的按钮"，随常驻标题栏一并解决） */
+    ApiPanel {
+        id: apiPanel
+
+        visible: root.showApiPanel
+        width: root.apiPanelWidth
+        anchors {
+            top: titleBar.bottom
+            right: parent.right
+            bottom: parent.bottom
+        }
+
+        /* 两个依赖都从播放器组件转出（interactionLayer / danmaku 引擎） */
+        interactionLayer: playerView.interactionLayer
+        danmakuView: playerView.danmaku
+    }
+
+    /*
+     * 折叠箭头把手（腾讯视频右栏收起/展开那一类的写法）：
+     *   * 贴着**播放器右缘、垂直居中**浮着 —— 右栏展开时贴分隔条左边，收起时贴窗口右边；
+     *   * 箭头方向（用户定的语义）：展开态向右 ▶（再点一下把右栏推走）、收起态向左 ◀
+     *     （再点一下把右栏拉出来）—— 用的就是弹幕面板同款素材 assets/images/dm/arrow.svg
+     *     （右向 chevron，左向就转 180°）；
+     *   * 显隐跟控制栏**同一套时序**：鼠标一动（playerView.controlsShown）就出来、
+     *     闲置 3 秒跟着控制栏一起淡出（不另加计时器，不碰播放器内部的显隐逻辑）；
+     *     鼠标停在把手自己身上时不淡出 —— 和控制栏"pointerInside 就不收"是同一条规则。
+     *
+     * 两个实现要点（都是这个工程里踩过的坑，别改）：
+     *   1. hover 判据用**被动**的 HoverHandler —— 把手压在画面活动层（activityArea）
+     *      上面，若用 MouseArea 的 hoverEnabled 抢 hover，鼠标一移到把手那一小条上
+     *      控制栏就不认"画面区有活动"了，自动隐藏的时序会被搅乱；
+     *   2. 点击那层 MouseArea **不写 hoverEnabled**（默认 false，不会抢 hover），
+     *      点击被它接走 → 不会漏到下面变成"点画面 = 暂停"。
+     *
+     * 它是纯浮层：不参与任何锚定链（playerView / panelDivider / titleBar
+     * 都不引用它），收起/展开只是它自己的 anchors.right 在两条之间切换 —— 播放器布局
+     * 一个像素都不动。
+     */
+    Item {
+        id: panelHandle
+
+        /* 全屏下没有右栏的概念，把手也不出现（visible false 时 hover/点击全免） */
+        visible: !root.fullscreen
+
+        /* 右栏展开 → 贴分隔条左边；收起 → 贴窗口右边（两条都是"播放器右缘"） */
+        anchors.right: root.showApiPanel ? panelDivider.left : parent.right
+        anchors.verticalCenter: parent.verticalCenter
+
+        width: 20
+        height: 64
+        /* 压在播放器整块上面（titleBar z:4 在顶部 36px 且常驻，把手垂直居中，不重叠） */
+        z: 5
+
+        /* 显隐：控制栏显示中、或鼠标正停在把手上 —— 否则淡出（200ms，跟浮层动画一个量级） */
+        opacity: (playerView.controlsShown || handleHover.hovered) ? 1 : 0
+
+        Behavior on opacity {
+            NumberAnimation {
+                duration: 200
+                easing.type: Easing.OutQuad
+            }
+        }
+
+        /* 被动 hover（只观察不独占，画面活动层照常收到鼠标移动） */
+        HoverHandler {
+            id: handleHover
+        }
+
+        /* 竖条底：深色半透明，hover 提亮（和参考里浮层按钮一档的对比度） */
+        Rectangle {
+            anchors.fill: parent
+            radius: 4
+            color: handleHover.hovered ? "#CC3A3A3A" : "#99222222"
+            /* 细描边让它压在亮画面上也看得清 */
+            border.width: 1
+            border.color: "#33FFFFFF"
+
+            Behavior on color {
+                ColorAnimation {
+                    duration: 150
+                }
+            }
+        }
+
+        /* 箭头本体：右向素材，展开态 ▶（rotation 0）/ 收起态 ◀（rotation 180），
+           翻转带 150ms 过渡（转轴在图标中心，视觉上是"箭头掉头"） */
+        Image {
+            anchors.centerIn: parent
+            width: 16
+            height: 16
+            source: "assets/images/dm/arrow.svg"
+            sourceSize: Qt.size(16, 16)
+            smooth: true
+            rotation: root.showApiPanel ? 0 : 180
+
+            Behavior on rotation {
+                NumberAnimation {
+                    duration: 150
+                    easing.type: Easing.InOutQuad
+                }
+            }
+        }
+
+        /*
+         * 点击切换收起/展开。hoverEnabled 不写（默认 false）—— 这层的职责只有"接住点击"，
+         * hover 交给上面的 HoverHandler 和下面的画面活动层。
+         * 淡出后（opacity ≤ 0.5）不再接点击：不然看不见的把手会把那一小条画面变成
+         * "点了没反应"的死区（点击到不了 activityArea，暂停/全屏都失效）。
+         */
+        MouseArea {
+            anchors.fill: parent
+            cursorShape: Qt.PointingHandCursor
+            enabled: panelHandle.opacity > 0.5
+            onClicked: root.apiPanelCollapsed = !root.apiPanelCollapsed
         }
     }
 
@@ -1875,6 +2073,17 @@ Window {
         player.manifestHint = (name === undefined || name === null) ? "" : ("" + name)
 
         var ok = player.setManifest(manifest)
+
+        /* 【和 playFile 同一套换片清理】清单对象没有可配对的同名 .xml —— 弹幕直接
+           reset（清掉上一部），元数据交给 resetProgressMeta：playing 上升沿会拉齐
+           mock 弹幕列表 / 分段 / 高能进度条 / 预览帧 / 交互卡片，和本地播放同一条链。
+           不加这段的话 JSON 播放是：弹幕沿用上一部 + 整份元数据全空（用户实测）。 */
+        danmakuLayer.reset()
+        _sidecarToken = -1
+        _mockToken = -1
+        _sidecarLoaded = false
+        resetProgressMeta()
+
         console.log("playManifestObject: " + (ok ? "已交给播放器" : "被拒绝（看日志）"))
         return ok
     }
@@ -1905,6 +2114,14 @@ Window {
             ok = player.setManifestJson(text)
         }
 
+        /* 【和 playFile 同一套换片清理】理由见 playManifestObject 里那段注释：
+           弹幕 reset + 元数据 playing 上升沿拉齐，JSON 播放才和本地播放一个待遇。 */
+        danmakuLayer.reset()
+        _sidecarToken = -1
+        _mockToken = -1
+        _sidecarLoaded = false
+        resetProgressMeta()
+
         console.log("playManifestJson: " + (ok ? "已交给播放器" : "被拒绝（看日志）"))
         return ok
     }
@@ -1929,6 +2146,12 @@ Window {
             ok = player.loadManifestFile(p)
         }
 
+        /* 【和 playFile 同一套换片清理】理由见 playManifestObject 里那段注释。
+           清单 .json 文件名也拿去配同名弹幕（有就加载、没有自动兜底 mock）——
+           和本地视频完全同一待遇。 */
+        loadSidecarDanmaku("file:///" + p)
+        resetProgressMeta()
+
         console.log("playManifestFile: " + (ok ? "已交给播放器" : "被拒绝（看日志）"))
         return ok
     }
@@ -1942,82 +2165,29 @@ Window {
     readonly property alias player: playerView.player
     readonly property alias bar: playerView.controlBar
     readonly property alias danmakuLayer: playerView.danmaku
-    /* ---------------- 顶部栏（无标题栏 + 透明 + 鼠标进顶部才出来） ---------------- */
+    /* ---------------- 顶部栏（常驻：非全屏永远显示，全屏高度归零） ---------------- */
 
     /*
-     * 【用户要求】播放器窗口：**无标题栏、顶部透明、右上角三颗按钮只在鼠标移到顶部时显示、
-     * 全屏时不显示**。
-     *
-     * 所以这一条和首页（HomeWindow.qml）**刻意不一样**：
-     *   * 首页：常显的标题栏（QWindowKit + 有标题栏），那是视频库窗口该有的样子；
-     *   * 这里：默认**完全不占位**（高度 0 + 不可见），鼠标移到窗口最上面那 36px 才浮出来，
-     *     底色 `transparent`（直接压在画面上），全屏时永远不出来。
-     *
-     * 三条实现要点，缺一条就出问题：
-     *   1. **判据里必须带上"某颗按钮自己的 hover"**（见 titleBar.captionHovered）——
-     *      hover 是最上层独占的，光标一停到按钮上热区就收不到 hover 了，只看热区会闪；
-     *   2. **热区用被动 HoverHandler，不用 MouseArea**：MouseArea 即使
-     *      acceptedButtons: NoButton 也仍是"能收 hover 的元素"，会把鼠标运动从下面的
-     *      画面活动层手里拿走（那会变成"鼠标一移到窗口顶部，控制栏就不自动隐藏了"）；
-     *      HoverHandler 是**被动**的，只观察、不参与独占，点击照样穿到下面去
-     *      （点顶部空白 = 暂停/播放，和别处一致）。
-     *   3. **收起时高度也要归零**：QWindowKit 的 isInTitleBarDraggableArea() 看的是
-     *      `m_delegate->isVisible(titleBar)` + 映射出来的矩形（见
-     *      abstractwindowcontext.cpp:102-122），高度 0 / 不可见时它就认定"这个窗口没有
-     *      标题栏"，顶部那一条于是是普通客户区 —— 鼠标移动才送得到 QML，顶部栏才浮得出来。
-     *      反过来，露出来的时候它就是拖动区：拖它移动窗口、双击最大化都是系统行为。
+     * 【演进史（别把热区加回来）】最早这一段还有一个 topHotZone（顶部 36px 的
+     * HoverHandler 热区，鼠标移进去把沉浸式标题栏"钓"出来），以及配套的
+     * captionHovered / surfaceHovered / topZoneFallback / titleBarHideTimer 一整套
+     * 显隐状态机 —— 那是"鼠标进顶部才显示"时代的东西，标题栏改常驻后整体移除：
+     * 常驻的标题栏不需要任何"浮出来"的判据，留着只会平白多一层抢 hover 的元素。
      */
-    Item {
-        id: topHotZone
-
-        anchors {
-            left: parent.left
-            right: parent.right
-            top: parent.top
-        }
-        height: root.titleBarHeight
-        /* 全屏不出顶部栏，热区也就没必要存在（顺便不再去抢顶部栏那个"?"的 hover） */
-        visible: !root.fullscreen
-        enabled: visible
-        /*
-         * 【必须在标题栏**上面**（z 比 titleBar 大）—— 别改回 3，这是"顶部栏一直闪"的修复】
-         *
-         * 之前热区在标题栏下面：鼠标一移到顶部，热区拿到 hover → 标题栏露出来（高 36）→
-         * 热区被标题栏盖住 → Qt 把 hover 从热区转走；而标题栏里那层 MouseArea 的
-         * containsMouse 在"鼠标没动、元素刚出现"这一帧**不一定**会立刻变成真 →
-         * 三个 hover 来源同时为假 → 300ms 后标题栏收起 → 热区又拿到 hover → 再露出……
-         * 用户看到的就是"鼠标移上去一直在闪烁"。
-         *
-         * 现在热区压在标题栏之上：它用的是**被动**的 HoverHandler（HoverHandler 不独占
-         * hover，也不参与按键分发），所以
-         *   * 只要光标在这 36px 里，topHotHover.hovered 就一直是真 → 标题栏稳定不闪；
-         *   * 下面标题栏里的按钮/拖拽 MouseArea 照样能拿到 hover 和点击（被动 handler
-         *     不会把它们挡掉）；
-         *   * 热区本身是一个没有 MouseArea 的 Item，不消费任何按键 —— 点击照样落在
-         *     标题栏的拖拽区（QWindowKit 的命中测试在窗口系统那一层，和 QML 的 z 无关）。
-         */
-        z: 5
-
-        HoverHandler {
-            id: topHotHover
-        }
-    }
 
     /*
      * 顶部栏本体：左边标题，右边主题按钮 + 三颗窗口按钮。
      *
-     * 【本轮（用户要求）】两处行为改了，别改回去：
+     * 【带背景，不再透明（用户要求，别改回去）】以前是 `color: "transparent"`
+     * （"顶部透明"），后果是用户看不出哪一条能拖窗口 —— 鼠标移上去以为在画面区，
+     * 按下去那一下被当成"点画面"（暂停/播放），拖拽也时灵时不灵。现在给一条
+     * **不透明底色**（QtPlayerTheme.captionBarBg，深浅色各一档），拖拽区一眼可见。
+     * 因为底色不再是画面，标题/图标的颜色也就不用再"跟着底下是不是黑画面"换了。
      *
-     *   1. **带背景，不再透明**。以前是 `color: "transparent"`（"顶部透明"），后果是
-     *      用户看不出哪一条能拖窗口 —— 鼠标移上去以为在画面区，按下去那一下被当成
-     *      "点画面"（暂停/播放），拖拽也时灵时不灵。现在给一条**不透明底色**
-     *      （QtPlayerTheme.captionBarBg，深浅色各一档），拖拽区一眼可见。
-     *      因为底色不再是画面，标题/图标的颜色也就不用再"跟着底下是不是黑画面"换了。
-     *
-     *   2. **鼠标停在上面就一直显示，移出去才收**（原来是 300ms 容错 + 只认三个 hover
-     *      来源）。现在多一条判据：`titleBar.surfaceHovered`（顶栏自己那一层的 hover），
-     *      三条 hover 来源取或；移出后 300ms 才收（跨对象时必然有一两帧的空档，
-     *      不留这点时间会闪）。
+     * 【常驻占位（本轮用户要求）】非全屏时高度恒 36、铺满窗口全宽 —— "标题栏在上、
+     * 播放器在下"，浮不出来也就挡不住下面的内容；右栏（ApiPanel）的 Tab 行同样从
+     * titleBar.bottom 开始，不再被盖住。全屏时高度归零（QWindowKit 据此认为"这个
+     * 窗口没有标题栏"，顶部变回普通客户区，全屏下顶部留给 PlayerTopBar）。
      *
      * 另外给顶栏加了一层 MouseArea：它把落在拖拽区里的**按下**事件吃掉，
      * 顺手调 Window.startSystemMove() —— 这样即使某个平台的命中测试没把这一条
@@ -2027,12 +2197,15 @@ Window {
         id: titleBar
 
         anchors.left: parent.left
+        /* **铺满窗口全宽**：右栏（ApiPanel）在标题栏**下面**（它的 Tab 行从
+           titleBar.bottom 开始），不再需要"编辑模式缩到左栏"让位 ——
+           整条都是 QWindowKit 的拖动区，和常规应用布局一致 */
         anchors.right: parent.right
         anchors.top: parent.top
         /*
-         * 收起时**高度归零**，不只是 visible: false —— 原因见上面第 3 条：
-         * QWindowKit 判"这一条还在不在"看的是可见性 + 映射矩形，高度 0 才是彻底"不存在"，
-         * 顶部那一条才会变回客户区、鼠标移动才送得到 QML（否则顶部栏再也浮不出来）。
+         * 全屏时**高度归零**，不只是 visible: false —— QWindowKit 判"这一条还在不在"
+         * 看的是可见性 + 映射矩形，高度 0 才是彻底"不存在"，顶部那一条才会变回
+         * 普通客户区（全屏下顶部留给 PlayerTopBar，鼠标移动才送得到 QML）。
          */
         height: root.titleBarShown ? root.titleBarHeight : 0
         visible: height > 0
@@ -2053,16 +2226,11 @@ Window {
             color: QtPlayerTheme.captionBarBorder
         }
 
-        /*
-         * 鼠标在顶栏上（除按钮之外的区域）—— "鼠标在上面就一直显示"的那条判据。
-         * 用普通 MouseArea 的 containsMouse：它同时负责吃掉按下事件（见下面的 onPressed）。
-         */
-        readonly property bool surfaceHovered: titleDragArea.containsMouse
-
         MouseArea {
             id: titleDragArea
 
             anchors.fill: parent
+            /* hoverEnabled 只为 cursorShape（箭头光标）能生效，不参与任何显隐判据 */
             hoverEnabled: true
             acceptedButtons: Qt.LeftButton
             cursorShape: Qt.ArrowCursor
@@ -2073,10 +2241,7 @@ Window {
              * startSystemMove()，任何平台都能拖；同时这次"按下"被本 MouseArea 吃掉，
              * **不会漏到下面的画面区**变成暂停/播放（用户报的就是这个）。
              */
-            onPressed: {
-                titleBarHideTimer.stop()
-                root.startSystemMove()
-            }
+            onPressed: root.startSystemMove()
 
             /* 双击顶栏 = 最大化 / 还原（和系统标题栏一致） */
             onDoubleClicked: {
@@ -2086,16 +2251,6 @@ Window {
                     root.showMaximized()
             }
         }
-
-        /*
-         * 四颗按钮里有没有哪一颗正被鼠标压着 —— "鼠标还在顶部栏上"的第二个判据。
-         *
-         * 光标停在按钮上时上面那条热区（topHotHover）收不到 hover（最上层独占，
-         * 见 CaptionButton.hovered 的说明），只靠热区判会把顶部栏当场收回去。
-         * 隐藏的按钮（macOS 上那三颗 ours 为假）containsMouse 恒为假，不影响。
-         */
-        readonly property bool captionHovered: themeButton.hovered || closeButton.hovered
-                                               || maximizeButton.hovered || minimizeButton.hovered
 
         /* 标题。用窗口自己的 title，任务栏上显示的就是同一个字符串。 */
         Text {
@@ -2234,10 +2389,10 @@ Window {
     Column {
         anchors.left: parent.left
         /*
-         * 【为什么不再锚 titleBar.bottom】顶部栏现在是"鼠标进顶部才浮出来"的，锚在它下面就
-         * 意味着这几行字会跟着一起上上下下地跳。所以固定锚在窗口顶端，再留出顶部栏那么高
-         * 的余量：顶部栏露出来时两者不打架，收起时也只是整体低 48px（全屏同理 ——
-         * 那正好让开了 PlayerTopBar 左上角的标题，原来两者是叠在一起的）。
+         * 【为什么锚窗口顶端而不是 titleBar.bottom】标题栏全屏时高度归零，锚它下面
+         * 这几行字会跟着跳到窗口最顶端、和 PlayerTopBar 左上角的标题叠在一起。
+         * 固定锚窗口顶端 + topMargin 48：非全屏时常驻标题栏（36px）正好被让开
+         * （还余 12px 空隙）；全屏时（标题栏高 0）正好让开 PlayerTopBar。
          */
         anchors.top: parent.top
         anchors.leftMargin: 12

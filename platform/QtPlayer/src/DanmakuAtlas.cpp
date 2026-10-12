@@ -1,7 +1,9 @@
 #include "DanmakuAtlas.h"
 
+#include <QtCore/QUrl>
 #include <QtGui/QFont>
 #include <QtGui/QFontMetricsF>
+#include <QtGui/QImageReader>
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtQuick/QQuickWindow>
@@ -369,6 +371,97 @@ namespace cicadaqt {
                            static_cast<qreal>(h) / m_image.height());
         result.valid = true;
         /* 流水号：渲染侧用它判断"这条进 GPU 纹理了没有"（上传是合并做的） */
+        result.serial = ++m_bakeSerial;
+
+        m_cache.insert(key, result);
+        m_dirty = true;
+
+        return result;
+    }
+
+    DanmakuAtlasEntry DanmakuAtlas::iconEntry(const QString &iconSource, const QColor &tintColor,
+                                              int logicalSize, qreal devicePixelRatio)
+    {
+        /*
+         * 缓存键与文字条目共用一张表：前缀 \x01icon 区分（弹幕文字里不会出现 \x01）。
+         * 染色必须进键 —— 同一个图标要跟着不同颜色的弹幕走（currentColor 语义）。
+         */
+        const qreal dpr = devicePixelRatio > 0.0 ? devicePixelRatio : 1.0;
+        const QString key = QStringLiteral("\x01icon\x1f") + iconSource + QLatin1Char('\x1f')
+                            + QString::number(tintColor.rgba()) + QLatin1Char('\x1f')
+                            + QString::number(logicalSize) + QLatin1Char('\x1f')
+                            + QString::number(dpr);
+        const auto cached = m_cache.constFind(key);
+
+        if (cached != m_cache.constEnd())
+            return cached.value();
+
+        DanmakuAtlasEntry result;
+
+        /* QML 给的是 resolvedUrl：qrc:///qt/qml/… 要转回 ":/…"，file:///… 转本地路径 */
+        const QUrl url(iconSource);
+        QString path;
+
+        if (url.scheme() == QLatin1String("qrc"))
+            path = QLatin1Char(':') + url.path();
+        else if (url.isLocalFile())
+            path = url.toLocalFile();
+        else
+            path = iconSource;
+
+        if (path.isEmpty()) {
+            m_cache.insert(key, result);   /* 记一条空条目，别每帧重试 */
+            return result;
+        }
+
+        const int w = qMax(1, static_cast<int>(std::lround(logicalSize * dpr)));
+
+        /*
+         * SVG 走 qsvg 图片格式插件（静态 Qt 下 CMake 里已点名链接 QSvgPlugin），
+         * setScaledSize 让它**直接按目标尺寸渲染**（矢量 → 位图，边缘清晰）。
+         * 万一来源不支持 scaledSize（或干脆是位图），下面再兜一层平滑缩放。
+         */
+        QImageReader reader(path);
+        reader.setScaledSize(QSize(w, w));
+        QImage icon = reader.read();
+
+        if (icon.isNull()) {
+            AF_LOGW("DanmakuAtlas: 点赞图标加载失败(%s)\n", qPrintable(iconSource));
+            m_cache.insert(key, result);
+            return result;
+        }
+
+        if (icon.size() != QSize(w, w))
+            icon = icon.scaled(w, w, Qt::IgnoreAspectRatio, Qt::SmoothTransformation);
+
+        QRect target;
+
+        if (!allocate(w, w, &target)) {
+            m_cache.insert(key, result);
+            return result;
+        }
+
+        /*
+         * 先把图标画进去，再用 SourceIn 把这一块整体染成弹幕文字色 ——
+         * 等价于参考 CSS 的 fill: currentColor（图标源本身是黑/本色的）。
+         * clip 限定在这块小图里，图集里邻居条目不受影响。
+         */
+        {
+            QPainter painter(&m_image);
+            painter.setClipRect(target);
+            painter.drawImage(QRect(target.topLeft(), QSize(w, w)), icon);
+            painter.setCompositionMode(QPainter::CompositionMode_SourceIn);
+            painter.fillRect(target, tintColor);
+            painter.end();
+        }
+
+        result.pixelWidth = w;
+        result.pixelHeight = w;
+        result.uv = QRectF(static_cast<qreal>(target.x()) / m_image.width(),
+                           static_cast<qreal>(target.y()) / m_image.height(),
+                           static_cast<qreal>(w) / m_image.width(),
+                           static_cast<qreal>(w) / m_image.height());
+        result.valid = true;
         result.serial = ++m_bakeSerial;
 
         m_cache.insert(key, result);

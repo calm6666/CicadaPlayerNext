@@ -446,6 +446,39 @@ namespace cicadaqt {
         /* 只写不读 → 不发信号 */
     }
 
+    void DanmakuRendererItem::setLikedIconSource(const QString &value)
+    {
+        if (m_likedIconSource == value)
+            return;
+
+        m_likedIconSource = value;
+        /* 只写不读 → 不发信号（QML 写属性→发信号→QV4 重入是崩溃链，见 setTimeMs 的说明） */
+        update();
+    }
+
+    void DanmakuRendererItem::setLiked(qint64 id, bool liked)
+    {
+        if (liked)
+            m_likedIds.insert(id);
+        else
+            m_likedIds.remove(id);
+
+        /*
+         * 点赞多发生在**暂停**时（鼠标得停下来才能悬停），而暂停期间渲染循环
+         * 不自驱（onTick 直接 return）—— 必须自己补这一帧，图标才会当场出现。
+         */
+        update();
+    }
+
+    void DanmakuRendererItem::clearLiked()
+    {
+        if (m_likedIds.isEmpty())
+            return;
+
+        m_likedIds.clear();
+        update();
+    }
+
     void DanmakuRendererItem::releaseResources()
     {
         /*
@@ -572,6 +605,8 @@ namespace cicadaqt {
                                              qreal nowSec, qreal refSec, qreal dpr)
     {
         const int count = static_cast<int>(items.size());
+        /* 点赞图标四边形（updatePaintNode 的图标趟填的；0 = 这一帧没有点赞的弹幕） */
+        const int iconCount = static_cast<int>(m_likedIcons.size());
 
         /*
          * 【★ 顶点/索引缓冲：只在**真的装不下**时才重新分配 ★】
@@ -588,8 +623,8 @@ namespace cicadaqt {
          * 现在两者兼顾：**权威永远是 `geometry->vertexCount()`**（下面 writableQuads 就是
          * 从它算的），只在真装不下时按"+32 / 翻倍"扩容一次，之后不再缩、也不再每帧换。
          */
-        if (geometry->vertexCount() / kVertexPerQuad < count) {
-            const int grown = qMax(count + 32, count * 2);
+        if (geometry->vertexCount() / kVertexPerQuad < count + iconCount) {
+            const int grown = qMax(count + iconCount + 32, (count + iconCount) * 2);
 
             m_quadCapacity = grown;
             geometry->allocate(grown * kVertexPerQuad, grown * kIndexPerQuad);
@@ -603,7 +638,7 @@ namespace cicadaqt {
          * 万一将来有人改动分配逻辑、或几何被外部换掉，也不允许写超过它的条数。
          * （多这一道判断几乎不花钱，但把"越界写堆"这条路彻底封死。）
          */
-        const int writableQuads = qMin(count, geometry->vertexCount() / kVertexPerQuad);
+        const int writableQuads = qMin(count + iconCount, geometry->vertexCount() / kVertexPerQuad);
 
         int quads = 0;
 
@@ -685,6 +720,76 @@ namespace cicadaqt {
             QSGGeometry::TexturedPoint2D *v = vertices + base;
 
             /* 顶点顺序：左上 → 右上 → 右下 → 左下（三角形 0-1-2 / 0-2-3） */
+            v[0].set(x0, y0, u0, v0);
+            v[1].set(x1, y0, u1, v0);
+            v[2].set(x1, y1, u1, v1);
+            v[3].set(x0, y1, u0, v1);
+
+            quint16 *quadIndices = indices + quads * kIndexPerQuad;
+            quadIndices[0] = static_cast<quint16>(base + 0);
+            quadIndices[1] = static_cast<quint16>(base + 1);
+            quadIndices[2] = static_cast<quint16>(base + 2);
+            quadIndices[3] = static_cast<quint16>(base + 0);
+            quadIndices[4] = static_cast<quint16>(base + 2);
+            quadIndices[5] = static_cast<quint16>(base + 3);
+
+            ++quads;
+        }
+
+        /*
+         * ---- 点赞图标四边形（画在对应文字的左前方）----
+         *
+         * 位置公式与 QML 版 DanmakuItem.qml 里那个 Image 完全同源（参考
+         * danmaku.scss:251-278 的 .danmaku-x-liked-icon）：
+         *   x = 盒x + borderW + padH − 0.8 × 字号   （margin-left: -0.8em）
+         *   y = 盒y + borderW + padV + 字号 − 图标高 （文字行底对齐）
+         * 滚动外推与像素吸附和上面的文字四边形用同一套 —— 图标必须和文字同步移动、
+         * 同样吸附，否则会看到图标和字"错位漂移"。
+         */
+        for (const LikedIcon &icon : m_likedIcons) {
+            if (quads >= writableQuads)
+                break;
+
+            if (icon.itemIndex < 0 || icon.itemIndex >= count)
+                continue;
+
+            const QRectF &uv = icon.entry.uv;
+
+            if (uv.isEmpty())
+                continue;
+
+            /* 还没进 GPU 纹理的图标这一帧先不画（和文字条目同一个 serial 判据） */
+            if (icon.entry.serial > m_atlas.uploadedSerial())
+                continue;
+
+            const RenderItem &item = items[icon.itemIndex];
+
+            qreal x = item.x;
+
+            if (item.type == DanmakuTypeScroll && !item.hovered && item.durationMs > 0.0f
+                && m_containerWidth > 0.0) {
+                const qreal speed = (m_containerWidth + item.width) / (item.durationMs / 1000.0);
+
+                x -= speed * (nowSec - refSec);
+            }
+
+            const qreal iconSize = icon.size;
+            const float x0 = static_cast<float>(std::round(
+                (x + item.borderWidth + item.padH - 0.8 * item.fontPixelSize) * snapScaleX) / snapScaleX);
+            const float y0 = static_cast<float>(std::round(
+                (item.y + item.borderWidth + item.padV + item.fontPixelSize - iconSize) * snapScale)
+                / snapScale);
+            const float x1 = x0 + static_cast<float>(iconSize);
+            const float y1 = y0 + static_cast<float>(iconSize);
+
+            const float u0 = static_cast<float>(uv.left());
+            const float v0 = static_cast<float>(uv.top());
+            const float u1 = static_cast<float>(uv.right());
+            const float v1 = static_cast<float>(uv.bottom());
+
+            const int base = quads * kVertexPerQuad;
+            QSGGeometry::TexturedPoint2D *v = vertices + base;
+
             v[0].set(x0, y0, u0, v0);
             v[1].set(x1, y0, u1, v0);
             v[2].set(x1, y1, u1, v1);
@@ -866,8 +971,20 @@ namespace cicadaqt {
                 /*
                  * 引擎刚推了一帧（时间戳变了）→ 直接按"引擎那一刻"重算。
                  * 这是**权威值**：顺带把增量累加攒下的那点误差清掉（不累积漂移）。
+                 *
+                 * 【差值钳到 250ms —— 与下面增量分支同待遇，别删】
+                 * 暂停期间 QML 侧仍可能补发 engine.update()（pushPointer 的悬停同步，
+                 * DanmakuView.qml），它会刷新 engineClockMonoMs() 但引擎时钟不走；
+                 * 此后鼠标停住、暂停持续，这个戳就停在悬停那一刻。任何让本分支拿到
+                 * "当前 − 很旧的引擎戳"的时序（恢复瞬间、GUI 卡顿后）都会把几秒的
+                 * 差值乘上倍速一次性算成外推量 —— 屏幕上就是整层弹幕"闪/弹一下再归位"
+                 * （用户实测：暂停后鼠标移上弹幕出 tip，再恢复播放 100% 复现）。
+                 * 正常播放时引擎 30Hz 刷新戳、差值 ≤33ms，钳制毫无影响；只有异常
+                 * 时序才会碰到上限，这正是要拦的。
                  */
-                extraMs = qMax<qreal>(0.0, static_cast<qreal>(monoNowRaw - engineStampMono)) * m_rate;
+                extraMs = qBound<qreal>(0.0,
+                                        static_cast<qreal>(monoNowRaw - engineStampMono) / 1000.0,
+                                        0.25) * 1000.0 * m_rate;
             } else if (m_lastFrameMonoMs >= 0) {
                 /*
                  * 引擎这一帧还没推（两次 engine.update 之间）：按**上一帧到这一帧**的真实
@@ -980,6 +1097,55 @@ namespace cicadaqt {
         const size_t itemCount = items.size();
 
         const qreal dpr = window() != nullptr ? window()->effectiveDevicePixelRatio() : 1.0;
+
+        /*
+         * ---- 点赞图标趟（在文字趟**之前**，理由见下）----
+         *
+         * 给这一帧每条"已点赞"的弹幕问一次图标条目（缓存命中就是一次哈希查找，
+         * 只有 0~3 条，代价可忽略）。两个顺序上的讲究：
+         *
+         *   1. 【先图标后文字】烤图标可能把图集塞满触发整体重烤（resetPacking），
+         *      先走图标趟的话，紧跟着的文字趟会看到 generation 变化、自动重走一遍
+         *      （文字侧本来就有的"两趟"防线）；反过来（文字先走）就没有这层保护。
+         *   2. 【fresh 图标要立刻上传】点赞常发生在**暂停**时 —— 渲染循环不自驱
+         *      （onTick 直接 return），烤好的图标如果等合并上传（最多 100ms），
+         *      又没有下一帧来消费，图标就永远不出现。所以这里数出"还没进纹理"的
+         *      图标就置 m_forceAtlasUpload，让下面那次 texture() 当帧传上去。
+         */
+        m_likedIcons.clear();
+
+        if (!m_likedIds.isEmpty() && !m_likedIconSource.isEmpty()) {
+            bool freshIcon = false;
+
+            for (size_t i = 0; i < itemCount; ++i) {
+                const RenderItem &item = items[i];
+
+                if (!m_likedIds.contains(item.id))
+                    continue;
+
+                /* 和文字条目同一道防脏数据闸（盒子不合理就别拿去烤图） */
+                if (!(item.width > 0.0f && item.height > 0.0f)
+                    || item.width > kMaxBoxWidth || item.height > kMaxBoxHeight)
+                    continue;
+
+                /* 0.64em（danmaku.scss:257），随弹幕字号缩放；最小 4 逻辑像素防缩没 */
+                const float iconSize = std::max(4.0f, 0.64f * static_cast<float>(item.fontPixelSize));
+                const DanmakuAtlasEntry entry =
+                    m_atlas.iconEntry(m_likedIconSource, colorOf(item.colorRGBA),
+                                      static_cast<int>(std::lround(iconSize)), dpr);
+
+                if (!entry.valid)
+                    continue;
+
+                m_likedIcons.push_back(LikedIcon{ static_cast<int>(i), entry, iconSize });
+
+                if (entry.serial > m_atlas.uploadedSerial())
+                    freshIcon = true;
+            }
+
+            if (freshIcon)
+                m_forceAtlasUpload = true;
+        }
 
         /*
          * ---- "图集键"签名 ----

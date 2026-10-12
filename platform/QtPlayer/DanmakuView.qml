@@ -52,6 +52,15 @@ Item {
      */
     property string renderMode: "gpu"
 
+    /*
+     * 【在屏列表需求】右栏弹幕 API 面板要在屏弹幕列表（GPU 渲染模式下也必须能看 ——
+     * 面板是 QML 的独立一层，和播放器画面不同层，没道理跟着渲染方式走）。
+     * 置 true 时下面 gpuLayer 的绑定退回 false：渲染照走 GPU（DanmakuRendererItem），
+     * 只是控制器多建一张 activeItems 的 QVariant 表给面板采样。
+     * 由 ApiPanel（容器）按"面板可见 && 当前是弹幕 Tab"维护。
+     */
+    property bool apiListNeeded: false
+
     /* 鼠标位置由画面区那层 MouseArea 喂进来（弹幕层自己挂 HoverHandler 会跟它抢 hover） */
     property bool pointerInside: false
     property point pointerPosition: Qt.point(-1, -1)
@@ -107,6 +116,14 @@ Item {
      * C++ 引擎（DanmakuController，里面是独立的 CicadaDanmaku 库）
      * ----------------------------------------------------------------------- */
 
+    /*
+     * 引擎本体暴露出去：右侧 API 面板（DanmakuApiPanel）要直接调它的
+     * Q_INVOKABLE（send / recallDanmaku）和读 activeItems / stats。
+     * 以前只有诊断浮层用 getStats() 转一手，面板要的东西多（列表/撤回/发送），
+     * 逐个转函数只会越加越多 —— 直接给引用。
+     */
+    readonly property alias danmakuEngine: engine
+
     /* 异步加载的两个出口（引擎那两个信号转出来，见 loadXmlFileAsync 那段说明） */
     signal danmakuLoaded(int token, int count)
     signal danmakuLoadFailed(int token, string reason)
@@ -127,8 +144,10 @@ Item {
         fontFamily: view.fontFamily
 
         /* GPU 模式那条路不经过 activeItems 这张 QML 列表（渲染器直接读引擎），
-           告诉控制器别每帧白建它 —— 见 DanmakuController.h 里 gpuLayer 的说明 */
-        gpuLayer: view.renderMode === "gpu"
+           告诉控制器别每帧白建它 —— 见 DanmakuController.h 里 gpuLayer 的说明。
+           例外：右栏弹幕 API 面板要在屏列表时（apiListNeeded，GPU 模式也必须能看），
+           退回"每帧建表"——渲染仍走 GPU，只是控制器多出一张 QVariant 列表 */
+        gpuLayer: view.renderMode === "gpu" && !view.apiListNeeded
 
         /* 屏蔽开关（引擎语义：true = 屏蔽） */
         blockScroll: view.filter.scroll === true
@@ -161,6 +180,28 @@ Item {
     onPointerPositionChanged: pushPointer()
 
     function pushPointer() {
+        /*
+         * 【指针在 tip 上时"钉"回弹幕】鼠标从弹幕挪到 tip 上后，指针已不在任何弹幕
+         * 矩形里 → 引擎 syncHover 命中清零 → 弹幕解冻开跑（用户实测的现象；而 tip
+         * 锚的是弹幕冻结那一刻的位置，弹幕一跑整个视觉错位）。web 端 tip 显示期间
+         * 弹幕一直保持冻结；这里等效实现：指针在 tip 上时，给引擎喂 **latched 那条
+         * 的中心**（它正被冻结、位置不动）→ syncHover 恒命中它，冻结与 hoveredItem
+         * （撤回/点赞要用的快照来源）全部维持。tip 收起（autoHide/手动）后
+         * pointerOverTip 变 false，下一次鼠标移动自动恢复正常喂法 → 正常解冻。
+         */
+        if (danmakuTip.shown && danmakuTip.latched !== null && view.pointerInside) {
+            /* 现场重算（不用 pointerOverTip 那个绑定：handler 执行时它可能还没重算，
+               时序差一拍就会先按真实坐标解冻一次 —— 又闪一下） */
+            var tp = view.mapToItem(danmakuTip, view.pointerPosition.x, view.pointerPosition.y)
+
+            if (tp.x >= 0 && tp.x <= danmakuTip.width
+                    && tp.y >= 0 && tp.y <= danmakuTip.height) {
+                engine.setPointer(danmakuTip.latched.x + danmakuTip.latched.w / 2,
+                                  danmakuTip.latched.y + danmakuTip.latched.h / 2, true)
+                return
+            }
+        }
+
         engine.setPointer(pointerPosition.x, pointerPosition.y, pointerInside)
 
         /*
@@ -176,6 +217,54 @@ Item {
          */
         if (!view._driving || view._mediaStalled)
             engine.update(view.smoothPositionMs)
+    }
+
+    /*
+     * 消费一次落在弹幕 tip 上的点击（tip 点击穿透的修复，调用方：PlayerView 的
+     * activityArea.onClicked / onDoubleClicked）。
+     *
+     * 【为什么需要它】danmakuLayer 声明在 activityArea **之前**，同 z 时后声明者在
+     * 上面 —— tip（连同它内部的 MouseArea）整个被 activityArea 盖住，点击只会到
+     * activityArea（400ms 后切播放/暂停），tip 里的按钮永远收不到事件（用户实测
+     * "点 tip 上的不管用，直接穿透到后面的暂停/继续"）。tip 里已有的 MouseArea
+     * 不能删（层级若将来调整仍生效），但当前层级下点击的分发只能由最上层做。
+     *
+     * 【为什么用"消费式"而不是把 tip 抬到 activityArea 之上】给 tip 加 MouseArea
+     * 抬层级会碰 hover 独占坑（docs/QML-POPUP-HOVER-PITFALLS.md：hover 是最上层
+     * 接受者独占，tip 一收 hover 画面区就收不到，悬停目标当场释放、tip 消失）。
+     * 在唯一接受者（activityArea）里问一层，零层级变化、零 hover 影响。
+     *
+     * 返回 true = 点击落在 tip 上已处理（调用方不得再触发播放/暂停/全屏）；
+     * false = 不在 tip 上（照旧处理）。热区几何与上面各按钮 Item 一一对应。
+     */
+    function consumeTipClick(layerX, layerY) {
+        if (!danmakuTip.shown && !tipHide.running)
+            return false
+
+        var p = mapToItem(danmakuTip, layerX, layerY)
+
+        if (p.x < 0 || p.x > danmakuTip.width || p.y < 0 || p.y > danmakuTip.height)
+            return false
+
+        /* 按钮行（y 10–42）：点赞（含数字，x 13–64）/ 复制（x 66–98）/ 撤回·举报（x 118–150） */
+        if (p.y >= 10 && p.y <= 42) {
+            if (p.x >= 13 && p.x <= 64) {
+                danmakuTip.toggleLike()
+            } else if (p.x >= 66 && p.x <= 98) {
+                if (danmakuTip.latched !== null && danmakuTip.latched.text !== undefined) {
+                    clipboardHelper.copyText(danmakuTip.latched.text)
+                    danmakuToast.show("复制成功")
+                }
+            } else if (p.x >= 118 && p.x <= 150 && danmakuTip.isSelf) {
+                if (danmakuTip.latched !== null)
+                    engine.recallDanmaku(danmakuTip.latched.id)
+
+                hideDelay.restart()
+            }
+            /* 举报按钮（非本人）：无动作，仅消费 —— 与它 MouseArea 版的空 onClicked 一致 */
+        }
+        /* 底板空白处：只消费不做事 —— 参考里 tip 是 video 之外的 DOM，点它不切播放/暂停 */
+        return true
     }
 
     /* -----------------------------------------------------------------------
@@ -577,8 +666,34 @@ Item {
             /* 暂停/停播：把所有动画一起停住 —— 否则视频暂停了弹幕还在飘。
                这里用 stop 而不是 pause：恢复后第一个 tick 会按引擎的位置重新起动画，
                而引擎的时钟（暂停时）没走，所以接得上、不会跳。 */
-            if (!running)
+            if (!running) {
                 view.stopAllMotion()
+
+                /*
+                 * 【★暂停边沿：_mediaStalled 立即置真 + 锚点收口（两件事都是"暂停后
+                 * 恢复播放闪一下"的修复，别删）★】
+                 *
+                 * 1) _mediaStalled 置真：暂停期间 stepTimer 停转，这个值没人刷新，
+                 *    会一直保留暂停前最后一次 tick 的 false。恢复播放的瞬间
+                 *    `clockRunning: _driving && !_mediaStalled` 按旧值立即变真；而
+                 *    恢复后的第一个 tick 又会按 1500ms 判据（_lastProgressMono 还是
+                 *    暂停前的旧戳）把它判回 true → clockRunning 在恢复后 ~半秒内走
+                 *    真→假→真两次边沿，渲染器每条边沿都重置一次外推 —— 这正是
+                 *    "恢复播放弹幕闪一下"（悬停 tip 后 100% 复现）的来源之一。
+                 *    在暂停边沿就置真：恢复瞬间 clockRunning 保持假，等下一次位置
+                 *    回调（框架 20–40ms 一报）刷新 _lastProgressMono 后再翻真，
+                 *    全程只有一次干净的假→真边沿。
+                 * 2) 锚点收口：stepDanmaku 里"停↔走边沿把锚点取成当前外推值"那段
+                 *    （_mediaStalled !== wasStalled 分支）只在 tick 里跑，暂停开始
+                 *    那一刻 timer 直接停转、这段从未执行 —— 暂停前的旧锚点带着
+                 *    一截未偿还的外推量，恢复后被渲染线程一次性讨回去。这里把
+                 *    stepDanmaku 那四行在暂停边沿补做一遍（数学完全一致）。
+                 */
+                view._mediaStalled = true
+                view._anchorPositionMs = view.smoothPositionMs
+                view._anchorClock = view._clock
+                view._rateTrim = 1.0
+            }
 
             view._lastTickMono = 0
         }
@@ -662,6 +777,13 @@ Item {
 
         /* 数据源就是上面那个 C++ 引擎（渲染器直接读它的 std::vector，不经 JS） */
         controller: engine
+
+        /*
+         * 点赞手势前缀图标的素材地址（Tip 点赞后，GPU 模式在弹幕文字左前方画的那个
+         * 小手势）。传 resolvedUrl 让 C++ 能同时解开 qrc / file 两种形式；
+         * 图标按弹幕字色染色（fill: currentColor 语义），见 DanmakuAtlas::iconEntry。
+         */
+        likedIconSource: Qt.resolvedUrl("assets/images/dm/dm-liked-icon.svg")
 
         /*
          * 【位置：直接绑播放器的位置（框架推位置时才变，2Hz）】
@@ -785,45 +907,96 @@ Item {
     }
 
     /* =======================================================================
-     * 弹幕悬停气泡（tip）+ 本人弹幕的"撤回"
+     * TipBubble —— tip 按钮的悬停文字气泡（danmaku.scss .nova-player-dm-tip-bubble 家族）
      *
-     * 【参考就是这一份】front/hilihili-player/player/src/component/dialog：
-     *   DOM  —— index.ts:37-65（initDmTip 的模板）
-     *   行为 —— index.ts:67-124（showDmTip / hideDmTip / inTip）
-     *   CSS  —— index.scss:1-123（尺寸、图标位置、tipsWrap / tipsWrapReturn）
-     *   图标 —— component/icons/index.ts:769-800（TipSvgm / TipLike / TipCopy / TipRecall / TipBack，
-     *            参考里是**内联 SVG 字符串**，已按原文逐字落成
-     *            assets/images/dm/dm-tip-{svgm,like,copy,recall,back}.svg）
+     * 规格（CSS 原文）：黑底 rgba(0,0,0,0.7)、28px 高、6px 圆角、左右 12px 内边距、
+     * 文字 12px #fff；顶上一个 8×5 的三角尾尖（CSS ::before：border 0 4px 5px）
+     * 指向正上方的对应按钮；显隐走 opacity 0.12s ease 过渡。
+     * 位置：挂在 tip 内部、top:100%（紧贴底板下边），x = centerX − 宽/2
+     * （CSS 的 translateX(-50%) 按按钮中心对齐：like 31.5 / copy 81.5 / recall|report 131.5）。
+     * （内联组件必须是根对象的直接子声明，所以放这里；只在下面的 danmakuTip 里用。）
+     * ======================================================================= */
+    component TipBubble: Rectangle {
+        id: bubble
+
+        /* 气泡中心 x（tip 内坐标 = 对应按钮的中心） */
+        property real centerX: 0
+        /* 气泡文字（点赞 / 复制 / 撤回 / 举报） */
+        property string label: ""
+        /* 是否展示：对应按钮热区命中（CSS 由 :hover 驱动，这里被动判） */
+        property bool active: false
+
+        x: centerX - width / 2
+        y: 48                                   /* CSS top:100% —— 紧贴 tip 底边 */
+        height: 28
+        width: bubbleText.implicitWidth + 24    /* CSS padding 0 12px */
+        radius: 6
+        color: "#b3000000"                      /* rgba(0,0,0,0.7) */
+        opacity: active ? 1 : 0
+        visible: opacity > 0.01
+
+        /* CSS transition: opacity 0.12s ease */
+        Behavior on opacity {
+            NumberAnimation { duration: 120; easing.type: Easing.InOutQuad }
+        }
+
+        Text {
+            id: bubbleText
+            anchors.centerIn: parent
+            text: bubble.label
+            color: "#fff"
+            font.pixelSize: 12
+        }
+
+        /* 上三角尾尖：顶点朝上、黑底同色，中心对齐气泡 */
+        Canvas {
+            width: 8
+            height: 5
+            x: parent.width / 2 - 4
+            y: -5
+
+            onPaint: {
+                var ctx = getContext("2d")
+                ctx.reset()
+                ctx.fillStyle = "rgba(0, 0, 0, 0.7)"
+                ctx.beginPath()
+                ctx.moveTo(0, 5)
+                ctx.lineTo(4, 0)
+                ctx.lineTo(8, 5)
+                ctx.closePath()
+                ctx.fill()
+            }
+        }
+    }
+
+    /* =======================================================================
+     * 弹幕悬停操作条 Tip + 本人弹幕的"撤回"（对齐 hili-player 现行版）
      *
-     * 结构（参考的模板）：
-     *   <div class="player-dm-tip player-showB">        162×48、translateX(-50%)、margin-top 6px
-     *     <div class="player-dm-tip-svgm">气泡 SVG</div>   162×48，标了 100%×100%
-     *     <div class="player-dm-tip-svgl">…</div>          参考里它的 opacity **永远是 0**（没有任何规则
-     *                                                     把它置 1），所以这里不画那一层
-     *     <div class="player-dm-tip-like">点赞图标</div>    23×23，left 20 / top 16
-     *     <div class="player-dm-tip-like-num">0</div>      left 40 / top 13、#fff
-     *     <div class="player-dm-tip-copy">复制图标</div>    left 70
-     *     <div class="player-dm-tip-recall">撤回图标</div>   left 120，**只有本人（player-master）显示**
-     *     <div class="player-dm-tip-back">警告图标</div>     left 120，本人时隐藏（与 recall 互斥）
-     *   </div>
+     * 【参考就是这一份】front/hili-player/packages/plugins/src/danmaku：
+     *   行为 —— DanmakuTip.ts（300ms 防抖弹出 / 2000ms 自动收起 / 200ms 移出收起；
+     *           点赞态跨悬停保留；复制成功 toast；撤回后走隐藏流程）
+     *   CSS  —— danmaku.scss 的 .nova-player-dm-tip 家族（按钮 32×32 热区、
+     *           left 13/66/118、hover 背景、按钮气泡、show/hide 动画）
+     *   图标 —— DanmakuTip.ts 顶部的 SVG 常量逐字落成本地素材：
+     *           assets/images/dm/dm-tip-{svgm,svgl,like,like-filled,copy,recall,back}.svg
+     *   锚点 —— domEngine.resolvePosition：**弹幕底部中心**（不是鼠标位置）；
+     *           DanmakuTip.position()：弹幕靠画面左侧（x < 半宽 81）时切换 svgl 底板
+     *           （尾尖偏左，145×42 经 162/145 宽度缩放后位于条内 x≈29.8），操作条左移
+     *           让尾尖对准弹幕，再做左右边界钳制。
      *
-     * 行为（参考的时序，一个数没改）：
-     *   * 悬停命中 → **300ms** 后弹出（index.ts:68 的 rafTimeout(..., 300)）
-     *   * 弹出后 **2000ms** 自动收起（index.ts:96-103 的 inTimer）
-     *   * 指针移到 tip 上 → 这 2000ms 重新计（index.ts:119-124 的 inTip）
-     *   * 指针离开 tip → 200ms 后收起（index.ts:109-117 的 outTimer）
-     *     （"从弹幕挪到 tip 上点撤回"在参考里就是这么成立的：离开弹幕只启动 200ms 收起，
-     *       tip 自己的 mouseenter 把它取消掉）
-     *   * 位置：left = clamp(鼠标 x, 81, 容器宽 − 81)（index.ts:76-82；81 = 162/2），
-     *           top  = 该条弹幕底边 + CSS 的 margin-top:6px（index.ts:83）
-     *   * 动画 = tipsWrap / tipsWrapReturn（index.scss:90-122）：
-     *       弹出 0.25s：opacity 0→1、scale 0.6 →(50%)→ 1.05 → 1
-     *       收起 0.25s：scale 1 →(20%)→ 1.05 → 0.6、opacity 1→0
+     * 行为时序（与参考一个数不差）：
+     *   * 悬停命中 → **300ms** 后弹出（DanmakuTip.show 的 rafTimeout(..., 300)）
+     *   * 弹出后 **2000ms** 自动收起（inTimer）
+     *   * 指针移到 tip 上 → 这 2000ms 重新计（inTip）
+     *   * 指针离开 tip → 200ms 后收起（outTimer）
+     *   * 弹出 0.25s：opacity 0→1、scale 0.6 →(50%)→ 1.05 → 1；
+     *     收起 0.25s：scale 1 →(20%)→ 1.05 → 0.6、opacity 1→0（keyframes 原文）
      *
      * 【★ tip 里所有 MouseArea 都不写 hoverEnabled】本项目 hover 是"最上层接受者独占"
      * （docs/QML-POPUP-HOVER-PITFALLS.md）：一写就会把画面区那层 hover 抢走，引擎随即收到
      * inside=false → 悬停目标被释放 → tip 当场消失，撤回根本点不到。
-     * 所以"指针在不在 tip 上"用**被动判**：画面区喂进来的 pointerPosition + mapToItem。
+     * 所以"指针在不在 tip 上 / 在哪个按钮上"都用**被动判**：
+     * 画面区喂进来的 pointerPosition + mapToItem。
      * ======================================================================= */
     Item {
         id: danmakuTip
@@ -835,21 +1008,31 @@ Item {
 
         /*
          * 弹出那一刻定下来的那一份（位置/文字/本人标记）。
-         * 参考也是一次性定位（index.ts:76-83 只设一次 left/top）；这里快照还多一个作用：
-         * 要挪鼠标到 tip 上点"撤回"时，引擎的悬停目标已经没了 —— 不快照就点不到。
+         * 要挪鼠标到 tip 上点"撤回"时，引擎的悬停目标可能已经没了 —— 不快照就点不到。
          */
         property var latched: null
-        property real tipCenterX: 0
+        /* CSS 的 left / top：left 是"操作条中心"（transform:translateX(-50%) ⇒ 本体 x = left − 81），
+         * top 是弹幕底边（+6 的 margin-top 由下面的 y 绑定给） */
+        property real tipLeft: 0
         property real tipTop: 0
+        /* 底板形态：弹幕靠画面左侧时 true → 显示 svgl（尾尖偏左），否则 svgm（尾尖居中） */
+        property bool useLeftBoard: false
         property bool shown: false
 
         readonly property bool isSelf: latched !== null && latched.isSelf === true
 
-        /* 参考 .player-dm-tip：162×48、z-index 999999、transform:translateX(-50%) */
+        /*
+         * 点赞状态（DanmakuTip 的 likedIds + item.like）：id → 是否已赞 / 当前计数，
+         * 跨悬停保留 —— 重新悬停同一条时恢复图标形态与计数（applyItemState 读它俩）。
+         */
+        property var likedIds: ({})
+        property var likeCounts: ({})
+
+        /* 参考 .nova-player-dm-tip：162×48、z-index 999999、transform:translateX(-50%) */
         width: 162
         height: 48
         z: 2
-        x: tipCenterX - width / 2
+        x: tipLeft - width / 2
         y: tipTop + 6                      /* CSS 的 margin-top:6px */
         visible: shown || tipHide.running
         /* 动画起点照 CSS 的初始态：opacity 0、scale(0.6)、transform-origin:center */
@@ -858,9 +1041,18 @@ Item {
         transformOrigin: Item.Center
 
         /*
-         * 指针在不在 tip 上（对应参考的 mouseenter / mouseleave）。
-         * **被动判**：画面区喂进来的 pointerPosition 就是本层坐标，mapToItem 到这一块再判；
+         * 指针在本层内的坐标（被动判；不在层内时给界外点）—— 按钮热区与气泡全从它算。
          * 不能用 MouseArea 的 hoverEnabled（见文件头那段）。
+         */
+        readonly property point localPointer: {
+            if (!shown || !view.pointerInside)
+                return Qt.point(-1, -1)
+
+            return view.mapToItem(danmakuTip, view.pointerPosition.x, view.pointerPosition.y)
+        }
+
+        /*
+         * 指针在不在 tip 上（对应参考的 mouseenter / mouseleave）。
          */
         readonly property bool pointerOverTip: {
             if (!shown || !view.pointerInside)
@@ -871,12 +1063,30 @@ Item {
             return p.x >= 0 && p.x <= width && p.y >= 0 && p.y <= height
         }
 
-        /* 悬停目标变了：换了一条 → 300ms 后弹出；目标没了 → 收起（指针在 tip 上时不算，见下） */
+        /* ---- 按钮热区（CSS :hover 的作用域；danmaku.scss 的按钮几何）----
+         * 按钮 32×32、top 10：like left 13 / copy left 66 / recall|back left 118；
+         * likeNum 是文本（left 40 / top 13），与点赞图标同属一个点击 / 气泡热区 */
+        readonly property bool overLikeBtn: localPointer.x >= 13 && localPointer.x <= 45
+                                            && localPointer.y >= 10 && localPointer.y <= 42
+        readonly property bool overLikeNum: localPointer.x >= 40 && localPointer.x <= 64
+                                            && localPointer.y >= 13 && localPointer.y <= 31
+        readonly property bool overCopyBtn: localPointer.x >= 66 && localPointer.x <= 98
+                                            && localPointer.y >= 10 && localPointer.y <= 42
+        readonly property bool overLastBtn: localPointer.x >= 118 && localPointer.x <= 150
+                                            && localPointer.y >= 10 && localPointer.y <= 42
+
+        /* 悬停目标变了：换了一条 → 300ms 后弹出（弹出中换目标同样 300ms 后重定位，
+         * 对齐 DanmakuTip.show 的 delayTimer 路径）；目标没了 → 收起（指针在 tip 上时不算） */
         onHasItemChanged: {
             if (hasItem) {
                 if (latched === null || latched.id !== hovered.id) {
                     hideDelay.stop()
                     showDelay.restart()
+                } else {
+                    /* 又悬回同一条（比如在弹幕和 tip 之间来回穿梭）：
+                       撤掉挂起的收起 —— 对齐 web 端 mouseenter 会清 outTimer 的行为。
+                       不撤的话会出现"鼠标明明停在弹幕上、tip 却自己收走了"。 */
+                    hideDelay.stop()
                 }
             } else if (!pointerOverTip) {
                 hideDelay.restart()
@@ -885,20 +1095,81 @@ Item {
 
         onPointerOverTipChanged: {
             if (pointerOverTip) {
-                /* 参考 inTip（index.ts:119-124）：取消收起 + 重新计那 2000ms */
+                /* 参考 inTip（DanmakuTip 的 tip mouseenter）：取消收起 + 重新计那 2000ms */
                 hideDelay.stop()
 
                 if (shown)
                     autoHide.restart()
             } else if (shown) {
-                /* 参考 mouseleave（index.ts:88-92）→ hideDmTip → 200ms 后收起 */
+                /* 参考 mouseleave → hide → 200ms 后收起 */
                 hideDelay.restart()
             }
         }
 
         onShownChanged: if (shown) tipShow.restart()
 
-        /* 300ms：悬停命中之后才弹（index.ts:68 的 rafTimeout(..., 300)） */
+        /*
+         * 锚定 + 定位（DanmakuTip.position 的原文数学，一个数不改）：
+         *   ① 锚点 = 弹幕底部中心（domEngine.resolvePosition）；
+         *   ② 弹幕靠画面左侧（px < 半宽）→ 切 svgl 底板，操作条左移使尾尖对准弹幕
+         *     （尾尖原位 26.65，经 162/145 宽度缩放 ⇒ 尾尖容器内坐标 = left − half + 29.79）；
+         *   ③ 左右边界钳制：操作条中心不许越出画面半宽。
+         */
+        function latch(item) {
+            latched = item
+            var px = item.x + item.w / 2
+            var py = item.y + item.h
+            var half = width / 2
+            var svglTailOffset = 26.65 * (width / 145)
+            useLeftBoard = px < half
+            var center = useLeftBoard ? px + (half - svglTailOffset) : px
+            tipLeft = Math.min(Math.max(center, half), Math.max(view.width - half, half))
+            tipTop = py
+            applyItemState()
+        }
+
+        /*
+         * 同步当前弹幕在 tip 上的展示态（DanmakuTip.applyItemState）：
+         * 本人弹幕身份由 isSelf 绑定负责，这里只管点赞数与图标填充形态。
+         */
+        function applyItemState() {
+            if (latched === null)
+                return
+
+            var key = latched.id
+            likeNumText.text = String(likeCounts[key] !== undefined ? likeCounts[key] : 0)
+            var liked = likedIds[key] === true
+            likeIconOutline.visible = !liked
+            likeIconFilled.visible = liked
+        }
+
+        /*
+         * 点赞 / 取消点赞（DanmakuTip.handleLikeClick）：计数 ±1（不为负）、
+         * 描边 ⇄ 实心图标切换；状态记在 likedIds / likeCounts 里跨悬停保留。
+         */
+        function toggleLike() {
+            if (latched === null)
+                return
+
+            var key = latched.id
+            var liked = likedIds[key] !== true
+
+            if (liked)
+                likedIds[key] = true
+            else
+                delete likedIds[key]
+
+            var count = (likeCounts[key] !== undefined ? likeCounts[key] : 0) + (liked ? 1 : -1)
+            likeCounts[key] = Math.max(0, count)
+            applyItemState()
+
+            /* GPU 模式：文字前面的手势图标在图集那边画（QML 池那条路由
+             * present() 的 item.liked 同步，见下面 present 里的那行） */
+            if (view.renderMode === "gpu")
+                gpuRenderer.setLiked(key, liked)
+        }
+
+        /* 300ms：悬停命中之后才弹（DanmakuTip.show 的 rafTimeout(..., 300)） */
         Timer {
             id: showDelay
 
@@ -907,12 +1178,10 @@ Item {
                 if (!danmakuTip.hasItem)
                     return
 
-                danmakuTip.latched = danmakuTip.hovered
-                /* index.ts:76-82：left 夹到 [81, 容器宽 − 81]（81 = 162/2，保证 tip 不出界） */
-                danmakuTip.tipCenterX = Math.max(81, Math.min(view.width - 81,
-                                                              view.pointerPosition.x))
-                /* index.ts:83：top = 该条弹幕底边（相对弹幕层）；+6 由 CSS 的 margin-top 给 */
-                danmakuTip.tipTop = danmakuTip.hovered.y + danmakuTip.hovered.h
+                /* 若上一轮收起动画还在播（极端时序），先停掉再弹 ——
+                   两套动画同时写 opacity/scale 会互相打架 */
+                tipHide.stop()
+                danmakuTip.latch(danmakuTip.hovered)
                 danmakuTip.shown = true
                 autoHide.restart()
             }
@@ -932,6 +1201,16 @@ Item {
 
             interval: 200
             onTriggered: {
+                /*
+                 * 【已完全藏住就别再跑一遍收起动画】tipHide 的 opacity 动画若带
+                 * 起始值会把 opacity 从 0 瞬间拉回 1；而这时 latched 已被清空、
+                 * tipLeft/tipTop 还停在**上一条弹幕**的陈旧位置 → 在旧弹幕下
+                 * "闪一下"再淡出（用户实测的 bug）。已经不可见时直接跳过。
+                 */
+                if (!danmakuTip.shown && danmakuTip.opacity <= 0.01)
+                    return
+
+                tipShow.stop()
                 danmakuTip.shown = false
                 danmakuTip.latched = null
                 tipHide.restart()
@@ -971,14 +1250,21 @@ Item {
             }
         }
 
-        /* tipsWrapReturn（index.scss:107-122）：0% scale 1 → 20% scale 1.05 → 100% scale 0.6 + opacity 0 */
+        /*
+         * tipsWrapReturn（index.scss:107-122）：0% scale 1 → 20% scale 1.05 → 100% scale 0.6 + opacity 0
+         *
+         * 【两段动画都不写 from】从**当前值**过渡到目标值。写了 from: 1 的话，
+         * 收起动画被再次触发时（悬停目标快速 A→空→B 的抖动时序）opacity 会先
+         * 瞬间跳回 1 —— 上一条弹幕的陈旧位置上"闪一下"就是这个（CSS 里 keyframe
+         * 永远从满亮开始没事，是因为 DOM 那边 hide 只可能从满亮态触发；这里
+         * hideDelay 的触发时序多得多，必须自适应起点）。
+         */
         ParallelAnimation {
             id: tipHide
 
             NumberAnimation {
                 target: danmakuTip
                 property: "opacity"
-                from: 1
                 to: 0
                 duration: 250
                 easing.type: Easing.OutCubic
@@ -988,7 +1274,6 @@ Item {
                 NumberAnimation {
                     target: danmakuTip
                     property: "scale"
-                    from: 1
                     to: 1.05
                     duration: 50
                     easing.type: Easing.OutCubic
@@ -1004,100 +1289,298 @@ Item {
             }
         }
 
-        /* ---- .player-dm-tip-svgm：气泡本体（162×48，icons/index.ts:769-773） ---- */
+        /* ---- .nova-player-dm-tip-svgm：默认底板（162×48，尾尖居中指向弹幕中心） ---- */
         Image {
             anchors.fill: parent
+            visible: !danmakuTip.useLeftBoard
             source: "assets/images/dm/dm-tip-svgm.svg"
             sourceSize: Qt.size(danmakuTip.width, danmakuTip.height)
             smooth: true
         }
 
         /*
+         * ---- .nova-player-dm-tip-svgl：靠左底板（145×42）----
+         * CSS 里 svg 铺满 162×48 底板盒、meet 等比缩放 ⇒ 尾尖渲染于条内 x≈29.8
+         * （latch() 的尾尖对准数学依赖这个缩放规则，所以用 PreserveAspectFit）。
+         */
+        Image {
+            anchors.fill: parent
+            visible: danmakuTip.useLeftBoard
+            source: "assets/images/dm/dm-tip-svgl.svg"
+            sourceSize: Qt.size(danmakuTip.width, danmakuTip.height)
+            fillMode: Image.PreserveAspectFit
+            smooth: true
+        }
+
+        /*
          * tip 把点击吞掉：参考里 tip 是 DOM 中 video 之外的兄弟节点，点它不会切播放/暂停；
          * 本项目画面区那层 MouseArea 铺满整块，不挡的话点气泡会切播放/暂停 —— 与参考不一致。
-         * 子项里只有它（以及下面四个图标里的）不写 hoverEnabled（原因见文件头那段）。
-         * 声明在四个图标**之前**，否则会把图标的点击也吞掉。
+         * 子项里只有它（以及下面各按钮里的）不写 hoverEnabled（原因见文件头那段）。
+         * 声明在按钮**之前**，否则会把按钮的点击也吞掉。
          */
         MouseArea {
             anchors.fill: parent
         }
 
-        /* ---- 点赞图标 + 数字（CSS：图标 left 20 / top 16；数字 left 40 / top 13） ---- */
-        Image {
-            x: 20
-            y: 16
-            width: 23
-            height: 23
-            source: "assets/images/dm/dm-tip-like.svg"
-            sourceSize: Qt.size(23, 23)
-            smooth: true
+        /* ---- 点赞（CSS：热区 32×32、left 13 / top 10、圆角 4；图标 23×23 居中） ---- */
+        Item {
+            x: 13
+            y: 10
+            width: 32
+            height: 32
+
+            /* hover 背景（CSS :hover rgba(47,50,56,.898)；被动判热区） */
+            Rectangle {
+                anchors.fill: parent
+                radius: 4
+                color: Qt.rgba(47 / 255, 50 / 255, 56 / 255, 0.898)
+                visible: danmakuTip.overLikeBtn
+            }
+
+            /* 描边版图标（默认形态） */
+            Image {
+                id: likeIconOutline
+                anchors.centerIn: parent
+                width: 23
+                height: 23
+                source: "assets/images/dm/dm-tip-like.svg"
+                sourceSize: Qt.size(23, 23)
+                smooth: true
+            }
+
+            /* 实心版图标（点赞后填充白色；CSS 经 svg:first/last-of-type 切换显隐） */
+            Image {
+                id: likeIconFilled
+                anchors.centerIn: parent
+                width: 23
+                height: 23
+                source: "assets/images/dm/dm-tip-like-filled.svg"
+                sourceSize: Qt.size(23, 23)
+                visible: false
+                smooth: true
+            }
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
+                onClicked: danmakuTip.toggleLike()
             }
         }
 
+        /* ---- 点赞数（CSS：left 40 / top 13、#fff；与点赞图标同一套点击） ---- */
         Text {
+            id: likeNumText
             x: 40
             y: 13
             /* 参考里这个数字没写 font-size（继承容器），这里跟播放器其它小字一致用 12 */
             text: "0"
             color: "#fff"
             font.pixelSize: 12
-        }
-
-        /* ---- 复制图标（left 70） ---- */
-        Image {
-            x: 70
-            y: 16
-            width: 23
-            height: 23
-            source: "assets/images/dm/dm-tip-copy.svg"
-            sourceSize: Qt.size(23, 23)
-            smooth: true
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
+                onClicked: danmakuTip.toggleLike()
             }
         }
 
-        /* ---- 撤回图标（left 120）：参考 CSS `.player-master .player-dm-tip-recall{display:block}` ---- */
-        Image {
-            x: 120
-            y: 16
-            width: 23
-            height: 23
+        /* ---- 复制（left 66）：写剪贴板 + toast「复制成功」 ---- */
+        Item {
+            x: 66
+            y: 10
+            width: 32
+            height: 32
+
+            Rectangle {
+                anchors.fill: parent
+                radius: 4
+                color: Qt.rgba(47 / 255, 50 / 255, 56 / 255, 0.898)
+                visible: danmakuTip.overCopyBtn
+            }
+
+            Image {
+                anchors.centerIn: parent
+                width: 23
+                height: 23
+                source: "assets/images/dm/dm-tip-copy.svg"
+                sourceSize: Qt.size(23, 23)
+                smooth: true
+            }
+
+            MouseArea {
+                anchors.fill: parent
+                cursorShape: Qt.PointingHandCursor
+                /* DanmakuTip.copyText：复制当前弹幕文本 → toast 提示 */
+                onClicked: {
+                    if (danmakuTip.latched !== null && danmakuTip.latched.text !== undefined) {
+                        clipboardHelper.copyText(danmakuTip.latched.text)
+                        danmakuToast.show("复制成功")
+                    }
+                }
+            }
+        }
+
+        /* ---- 撤回（left 118）：仅本人弹幕（.nova-player-dm-tip-master） ---- */
+        Item {
+            x: 118
+            y: 10
+            width: 32
+            height: 32
             visible: danmakuTip.isSelf
-            source: "assets/images/dm/dm-tip-recall.svg"
-            sourceSize: Qt.size(23, 23)
-            smooth: true
+
+            Rectangle {
+                anchors.fill: parent
+                radius: 4
+                color: Qt.rgba(47 / 255, 50 / 255, 56 / 255, 0.898)
+                visible: danmakuTip.overLastBtn
+            }
+
+            Image {
+                anchors.centerIn: parent
+                width: 23
+                height: 23
+                source: "assets/images/dm/dm-tip-recall.svg"
+                sourceSize: Qt.size(23, 23)
+                smooth: true
+            }
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
-                /* 撤回：转发给引擎（引擎那边 = 参考的 removeDanmaku(renderId)） */
-                onClicked: if (danmakuTip.latched !== null)
-                               engine.recallDanmaku(danmakuTip.latched.id)
+                /* 撤回：转发给引擎（= 参考的 removeDanmaku(renderId)）；弹幕即从画面
+                 * 移除，Tip 走隐藏流程（DanmakuTip 的 recall click → hide） */
+                onClicked: {
+                    if (danmakuTip.latched !== null)
+                        engine.recallDanmaku(danmakuTip.latched.id)
+
+                    hideDelay.restart()
+                }
             }
         }
 
-        /* ---- 非本人时显示的那颗图标（同一位置，与撤回互斥；参考 CSS 同上） ---- */
-        Image {
-            x: 120
-            y: 16
-            width: 23
-            height: 23
+        /* ---- 举报（left 118）：非本人（与撤回互斥；展示模式：仅气泡提示，点击不做事） ---- */
+        Item {
+            x: 118
+            y: 10
+            width: 32
+            height: 32
             visible: !danmakuTip.isSelf
-            source: "assets/images/dm/dm-tip-back.svg"
-            sourceSize: Qt.size(23, 23)
-            smooth: true
+
+            Rectangle {
+                anchors.fill: parent
+                radius: 4
+                color: Qt.rgba(47 / 255, 50 / 255, 56 / 255, 0.898)
+                visible: danmakuTip.overLastBtn
+            }
+
+            Image {
+                anchors.centerIn: parent
+                width: 23
+                height: 23
+                source: "assets/images/dm/dm-tip-back.svg"
+                sourceSize: Qt.size(23, 23)
+                smooth: true
+            }
 
             MouseArea {
                 anchors.fill: parent
                 cursorShape: Qt.PointingHandCursor
             }
+        }
+
+        /* ---- 按钮悬停文字气泡（在 tip 正下方按按钮中心对齐；DanmakuTip.initTip 的 bubbles） ---- */
+        TipBubble {
+            centerX: 31.5
+            label: "点赞"
+            active: danmakuTip.overLikeBtn || danmakuTip.overLikeNum
+        }
+
+        TipBubble {
+            centerX: 81.5
+            label: "复制"
+            active: danmakuTip.overCopyBtn
+        }
+
+        TipBubble {
+            centerX: 131.5
+            label: "撤回"
+            active: danmakuTip.isSelf && danmakuTip.overLastBtn
+        }
+
+        TipBubble {
+            centerX: 131.5
+            label: "举报"
+            active: !danmakuTip.isSelf && danmakuTip.overLastBtn
+        }
+    }
+
+    /* =======================================================================
+     * 弹幕操作 toast（danmaku.scss .nova-player-dm-toast）：复制成功等提示。
+     * 弹幕层居中、黑底 rgba(0,0,0,0.75)、6px 圆角、14px 白字、8/16 内边距；
+     * 动画 danmaku-x-toast 1.6s：0→15% 淡入、15%→75% 停留、75%→100% 淡出。
+     * ======================================================================= */
+    Rectangle {
+        id: danmakuToast
+
+        anchors.centerIn: parent
+        radius: 6
+        color: "#bf000000"                        /* rgba(0,0,0,0.75) */
+        opacity: 0
+        visible: opacity > 0.01
+        width: toastLabelText.implicitWidth + 32   /* CSS padding 8px 16px */
+        height: toastLabelText.implicitHeight + 16
+        z: 3
+
+        Text {
+            id: toastLabelText
+            anchors.centerIn: parent
+            color: "#fff"
+            font.pixelSize: 14
+            text: ""
+        }
+
+        /* 1.6s = 240ms 淡入 + 960ms 停留 + 400ms 淡出（keyframes 的 15% / 75% 断点） */
+        SequentialAnimation {
+            id: toastAnim
+
+            NumberAnimation {
+                target: danmakuToast
+                property: "opacity"
+                from: 0
+                to: 1
+                duration: 240
+            }
+            PauseAnimation { duration: 960 }
+            NumberAnimation {
+                target: danmakuToast
+                property: "opacity"
+                from: 1
+                to: 0
+                duration: 400
+            }
+        }
+
+        /* 展示一条 toast（DanmakuTip.showToast：改文案后重放动画） */
+        function show(message) {
+            toastLabelText.text = message
+            toastAnim.restart()
+        }
+    }
+
+    /*
+     * 剪贴板帮手：QML 没有直接的剪贴板 API，用隐藏 TextInput 的
+     * selectAll() + copy()（Qt Quick 的标准做法；copy() 只依赖选区，
+     * 不需要可见 / 焦点）。
+     */
+    TextInput {
+        id: clipboardHelper
+        visible: false
+        text: ""
+
+        function copyText(value) {
+            clipboardHelper.text = value
+            clipboardHelper.selectAll()
+            clipboardHelper.copy()
         }
     }
 
@@ -1192,6 +1675,8 @@ Item {
             item.z = data.hovered === true ? 1000 : (data.type !== "scroll" ? 2 : 1)
             item.opacity = data.hovered === true ? 1 : item.contentOpacity
             item.visible = true
+            /* 点赞态（Tip 的 likedIds；30Hz 轮询足够 —— 图标淡入本身就有 150ms） */
+            item.liked = danmakuTip.likedIds[id] === true
 
             if (isScroll) {
                 /*
@@ -1303,7 +1788,18 @@ Item {
      * 一条 TypeScript 时代的调用就这么静默失效了，所以这两个函数别再删。
      */
     function clear() { engine.clear() }
-    function reset() { engine.reset() }
+
+    /*
+     * 连数据一起清（换片必走，见上面那段说明）。点赞态也要跟着清：
+     * 引擎的弹幕 id 重新从 1 分配，不清的话上一部视频点过的赞会串到
+     * 这一部"恰好同 id"的弹幕上（tip 的 likedIds / likeCounts 同理）。
+     */
+    function reset() {
+        engine.reset()
+        gpuRenderer.clearLiked()
+        danmakuTip.likedIds = ({})
+        danmakuTip.likeCounts = ({})
+    }
 
     /*
      * 从文件灌弹幕（B 站那种 XML）：Main.qml 在打开片源时会找"同目录同名的 .xml"，

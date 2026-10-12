@@ -796,6 +796,10 @@ namespace cicadaqt {
                 refreshActiveItems();
             }
 
+            /* 新一批数据进引擎：全量列表整个换了（记账是上一部的，一并清） */
+            m_selfRecords.clear();
+            emit allItemsChanged();
+
 #if defined(_MSC_VER) && defined(_DEBUG)
             /*
              * 【把"哪一步写坏堆"钉死】
@@ -829,8 +833,60 @@ namespace cicadaqt {
         entry.id = item.value(QStringLiteral("id")).toLongLong();
         entry.speed = item.value(QStringLiteral("speed"), -1).toInt();
 
-        if (m_engine.addDanmaku(entry, currentMs))
+        if (m_engine.addDanmaku(entry, currentMs)) {
+            /* addDanmaku 走立即队列、不进 _items —— 记账 + 通知全量列表（与 send 同） */
+            SelfRecord rec;
+            rec.id = entry.id != 0 ? entry.id : m_nextSelfId--;
+            rec.timeMs = entry.timeMs;
+            rec.text = QString::fromStdString(entry.text);
+            m_selfRecords.append(rec);
+            emit allItemsChanged();
             refreshActiveItems();
+        }
+    }
+
+    QVariantList DanmakuController::allItems() const
+    {
+        /*
+         * 【弹幕列表面板】全量弹幕（引擎 _items + 自己发的记账），按 timeMs 升序。
+         * 现算不用缓存：读取频率 = allItemsChanged 的频率（载入/发送/撤回/清空），
+         * 一次最多几千条 QVariantMap，只在面板可见时发生 —— 与 refreshActiveItems
+         * 的"每帧"完全不是一个量级，缓存反而要多维护一份失效逻辑。
+         */
+        QVariantList list;
+        const size_t count = m_engine.itemCount();
+        list.reserve(static_cast<int>(count) + m_selfRecords.size());
+
+        for (size_t i = 0; i < count; ++i) {
+            const DanmakuItem *item = m_engine.itemAt(i);
+
+            if (item == nullptr)
+                continue;
+
+            QVariantMap map;
+            map.insert(QStringLiteral("id"), QVariant::fromValue(item->id));
+            map.insert(QStringLiteral("timeMs"), QVariant::fromValue(item->timeMs));
+            map.insert(QStringLiteral("text"), QString::fromStdString(item->text));
+            map.insert(QStringLiteral("isSelf"), item->isSelf);
+            list.append(map);
+        }
+
+        for (const SelfRecord &rec : m_selfRecords) {
+            QVariantMap map;
+            map.insert(QStringLiteral("id"), QVariant::fromValue(rec.id));
+            map.insert(QStringLiteral("timeMs"), QVariant::fromValue(rec.timeMs));
+            map.insert(QStringLiteral("text"), rec.text);
+            map.insert(QStringLiteral("isSelf"), true);
+            list.append(map);
+        }
+
+        /* 两段各自有序，整体未必（自己发的夹在中间）—— 按 timeMs 稳定排序归一 */
+        std::stable_sort(list.begin(), list.end(), [](const QVariant &a, const QVariant &b) {
+            return a.toMap().value(QStringLiteral("timeMs")).toLongLong()
+                   < b.toMap().value(QStringLiteral("timeMs")).toLongLong();
+        });
+
+        return list;
     }
 
     void DanmakuController::clear()
@@ -839,6 +895,10 @@ namespace cicadaqt {
         ++m_loadToken;
 
         m_engine.clear();
+
+        /* 全量列表也空了（自己发的记账一并清） */
+        m_selfRecords.clear();
+        emit allItemsChanged();
         refreshActiveItems();
     }
 
@@ -847,6 +907,10 @@ namespace cicadaqt {
         ++m_loadToken;
 
         m_engine.reset();
+
+        /* 换片/重来：全量列表跟引擎一起清（自己发的属于上一部） */
+        m_selfRecords.clear();
+        emit allItemsChanged();
 
         /* 时钟被清回 0 → 基准要跟着重记（否则渲染器会拿着 seek 前的时间戳去外推） */
         m_engineClockMs = m_engine.clockMs();
@@ -929,7 +993,13 @@ namespace cicadaqt {
         sendOptions.self = options.value(QStringLiteral("self"), true).toBool();
         sendOptions.timeMs = options.value(QStringLiteral("timeMs"), -1).toLongLong();
         sendOptions.uid = options.value(QStringLiteral("uid"), QStringLiteral("1")).toString().toStdString();
+        /* 调用方没给 id 就由控制器分一个负 id：引擎接受调用者指定的 id，而负 id
+           与引擎给数据弹幕分配的正 id 永不冲突 —— recallDanmaku / 弹幕列表的记账
+           都靠这个 id 对得上号 */
         sendOptions.id = options.value(QStringLiteral("id")).toLongLong();
+
+        if (sendOptions.id == 0)
+            sendOptions.id = m_nextSelfId--;
 
         /*
          * 引擎的裁决如实返回（false = 被屏蔽规则挡了 / 同屏条数到顶 / 类型非法）。
@@ -940,7 +1010,15 @@ namespace cicadaqt {
 
         refreshActiveItems();
 
-        if (!accepted) {
+        if (accepted) {
+            /* 记进全量列表（引擎把立即弹幕放 _immediate、不进 _items，不记就漏） */
+            SelfRecord rec;
+            rec.id = sendOptions.id;
+            rec.timeMs = sendOptions.timeMs > 0 ? sendOptions.timeMs : m_engine.clockMs();
+            rec.text = text;
+            m_selfRecords.append(rec);
+            emit allItemsChanged();
+        } else {
             const DanmakuStats s = m_engine.stats();
             qWarning("[danmaku] 引擎没有接受这条弹幕（active=%d dropped=%d maxRenderCount 可能到顶，"
                      "或它被屏蔽规则挡了）", s.activeCount, s.dropped);
@@ -1001,6 +1079,16 @@ namespace cicadaqt {
             /* 立刻重建这一帧：被撤的那条要马上从 activeItems 里消失，
                气泡也就不用再指着它了（QML 读 hoveredItem 会立刻变空）。 */
             refreshActiveItems();
+
+            /* 全量列表也去掉这一条（自己发的记账按 id 匹配；数据弹幕本来就在
+               引擎里同步没了，重读 allItems 自然不含它） */
+            for (int i = 0; i < m_selfRecords.size(); ++i) {
+                if (m_selfRecords[i].id == id) {
+                    m_selfRecords.removeAt(i);
+                    break;
+                }
+            }
+            emit allItemsChanged();
         }
 
         return removed;

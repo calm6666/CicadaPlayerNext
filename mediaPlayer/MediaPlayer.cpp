@@ -183,13 +183,32 @@ namespace Cicada {
          *
          * 判据复用内核唯一的"切档在途"并集（ICicadaPlayer::IsStreamSwitchInFlight），
          * 不引入任何新状态、不引入计时器。
+         *
+         * 【2026-10-11 修：这个跳过必须带 20 秒年龄上限】对齐切换在解复用层失败时（边界块
+         * 回退旧流），在途状态可能永远不收口（失败结果原本只在目标流发包时才被检查，而
+         * 失败的目标流恰恰不发包）。若无年龄上限，这里的 return 会让每一个 ABR tick 都被
+         * 跳过 —— 用户症状"切回自动清晰度后再也不切档"。20 秒 = AbrBufferAlgoStrategy 的
+         * ABR_SWITCH_WATCHDOG_MS：对齐切换的边界最长只隔一个分片时长，20 秒还没到终态
+         * 本身就是异常。超龄后放行本 tick：新的切换请求会在内核侧取代/收口卡死的旧请求
+         * （switchVideoStream 的同目标去重同样带年龄上限，超龄先 finishQualitySwitch(false)
+         * 再重新武装）。
          */
         GET_PLAYER_HANDLE
 
         if (handle != nullptr && CicadaIsStreamSwitchInFlight(handle)) {
-            AF_LOGI("abr: a quality switch is still in flight, skipping this ABR tick so the in-flight "
-                    "switch is not reported as canceled (the next tick will re-evaluate)\n");
-            return;
+            const int64_t startedSteadyMs = mQualitySwitchStartedSteadyMs.load();
+            const int64_t inFlightAgeMs =
+                    startedSteadyMs > 0 ? (af_gettime_relative() / 1000 - startedSteadyMs) : INT64_MAX;
+
+            if (inFlightAgeMs < 20 * 1000) {
+                AF_LOGI("abr: a quality switch is still in flight, skipping this ABR tick so the in-flight "
+                        "switch is not reported as canceled (the next tick will re-evaluate)\n");
+                return;
+            }
+
+            AF_LOGW("abr: the in-flight quality switch is %lld ms old (>= 20 s watchdog) — it is presumed "
+                    "stuck; letting this ABR tick through so a fresh switch supersedes it\n",
+                    (long long) inFlightAgeMs);
         }
 
         int64_t toTime = af_gettime_relative();
@@ -407,6 +426,13 @@ namespace Cicada {
     {
         GET_PLAYER_HANDLE
         CicadaSetVolume(handle, volume);
+    }
+
+    /* 【音量均衡】照 SetVolume 转发（无 analytics 上报，与 SetColorMatrix 的 C2 同一写法） */
+    void MediaPlayer::SetLoudness(int mode)
+    {
+        GET_PLAYER_HANDLE
+        CicadaSetLoudness(handle, mode);
     }
 
     float MediaPlayer::GetVolume()
@@ -1113,6 +1139,17 @@ namespace Cicada {
     void MediaPlayer::videoQualitySwitchCallback(int64_t status, int64_t streamIndex, const void *desc, void *userData)
     {
         GET_MEDIA_PLAYER
+        /*
+         * 【2026-10-11】记录/清零"切档在途"的起点时刻（见成员声明处的说明）：
+         * STARTED 写入当前单调时钟，任何终态（READY / FAILED）清零。abrChanged() 用它
+         * 给"在途 ⇒ 跳过本 tick"加 20 秒年龄上限，避免一次卡死的切换把 ABR 永久瘫痪。
+         * 这是同步回调，写在内核切档武装之后、终态之前，时刻可靠。
+         */
+        if (status == PLAYER_QUALITY_SWITCH_STARTED) {
+            player->mQualitySwitchStartedSteadyMs.store(af_gettime_relative() / 1000);
+        } else {
+            player->mQualitySwitchStartedSteadyMs.store(0);
+        }
         if (player->mListener.VideoQualitySwitch) {
             player->mListener.VideoQualitySwitch(status, streamIndex, desc, player->mListener.userData);
         }

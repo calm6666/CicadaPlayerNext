@@ -90,6 +90,21 @@ Item {
     property var previewFrames: []
 
     /*
+     * 雪碧图预览参数（index.json 的 pvdata，B 站形状）：{ imgUrl, imgXLen, imgYLen,
+     * imgXSize, imgYSize, sliceCount }，null = 没拉到 / 当前是 bin 模式。
+     * 和 previewFrames 一个路子：应用层按 QtPlayerPreviewMode.mode 二选一喂进来，
+     * 这里原样往下转，气泡里用 Image.sourceClipRect 从大图裁出悬停那一格。
+     */
+    property var previewSprite: null
+
+    /*
+     * 交互卡片数据（mock 的 /x/player/interaction）：结构照 hili-player 的
+     * InteractionPluginData —— { guideList, linkList, voteList, scoreList } 四个数组，
+     * null = 接口没给，InteractionLayer 整层不出现。和 viewPoints 一个路子：应用层喂进来。
+     */
+    property var interactionData: null
+
+    /*
      * mock 服务基址：外面（Main.qml）喂进来给设置面板显示，用户在面板里改完再由下面的信号转出去。
      * 播放器自己**不关心 mock 基址在哪**，它只做"转交"（和 episodes / hasPrevious 一个路子）。
      */
@@ -127,6 +142,8 @@ Item {
     readonly property alias controlBar: controlBar
     readonly property alias danmaku: danmakuLayer
     readonly property alias topBarVisible: topBar.shown
+    /* 交互卡片层（Main.qml 的右侧 API 面板经它调编辑 API / 读持久化状态） */
+    readonly property alias interactionLayer: interactionLayer
 
     /*
      * 右键菜单 + 三个面板 + 提示条（本轮新增，全部复刻参考实现的 DOM/CSS）：
@@ -164,6 +181,14 @@ Item {
 
     /* 光标是不是停在画面区里（外面判"还在不在播放器上"用，见 Main.qml 的 pointerInPlayer） */
     readonly property bool pointerInside: activityArea.containsMouse
+
+    /*
+     * 控制栏当前是否显示 —— 把"鼠标活动"状态对外只读转一手：
+     * Main.qml 右栏的折叠箭头用它实现"鼠标到播放器上就显示、闲置 3 秒自动隐藏"
+     * （和 controlBar 同一套 kickAutoHide / hideTimer，不另加计时器，
+     * 也不会破坏播放器内部的显隐时序）。
+     */
+    readonly property bool controlsShown: controlBar.shown
 
     /* 鼠标最后停在哪一行（-1 = 不在窗口里），用来决定要不要把指针藏起来 */
     property real lastMouseY: -1
@@ -458,6 +483,38 @@ Item {
     }
 
     /* -----------------------------------------------------------------------
+     * 交互卡片层（照 hili-player 交互插件的展示模式复刻，四种卡片全部只做展示）
+     * -----------------------------------------------------------------------
+     *
+     * 挂在弹幕层**之后**：参考实现里交互层 z-index:11 比弹幕高，同 z 时 QML 后声明的
+     * 在上面，视觉次序一致。卡片自己的显隐/倒计时/关闭全在 InteractionLayer 里算
+     * （时钟 = player.position，和 DanmakuView 用的是同一个），这里只负责把数据递进去。
+     */
+    InteractionLayer {
+        id: interactionLayer
+
+        anchors.fill: player
+        /*
+         * 【必须压过 activityArea（z 无 = 0）】卡片自己的点击（投票选项 / 关闭环 /
+         * 编辑拖拽）要能收到，整层就得在画面活动层**上面** —— web 端交互层
+         * z-index:11 同理。也不能压控制栏（z:1）：控制栏要盖在卡片之上（和 web 端
+         * 控制栏层级高于交互层一致）。取 z:0.5 正好夹在中间。
+         * 事件穿透（两处，消费式拦截，见 InteractionLayer.consumeDisplayClick）：
+         *   * 关闭环经 -13 边距悬在卡身矩形之外，QML 只把事件投给"父对象矩形
+         *     范围内"的子项 → 环的热区绝大部分收不到点击，落到 activityArea
+         *     变成暂停/继续（用户实测）；
+         *   * 卡身上没有 MouseArea 的区域（外框/问题文字）同样穿透。
+         * 修复：activityArea 的单击/双击先问 consumeDisplayClick（同弹幕层
+         * consumeTipClick 的先例）—— 命中卡身纯消费、命中环热区执行关闭并消费；
+         * 空白处的点击照常落到 activityArea（单击暂停/双击全屏不受影响）。
+         */
+        z: 0.5
+        player: player
+        fullscreen: playerView.fullscreen
+        interactionData: playerView.interactionData
+    }
+
+    /* -----------------------------------------------------------------------
      * 顶部栏（照参考实现的 Top.ts + topbar.scss 复刻）
      * ----------------------------------------------------------------------- */
 
@@ -579,6 +636,7 @@ Item {
         pbpData: playerView.pbpData
         highlightEnabled: playerView.highlightEnabled
         previewFrames: playerView.previewFrames
+        previewSprite: playerView.previewSprite
 
         onSettingsRequested: playerView.settingsRequested()
         onFullscreenRequested: playerView.fullscreenRequested()
@@ -678,12 +736,47 @@ Item {
         /*
          * 单击：延迟 400ms 再播放/暂停（参考 PlayerDocker.ts:847-862 的 clickTimer）。
          * 双击时第二次点击会取消这个定时器，所以双击=只切全屏，不会顺带暂停一下。
+         *
+         * 【先问弹幕层要不要消费这一次点击】tip 压在 activityArea 下面（层级说明见
+         * DanmakuView.consumeTipClick），点在 tip 上的那一下必须被它消费（点赞/复制/
+         * 撤回或纯吞掉），绝不能再走 clickTimer —— 否则"点 tip 上的按钮不管用，
+         * 直接穿透到后面的暂停/继续"（用户实测）。
+         *
+         * 【再问交互卡片层】同一个消费式拦截模式（InteractionLayer.consumeDisplayClick）：
+         * 关闭环悬在卡身矩形外、卡身又没有整片的 MouseArea → 点卡片外框/关闭环
+         * 同样会穿透成暂停/继续（用户实测）。命中卡身 = 纯消费；命中环热区 =
+         * 执行关闭并消费；都没命中才走 clickTimer。
          */
-        onClicked: clickTimer.restart()
+        onClicked: function (mouse) {
+            var p = activityArea.mapToItem(danmakuLayer, mouse.x, mouse.y)
 
-        /* 双击：切全屏（并且取消单击的定时器，避免"双击=切全屏+暂停"） */
-        onDoubleClicked: {
+            if (danmakuLayer.consumeTipClick(p.x, p.y))
+                return
+
+            var ip = activityArea.mapToItem(interactionLayer, mouse.x, mouse.y)
+
+            if (interactionLayer.consumeDisplayClick(ip.x, ip.y))
+                return
+
+            clickTimer.restart()
+        }
+
+        /* 双击：切全屏（并且取消单击的定时器，避免"双击=切全屏+暂停"）。
+           tip 上的双击同样先消费（参考里 tip 是独立 DOM，双击不会透到 video）；
+           交互卡片同理 —— 点在卡片上的双击不该触发全屏。 */
+        onDoubleClicked: function (mouse) {
             clickTimer.stop()
+
+            var p = activityArea.mapToItem(danmakuLayer, mouse.x, mouse.y)
+
+            if (danmakuLayer.consumeTipClick(p.x, p.y))
+                return
+
+            var ip = activityArea.mapToItem(interactionLayer, mouse.x, mouse.y)
+
+            if (interactionLayer.consumeDisplayClick(ip.x, ip.y))
+                return
+
             playerView.fullscreenRequested()
         }
 

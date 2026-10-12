@@ -104,6 +104,9 @@ namespace Cicada {
 
         int setVolume(float volume);
 
+        /* 【音量均衡】响度压缩档位转发（与 setVolume 同构，0 关闭 / 1 标准 / 2 高动态） */
+        int setLoudness(int mode);
+
         void setMute(bool mute);
 
         uint64_t getAudioRenderQueDuration();

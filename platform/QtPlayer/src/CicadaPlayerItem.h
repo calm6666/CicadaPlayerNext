@@ -118,6 +118,13 @@ namespace cicadaqt {
         Q_PROPERTY(qint64 duration READ duration NOTIFY durationChanged)
         /* 音量 0.0 ~ 1.0。 */
         Q_PROPERTY(qreal volume READ volume WRITE setVolume NOTIFY volumeChanged)
+        /*
+         * 音量均衡（响度压缩）档位：0 关闭（默认）/ 1 标准 / 2 高动态。
+         * 设置面板「音量均衡」三档直接写这里；换片源重建播放器时随起播参数
+         * 一起重应用（applyPlaybackOptions 里与 SetVolume 同一批），不会丢。
+         * 实现在内核音频滤镜管线（acompressor），切换即时生效、无音频间隙。
+         */
+        Q_PROPERTY(int loudnessMode READ loudnessMode WRITE setLoudnessMode NOTIFY loudnessModeChanged)
         /* 静音开关。 */
         Q_PROPERTY(bool muted READ muted WRITE setMuted NOTIFY mutedChanged)
         /* 倍速播放（0.5 ~ 2.0 之间比较安全）。 */
@@ -452,6 +459,11 @@ namespace cicadaqt {
             return m_volume;
         }
         void setVolume(qreal volume);
+        int loudnessMode() const
+        {
+            return m_loudnessMode;
+        }
+        void setLoudnessMode(int mode);
         bool muted() const
         {
             return m_muted;
@@ -870,6 +882,7 @@ namespace cicadaqt {
         void downloadSpeedChanged();
         void durationChanged();
         void volumeChanged();
+        void loudnessModeChanged();
         void mutedChanged();
         void playbackRateChanged();
         void videoSizeChanged();
@@ -1022,6 +1035,8 @@ namespace cicadaqt {
         qint64 m_downloadSpeed = 0;
         qint64 m_duration = 0;
         qreal m_volume = 1.0;
+        /* 音量均衡档位（见 Q_PROPERTY 的说明）；只在 GUI 线程读写 */
+        int m_loudnessMode = 0;
         bool m_muted = false;
         qreal m_playbackRate = 1.0;
         int m_videoWidth = 0;

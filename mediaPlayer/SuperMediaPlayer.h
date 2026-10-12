@@ -340,6 +340,9 @@ namespace Cicada {
 
         void SetVolume(float volume) override;
 
+        /* 【音量均衡】响度压缩档位（0 关闭 / 1 标准 / 2 高动态，见 ICicadaPlayer 注释） */
+        void SetLoudness(int mode) override;
+
         void Start() override;
 
         void Pause() override;
@@ -1738,6 +1741,26 @@ namespace Cicada {
          * 追加在成员列表最末尾（本工程硬规则：只有追加才是增量 ABI 安全的）。
          */
         int mVideoSwitchOldStreamIndex{-1};
+
+        /*
+         * ============ 【2026-10-11 新增，按规则追加在类末尾】切档在途的武装时刻 ============
+         *
+         * 记 switchVideoStream() 把 mVideoSwitchInFlight 置 true 那一刻的单调时钟
+         * （af_getsteady_ms()，毫秒）；finishQualitySwitch() 收口时清零。0 = 没有在途切换。
+         *
+         * 为什么需要它：对齐切换的失败结果（alignedSwitchResult < 0）原本只在**目标流的包
+         * 到达时**才被检查 —— 而失败恰恰意味着目标流永远不会发包，于是 mVideoSwitchInFlight
+         * 永久卡 true：abrChanged() 把每一个 ABR tick 都跳过（ABR 永久瘫痪，用户看到的
+         * 就是"切回自动清晰度后再也不切档"）、同目标的重试请求也被去重永久忽略。
+         *
+         * 用它给"在途"加年龄上限（20 秒，= AbrBufferAlgoStrategy 的 ABR_SWITCH_WATCHDOG_MS）：
+         *   · switchVideoStream 的同目标去重只对**年轻**（< 20s）的在途请求生效，超龄的先
+         *     finishQualitySwitch(false) 收掉再重新武装 —— 卡死的切换不再吞掉用户的点击；
+         *   · 超过 20 秒还没到终态的切换本身就是异常（边界最长只隔一个分片时长），按失败
+         *     收口并允许重试，而不是让状态机永久停摆。
+         * 纯状态量：没有计时器、没有线程。追加在成员列表最末尾（增量 ABI 安全）。
+         */
+        int64_t mVideoSwitchStartedSteadyMs{0};
     };
 }// namespace Cicada
 #endif// CICADA_PLAYER_SERVICE_H

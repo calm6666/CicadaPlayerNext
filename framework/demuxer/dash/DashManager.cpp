@@ -313,6 +313,33 @@ int DashManager::ReadPacket(unique_ptr<IAFPacket> &packet, int index)
                                 continue;
                             }
 
+                            /*
+                             * 【2026-10-11 修：定位前确保目标流已打开】
+                             *
+                             * 预取块在流循环之后执行，存在竞态：武装后的第一次 ReadPacket 里，
+                             * 旧流恰好已到分片末尾（boundaryNow 合成 ret=0）⇒ 边界块先于预取块
+                             * 跑起来，此刻目标流还没打开。对一个没打开的流 start()/SetCurSegNum()
+                             * 只会失败或无事发生 ⇒ 切换悬死。这里补一次 OpenStream（成功则顺带
+                             * 完成 select + start，与下方语句幂等）；仍失败 ⇒ 走与 SetCurSegNum
+                             * 失败相同的收口：写 alignedSwitchResult(-1)、旧流恢复选中继续播、
+                             * 解除武装，播放器轮询到结果后上报 FAILED。
+                             */
+                            if (!j->mPStream->isOpened() && OpenStream(toStreamId) < 0) {
+                                setAlignedSwitchResult(-1);
+                                j->selected = false;
+                                i->selected = true;
+
+                                i->stopOnSegEnd = false;
+                                i->mPStream->stopOnSegEnd(false);
+                                AF_LOGW("aligned switch %d -> %d FAILED: the target stream could not be "
+                                        "opened at the boundary (OpenStream returned error) — the old stream "
+                                        "%d keeps playing and the player will report "
+                                        "PLAYER_QUALITY_SWITCH_FAILED\n",
+                                        i->mPStream->getId(), toStreamId, i->mPStream->getId());
+                                i->toStreamId = -1;
+                                return -EAGAIN;
+                            }
+
                             j->selected = true;
                             j->stopOnSegEnd = false;
                             j->toStreamId = -1;
@@ -409,20 +436,43 @@ int DashManager::ReadPacket(unique_ptr<IAFPacket> &packet, int index)
 
         const int prefetchStream = mPendingPrefetchStream;
         mPendingPrefetchStream = -1;
-        OpenStream(prefetchStream);
 
+        /*
+         * 【2026-10-11 修：预取打开失败必须当场判失败并解除武装】
+         *
+         * 原来这里把 OpenStream() 的返回值整个丢掉：目标流打开失败（网络错误、init 段
+         * 拉不下来等）之后什么都没发生 —— 旧流继续播、武装还挂着，等到边界块去定位一个
+         * 没打开的目标流才失败；而播放器侧的失败结果原本只在目标流发包时才检查 ⇒ 在途
+         * 状态永久卡死、ABR 永久瘫痪。现在：打开失败 ⇒ 写 alignedSwitchResult(-1)（播放器
+         * 读循环会轮询到并上报 FAILED/收口）+ 解除旧流的武装（stopOnSegEnd/toStreamId
+         * 复位，旧流保持 selected 继续正常播，不会卡在"等边界"上）。
+         */
+        if (OpenStream(prefetchStream) < 0) {
+            setAlignedSwitchResult(-1);
 
-        for (auto &j : mStreamInfoList) {
-            if (j->mPStream->getId() == prefetchStream) {
-                j->selected = false;
-                break;
+            for (auto &i : mStreamInfoList) {
+                if (i->stopOnSegEnd && i->toStreamId == prefetchStream) {
+                    i->stopOnSegEnd = false;
+                    i->mPStream->stopOnSegEnd(false);
+                    i->toStreamId = -1;
+                    break;
+                }
             }
+
+            AF_LOGW("aligned switch: opening the target stream %d for prefetch FAILED — the switch is "
+                    "aborted (the old stream keeps playing) and the failure is reported via "
+                    "alignedSwitchResult so the player can finish the switch as FAILED\n", prefetchStream);
+        } else {
+            for (auto &j : mStreamInfoList) {
+                if (j->mPStream->getId() == prefetchStream) {
+                    j->selected = false;
+                    break;
+                }
+            }
+            AF_LOGI("aligned switch: the target stream %d is opened NOW on the demuxer's read thread so it can "
+                    "prefetch its segment before the boundary; it stays unselected (bypass) and becomes the active "
+                    "stream only when the boundary block selects and positions it\n", prefetchStream);
         }
-        AF_LOGI("aligned switch: the target stream %d is opened NOW on the demuxer's read thread so it can "
-                "prefetch its segment before the boundary; it stays unselected (bypass) and becomes the active "
-                "stream only when the boundary block selects and positions it\n", prefetchStream);
-
-
     }
 
     if (index == -1 && mPList->isLive() && mPreferAudioEnabled && mBufferLevel == client_buffer_level_low) {
@@ -750,43 +800,60 @@ int64_t DashManager::seek(int64_t us, int flags, int index)
 }
 
 int DashManager::SwitchStreamAligned(int from, int to)
-{
-    AF_LOGD("SwitchStreamAligned %d -->%d\n", from, to);
+    {
+        AF_LOGD("SwitchStreamAligned %d -->%d\n", from, to);
 
-    for (auto &i : mStreamInfoList) {
-        if (i->mPStream->getId() == from) {
-            /*
-             * 没有播放头就定不出"切换点"（切换点 = 播放头所在分片的下一分片起点）。
-             * 这时既不能立刻换（没有落点），也不能挂着（切换永远不完成、seek 被永久挂起）⇒
-             * 返回负值，让播放器走既有的失败出口 finishQualitySwitch(false)：旧档继续播、报 FAILED。
-             * 分片表暂时查不到不算失败（边界块会用目标档自己的表再查一次），所以只在播放头缺失时拒绝。
-             */
-            const int64_t armPlayhead = getAlignedSwitchPlayheadUs();
-            uint64_t armSegNum = 0;
+        /*
+         * 【2026-10-11 修：from 流不存在时不能假装武装成功】
+         *
+         * 原来找不到 from 流时直接落到 return 0（成功）：播放器以为武装完成、mVideoSwitchInFlight
+         * 挂起，但这个 manager 里根本没有任何流被武装 ⇒ 边界块永远不会跑 ⇒ 切换一直悬到旧流
+         * EOF 才被 EOF 收口判失败。返回负值让播放器当场走 finishQualitySwitch(false)：
+         * 旧档继续播、立刻报 FAILED，ABR 下一个 tick 可以重试。
+         */
+        bool armed = false;
 
-            if (armPlayhead <= 0) {
-                AF_LOGW("aligned switch %d -> %d refused: no playhead was delivered to this manager "
-                        "(alignedSwitchPlayheadUs=%lld), so the switch point cannot be defined\n",
-                        from, to, (long long) armPlayhead);
-                return -EINVAL;
+        for (auto &i : mStreamInfoList) {
+            if (i->mPStream->getId() == from) {
+                /*
+                 * 没有播放头就定不出"切换点"（切换点 = 播放头所在分片的下一分片起点）。
+                 * 这时既不能立刻换（没有落点），也不能挂着（切换永远不完成、seek 被永久挂起）⇒
+                 * 返回负值，让播放器走既有的失败出口 finishQualitySwitch(false)：旧档继续播、报 FAILED。
+                 * 分片表暂时查不到不算失败（边界块会用目标档自己的表再查一次），所以只在播放头缺失时拒绝。
+                 */
+                const int64_t armPlayhead = getAlignedSwitchPlayheadUs();
+                uint64_t armSegNum = 0;
+
+                if (armPlayhead <= 0) {
+                    AF_LOGW("aligned switch %d -> %d refused: no playhead was delivered to this manager "
+                            "(alignedSwitchPlayheadUs=%lld), so the switch point cannot be defined\n",
+                            from, to, (long long) armPlayhead);
+                    return -EINVAL;
+                }
+
+                i->stopOnSegEnd = true;
+                i->toStreamId = to;
+
+                if (!i->mPStream->isLive()) {
+                    mPendingPrefetchStream = to;
+                }
+
+                mAlignedSwitchBoundaryStream = i->mPStream->getSegmentNumByTime(armPlayhead, armSegNum)
+                                               ? (int) armSegNum : -1;
+
+                armed = true;
+                break;
             }
-
-            i->stopOnSegEnd = true;
-            i->toStreamId = to;
-
-            if (!i->mPStream->isLive()) {
-                mPendingPrefetchStream = to;
-            }
-
-            mAlignedSwitchBoundaryStream = i->mPStream->getSegmentNumByTime(armPlayhead, armSegNum)
-                                           ? (int) armSegNum : -1;
-
-            break;
         }
-    }
 
-    return 0;
-}
+        if (!armed) {
+            AF_LOGW("aligned switch %d -> %d refused: stream %d is not in this manager's stream list — "
+                    "nothing would ever fire at a boundary\n", from, to, from);
+            return -EINVAL;
+        }
+
+        return 0;
+    }
 
 int DashManager::getNBSubStream(int index) const
 {

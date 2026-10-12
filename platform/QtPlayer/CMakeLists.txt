@@ -594,6 +594,14 @@ endif ()
 # 少了这一句，QML 会把 QtPlayerTheme 当普通组件，用的时候报 "QtPlayerTheme is not a type"。
 set_source_files_properties(QtPlayerTheme.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
 
+# QtPlayerPreviewMode.qml（预览图雪碧图/bin 的全局开关）同样是 `pragma Singleton`：
+# 首页的切换按钮和播放器窗口的取数逻辑分属两个窗口的 QML 树，只有单例能共享。
+set_source_files_properties(QtPlayerPreviewMode.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
+# QtPlayerAppMode.qml（交互卡片 展示/编辑 模式的全局开关）同样是 `pragma Singleton`：
+# 首页的模式切换按钮写它，播放器窗口的交互层（InteractionLayer）和右侧 API 面板读它。
+set_source_files_properties(QtPlayerAppMode.qml PROPERTIES QT_QML_SINGLETON_TYPE TRUE)
+
 # ---------------------------------------------------------------------------
 # 界面素材（**原样**拷自参考工程 front/hili-player/packages/player/src/assets）：
 #   * assets/lottie-icon/*.json —— 控制栏那 20 个 Lottie 动画图标；
@@ -635,7 +643,8 @@ file(GLOB CICADA_QT_IMAGE_ASSETS
         LIST_DIRECTORIES false
         RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/*
-        ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/dm/*)
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/dm/*
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/interaction/*)
 list(SORT CICADA_LOTTIE_ICONS)
 list(SORT CICADA_QT_IMAGE_ASSETS)
 list(LENGTH CICADA_LOTTIE_ICONS _cicada_icon_count)
@@ -649,6 +658,8 @@ qt_add_qml_module(appQtPlayer
         QML_FILES
         Main.qml
         QtPlayerTheme.qml
+        QtPlayerPreviewMode.qml
+        QtPlayerAppMode.qml
         LottieIcon.qml
         PlayerView.qml
         PlayerControlBar.qml
@@ -667,6 +678,8 @@ qt_add_qml_module(appQtPlayer
         controls/LeftControls.qml
         controls/DanmakuBar.qml
         controls/RightControls.qml
+        # 控制栏按钮的 tooltip 层（参考 hili-player 的 Tooltips.ts/tooltip.scss）
+        controls/ControlTipLayer.qml
         PlayerTopBar.qml
         DanmakuView.qml
         DanmakuItem.qml
@@ -685,6 +698,31 @@ qt_add_qml_module(appQtPlayer
         # —— 从 Main.qml 里抽出来的，见那个文件的头注释和 HANDOVER-TODO.md 第三节第 1 条。
         SettingsPage.qml
         HomeWindow.qml
+        # 交互卡片层 + 四种卡片 + 倒计时关闭环（照 hili-player 交互插件的展示模式复刻）：
+        #   InteractionLayer —— .nova-player-cmd-dm-wrap（容器/显隐/时钟）
+        #   GuideCard       —— .nova-danmaku-x-editor（三连 + 关注）
+        #   LinkCard        —— .nova-danmaku-x-link（外链 + 稍后再看）
+        #   VoteCard        —— .nova-danmaku-x-vote（投票）
+        #   ScoreCard       —— .nova-danmaku-x-score（评分）
+        #   CloseCircle     —— 两半环倒计时关闭按钮（closeCircle.ts 的 Canvas 化）
+        controls/interaction/InteractionLayer.qml
+        controls/interaction/CloseCircle.qml
+        controls/interaction/GuideCard.qml
+        controls/interaction/LinkCard.qml
+        controls/interaction/VoteCard.qml
+        controls/interaction/ScoreCard.qml
+
+        # ---------------------------------------------------------------------------
+        # 右侧 API 操作面板（编辑模式下播放器窗口变左右两栏：左播放器 + 右 API 面板）：
+        #   ApiPanel            —— 容器 + 顶部 Tab（交互卡片 / 弹幕），Main.qml 摆放
+        #   InteractionApiPanel —— 交互卡片增删改查（照 hili-player demo 的编辑面板）
+        #   DanmakuApiPanel     —— 弹幕发送/撤回/在屏列表/统计（调 DanmakuController）
+        # 【必须列在这里】和 DanmakuLive.qml 同一个理由：qt_add_qml_module 只把
+        # QML_FILES 里的文件放进 qrc，漏一行就是运行时 "No such file or directory"。
+        # ---------------------------------------------------------------------------
+        ApiPanel.qml
+        InteractionApiPanel.qml
+        DanmakuApiPanel.qml
 
         # ---------------------------------------------------------------------------
         # 网页窗口（首页那个"HTML 链接"输入框打开的独立窗口）：

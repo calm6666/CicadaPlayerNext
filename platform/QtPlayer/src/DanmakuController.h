@@ -171,9 +171,26 @@ namespace cicadaqt {
          */
         Q_PROPERTY(QVariantMap hoveredItem READ hoveredItem NOTIFY frameChanged)
 
+        /*
+         * 【弹幕列表面板】全量弹幕（不只 in 屏）：每条 { timeMs, text, isSelf, id }，
+         * 按 timeMs 升序 —— 右栏弹幕列表面板照 B 站排式展示用（时间点前缀 +
+         * 自己发的加标签 + 可撤回）。
+         *
+         * 数据来源是两部分的**合并**：
+         *   * 引擎 _items（mock XML / 本地文件载入的全量调度数据，itemAt/itemCount 只读导出）；
+         *   * 本控制器记录的"自己发的"（send() 成功的那些 —— 引擎把立即弹幕放
+         *     _immediate 队列、不进 _items，所以要在控制器这边自己记账，否则列表
+         *     会漏掉自己发的）。
+         * NOTIFY 在这些时机发：载入完成（danmakuLoaded）/ send / recallDanmaku /
+         * append / clear / reset —— 都是"全量集合可能变了"的时刻，面板读一次就稳。
+         */
+        Q_PROPERTY(QVariantList allItems READ allItems NOTIFY allItemsChanged)
+
     public:
         explicit DanmakuController(QObject *parent = nullptr);
         ~DanmakuController() override;
+
+        QVariantList allItems() const;
 
         bool enabled() const { return m_enabled; }
         void setEnabled(bool value);
@@ -396,8 +413,24 @@ namespace cicadaqt {
         void frameChanged();
         void statsChanged();
         void gpuLayerChanged();
+        /* 全量列表变了（载入 / 发送 / 撤回 / 清空 —— 见 allItems 属性的说明） */
+        void allItemsChanged();
 
     private:
+        /*
+         * 【弹幕列表面板】自己发的弹幕的记账（见 allItems 属性的说明）。
+         *   * id 从 -1 起递减分配（引擎给数据弹幕分的是正 id，负 id 一眼可辨，
+         *     且绝不会撞）；recallDanmaku 按它移除，clear/reset/load 清空。
+         *   * 只在 GUI 线程动（send/recall/clear/reset/load 全是 GUI 线程入口），
+         *     不需要锁。
+         */
+        struct SelfRecord {
+            qint64 id = 0;
+            qint64 timeMs = 0;
+            QString text;
+        };
+        QList<SelfRecord> m_selfRecords;
+        qint64 m_nextSelfId = -1;
         /* 把 QML 属性写回引擎配置（改完不用重开片源） */
         void applyConfig();
         /*

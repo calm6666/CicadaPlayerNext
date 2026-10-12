@@ -50,6 +50,7 @@
 #define CICADA_QT_DANMAKURENDERERITEM_H
 
 #include <QtCore/QElapsedTimer>
+#include <QtCore/QSet>
 #include <QtCore/QTimer>
 #include <QtQuick/QQuickItem>
 #include <QtQml/qqmlregistration.h>
@@ -105,8 +106,34 @@ namespace cicadaqt {
         Q_PROPERTY(int quadCount READ quadCount NOTIFY quadCountChanged)
         Q_PROPERTY(int atlasEntries READ atlasEntries NOTIFY quadCountChanged)
 
+        /*
+         * 点赞手势前缀图标的素材地址（QML 用 Qt.resolvedUrl(...) 喂进来；空 = 不画）。
+         *
+         * 【为什么不发 NOTIFY】QML 只在启动时写一次、没有任何地方读它 ——
+         * "属性写入 → 发信号 → QV4 重入"是本类踩过的崩溃链（见 .cpp 里 setTimeMs
+         * 的说明），没有消费者的信号一律不发。值的变化由 updatePaintNode 每帧
+         * 现读 m_likedIconSource 兜住，不需要通知驱动重画之外的东西。
+         */
+        Q_PROPERTY(QString likedIconSource READ likedIconSource WRITE setLikedIconSource)
+
     public:
         explicit DanmakuRendererItem(QQuickItem *parent = nullptr);
+
+        QString likedIconSource() const { return m_likedIconSource; }
+        void setLikedIconSource(const QString &value);
+
+        /*
+         * 点赞 / 取消点赞一条弹幕（Tip 里那颗点赞按钮调，DanmakuView.toggleLike）。
+         * 点赞的弹幕会在文字左前方多画一个"点赞手势"小图标（0.64em，随字色染色，
+         * 对齐 danmaku.scss 的 .danmaku-x-liked-icon）。
+         *
+         * 【线程约定】GUI 线程写、updatePaintNode 的 sync 阶段读 —— 与 timeMs 同一条
+         * 约定（sync 期间 GUI 线程被阻塞，不存在并发）。
+         */
+        Q_INVOKABLE void setLiked(qint64 id, bool liked);
+
+        /* 换弹幕源时清掉点赞集合（引擎 id 会重新分配，不清会串到新视频的弹幕上） */
+        Q_INVOKABLE void clearLiked();
 
         QObject *controller() const { return m_controllerObject; }
         void setController(QObject *controller);
@@ -267,6 +294,26 @@ namespace cicadaqt {
 
         /* 上一帧画了多少条：定时器据此在 60Hz / 10Hz 之间切 */
         int m_quadCount = 0;
+
+        /*
+         * ---- 点赞手势前缀图标（GPU 模式）----
+         *
+         * m_likedIconSource：素材地址（QML 传入，见属性说明）。
+         * m_likedIds：已点赞的弹幕 id 集合（setLiked / clearLiked 维护；
+         *   GUI 线程写、sync 阶段读，同 timeMs 的线程约定）。
+         * m_likedIcons：这一帧要点图标的瞬时数据（updatePaintNode 里在文字趟
+         *   **之前**现算 —— 图标烤制可能触发图集整体重烤，先烤图标可以让文字趟
+         *   的世代签名自然兜住；rebuildGeometry 据此给对应文字附加一个四边形）。
+         */
+        QString m_likedIconSource;
+        QSet<qint64> m_likedIds;
+
+        struct LikedIcon {
+            int itemIndex;              /* 对应快照里第几条弹幕 */
+            DanmakuAtlasEntry entry;    /* 图集条目（UV / 流水号） */
+            float size;                 /* 图标逻辑边长（0.64 × 字号） */
+        };
+        std::vector<LikedIcon> m_likedIcons;
 
         /*
          * 场景图节点（根 = 不透明度节点，下面挂唯一的几何节点）。

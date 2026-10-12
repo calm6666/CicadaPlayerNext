@@ -63,6 +63,13 @@ namespace Cicada {
             mFilterFlags |= A_FILTER_FLAG_VOLUME;
         }
 
+        /*
+         * 【音量均衡】acompressor 常驻：关闭档 ratio=1 数学直通（docs §4.3），
+         * 单核开销 <0.1%（§7），换来的是档位切换永远零建图/零音频间隙（§6 ③）。
+         * 全平台 filterAudioRender 系渲染器一处生效（OHOS 直连 IAudioRender 的除外）。
+         */
+        mFilterFlags |= A_FILTER_FLAG_LOUDNESS;
+
         if (ret < 0) {
             AF_LOGE("subInit failed , ret = %d ", ret);
             mSuccessInitDevice = false;
@@ -203,6 +210,19 @@ namespace Cicada {
         return device_setSpeed(speed);
     }
 
+    int filterAudioRender::setLoudness(int mode)
+    {
+        /* 越界档位直接拒绝（上游 SuperMediaPlayer 也夹过一次，这里再兜一层） */
+        if (mode < 0 || mode > 2) {
+            return -EINVAL;
+        }
+
+        /* 只记值：真正的应用在渲染线程 getFrame 的延迟应用点（仿 setSpeed/setVolume，
+           避免和 FilterLoop 并发改图） */
+        mLoudness = mode;
+        return 0;
+    }
+
     void filterAudioRender::pause(bool bPause)
     {
         if (bPause) {
@@ -318,6 +338,13 @@ namespace Cicada {
             mFilterVolume = volume;
         }
 
+        /* 【音量均衡】与 speed/volume 同一延迟应用模式：目标值变了才碰滤镜 */
+        int loudness = mLoudness.load();
+        if (loudness != mFilterLoudness) {
+            applyLoudness();
+            mFilterLoudness = loudness;
+        }
+
         unique_ptr<IAFFrame> filter_frame{};
 
         if (mFilter != nullptr) {
@@ -362,6 +389,32 @@ namespace Cicada {
             }
         } else {
             mFilter->setOption("rate", AfString::to_string(mSpeed), "atempo");
+        }
+
+        return 0;
+    }
+
+    int filterAudioRender::applyLoudness()
+    {
+        /*
+         * 【音量均衡】仿 applySpeed 的懒建图先例（filterAudioRender.cpp:353-368）：
+         * 滤镜图只在做格式转换/变速/软件放大时才存在 —— 用户直接开音量均衡而图未建时，
+         * 这里主动把图建起来（图里 acompressor 常驻、关闭档直通，建图代价与变速一致）。
+         *
+         * 顺序有讲究（照 applySpeed）：先 setOption 再 init —— setOption 在图未建时
+         * 只把档位记进滤镜对象（mLoudnessMode），init 按它构建对应档参数的图；
+         * 图已建时 setOption 直接走热更新（不重建）。
+         */
+        if (mFilter == nullptr) {
+            mFilter = std::unique_ptr<IAudioFilter>(filterFactory::createAudioFilter(mInputInfo, mOutputInfo, mUseActiveFilter));
+            mFilter->setOption("mode", AfString::to_string(mLoudness.load()), "loudness");
+            int ret = mFilter->init(mFilterFlags);
+
+            if (ret < 0) {
+                return ret;
+            }
+        } else {
+            mFilter->setOption("mode", AfString::to_string(mLoudness.load()), "loudness");
         }
 
         return 0;

@@ -623,6 +623,12 @@ void AppleAVPlayer::SetColorMatrix(const float matrix[9])
     (void) matrix;
 }
 
+/* 【音量均衡】空实现（理由见 .h 的注释）：AVPlayer 直出不经内核音频滤镜管线 */
+void AppleAVPlayer::SetLoudness(int mode)
+{
+    (void) mode;
+}
+
 int AppleAVPlayer::GetCurrentStreamIndex(StreamType type)
 {
     return 0;

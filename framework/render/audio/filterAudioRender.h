@@ -36,6 +36,10 @@ namespace Cicada {
 
         int setSpeed(float speed) override;
 
+        /* 【音量均衡】响度压缩档位（0 关闭 / 1 标准 / 2 高动态）：
+           只记值，renderLoop 线程的 getFrame 里延迟应用（仿 speed/volume 的同一模式） */
+        int setLoudness(int mode) override;
+
         void pause(bool bPause) override;
 
         void flush() override;
@@ -95,6 +99,9 @@ namespace Cicada {
 
         int applyVolume();
 
+        /* 【音量均衡】把 mLoudness 应用到滤镜（仿 applySpeed 的懒建图先例） */
+        int applyLoudness();
+
         void requireSetting();
 
     protected:
@@ -109,6 +116,13 @@ namespace Cicada {
         std::atomic<int64_t> mSpeedDeltaDuration{0};
         volatile std::atomic<float> mVolume{1};
         std::atomic<float> mFilterVolume{1};
+        /*
+         * 【音量均衡】与 mSpeed/mFilterSpeed 同一对"目标值/已应用值"：
+         * mLoudness 由 setLoudness 写（任意线程），getFrame 比对两值、不一致时
+         * 调 applyLoudness 在渲染线程统一应用。
+         */
+        std::atomic<int> mLoudness{0};
+        std::atomic<int> mFilterLoudness{0};
         volatile std::atomic_bool mMute{false};
         std::unique_ptr<Cicada::IAudioFilter> mFilter{};
         std::mutex mFrameQueMutex;

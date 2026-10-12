@@ -45,6 +45,14 @@ namespace Cicada {
         typedef boost::lockfree::spsc_queue<IAFFrame *, boost::lockfree::capacity<20>> spsc_queue;
         std::atomic<double> mRate{1.0};
         double mVolume = 1.0;
+        /*
+         * 【音量均衡】当前响度压缩档位：0 关闭 / 1 标准 / 2 高动态
+         * （docs/audio-loudness-modes.md §5）。init() 重建图时按它构建对应档参数，
+         * 运行中切换走 applyLoudnessToGraph() 热更新（不重建）。
+         * atomic：SetLoudness 可从任意线程写（setOption），FilterLoop 线程 init/读——
+         * 与 mRate 同一读写模式；跨线程改图本身由 mMutexRate 保护（见 setOption）。
+         */
+        std::atomic<int> mLoudnessMode{0};
         AVFilterGraph *m_pFilterGraph{};
         afThread *mPThread{nullptr};
 
@@ -63,6 +71,11 @@ namespace Cicada {
         uint64_t mFlags{0};
 
         int addFilter(AVFilterContext **current, const char *name, const char *options_str);
+
+        /* 【音量均衡】把 mLoudnessMode 对应档位的参数逐条热更新到已建图的 acompressor
+           （调用方必须已持有 mMutexRate —— avfilter_graph_send_command 与 FilterLoop
+            并发访问图不是线程安全的，见 atempo 分支的同一先例） */
+        void applyLoudnessToGraph();
     };
 }
 

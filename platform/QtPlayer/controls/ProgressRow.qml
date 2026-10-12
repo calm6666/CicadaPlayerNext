@@ -59,6 +59,15 @@ Item {
      */
     property var previewFrames: []
 
+    /*
+     * 雪碧图预览参数（index.json 的 pvdata，B 站形状）：
+     * { imgUrl, imgXLen, imgYLen, imgXSize, imgYSize, sliceCount }。
+     * null = 没拉到 / 当前是 bin 模式 → 气泡走 previewFrames 或 CaptureScreen。
+     * 和 previewFrames 互斥喂入（应用层按 QtPlayerPreviewMode.mode 二选一拉），
+     * 两条路都空时才落到 CaptureScreen 兜底。
+     */
+    property var previewSprite: null
+
     /* 高能进度条开关（默认**开**）：从控制栏一路传进来，pbpArea.active 直接读它 ——
        关掉之后曲线和 pin 都不显示、也不响应鼠标。 */
     property bool highlightEnabled: true
@@ -368,10 +377,11 @@ Item {
         }
 
         function requestSnapshotThrottled() {
-            /* 【有接口帧就别再截屏】位置帧由 videoshot/preview.bin 提供（onlineSource 非空就是
-               这一档有接口帧）；下面两条兜底只在接口整条不可用时才用（判断放在最前面：
+            /* 【有接口帧就别再截屏】位置帧由 videoshot 提供 —— bin 模式看
+               onlineSource（这一档有接口帧），sprite 模式看雪碧图整体可用；
+               下面两条兜底只在接口整条不可用时才用（判断放在最前面：
                连 150ms 节流都不用起）。 */
-            if (preview.onlineSource !== "")
+            if (preview.onlineSource !== "" || preview.spriteAvailable)
                 return
 
             /* 没播放器（还没 Prepare）或还没就绪时框架只会回调"没有画面"，白截。 */
@@ -740,6 +750,34 @@ Item {
             /* 在线帧：档位变 → URL 变 → Image 换图（纯绑定，没有任何中转和手写状态） */
             readonly property string onlineSource: apiFrameSourceAt(apiFrameIndex)
 
+            /*
+             * 雪碧图（sprite 模式，与 previewFrames 互斥喂入）：
+             * 下标 = floor(秒/5)，**无 +1**（bin 的 arr[0] 是空占位才有偏移）；
+             * col = 下标 % imgXLen、row = floor(下标 / imgXLen)，
+             * Image.sourceClipRect 从大图裁出那一格 —— 悬停换档只是换裁剪区，
+             * 大图只加载一次（URL 不变），比 bin 的逐帧换图省得多。
+             */
+            readonly property int spriteFrameIndex:
+                (progressRow.hoverRatio >= 0 && progressRow.durationSec > 0)
+                ? Math.floor(progressRow.hoverRatio * progressRow.durationSec
+                             / QtPlayerTheme.progressPreviewFrameSec)
+                : -1
+
+            readonly property bool spriteAvailable:
+                progressRowRoot.previewSprite !== null
+                && progressRowRoot.previewSprite !== undefined
+                && progressRowRoot.previewSprite.imgUrl !== undefined
+
+            readonly property rect spriteClipRect: {
+                if (!spriteAvailable || spriteFrameIndex < 0)
+                    return Qt.rect(0, 0, 0, 0)
+
+                var pv = progressRowRoot.previewSprite
+                var col = spriteFrameIndex % pv.imgXLen
+                var row = Math.floor(spriteFrameIndex / pv.imgXLen)
+                return Qt.rect(col * pv.imgXSize, row * pv.imgYSize, pv.imgXSize, pv.imgYSize)
+            }
+
             /* 本地帧（只在接口不可用时显示）：框架 CaptureScreen 的当前画面，零拷贝回读。
                版本号拼进 URL 是因为 provider 手里永远只有"最近一张"（见 SnapshotImageProvider.h）。
 
@@ -784,6 +822,20 @@ Item {
             }
 
             /*
+             * 雪碧图帧（sprite 模式）：同一张大图不动，只换 sourceClipRect 的裁剪区。
+             * visible 判据带 `onlineSource === ""`：两条路互斥喂入，真同时有数据时
+             * （模式切换的过渡帧）优先 bin 的逐帧图，闪一帧也不要紧。
+             */
+            Image {
+                visible: preview.spriteAvailable && preview.onlineSource === ""
+                anchors.fill: parent
+                fillMode: Image.Stretch
+                asynchronous: false
+                source: preview.spriteAvailable ? progressRowRoot.previewSprite.imgUrl : ""
+                sourceClipRect: preview.spriteClipRect
+            }
+
+            /*
              * 本地帧（接口整条不可用时的兜底）：零拷贝快照那条路，URL 跟着 revision 走。
              * cache 关掉：revision 一直在变，缓存旧的是白占内存。
              */
@@ -795,7 +847,14 @@ Item {
                  * 绝不用旧图冒充。在线兜底（框架 CaptureScreen）那条路上它恒为 true，
                  * 行为与加这个功能之前完全一致。
                  */
-                visible: !preview.apiFramesAvailable && preview.localSource !== ""
+                /*
+                 * 【为什么还要排除雪碧图】切到 sprite 模式时 previewFrames 被清空
+                 * （apiFramesAvailable 变 false），但切模式前截过的本地快照还在
+                 * （snapshotRevision > 0）—— 不排除的话本地帧会和雪碧图帧叠着同时显示。
+                 * 雪碧图优先：它有整条时间轴的帧，本地快照只有"最近一张"，信息量差一截。
+                 */
+                visible: !preview.apiFramesAvailable && !preview.spriteAvailable
+                         && preview.localSource !== ""
                          && bar.player !== null && bar.player.hoverPreviewImageIsCurrent
                 anchors.fill: parent
                 fillMode: Image.Stretch

@@ -421,6 +421,10 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
+                    /* 移入 300ms 后弹 tip（参考 Controls.ts initTooltip 的节奏；
+                       转发原因见 PlayerControlBar.requestTipShow 的注释） */
+                    onEntered: bar.requestTipShow("ctrl:prev", prevButton)
+                    onExited: bar.requestTipHide("ctrl:prev")
                     onClicked: bar.previousRequested()
                 }
             }
@@ -554,6 +558,9 @@ Item {
                     anchors.fill: parent
                     hoverEnabled: true
                     cursorShape: Qt.PointingHandCursor
+                    /* 同 prevArea：移入 300ms 弹 tip、移出立即收 */
+                    onEntered: bar.requestTipShow("ctrl:next", nextButton)
+                    onExited: bar.requestTipHide("ctrl:next")
                     onClicked: bar.nextRequested()
                 }
             }

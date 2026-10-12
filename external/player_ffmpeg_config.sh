@@ -100,8 +100,11 @@ ffmpeg_config_add_protocols \
     async cache icecast httpproxy
 
 # ---- filters ----------------------------------------------------------------
+# acompressor：音量均衡（高动态/标准，docs/audio-loudness-modes.md）的实现滤镜。
+# 全参数带运行时 R 标志（process_command 热更新），关不关它只影响这一个功能，
+# 增加约 4KB 代码量；ratio=1 时数学直通（无听感影响、无性能开销）。
 ffmpeg_config_add_filters \
-    atempo aresample aformat volume scale transpose hflip vflip rotate
+    atempo aresample aformat volume scale transpose hflip vflip rotate acompressor
 
 if [[ "$TARGET_PLATFORM" != "Android" ]];then
     ffmpeg_config_add_protocols udp

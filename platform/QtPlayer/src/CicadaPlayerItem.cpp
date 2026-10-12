@@ -1340,6 +1340,25 @@ namespace cicadaqt {
         }
     }
 
+    void CicadaPlayerItem::setLoudnessMode(int mode)
+    {
+        /* 越界档位夹回关闭（内核侧也各兜了一层，这里保证 QML 属性永远是合法三档） */
+        if (mode < 0 || mode > 2) {
+            mode = 0;
+        }
+
+        if (m_loudnessMode == mode) {
+            return;
+        }
+
+        m_loudnessMode = mode;
+        emit loudnessModeChanged();
+
+        if (m_player) {
+            m_player->SetLoudness(m_loudnessMode);
+        }
+    }
+
     void CicadaPlayerItem::setMuted(bool muted)
     {
         if (m_muted == muted) {
@@ -3734,6 +3753,8 @@ namespace cicadaqt {
         }
 
         m_player->SetVolume(static_cast<float>(m_volume));
+        /* 音量均衡档位与音量同一批重应用（换片源/重建播放器后内核是默认关闭档） */
+        m_player->SetLoudness(m_loudnessMode);
         m_player->SetMute(m_muted);
         m_player->SetLoop(m_loop);
     }

@@ -36,6 +36,8 @@ Item {
     property bool fontBold: true
     /* 描边类型：0 重墨 / 1 描边 / 2 45°投影（参考右页那组单选） */
     property int outlineType: 0
+    /* 点赞态（Tip 点赞后由 DanmakuView.present 每帧同步；初始渲染 like>0 同一机制） */
+    property bool liked: false
 
     /* padding：固定弹幕 2px 8px、本人弹幕 2px 6px、其余不加；border 只有本人弹幕有 */
     readonly property int padH: fixedStyle ? 8 : (selfBorder ? 6 : 0)
@@ -182,5 +184,45 @@ Item {
         radius: 4
         border.width: 2
         border.color: "#ffffff"
+    }
+
+    /*
+     * 弹幕点赞图标（danmaku.scss .danmaku-x-liked-icon，B 站点赞手势）：
+     * 常驻于弹幕元素内、挂在文字左前方 —— CSS 里 absolute 定位 + opacity:0
+     * 不参与布局与尺寸测量（引擎量的仍是纯文字宽），点赞后淡入（150ms）。
+     * 几何全按 CSS 的 em 值换算：见方 0.64em、左移 0.8em、底对齐行盒
+     * （行盒高 = textLineHeight）。
+     *
+     * 【颜色 = 跟随弹幕文字色】参考 CSS 是 fill: currentColor（danmaku.scss:276，
+     * 白字白色图标、彩字随字色）；素材 SVG 本体不带 fill（默认黑），所以这里
+     * 按当前字色现拼一个 data URL —— path 取自 domEngine.ts:69 的 LIKED_ICON_SVG。
+     * base64 是 UTF-8 安全的拼法（Qt.btoa 只认 Latin-1，中文不在 SVG 里但保持
+     * 这套写法最稳）。
+     */
+    Image {
+        /* domEngine.ts:69 LIKED_ICON_SVG 的 path d（viewBox 0 0 24 24） */
+        readonly property string iconPath: "M4.909 8.543v15.275h-1.78a2.944 2.944 0 0 1-2.947-2.94"
+                                           + "v-9.395c0-1.624 1.32-2.94 2.948-2.94zm8.64-8.114c1.282.62"
+                                           + " 2.128 2.183 2.128 4.272q0 1.875-.468 3.842h5.655a2.955"
+                                           + " 2.955 0 0 1 2.868 3.662l-1.865 7.568a5.32 5.32 0 0 1"
+                                           + "-5.163 4.045H6.682V8.508l.132-.047c2.316-.894 3.634-3.072"
+                                           + " 3.957-6.64C10.9.396 12.256-.196 13.548.428"
+
+        width: 0.64 * view.fontSize
+        height: 0.64 * view.fontSize
+        x: label.x - 0.8 * view.fontSize
+        y: label.y + label.height - height
+        source: "data:image/svg+xml;base64,"
+                + Qt.btoa('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24">'
+                          + '<path fill="' + view.textColor + '" d="' + iconPath + '"/></svg>')
+        sourceSize: Qt.size(width, height)
+        smooth: true
+        opacity: view.liked ? 1 : 0
+        visible: opacity > 0.01
+
+        /* CSS transition: opacity 150ms ease-in-out */
+        Behavior on opacity {
+            NumberAnimation { duration: 150; easing.type: Easing.InOutQuad }
+        }
     }
 }

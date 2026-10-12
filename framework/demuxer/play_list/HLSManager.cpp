@@ -273,6 +273,34 @@ namespace Cicada {
 
                         for (auto &j : mStreamInfoList) {
                             if (j->mPStream->getId() == i->toStreamId) {
+                                /*
+                                 * 【2026-10-11 修：定位前确保目标流已打开】（与 DashManager 同一修法）
+                                 *
+                                 * 预取块在流循环之后执行，存在竞态：武装后的第一次 ReadPacket 里，
+                                 * 旧流恰好已到分片末尾（boundaryNow 合成 ret=0）⇒ 边界块先于预取块
+                                 * 跑起来，此刻目标流还没打开；或预取那次 OpenStream 已失败。对一个
+                                 * 没打开的流 start()/SetCurSegNum() 只会失败或无事发生 ⇒ 切换悬死。
+                                 * 这里补一次 OpenStream（成功则顺带完成 select + start，与下方语句
+                                 * 幂等）；仍失败 ⇒ 与 SetCurSegNum 失败同一收口：写
+                                 * alignedSwitchResult(-1)、旧流恢复选中继续播、解除武装，播放器
+                                 * 轮询到结果后上报 FAILED。
+                                 */
+                                if (!j->mPStream->isOpened() && OpenStream(i->toStreamId) < 0) {
+                                    setAlignedSwitchResult(-1);
+                                    j->selected = false;
+                                    i->selected = true;
+
+                                    i->stopOnSegEnd = false;
+                                    i->mPStream->stopOnSegEnd(false);
+                                    AF_LOGW("aligned switch %d -> %d FAILED: the target stream could not be "
+                                            "opened at the boundary (OpenStream returned error) — the old stream "
+                                            "%d keeps playing and the player will report "
+                                            "PLAYER_QUALITY_SWITCH_FAILED\n",
+                                            i->mPStream->getId(), i->toStreamId, i->mPStream->getId());
+                                    i->toStreamId = -1;
+                                    return -EAGAIN;
+                                }
+
                                 j->selected = true;
                                 j->stopOnSegEnd = false;
                                 j->toStreamId = -1;
@@ -411,17 +439,43 @@ namespace Cicada {
         if (mPendingPrefetchStream >= 0) {
             const int prefetchStream = mPendingPrefetchStream;
             mPendingPrefetchStream = -1;
-            OpenStream(prefetchStream);
 
-            for (auto &j : mStreamInfoList) {
-                if (j->mPStream->getId() == prefetchStream) {
-                    j->selected = false;
-                    break;
+            /*
+             * 【2026-10-11 修：预取打开失败必须当场判失败并解除武装】（与 DashManager 同一修法）
+             *
+             * 原来这里把 OpenStream() 的返回值整个丢掉：目标流打开失败之后什么都没发生 ——
+             * 旧流继续播、武装还挂着，等到边界块去定位一个没打开的目标流才失败；而播放器侧
+             * 的失败结果原本只在目标流发包时才检查 ⇒ 在途状态永久卡死、ABR 永久瘫痪。
+             * 现在：打开失败 ⇒ 写 alignedSwitchResult(-1)（播放器读循环会轮询到并上报
+             * FAILED/收口）+ 解除旧流的武装（stopOnSegEnd/toStreamId 复位，旧流保持
+             * selected 继续正常播）。
+             */
+            if (OpenStream(prefetchStream) < 0) {
+                setAlignedSwitchResult(-1);
+
+                for (auto &i : mStreamInfoList) {
+                    if (i->stopOnSegEnd && i->toStreamId == prefetchStream) {
+                        i->stopOnSegEnd = false;
+                        i->mPStream->stopOnSegEnd(false);
+                        i->toStreamId = -1;
+                        break;
+                    }
                 }
-            }
 
-            AF_LOGI("aligned switch: target stream %d opened on the demuxer read thread to prefetch its segment\n",
-                    prefetchStream);
+                AF_LOGW("aligned switch: opening the target stream %d for prefetch FAILED — the switch is "
+                        "aborted (the old stream keeps playing) and the failure is reported via "
+                        "alignedSwitchResult so the player can finish the switch as FAILED\n", prefetchStream);
+            } else {
+                for (auto &j : mStreamInfoList) {
+                    if (j->mPStream->getId() == prefetchStream) {
+                        j->selected = false;
+                        break;
+                    }
+                }
+
+                AF_LOGI("aligned switch: target stream %d opened on the demuxer read thread to prefetch its segment\n",
+                        prefetchStream);
+            }
         }
 
         if (index != -1) {
@@ -760,6 +814,16 @@ namespace Cicada {
     {
         AF_LOGD("SwitchStreamAligned %d -->%d\n", from, to);
 
+        /*
+         * 【2026-10-11 修：from 流不存在时不能假装武装成功】（与 DashManager 同一修法）
+         *
+         * 原来找不到 from 流时直接落到 return 0（成功）：播放器以为武装完成、mVideoSwitchInFlight
+         * 挂起，但这个 manager 里根本没有任何流被武装 ⇒ 边界块永远不会跑 ⇒ 切换一直悬到旧流
+         * EOF 才被 EOF 收口判失败。返回负值让播放器当场走 finishQualitySwitch(false)：
+         * 旧档继续播、立刻报 FAILED，ABR 下一个 tick 可以重试。
+         */
+        bool armed = false;
+
         for (auto &i : mStreamInfoList) {
             if (i->mPStream->getId() == from) {
                 /*
@@ -788,8 +852,15 @@ namespace Cicada {
                 mAlignedSwitchBoundaryStream = i->mPStream->getSegmentNumByTime(armPlayhead, armSegNum)
                                                ? (int) armSegNum : -1;
 
+                armed = true;
                 break;
             }
+        }
+
+        if (!armed) {
+            AF_LOGW("aligned switch %d -> %d refused: stream %d is not in this manager's stream list — "
+                    "nothing would ever fire at a boundary\n", from, to, from);
+            return -EINVAL;
         }
 
         return 0;

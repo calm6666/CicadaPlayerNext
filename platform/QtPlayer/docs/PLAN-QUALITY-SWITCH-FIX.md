@@ -1275,6 +1275,54 @@ UI 按两张参考截图（非全屏/全屏）、主题色深色 `#D44E7D` / 浅
 
 ---
 
+### ✅ 第三十轮：手动切清晰度后切回"自动"再也不切档（DASH/HLS 同病）—— 失败通道断裂三连修 —— 2026-10-11
+
+**症状**：手动切任意清晰度正常（边界对齐切换整链路工作）；点"自动"后 ABR 永远不再发起切换。
+DASH / HLS 都复现 ⇒ 病灶在公共路径（SuperMediaPlayer / 两个 manager 的同构代码），不是某一协议的实现。
+
+**根因链（三个互锁缺陷）**：
+
+| # | 缺陷 | 位置 | 后果 |
+|---|---|---|---|
+| **RC-AR** | **失败结果的上报通道断裂**：边界块判"换不过去"只写 `alignedSwitchResult(-1)` 然后回退旧流（目标流不被选中、**永不发包**）；而播放器原本**只在目标流的包到达时**才检查这个结果 | `SuperMediaPlayer.cpp` ReadPacket 提交块 | 失败永不上报 ⇒ `mVideoSwitchInFlight` 永久卡 true |
+| **RC-AS** | **abrChanged 的在途跳过无时限**：`CicadaIsStreamSwitchInFlight()` 为 true 就 return，不看这次在途挂了多久 | `MediaPlayer.cpp` `abrChanged()` | 一旦 RC-AR 卡死，**每一个 ABR tick 都被跳过** ⇒ ABR 永久瘫痪（用户看到的"切回自动没反应"）。手动点击换目标可穿透（不同目标直接覆盖武装），所以"手动能用、自动不能用" |
+| **RC-AT** | **同目标去重无时限**：`mVideoSwitchTargetIndex == index` 就 return | `SMPMessageControllerListener.cpp` `switchVideoStream()` | 卡死后同一目标档的所有重试（含 ABR 重新决策到同一档）被永久忽略 |
+
+另有两个**放大器**（本轮一并修掉）：
+
+| # | 缺陷 | 位置 |
+|---|---|---|
+| **RC-AU** | 预取块把 `OpenStream(目标流)` 的返回值整个丢掉：目标流打开失败后武装还挂着，要等边界块去定位一个没打开的流才失败（然后落进 RC-AR） | `DashManager.cpp` / `HLSManager.cpp` ReadPacket 预取块 |
+| **RC-AV** | `SwitchStreamAligned` 找不到 from 流时**静默 return 0**（假武装）：播放器以为武装成功，实际什么都没挂上 ⇒ 切换悬到旧流 EOF | 同上两文件 `SwitchStreamAligned()` |
+
+**修复（全部落在既有状态机上，无计时器线程；20 秒 = AbrBufferAlgoStrategy 的 ABR_SWITCH_WATCHDOG_MS）**：
+
+| 修 | 文件 / 函数 | 内容 |
+|---|---|---|
+| 修 RC-AR | `SuperMediaPlayer.cpp` `doReadPacket()` 读前闸门块 | 在途时**先轮询** `GetProperty("alignedSwitchResult")`、**后刷** `alignedSwitchPlayheadUs` —— 顺序不能反：刷播放头会顺带清掉结果槽（`setAlignedSwitchPlayhead` 的"新切换复位旧结果"语义），先读后刷才能确定性捕获边界块刚写下的失败。读到负值 ⇒ `finishQualitySwitch(false)`（内部统一上报 FAILED + 清在途 + 关旧流 + 补 seek/暂停帧） |
+| 修 RC-AS | `MediaPlayer.h/.cpp` | 新增原子成员 `mQualitySwitchStartedSteadyMs`（类末尾追加）：`videoQualitySwitchCallback` 在 STARTED 记时刻、终态清零；`abrChanged()` 的在途跳过只在**年龄 < 20s** 时生效，超龄打 WARN 放行 —— 新切换会取代/收口卡死的旧请求 |
+| 修 RC-AT | `SMPMessageControllerListener.cpp` `switchVideoStream()` + `SuperMediaPlayer.h/.cpp` | 内核侧对称地新增 `mVideoSwitchStartedSteadyMs`（类末尾追加，friend 可写）：武装时记时刻、`finishQualitySwitch` 清零；同目标去重只对 < 20s 的在途请求生效，超龄先 `finishQualitySwitch(false)` 收口再重新武装 |
+| 修 RC-AU | `DashManager.cpp` / `HLSManager.cpp` 预取块 | `OpenStream` 失败 ⇒ 当场 `setAlignedSwitchResult(-1)` + 解除旧流武装（stopOnSegEnd/toStreamId 复位，旧流保持 selected 正常播）。另外两个 manager 的**边界块**在定位前补一次 `isOpened()→OpenStream()` 兜底（预取块在流循环之后执行，存在"武装后首次读就撞边界、目标流还没打开"的竞态），仍失败走与 SetCurSegNum 失败相同的回退收口 |
+| 修 RC-AV | 两文件 `SwitchStreamAligned()` | 找不到 from 流 ⇒ 返回 `-EINVAL`（不再假成功）。`SwitchVideoAligned` 对负返回本来就有失败出口（`finishQualitySwitch(false)`），当场报 FAILED、ABR 下一 tick 可重试 |
+
+**为什么手动切换一直是好的**：成功路径是"武装 → 预取 → 边界 → 目标流发包 → 提交 → 首帧上屏 → finishQualitySwitch(true)"，全程不经过失败通道；三个缺陷只在**失败发生时**才咬人 —— 而普通网络下手动切换几乎不失败，所以一直没暴露。
+
+**验收点（下次日志逐条对）**：
+
+| 场景 | 应看到 |
+|---|---|
+| 正常切换（手动/ABR） | 行为不变：`armed an ALIGNED switch` → `the playhead has left the segment …` → `finishQualitySwitch ready=1` |
+| 边界定位失败（VOD 末尾等） | `aligned switch … FAILED: SetCurSegNum …`（manager）→ 紧跟 `quality switch (aligned): the demuxer reported the boundary switch … as failed`（播放器轮询捕获）→ `finishQualitySwitch ready=0`；**之后 ABR 继续有 tick**（不再沉默） |
+| 预取打开失败 | `opening the target stream … for prefetch FAILED` → 同上失败链 |
+| 卡死自愈（如出现新卡死路径） | ≤ 20 秒内必有 `the in-flight quality switch is NNNNN ms old (>= 20 s watchdog)`（abrChanged 或 switchVideoStream 任一先到）→ FAILED 收口 → 后续切换正常 |
+| 切回"自动" | `abr:` 不再无限刷 `skipping this ABR tick`；缓冲/带宽满足条件时出现新的 `armed an ALIGNED switch` |
+
+改动文件：`mediaPlayer/SuperMediaPlayer.h/.cpp`、`mediaPlayer/SMPMessageControllerListener.cpp`、`mediaPlayer/MediaPlayer.h/.cpp`、`framework/demuxer/dash/DashManager.cpp`、`framework/demuxer/play_list/HLSManager.cpp`（共 7 个）。
+
+**编译验证（2026-10-11）**：`cmake --build …/msvc-static --target appQtPlayer --config Debug` 全量通过（exit code 0），产物 `Debug/appQtPlayer.exe` 已生成；仅 Qt 官方库的 LNK4099（PDB 未找到）链接警告，与本次改动无关。行为验收待用户实测（按上表 5 个场景逐条对日志）。
+
+---
+
 ## 0. 目标与验收标准
 
 

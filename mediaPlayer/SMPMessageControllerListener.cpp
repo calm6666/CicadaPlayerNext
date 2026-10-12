@@ -700,22 +700,11 @@ void SMPMessageControllerListener::ProcessStartMsg()
         mPlayer.mUtil->reset();
 
         if (mPlayer.mPlayStatus != PLAYER_PAUSED) {
-            /*
-             * 【主时钟锚在"节目轴"上，与视频帧同轴】
-             *
-             * mFirstAudioPts / mFirstVideoPts 记的是各自流的**原始基准**（= 首个 pts − 它的
-             * timePosition，见 DecodeAudioFrame / DecodeVideoPacket 处的记账：SuperMediaPlayer.cpp
-             * 的 mFirstAudioPts / mFirstVideoPts 赋值）。而视频帧的 pts 走的是 timePosition
-             * （从 0 起算）这条轴。实测日志里两者差了一整条流的时长：
-             *   drop frame, master played time is 46244931217, video pts is 167000
-             * 主时钟锚在 46244.9 秒（这条 FLV 直播自己的 12.8 小时原始时间戳），视频帧却是 0.167 秒
-             * ⇒ 每一帧都被判"迟到"丢掉、每 8 帧才强制上屏一帧（"FLV 直播非常卡"就是这么来的）。
-             *
-             * 节目轴的定义本来就是"从 0 开始"（位置/时长/seek 都在这条轴上），所以这里锚 0，
-             * 音视频两侧从此同轴。原来是"有音频锚 mFirstAudioPts、否则锚 mFirstVideoPts"——
-             * 两个基准都是原始轴上的值，改成 0 之后两个分支等价，不再需要分支。
-             */
-            mPlayer.mMasterClock.setTime(0);
+            if (HAVE_AUDIO) {
+                mPlayer.mMasterClock.setTime(mPlayer.mFirstAudioPts);
+            } else {
+                mPlayer.mMasterClock.setTime(mPlayer.mFirstVideoPts);
+            }
         }
 
         mPlayer.ChangePlayerStatus(PLAYER_PLAYING);
@@ -1608,10 +1597,28 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     /*
      * 【P3】"同一个目标档的重复请求不再取消再重启"：判据换成新模型的单一闩
      * （请求的目标 == 在途请求的目标 ⇒ 什么都不做，在途那次本来就在朝同一个目标走）。
+     *
+     * 【2026-10-11 修：这个去重必须带年龄上限】对齐切换失败时（边界块回退旧流、目标流
+     * 永不发包），mVideoSwitchInFlight 会一直卡 true —— 原来的去重没有时限，卡死之后
+     * 同一个目标档的所有重试请求都被永久忽略，用户点多少次都没反应。这里给去重加 20 秒
+     * 年龄上限（= AbrBufferAlgoStrategy 的 ABR_SWITCH_WATCHDOG_MS；对齐切换的边界最长
+     * 只隔一个分片时长，20 秒还没到终态本身就是异常）：年轻的在途请求照旧让过；超龄的先
+     * 按 finishQualitySwitch(false) 收口（内部会上报 FAILED、清在途状态），再往下重新武装。
      */
     if (mPlayer.mVideoSwitchInFlight && mPlayer.mVideoSwitchTargetIndex == index) {
-        AF_LOGI("quality switch ignored: stream %d is already the in-flight target\n", index);
-        return;
+        const int64_t inFlightAgeMs =
+                (af_getsteady_ms() - mPlayer.mVideoSwitchStartedSteadyMs);
+
+        if (inFlightAgeMs < 20 * 1000) {
+            AF_LOGI("quality switch ignored: stream %d is already the in-flight target\n", index);
+            return;
+        }
+
+        AF_LOGW("quality switch: the in-flight switch to stream %d is %lld ms old (>= 20 s watchdog) — "
+                "it is presumed stuck at the demuxer; finishing it as FAILED and re-arming a fresh "
+                "switch to the same target\n",
+                index, (long long) inFlightAgeMs);
+        mPlayer.finishQualitySwitch(false, "the in-flight switch exceeded the watchdog window");
     }
 
     AF_LOGD("video change video bitrate before is %d,after is %d",
@@ -1624,6 +1631,8 @@ void SMPMessageControllerListener::switchVideoStream(int index, Stream_type type
     mPlayer.mMixMode = (type == STREAM_TYPE_MIXED);
     mPlayer.mVideoSwitchTargetIndex = index;
     mPlayer.mVideoSwitchInFlight = true;
+    /* 【2026-10-11】武装时刻：供上面同目标去重的年龄上限与 abrChanged 的在途跳过使用。 */
+    mPlayer.mVideoSwitchStartedSteadyMs = af_getsteady_ms();
 
     int64_t switchPos = mPlayer.getCurrentPosition();
 

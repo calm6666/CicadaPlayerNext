@@ -153,6 +153,13 @@ namespace Cicada {
          */
         void SetVolume(float volume);
 
+        /*
+         * 【音量均衡（高动态/标准）】设置响度压缩档位（0 关闭 / 1 标准 / 2 高动态），
+         * 与 SetVolume 同一层转发语义：转发到 native handle 的 SetLoudness
+         * （实现见 ICicadaPlayer / SuperMediaPlayer，docs/audio-loudness-modes.md）。
+         */
+        void SetLoudness(int mode);
+
         /**
          * get current volume of the player
          */
@@ -545,6 +552,23 @@ namespace Cicada {
          * 等用户按播放时 `MediaPlayer::Start()` 会把它起来 —— 与原有设计一致。
          */
         PlayerStatus mPlayStatus{PLAYER_IDLE};
+
+        /*
+         * ============ 【2026-10-11 新增，按规则追加在类末尾】切档在途的起点时刻 ============
+         *
+         * 记内核上报 PLAYER_QUALITY_SWITCH_STARTED 那一刻的单调时钟（af_gettime_relative()/1000，
+         * 毫秒）；READY / FAILED 终态时清零。0 = 没有在途切换。
+         *
+         * 用途：abrChanged() 里"切档在途 ⇒ 跳过本 tick"的判据必须带年龄上限（20 秒，=
+         * AbrBufferAlgoStrategy 的 ABR_SWITCH_WATCHDOG_MS）。对齐切换的失败结果原本只在
+         * 目标流发包时才被检查，失败的目标流不发包 ⇒ 在途状态可能永久卡 true ⇒ 若无
+         * 年龄上限，每一个 ABR tick 都被跳过 —— 用户症状"切回自动清晰度后再也不切档"
+         * 就是这一条。超龄的在途切换不再拦 ABR：新的切换请求会取代/收口卡死的旧请求。
+         *
+         * 原子量：abrChanged() 在 ABR 线程读，videoQualitySwitchCallback() 在内核回调
+         * 线程写，无锁读写一个 int64 足够（读到的值只影响"这一 tick 让不让过"的决策）。
+         */
+        std::atomic<int64_t> mQualitySwitchStartedSteadyMs{0};
     };
 }// namespace Cicada
 

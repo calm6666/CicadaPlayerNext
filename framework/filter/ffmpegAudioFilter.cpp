@@ -34,6 +34,26 @@ extern "C"
 
 namespace Cicada {
 
+    /*
+     * 【音量均衡】三档预设 —— docs/audio-loudness-modes.md §5 换算表的直接落地：
+     *   threshold / knee 由 Web 端（DynamicsCompressorNode）的 dB 值换算成线性幅度：
+     *     标准：threshold=10^(-18/20)=0.125893，knee=10^(24/20)=15.85 → 夹上限 8；
+     *     高动态：threshold=10^(-32/20)=0.025119，knee=10^(12/20)=3.981；
+     *   attack / release 由秒 × 1000 成毫秒；ratio 同范围原样。
+     * 关闭档 ratio=1 + knee=1：acompressor 的 output_gain 在 ratio=1 时数学上恒等直通
+     * （含软拐点区间，文档 §4.3），所以"关闭"不需要拆图 —— 图常驻、档位切换零重建。
+     * threshold/attack/release 在关闭档写的什么值都无所谓（ratio=1 时根本走不到），
+     * 填标准档的值只为表整齐。
+     */
+    static const char *kLoudnessPresets[3][5] = {
+        /* threshold  knee    ratio  attack  release */
+        {"0.125893", "1",     "1",   "3",    "250"},   /* 0 关闭：ratio=1 直通 */
+        {"0.125893", "8",     "12",  "3",    "250"},   /* 1 标准：提前触发 + 高比率，拉平响度 */
+        {"0.025119", "3.981", "4",   "10",   "400"},   /* 2 高动态：深阈值 + 低比率，只压峰值 */
+    };
+    /* 与 kLoudnessPresets 逐列对应的 acompressor 参数名（send_command 用） */
+    static const char *kLoudnessParamNames[5] = {"threshold", "knee", "ratio", "attack", "release"};
+
     ffmpegAudioFilter::ffmpegAudioFilter(const format &srcFormat, const format &dstFormat, bool active)
         : IAudioFilter(srcFormat, dstFormat, active)
     {
@@ -85,9 +105,56 @@ namespace Cicada {
             }
 
             return true;
+        } else if (capacity == "loudness") {
+            /*
+             * 【音量均衡】档位切换（0 关闭 / 1 标准 / 2 高动态）。
+             * 必须持 mMutexRate（与 atempo 分支同一把锁、同一先例）：send_command 和
+             * FilterLoop 线程并发访问 graph 不是线程安全的（volume 分支没加锁属历史
+             * 遗留，勿仿照）。图还没建时只记 mLoudnessMode —— init() 会按它构建。
+             */
+            if (key == "mode") {
+                int mode = atoi(value.c_str());
+
+                if (mode < 0 || mode > 2) {
+                    return false;
+                }
+
+                if (mode != mLoudnessMode.load()) {
+                    std::lock_guard<std::mutex> uMutex(mMutexRate);
+                    mLoudnessMode = mode;
+
+                    if (m_pFilterGraph) {
+                        applyLoudnessToGraph();
+                    }
+                }
+
+                return true;
+            }
         }
 
         return false;
+    }
+
+    void ffmpegAudioFilter::applyLoudnessToGraph()
+    {
+        /*
+         * 【音量均衡】档位热更新：acompressor 全参数带运行时 R 标志 + process_command
+         * （FFmpeg 9.0 af_sidechaincompress.c:75-95/:435），逐参数 send_command 即可，
+         * 与 atempo/volume 的热更新是同一机制。attack/release 自带包络平滑，参数阶跃
+         * 通常无爆音（文档 §6 注意点 ③）。
+         * 调用方（setOption）已持 mMutexRate；只应在本函数内被调用。
+         */
+        int mode = mLoudnessMode.load();
+
+        if (mode < 0 || mode > 2) {
+            mode = 0;
+        }
+
+        const char **preset = kLoudnessPresets[mode];
+
+        for (int i = 0; i < 5; ++i) {
+            avfilter_graph_send_command(m_pFilterGraph, "acompressor", kLoudnessParamNames[i], preset[i], nullptr, 0, 0);
+        }
     }
 
     int ffmpegAudioFilter::createSrcBufferFilter()
@@ -209,6 +276,33 @@ namespace Cicada {
                 || mSrcFormat.format != mDstFormat.format
                 || mSrcFormat.channels != mDstFormat.channels) {
             needAFormat = true;
+        }
+
+        /*
+         * 【音量均衡】acompressor 常驻（volume 段之后、atempo 段之前，文档 §6 ②）：
+         *   * 图按**当前档位**构建（mLoudnessMode 由 setOption 提前记好），所以重建图
+         *     （seek/flush、懒建图）后档位自动恢复，不需要重发命令；
+         *   * 关闭档构建的也是 ratio=1 直通 —— 切换永远不重建图、不产生音频间隙；
+         *   * 不改采样格式，故对上面的 needAFormat 判断无影响。
+         * 【预留/降级】返回值故意不检查（不能学 atempo 段的 return）：addFilter 失败时
+         * *current 保持原值，后续滤镜直接接在前一个上 —— 当前 Windows FFmpeg 构建里
+         * acompressor 未编入（CONFIG_ACOMPRESSOR_FILTER=0），这条路径实测走通：
+         * 仅一条 AF_LOGW、图照常建成、主音频路径零影响（音量均衡暂时无效果，属预期）。
+         * 白名单已加 acompressor（player_ffmpeg_config.sh），交叉编译 FFmpeg 后
+         * 这里不需要任何改动即自动生效。
+         */
+        if (flags & A_FILTER_FLAG_LOUDNESS) {
+            int mode = mLoudnessMode.load();
+
+            if (mode < 0 || mode > 2) {
+                mode = 0;
+            }
+
+            const char **preset = kLoudnessPresets[mode];
+            snprintf(options_str, sizeof(options_str),
+                     "threshold=%s:knee=%s:ratio=%s:attack=%s:release=%s:makeup=1:detection=rms:link=average:mix=1",
+                     preset[0], preset[1], preset[2], preset[3], preset[4]);
+            addFilter(&current, "acompressor", options_str);
         }
 
         if (flags & A_FILTER_FLAG_TEMPO) {

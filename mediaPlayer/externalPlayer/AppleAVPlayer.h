@@ -62,6 +62,14 @@ namespace Cicada {
 
         void SetVolume(float volume) override;
 
+        /*
+         * 【音量均衡 / 回退点】ICicadaPlayer::SetLoudness 是纯虚的，而这个
+         * "ExternalPlayer"（AVPlayer 直出，不经内核音频滤镜管线）必须给个实现才能编译。
+         * 空实现：响度压缩在内核 acompressor 里做，这条路根本不经过它
+         * （与 SetColorMatrix 的 C9 限制同一类）。
+         */
+        void SetLoudness(int mode) override;
+
         float GetVideoRenderFps() override;
 
         void EnterBackGround(bool back) override;

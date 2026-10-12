@@ -497,6 +497,40 @@ Window {
                 onClicked: home.openFlvFile()
             }
 
+            /*
+             * 预览图模式（雪碧图 / 逐帧 bin）：一颗按钮循环切换，文字显示当前模式。
+             * 状态存在全局单例 QtPlayerPreviewMode 里 —— 首页（这里）写、
+             * 播放器窗口（Main.qml）读：那边按它决定拉 /videoshot/index.json
+             * （雪碧图 + pvdata 裁切）还是 /videoshot/preview.bin（逐帧 data URL）。
+             * 播放器窗口开着的时候切，单例的属性变化会把那边的重拉触发起来。
+             * 默认 "bin"：和加这个开关之前的行为一致。
+             */
+            Button {
+                text: QtPlayerPreviewMode.mode === "sprite"
+                      ? qsTr("预览图:雪碧图")
+                      : qsTr("预览图:bin")
+                onClicked: QtPlayerPreviewMode.mode =
+                           (QtPlayerPreviewMode.mode === "sprite") ? "bin" : "sprite"
+            }
+
+            /*
+             * 交互卡片模式（展示 / 编辑）：一颗按钮循环切换，文字显示当前模式。
+             * 状态存在全局单例 QtPlayerAppMode 里 —— 首页（这里）写、
+             * 播放器窗口（Main.qml）读：那边交互层（InteractionLayer）按它决定
+             * 卡片是按时间窗出现/消失（展示，观众交互），还是常驻显示 + 可拖拽 +
+             * 右侧 API 面板可增删改（编辑，复刻 hili-player demo 的编辑面板）。
+             * 播放器窗口开着的时候切，单例的属性变化会把那边带进/带出编辑态。
+             * 默认 "interactive"：和加这个开关之前的行为一致。
+             */
+            Button {
+                text: QtPlayerAppMode.interactionMode === "edit"
+                      ? qsTr("交互:编辑模式")
+                      : qsTr("交互:展示模式")
+                onClicked: QtPlayerAppMode.interactionMode =
+                           (QtPlayerAppMode.interactionMode === "edit")
+                               ? "interactive" : "edit"
+            }
+
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: library.scanning ? qsTr("扫描中…")
@@ -1387,11 +1421,24 @@ Window {
         return playerWindow
     }
 
-    /* 把窗口显示出来并提到最前（三处调用都一样） */
+    /*
+     * 把窗口显示出来并提到最前（所有点播入口都走这里）。
+     *
+     * 【同一时刻只有一个窗口】用户要求"播放器不要独立在外边、左右侧在同一个窗口里"：
+     * 播放器窗口本身就是"左播放器 + 右交互面板"两栏，但首页窗口若留在原地，屏幕上
+     * 就是两个窗口并排 —— 观感上播放器"独立在外"。现在播放器一显示就把首页藏起来，
+     * 屏幕上自始至终只有一个窗口（用户视角：首页 → 播放页 → 关播放回首页，一个窗口
+     * 在换页面）。关掉播放器后由 reapPlayerWindow() 把首页带回来。
+     *
+     * 顺序：**先 show/raise 播放器、最后才 hide 首页** —— 反过来的话，万一播放器
+     * show 因平台原因失败，首页已经收了，屏幕上一个窗口都不剩。
+     * （直播窗口不走这里：那套注释写明"点播 + 直播并排"是合理场景，保持两个窗口。）
+     */
     function showPlayerWindow() {
         playerWindow.show()
         playerWindow.raise()
         playerWindow.requestActivate()
+        home.hide()
     }
 
     function openPlayer(index) {
@@ -1673,6 +1720,19 @@ Window {
         playerWindow = null
         console.warn("[mem] reapPlayerWindow: destroying the player window object")
         w.destroy()
+
+        /*
+         * 【把首页带回来】showPlayerWindow() 播放时把首页藏了；播放器走到这里
+         * （✕ 关闭 / 其它不可见路径）意味着"播放页结束" —— 首页必须重新出现，
+         * 否则整个应用就没有可见窗口了（进程还在、屏幕上什么都没有，只能任务管理器杀）。
+         * 这里是所有"播放器没了"路径的汇合点（closeCommitted + visibleChanged 兜底
+         * 都经 Qt.callLater 走到这里），在这一个地方恢复就够了。
+         * 时序：本函数本来就在 callLater 里（close 走完、场景图收完才进来），
+         * 再 show 首页不会撞上播放器的销毁。
+         */
+        home.show()
+        home.raise()
+        home.requestActivate()
     }
 
     /* =======================================================================

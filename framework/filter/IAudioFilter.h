@@ -14,6 +14,12 @@ namespace Cicada{
     class IAudioFilter {
 #define A_FILTER_FLAG_TEMPO (1 << 1)
 #define A_FILTER_FLAG_VOLUME (1 << 2)
+/*
+ * 【音量均衡（高动态/标准）】响度压缩通道（docs/audio-loudness-modes.md §6 ①）。
+ * 置位时 init() 在滤镜图里常驻挂一个 acompressor：关闭档用 ratio=1 数学直通
+ * （output_gain 恒等，见文档 §4.3），档位切换经 process_command 热更新、零重建。
+ */
+#define A_FILTER_FLAG_LOUDNESS (1 << 3)
     public:
         typedef IAFFrame::audioInfo format;
 
