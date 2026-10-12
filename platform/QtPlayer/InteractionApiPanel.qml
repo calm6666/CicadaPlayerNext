@@ -26,14 +26,15 @@ Rectangle {
 
     color: "transparent"
 
-    /* 四类的中文名与默认添加模板（照 demo INITIAL_INTERACTION_DATA 的字段形状） */
+    /* 五类的中文名与默认添加模板（照 demo INITIAL_INTERACTION_DATA 的字段形状） */
     readonly property var kindNames: ({
         guide: qsTr("三连"),
         link: qsTr("外链"),
         vote: qsTr("投票"),
-        score: qsTr("评分")
+        score: qsTr("评分"),
+        scoreSum: qsTr("总结")
     })
-    readonly property var kindKeys: ["guide", "link", "vote", "score"]
+    readonly property var kindKeys: ["guide", "link", "vote", "score", "scoreSum"]
 
     /* 展开的卡片行（getStatus 的深拷贝展开成一维，和 layer.masterModel 同序） */
     property var rows: []
@@ -45,7 +46,17 @@ Rectangle {
     /* 底部一行操作日志 */
     property string logText: ""
 
+    /* toast 提示文字（空串 = 不显示；时间窗重叠 / scoreSum 前置不满足时
+       提示用户 —— 照 web demo 的 showToast / .demo-toast 样式） */
+    property string toastText: ""
+
     readonly property bool hasLayer: interactionLayer !== null && interactionLayer !== undefined
+
+    /* toast 提示（2400ms 后自动消失 —— 照 web demo-toast-show 的淡出节奏） */
+    function showToast(text) {
+        toastText = text
+        toastTimer.restart()
+    }
 
     /* ------------------------------------------------------------------ */
     /* 刷新：初次、数据变化（增删改）、拖拽结束（top/left 变了） */
@@ -149,7 +160,8 @@ Rectangle {
     }
 
     /* 应用草稿（updateCardContent 的补丁口径：只带变化的字段没必要算，全带即可 ——
-       未定义语义是"保持原值"，全量带等价于覆盖为草稿值） */
+       未定义语义是"保持原值"，全量带等价于覆盖为草稿值；
+       时间窗与其他卡片重叠 → 整个补丁被拒 + toast 提示，照 web 端定稿） */
     function applyDraft() {
         if (editDraft === null || !hasLayer)
             return
@@ -173,13 +185,19 @@ Rectangle {
             patch.title = d.title
             patch.scoreType = d.scoreType
         }
+        /* scoreSum 无专属内容字段（汇总内容运行期聚合），通用字段即可 */
 
-        interactionLayer.updateCardContent(d.kind, d.listIndex, patch)
+        if (!interactionLayer.updateCardContent(d.kind, d.listIndex, patch)) {
+            showToast(qsTr("时间窗 %1-%2s 与其他卡片重叠，一次只能存在一张交互卡片")
+                      .arg(patch.timeStart).arg(patch.timeEnd))
+            return
+        }
         logText = qsTr("已更新 %1 #%2").arg(kindNames[d.kind]).arg(d.listIndex)
     }
 
     /* ------------------------------------------------------------------ */
-    /* 添加：四类各一个默认模板；时间窗取"当前播放位置起 30 秒"（加了立刻能看到） */
+    /* 添加：五类各一个默认模板；时间窗取"当前播放位置起 30 秒"（加了立刻能看到）；
+       时间窗重叠 / scoreSum 前置不满足 → 拒绝 + toast 提示（照 web 端定稿） */
     /* ------------------------------------------------------------------ */
 
     function addDefaultCard(kind) {
@@ -208,8 +226,24 @@ Rectangle {
             card.title = qsTr("新评分")
             card.scoreType = 1
         }
+        /* scoreSum 无专属字段（汇总内容运行期聚合全部评分卡） */
 
-        interactionLayer.addCard(kind, card)
+        /* scoreSum 前置预检：必须已有至少一张评分卡（照 web addScoreSum） */
+        if (kind === "scoreSum") {
+            var st = interactionLayer.getStatus()
+            if (st === null || st.scoreList === undefined
+                    || st.scoreList === null || st.scoreList.length === 0) {
+                showToast(qsTr("评分总结卡片需要先添加至少一张评分卡片"))
+                return
+            }
+        }
+
+        /* 时间窗互斥：addCard 返回 false = 与其他卡片重叠 → 拒绝 + toast */
+        if (!interactionLayer.addCard(kind, card)) {
+            showToast(qsTr("时间窗 %1-%2s 与其他卡片重叠，一次只能存在一张交互卡片")
+                      .arg(nowSec).arg(nowSec + 30))
+            return
+        }
         logText = qsTr("已添加 %1（时间窗 %2-%3s）").arg(kindNames[kind]).arg(nowSec).arg(nowSec + 30)
     }
 
@@ -222,6 +256,8 @@ Rectangle {
             return (d.linkContent !== undefined) ? d.linkContent : ""
         if (row.kind === "score")
             return (d.title !== undefined) ? d.title : ""
+        if (row.kind === "scoreSum")
+            return qsTr("评分总结")
         return qsTr("三连 / 关注")
     }
 
@@ -847,6 +883,44 @@ Rectangle {
             font.pixelSize: 11
             elide: Text.ElideMiddle
         }
+    }
+
+    /* ======================================================================
+     * toast 浮层（时间窗重叠 / scoreSum 前置不满足的提示 —— 照 web demo 的
+     * .demo-toast：深色胶囊浮在面板顶部中央，2400ms 后淡出，pointer-events:none
+     * 用 visible + 不挂 MouseArea 实现（Rectangle 本身不吃鼠标事件）
+     * ====================================================================== */
+    Rectangle {
+        anchors.horizontalCenter: parent.horizontalCenter
+        y: 8
+        z: 100
+        width: toastTextItem.implicitWidth + 36
+        height: 36
+        radius: 8
+        color: "#EB141418"      /* rgba(20,20,24,.92) */
+        visible: interactionPanel.toastText !== ""
+        opacity: interactionPanel.toastText !== "" ? 1 : 0
+
+        Behavior on opacity {
+            NumberAnimation { duration: 250; easing.type: Easing.Linear }
+        }
+
+        Text {
+            id: toastTextItem
+
+            anchors.centerIn: parent
+            text: interactionPanel.toastText
+            color: "#ffffff"
+            font.pixelSize: 12
+        }
+    }
+
+    Timer {
+        id: toastTimer
+
+        interval: 2400
+        repeat: false
+        onTriggered: interactionPanel.toastText = ""
     }
 
     /* ======================================================================

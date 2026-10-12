@@ -10,6 +10,11 @@
 //   * 中央 × 图标（close-x.svg，尺寸 90%）
 //   * ::before 热区 40x40（left/top -12）—— 点击目标比可见圆环大一圈
 //
+// 【参数化变体（左下角缩小条目用，照 renderShrinkRing）】
+//   ringSize 16 → 26：直径随条目放大（环色 #ffffffb3）
+//   centerIcon 非空：环中心不是 × 而是 16x16 的卡片类型图标（圆形）
+//   interactive false：不挂点击热区（点击交互由缩小条目根元素整体承接）
+//
 // 【两半环的几何（为什么这样转）】
 //   remaining 语义 = 卡片剩余显示进度（1 满环 → 0 空环），角度公式照抄
 //   closeCircle.ts 的 getLeftDeg/getRightDeg：
@@ -37,12 +42,27 @@ Item {
     /* 卡片剩余显示进度（1 → 0，随播放推进），由 InteractionLayer 的 delegate 喂进来 */
     property real remaining: 1
 
+    /* 环直径（关闭环 16 / 缩小条目进度环 26 —— 照 scss 的 --width/--height 变量） */
+    property real ringSize: 16
+
+    /* 环色（关闭环 rgba(255,255,255,0.70196) / 缩小条目 #ffffffb3） */
+    property color ringColor: Qt.rgba(1, 1, 1, 0.70196)
+
+    /*
+     * 环中心图标：空串 = 关闭环的 × 图标（close-x.svg，尺寸 90%）；
+     * 非空 = 缩小条目的卡片类型图标（16x16 圆形，照 .nova-danmaku-x-shrink-img）
+     */
+    property string centerIcon: ""
+
+    /* 是否挂点击热区（缩小条目的环不吃点击 —— 点击由条目根整体承接） */
+    property bool interactive: true
+
     /* 点击（关闭卡片）—— 展示模式由 delegate 接住去打 closed 标记 */
 
     signal clicked()
 
-    width: 16
-    height: 16
+    width: circle.ringSize
+    height: circle.ringSize
 
     // ---------------------------------------------------------------------
     // 两半环角度（照 closeCircle.ts 的公式，一字不改）
@@ -55,8 +75,9 @@ Item {
                                     ? -45
                                     : -45 - (0.5 - circle.remaining) * 360
 
-    /* 弧线规格：border 2px rgba(255,255,255,0.70196)；box 16x16 → 弧中心线半径 7 */
-    readonly property color barColor: Qt.rgba(1, 1, 1, 0.70196)
+    /* 弧线规格：border 2px；box 直径 → 弧中心线半径 = 直径/2 - 1（16→7 / 26→12） */
+    readonly property real ringRadius: circle.ringSize / 2 - 1
+    readonly property color barColor: circle.ringColor
 
     // ---------------------------------------------------------------------
     // 左半环：clip 左半平面 + 旋转的 top+left 180° 弧
@@ -64,18 +85,18 @@ Item {
 
     Item {
         x: 0
-        width: 8
-        height: 16
+        width: circle.ringSize / 2
+        height: circle.ringSize
         clip: true
 
         Canvas {
             id: leftBar
 
             x: 0
-            width: 16
-            height: 16
+            width: circle.ringSize
+            height: circle.ringSize
 
-            /* bar 绕自身中心（8,8）旋转 —— 与 CSS transform: rotate(var(--leftDeg)) 等价。
+            /* bar 绕自身中心旋转 —— 与 CSS transform: rotate(var(--leftDeg)) 等价。
                【时长必须是 500ms + Linear，不能照抄 web 的 0.3s ease】平滑的前提是
                "动画时长 ≥ 数据更新周期"：框架的位置上报周期是 500ms
                （SuperMediaPlayer 的 mTimerInterval，QtPlayer 未覆盖默认值），
@@ -96,12 +117,13 @@ Item {
 
             onPaint: {
                 var ctx = leftBar.getContext("2d")
+                var c = circle.ringSize / 2
                 ctx.reset()
                 ctx.strokeStyle = circle.barColor
                 ctx.lineWidth = 2
                 ctx.beginPath()
                 /* top+left 染色弧：135° 顺时针到 315°（跨西 180°、北 270°） */
-                ctx.arc(8, 8, 7, 135 * Math.PI / 180, 315 * Math.PI / 180, false)
+                ctx.arc(c, c, circle.ringRadius, 135 * Math.PI / 180, 315 * Math.PI / 180, false)
                 ctx.stroke()
             }
         }
@@ -112,18 +134,18 @@ Item {
     // ---------------------------------------------------------------------
 
     Item {
-        x: 8
-        width: 8
-        height: 16
+        x: circle.ringSize / 2
+        width: circle.ringSize / 2
+        height: circle.ringSize
         clip: true
 
         Canvas {
             id: rightBar
 
-            /* bar 本体 16x16，靠左偏移 8px，让右半露在 clip 窗口里（CSS 的 right:0） */
-            x: -8
-            width: 16
-            height: 16
+            /* bar 本体直径大小，靠左偏移半宽，让右半露在 clip 窗口里（CSS 的 right:0） */
+            x: -circle.ringSize / 2
+            width: circle.ringSize
+            height: circle.ringSize
 
             rotation: circle.rightDeg
 
@@ -138,36 +160,43 @@ Item {
 
             onPaint: {
                 var ctx = rightBar.getContext("2d")
+                var c = circle.ringSize / 2
                 ctx.reset()
                 ctx.strokeStyle = circle.barColor
                 ctx.lineWidth = 2
                 ctx.beginPath()
                 /* right+bottom 染色弧：315° 顺时针到 495°（=135°，跨 0°/东） */
-                ctx.arc(8, 8, 7, 315 * Math.PI / 180, 495 * Math.PI / 180, false)
+                ctx.arc(c, c, circle.ringRadius, 315 * Math.PI / 180, 495 * Math.PI / 180, false)
                 ctx.stroke()
             }
         }
     }
 
     // ---------------------------------------------------------------------
-    // 中央 × 图标（close-x.svg 原图：外圆 #000@.3 + 白 ×；尺寸 90% = scss 的 width/height 90%）
+    // 环中心图标：默认 × 图标（close-x.svg 原图：外圆 #000@.3 + 白 ×；
+    // 尺寸 90% = scss 的 width/height 90%）；centerIcon 非空时换卡片类型图标
+    // （16x16 圆形 —— 照 .nova-danmaku-x-shrink-img 的 16px 规格）
     // ---------------------------------------------------------------------
 
     Image {
         anchors.centerIn: parent
-        width: parent.width * 0.9
-        height: parent.height * 0.9
-        source: "../../assets/images/interaction/close-x.svg"
-        sourceSize: Qt.size(16, 16)
+        width: circle.centerIcon !== "" ? 16 : parent.width * 0.9
+        height: circle.centerIcon !== "" ? 16 : parent.height * 0.9
+        source: circle.centerIcon !== ""
+                ? circle.centerIcon
+                : "../../assets/images/interaction/close-x.svg"
+        sourceSize: Qt.size(width, height)
         smooth: true
         fillMode: Image.PreserveAspectFit
     }
 
     // ---------------------------------------------------------------------
     // 点击热区：40x40、相对可见圆环 left/top -12（照 .nova-danmaku-x-circle::before）
+    // （缩小条目变体不挂 —— 环不吃点击）
     // ---------------------------------------------------------------------
 
     MouseArea {
+        visible: circle.interactive
         x: -12
         y: -12
         width: 40

@@ -705,14 +705,19 @@ qt_add_qml_module(appQtPlayer
         #   GuideCard       —— .nova-danmaku-x-editor（三连 + 关注）
         #   LinkCard        —— .nova-danmaku-x-link（外链 + 稍后再看）
         #   VoteCard        —— .nova-danmaku-x-vote（投票）
-        #   ScoreCard       —— .nova-danmaku-x-score（评分）
-        #   CloseCircle     —— 两半环倒计时关闭按钮（closeCircle.ts 的 Canvas 化）
+        #   ScoreCard       —— .nova-danmaku-x-score（评分，图片化图标）
+        #   ScoreSumCard    —— .nova-danmaku-x-scoreSum（评分总结，聚合全部评分卡）
+        #   ShrinkBar       —— .nova-danmaku-x-cmd-shrink（左下角缩小条目）
+        #   CloseCircle     —— 两半环倒计时关闭按钮（closeCircle.ts 的 Canvas 化；
+        #                      参数化支持缩小条目的 26px 进度环变体）
         controls/interaction/InteractionLayer.qml
         controls/interaction/CloseCircle.qml
         controls/interaction/GuideCard.qml
         controls/interaction/LinkCard.qml
         controls/interaction/VoteCard.qml
         controls/interaction/ScoreCard.qml
+        controls/interaction/ScoreSumCard.qml
+        controls/interaction/ShrinkBar.qml
 
         # ---------------------------------------------------------------------------
         # 右侧 API 操作面板（编辑模式下播放器窗口变左右两栏：左播放器 + 右 API 面板）：

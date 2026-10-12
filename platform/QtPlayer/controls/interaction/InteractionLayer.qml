@@ -1,18 +1,33 @@
 // ===========================================================================
-// 交互卡片层 —— 四类卡片（点赞关注 / 外链 / 投票 / 评分）的时间窗驱动与装配
-// （照 hili-player packages/plugins/src/interaction/index.ts 复刻：展示 + 编辑两种模式）
+// 交互卡片层 —— 五类卡片（点赞关注 / 外链 / 投票 / 评分 / 评分总结）的
+// 时间窗驱动与装配 + 左下角缩小条目（照 hili-player interaction/index.ts 复刻：
+// 展示 + 编辑两种模式）
 //
-// 数据流（和 viewPoints / pbpData / previewFrames 同一条路）：
+// 数据流（和 viewPoints / pbData / previewFrames 同一条路）：
 //   Main.qml fetchProgressMetaFrom() → GET /x/player/interaction →
-//   playerView.interactionData → 本层 → 四类卡片
+//   playerView.interactionData → 本层 → 五类卡片
 //   数据结构照 hili-player 的 InteractionCard：
 //     { guideList: [{type, top, left, timeStart, timeEnd}],
 //       linkList:  [{top, left, linkContent, timeStart, timeEnd}],
 //       voteList:  [{top, left, question, options, timeStart, timeEnd}],
-//       scoreList: [{top, left, title, scoreType, timeStart, timeEnd}] }
+//       scoreList: [{top, left, title, scoreType, timeStart, timeEnd}],
+//       scoreSumList: [{top, left, timeStart, timeEnd}] }
 //   top/left 是百分比（相对整个播放区 —— 见下面内容区处的坐标系说明），
 //   timeStart/timeEnd 单位秒。
 //   没有数据 / 接口不通 = 一张卡片都不显示（静默降级，界面不变）。
+//
+// 【时间窗互斥（照 web 端第六轮定稿）】一次只能存在一张卡片：
+//   五类列表全部卡片的时间窗两两不相交（半开区间相交判定，
+//   边界相接不算重叠）；addCard / updateCardContent 的时间补丁先做
+//   重叠预检，重叠即拒绝（返回 false，不入数据）；scoreSum 前置：
+//   必须已有至少一张评分卡才允许添加。
+//
+// 【左下角缩小条目（照 web ShrinkBar）】展示模式下非 guide 卡片被手动
+//   关闭（关闭环未归零时点 ×）→ 卡片淡出 + 左下角生成缩小条目（图标 +
+//   标题 + 26px 进度环继续倒数）：归零移除；源数据被删 / 重开 / seek 回
+//   关闭时刻之前 → 移除；点击条目 → 清关闭标记 → 卡片立即重建显示。
+//   关闭态存数据对象（__isClose / __closeTime，照 web 的 isClose/closeTime
+//   字段），delegate 重建后按数据恢复。
 //
 // 布局（照 interaction.scss 的 .nova-player-cmd-dm-wrap / -inside）：
 //   层铺满播放区；卡片以 top/left 百分比定位 + 中心锚定
@@ -39,9 +54,10 @@
 //     "x ≥ 0.03W"，夹取边界在按下时按卡片尺寸现算；拖完换算百分比回写数据；
 //   * 贴边辅助线：照 AlignLines.ts —— 四根 1px #858688 线画在「视觉安全边界」
 //     （左 3% / 右 97% / 上 5% / 下 85%，底部预留控制栏），贴边时显示（0.2s 过渡）；
-//   * 编辑 API（照 index.ts 的公共 API，语义一致）：
+//   * 编辑 API（照 index.ts 的公共 API，语义一致；第六轮起返回 boolean ——
+//     重叠 / 前置不满足返回 false，调用方 toast 提示）：
 //       addCard(kind, data) / removeCard(kind, i) / updateCardContent(kind, i, patch)
-//       / closeCard(kind, i) / getStatus() / updateData(data)
+//       / closeCard(kind, i) / wouldOverlap(kind, i, ts, te) / getStatus() / updateData(data)
 //     QML 的 property var 没有"字段级"属性通知 → 补丁落数据后**全量重赋**
 //     interactionData 触发 rebuildModel（Repeater 重建 delegate，数据引用不变但
 //     新 delegate 会读到新字段值，文本/选项数量即刻正确）；
@@ -104,12 +120,209 @@ Item {
 
     /* 大尺寸档（照参考媒体查询 min-width:1366.9px 的大档规格，用户指定的 Qt 侧
        判据：**只看播放区宽度** > 1366.9 —— Qt 没有网页的媒体查询/data-screen，
-       播放区够宽就放大、拉窄就缩回；不再叠加全屏条件。四类卡片都按 large
+       播放区够宽就放大、拉窄就缩回；不再叠加全屏条件。五类卡片都按 large
        属性切换两套尺寸（interaction.scss L774-879 的大档数值）。 */
     readonly property bool large: interactionLayer.width > 1366.9
 
-    /* 展开成带类型标记的一维模型（顺序照参考创建顺序：guide → link → vote → score，
-       后声明的压在上面 —— Repeater 同 z 按序绘制，与 DOM 顺序一致） */
+    // ---------------------------------------------------------------------
+    // 左下角缩小条目（照 web 端 shrinkActive / ShrinkBar 的生命周期）
+    //
+    // 条目数据：{ id: "kind:listIndex", kind, listIndex, icon, title }
+    // （id 与 web 端 "shrink:类型:下标" 同构，用作幂等替换的键）。
+    // 进度 remaining 不存条目里 —— delegate 绑定 shrinkRemainingOf() 每拍
+    // 从源卡片数据的时间窗现算（照 web syncShrinkEntries 的公式）。
+    // ---------------------------------------------------------------------
+
+    property var shrinkModel: []
+
+    /* 编辑模式切换：条目清空（编辑模式卡片常驻显示，缩小条目无意义 —— 且
+       web 端编辑模式不生成条目，这里同样保证切换后不残留） */
+    onEditModeChanged: interactionLayer.shrinkModel = []
+
+    /* 播放时钟每拍同步缩小条目（归零 / 源失效移除 —— 照 syncShrinkEntries） */
+    onClockSecChanged: interactionLayer.syncShrinkEntries()
+
+    /* 缩小条目图标 / 标题映射（照 icons.ts 的 SHRINK_META_MAP：
+       link→link-video+"推荐"；vote→vote+"投票"；score/scoreSum→score+"推荐"） */
+    function shrinkMetaOf(kind) {
+        if (kind === "link")
+            return { icon: "../../assets/images/interaction/link-video.png",
+                     title: qsTr("推荐") }
+        if (kind === "vote")
+            return { icon: "../../assets/images/interaction/vote.png",
+                     title: qsTr("投票") }
+        /* score / scoreSum 同款（guide 无关闭概念不参与，兜底同 score） */
+        return { icon: "../../assets/images/interaction/score.png",
+                 title: qsTr("推荐") }
+    }
+
+    /*
+     * 生成缩小条目（卡片关闭时调用）：同卡片同下标幂等替换（互斥时间窗下
+     * 理论上不会共存，照 web appendShrinkEntry 的 filter-then-push）。
+     */
+    function appendShrinkEntry(kind, listIndex) {
+        var meta = interactionLayer.shrinkMetaOf(kind)
+        var id = kind + ":" + listIndex
+        var next = []
+
+        for (var i = 0; i < interactionLayer.shrinkModel.length; i++) {
+            if (interactionLayer.shrinkModel[i].id !== id)
+                next.push(interactionLayer.shrinkModel[i])
+        }
+
+        next.push({ id: id, kind: kind, listIndex: listIndex,
+                    icon: meta.icon, title: meta.title })
+        interactionLayer.shrinkModel = next
+    }
+
+    /*
+     * 缩小条目的进度环剩余比例（照 web syncShrinkEntries 的公式）：
+     * 从源卡片数据的时间窗现算（1 → 0，归零由 syncShrinkEntries 移除条目）。
+     * 绑定调用：函数内读取 clockSec / interactionData → 依赖变化自动重算。
+     */
+    function shrinkRemainingOf(entry) {
+        var d = interactionLayer.interactionData
+        if (d === null || d === undefined || entry === null || entry === undefined)
+            return 0
+
+        var list = d[entry.kind + "List"]
+        if (list === undefined || list === null)
+            return 0
+
+        var src = list[entry.listIndex]
+        if (src === undefined || src.__isClose !== true)
+            return 0
+
+        var ts = src.timeStart !== undefined ? src.timeStart : 0
+        var te = src.timeEnd !== undefined ? src.timeEnd : 0
+        var now = interactionLayer.clockSec
+
+        if (now <= ts)
+            return 1
+        if (now >= te)
+            return 0
+        return 1 - (now - ts) / Math.max(0.001, te - ts)
+    }
+
+    /*
+     * 每拍同步缩小条目（照 web syncShrinkEntries）：
+     *   * 源卡片数据被删（下标越界）或关闭标记被清（点击重开 / seek 回退
+     *     复位）→ 条目移除；
+     *   * 进度归零（播放越过 timeEnd）→ 条目完成使命移除。
+     */
+    function syncShrinkEntries() {
+        var cur = interactionLayer.shrinkModel
+        if (cur.length === 0)
+            return
+
+        var d = interactionLayer.interactionData
+        var kept = []
+        var changed = false
+
+        for (var i = 0; i < cur.length; i++) {
+            var entry = cur[i]
+            var keep = true
+
+            if (d === null || d === undefined) {
+                keep = false
+            } else {
+                var list = d[entry.kind + "List"]
+                var src = (list !== undefined && list !== null)
+                          ? list[entry.listIndex] : undefined
+
+                /* 源不存在 / 已被重新打开（__isClose 被清）→ 移除 */
+                if (src === undefined || src.__isClose !== true) {
+                    keep = false
+                } else {
+                    /* 归零（播放越过 timeEnd）→ 移除 */
+                    var te = src.timeEnd !== undefined ? src.timeEnd : 0
+                    if (interactionLayer.clockSec >= te)
+                        keep = false
+                }
+            }
+
+            if (keep) {
+                kept.push(entry)
+            } else {
+                changed = true
+            }
+        }
+
+        if (changed)
+            interactionLayer.shrinkModel = kept
+    }
+
+    /*
+     * 点击缩小条目重开原卡片（照 web reopenFromShrink）：
+     * 移除条目 → 清源数据关闭标记 → 对应 slot 复位 closed →
+     * 卡片按当前时间立即重建显示（仍在时间窗内即刻恢复）。
+     */
+    function reopenFromShrink(entry) {
+        /* 先移除条目（无论源卡片是否仍可显示） */
+        var next = []
+        for (var i = 0; i < interactionLayer.shrinkModel.length; i++) {
+            if (interactionLayer.shrinkModel[i].id !== entry.id)
+                next.push(interactionLayer.shrinkModel[i])
+        }
+        interactionLayer.shrinkModel = next
+
+        var d = interactionLayer.interactionData
+        if (d === null || d === undefined)
+            return
+
+        var list = d[entry.kind + "List"]
+        if (list === undefined || list === null)
+            return
+
+        var src = list[entry.listIndex]
+        if (src === undefined)
+            return
+
+        /* 清关闭标记：卡片回到「窗口内即显示」状态 */
+        src.__isClose = false
+
+        /* 对应 slot 复位（卡片立即重建显示） */
+        for (var j = 0; j < repeater.count; j++) {
+            var slotItem = repeater.itemAt(j)
+            if (slotItem !== null && slotItem.kind === entry.kind
+                    && slotItem.listIndex === entry.listIndex) {
+                slotItem.closed = false
+                break
+            }
+        }
+    }
+
+    /*
+     * 聚合评分总结数据（照 web renderScoreSumEntry 的条目创建时一次性聚合）：
+     * 全部评分卡题目 + 当前平均分（persistStates 里 score:i 快照的
+     * totalScore/count，保留一位小数）+ 总参与人数。
+     */
+    function aggregateScoreSum() {
+        var items = []
+        var totalCount = 0
+        var d = interactionLayer.interactionData
+
+        if (d !== null && d !== undefined
+                && d.scoreList !== undefined && d.scoreList !== null) {
+            for (var i = 0; i < d.scoreList.length; i++) {
+                var title = d.scoreList[i].title !== undefined
+                            ? d.scoreList[i].title : ""
+                var state = interactionLayer.stateFor("score:" + i)
+                var c = (state !== undefined && state.count !== undefined)
+                        ? state.count : 0
+                var t = (state !== undefined && state.totalScore !== undefined)
+                        ? state.totalScore : 0
+                items.push({ name: title,
+                             average: c > 0 ? (t / c).toFixed(1) : "0.0" })
+                totalCount += c
+            }
+        }
+
+        return { items: items, count: totalCount }
+    }
+
+    /* 展开成带类型标记的一维模型（顺序照参考创建顺序：guide → link → vote →
+       score → scoreSum，后声明的压在上面 —— Repeater 同 z 按序绘制，与 DOM 顺序一致） */
     property var masterModel: []
 
     onInteractionDataChanged: interactionLayer.rebuildModel()
@@ -120,7 +333,8 @@ Item {
 
         if (d !== null && d !== undefined) {
             var lists = [["guide", d.guideList], ["link", d.linkList],
-                         ["vote", d.voteList], ["score", d.scoreList]]
+                         ["vote", d.voteList], ["score", d.scoreList],
+                         ["scoreSum", d.scoreSumList]]
 
             for (var i = 0; i < lists.length; i++) {
                 var list = lists[i][1]
@@ -149,7 +363,9 @@ Item {
     }
 
     // ---------------------------------------------------------------------
-    // 编辑 API（照 index.ts 的公共 API；kind = "guide" / "link" / "vote" / "score"）
+    // 编辑 API（照 index.ts 的公共 API；kind = "guide" / "link" / "vote" /
+    //         "score" / "scoreSum"；第六轮起 add/update 返回 boolean ——
+    //         时间窗重叠 / scoreSum 前置不满足返回 false，调用方 toast 提示）
     // ---------------------------------------------------------------------
 
     /*
@@ -168,17 +384,76 @@ Item {
             guideList: d.guideList,
             linkList: d.linkList,
             voteList: d.voteList,
-            scoreList: d.scoreList
+            scoreList: d.scoreList,
+            scoreSumList: d.scoreSumList
         }
         cardsChanged()
     }
 
-    /* 添加卡片（照 addGuide/addLink/addVote/addScore：入列表 + 立即可见） */
+    /*
+     * 时间窗互斥预检（照 web wouldOverlap）：半开区间相交判定
+     * （itemStart < newEnd && itemEnd > newStart，边界相接不算重叠）；
+     * timeStart/timeEnd 缺省的条目不参与；五类列表全查、排除自身
+     * （同类型同下标 —— 新增时 index 传 -1 不排除任何条目）。
+     */
+    function wouldOverlap(kind, index, timeStart, timeEnd) {
+        var d = interactionLayer.interactionData
+        if (d === null || d === undefined)
+            return false
+
+        var lists = [["guide", d.guideList], ["link", d.linkList],
+                     ["vote", d.voteList], ["score", d.scoreList],
+                     ["scoreSum", d.scoreSumList]]
+
+        for (var i = 0; i < lists.length; i++) {
+            var list = lists[i][1]
+            if (list === undefined || list === null)
+                continue
+
+            for (var j = 0; j < list.length; j++) {
+                /* 排除自身（同类型同下标） */
+                if (lists[i][0] === kind && j === index)
+                    continue
+
+                var item = list[j]
+                if (item.timeStart === undefined || item.timeEnd === undefined)
+                    continue
+
+                if (item.timeStart < timeEnd && item.timeEnd > timeStart)
+                    return true
+            }
+        }
+
+        return false
+    }
+
+    /*
+     * 添加卡片（照 addGuide/addLink/addVote/addScore/addScoreSum，boolean 语义）：
+     * 时间窗与任何已有卡片重叠 → 拒绝；scoreSum 前置（必须已有至少一张
+     * 评分卡）→ 拒绝；成功入列表 + 立即可见并返回 true。
+     */
     function addCard(kind, cardData) {
         var d = interactionLayer.interactionData
 
         if (d === null || d === undefined)
-            return
+            return false
+
+        /* scoreSum 前置：无可汇总的评分卡（照 addScoreSum 的前置校验） */
+        if (kind === "scoreSum") {
+            if (d.scoreList === undefined || d.scoreList === null
+                    || d.scoreList.length === 0)
+                return false
+            /* 新字段兜底：旧数据可能没有 scoreSumList */
+            if (d.scoreSumList === undefined || d.scoreSumList === null)
+                d.scoreSumList = []
+        }
+
+        /* 时间窗完整才参与互斥校验（照 web addXxx 的判定口径） */
+        if (cardData.timeStart !== undefined && cardData.timeEnd !== undefined
+                && interactionLayer.wouldOverlap(kind, -1,
+                                                 cardData.timeStart,
+                                                 cardData.timeEnd))
+            return false
 
         if (kind === "guide")
             d.guideList.push(cardData)
@@ -188,13 +463,17 @@ Item {
             d.voteList.push(cardData)
         else if (kind === "score")
             d.scoreList.push(cardData)
+        else if (kind === "scoreSum")
+            d.scoreSumList.push(cardData)
         else
-            return
+            return false
 
         interactionLayer.notifyDataChanged()
+        return true
     }
 
-    /* 移除卡片（照 removeCard：数据从列表删除，跨快照不再出现） */
+    /* 移除卡片（照 removeCard：数据从列表删除，跨快照不再出现；
+       下标位移后缩小条目的源映射失效 → 一并清空，照 web removeCard 清空 shrinkActive） */
     function removeCard(kind, index) {
         var d = interactionLayer.interactionData
 
@@ -211,6 +490,8 @@ Item {
             list = d.voteList
         else if (kind === "score")
             list = d.scoreList
+        else if (kind === "scoreSum")
+            list = d.scoreSumList
 
         if (list === null || index < 0 || index >= list.length)
             return
@@ -219,11 +500,13 @@ Item {
            同步把持久化状态按新下标搬移（参考 Map 按 listIndex 存、splice 后整体刷新）。 */
         list.splice(index, 1)
         interactionLayer.shiftPersistStates(kind, index)
+        interactionLayer.shrinkModel = []
         interactionLayer.notifyDataChanged()
     }
 
     /*
-     * 编辑卡片内容（照 updateCardContent 的补丁语义：未提供的字段保持原值）。
+     * 编辑卡片内容（照 updateCardContent 的补丁语义：未提供的字段保持原值；
+     * 返回 boolean —— 时间补丁与任何已有卡片重叠 → 整个补丁拒绝）。
      * 可用字段（CardContentPatch）：guideType / linkContent / question /
      * optionTexts / title / scoreType / timeStart / timeEnd / top / left。
      */
@@ -231,7 +514,7 @@ Item {
         var d = interactionLayer.interactionData
 
         if (d === null || d === undefined || patch === null || patch === undefined)
-            return
+            return false
 
         var item = null
 
@@ -243,11 +526,24 @@ Item {
             item = d.voteList[index]
         else if (kind === "score")
             item = d.scoreList[index]
+        else if (kind === "scoreSum")
+            item = d.scoreSumList[index]
 
         if (item === undefined || item === null)
-            return
+            return false
 
-        /* 时间窗 / 定位（四类通用） */
+        /* 时间补丁先合并现值再预检重叠（照 web applySchedulePatch：
+           只改一端时另一端用现值参与判定，避免漏判）；重叠 → 整体拒绝 */
+        if (patch.timeStart !== undefined || patch.timeEnd !== undefined) {
+            var ts = patch.timeStart !== undefined ? patch.timeStart : item.timeStart
+            var te = patch.timeEnd !== undefined ? patch.timeEnd : item.timeEnd
+
+            if (ts !== undefined && te !== undefined
+                    && interactionLayer.wouldOverlap(kind, index, ts, te))
+                return false
+        }
+
+        /* 时间窗 / 定位（五类通用） */
         if (patch.timeStart !== undefined)
             item.timeStart = patch.timeStart
         if (patch.timeEnd !== undefined)
@@ -257,7 +553,7 @@ Item {
         if (patch.left !== undefined)
             item.left = patch.left
 
-        /* 各类型自己的内容字段 */
+        /* 各类型自己的内容字段（scoreSum 无专属字段 —— 内容运行期聚合） */
         if (kind === "guide") {
             if (patch.guideType !== undefined)
                 item.type = patch.guideType
@@ -288,9 +584,11 @@ Item {
         }
 
         interactionLayer.notifyDataChanged()
+        return true
     }
 
-    /* 关闭卡片（照 closeCard：本次播放关闭 —— 展示模式淡出；guide 无关闭概念） */
+    /* 关闭卡片（照 closeCard：本次播放关闭 —— 展示模式淡出并生成缩小条目；
+       guide 无关闭概念） */
     function closeCard(kind, index) {
         if (kind === "guide")
             return
@@ -299,7 +597,7 @@ Item {
             var row = repeater.itemAt(i)
 
             if (row !== null && row.kind === kind && row.listIndex === index) {
-                row.closed = true
+                row.requestClose()
                 return
             }
         }
@@ -313,7 +611,8 @@ Item {
         return JSON.parse(JSON.stringify(interactionLayer.interactionData))
     }
 
-    /* 更新数据（照 updateData：替换显式传入的列表，交互状态清零重建） */
+    /* 更新数据（照 updateData：替换显式传入的列表，交互状态清零重建；
+       换数据后缩小条目的源映射失效 → 一并清空，照 web updateData） */
     function updateData(data) {
         var d = interactionLayer.interactionData
 
@@ -328,8 +627,11 @@ Item {
             d.voteList = data.voteList
         if (data.scoreList !== undefined)
             d.scoreList = data.scoreList
+        if (data.scoreSumList !== undefined)
+            d.scoreSumList = data.scoreSumList
 
         interactionLayer.persistStates = ({})
+        interactionLayer.shrinkModel = []
         interactionLayer.notifyDataChanged()
     }
 
@@ -438,8 +740,10 @@ Item {
             if (slotItem.kind !== "guide"
                     && px >= slotItem.width - 15 && px <= slotItem.width + 25
                     && py >= -25 && py <= 15) {
+                /* 展示模式走统一关闭路径（置 closed + 数据标记 + 生成缩小条目）；
+                   编辑模式不关闭（web 编辑模式不注册 close 回调），同样消费防穿透 */
                 if (!interactionLayer.editMode)
-                    slotItem.closed = true
+                    slotItem.requestClose()
                 return true
             }
 
@@ -531,8 +835,47 @@ Item {
                 readonly property real timeEnd: (slot.cardData.timeEnd !== undefined)
                                                 ? slot.cardData.timeEnd : 0
 
-                /* 用户关闭标记（点击关闭环置位；seek 回窗口前复位 —— 照 closeEntry） */
-                property bool closed: false
+                /*
+                 * 用户关闭标记（点击关闭环置位；seek 回窗口前复位 —— 照 closeEntry）。
+                 * 关闭态同步写进数据对象（__isClose / __closeTime，照 web 的
+                 * isClose/closeTime 字段）：缩小条目的生命周期据此判定，
+                 * delegate 被 rebuildModel 重建时也据此恢复关闭态
+                 * （绑定初始值，命令式赋值后打断 —— 重建后新 delegate 重新求值）。
+                 */
+                property bool closed: (slot.cardData !== undefined
+                                       && slot.cardData.__isClose === true)
+
+                /* 关闭时刻（秒，0 = 未关闭过） */
+                readonly property real closeTimeSec: (slot.cardData !== undefined
+                                                      && slot.cardData.__closeTime !== undefined
+                                                      && slot.cardData.__closeTime !== null)
+                                                     ? slot.cardData.__closeTime : 0
+
+                /* seek 回关闭时刻之前：关闭态复位（照 web syncCard 的
+                   closeTime > currentTime 分支 —— 复位后缩小条目随之移除） */
+                readonly property bool rewindBeforeClose: slot.closeTimeSec > 0
+                                                          && slot.now < slot.closeTimeSec
+
+                onRewindBeforeCloseChanged: {
+                    if (slot.rewindBeforeClose && slot.closed) {
+                        slot.closed = false
+                        slot.cardData.__isClose = false
+                    }
+                }
+
+                /*
+                 * 统一关闭路径（照 web closeEntry）：置 closed（卡片淡出）+
+                 * 数据打标记（缩小条目的源依据）+ 展示模式下非 guide 卡片
+                 * 生成左下角缩小条目（编辑模式不生成 —— 卡片常驻无关闭语义）。
+                 */
+                function requestClose() {
+                    slot.closed = true
+                    slot.cardData.__isClose = true
+                    slot.cardData.__closeTime = interactionLayer.clockSec
+
+                    if (!interactionLayer.editMode && slot.kind !== "guide")
+                        interactionLayer.appendShrinkEntry(slot.kind, slot.listIndex)
+                }
 
                 /* 播放时钟（秒）—— 每次变化重算下面所有派生态 */
                 readonly property real now: interactionLayer.clockSec
@@ -579,9 +922,12 @@ Item {
                 }
 
                 onBeforeWindowChanged: {
-                    /* seek 回到窗口前：复位关闭标记（下次进窗重新显示） */
-                    if (slot.beforeWindow)
+                    /* seek 回到窗口前：复位关闭标记（下次进窗重新显示）；
+                       数据标记同步清（缩小条目的源判定据此失效） */
+                    if (slot.beforeWindow) {
                         slot.closed = false
+                        slot.cardData.__isClose = false
+                    }
                 }
 
                 /* 尺寸跟随装载的卡片（Loader 不设尺寸 → 自动取内容 implicitSize） */
@@ -595,26 +941,37 @@ Item {
                     sourceComponent: slot.kind === "guide" ? guideComponent
                                    : slot.kind === "link" ? linkComponent
                                    : slot.kind === "vote" ? voteComponent
+                                   : slot.kind === "scoreSum" ? scoreSumComponent
                                    : scoreComponent
 
                     /* 卡片本体的状态由组件内部自己管；时间窗/显隐相关的
-                       三个属性在这里喂 */
+                       属性在这里喂 */
                     onLoaded: {
                         item.cardData = Qt.binding(function () { return slot.cardData })
                         item.large = Qt.binding(function () { return interactionLayer.large })
                         if (slot.kind !== "guide") {
                             /* guide 没有关闭环和 remaining（参考里 guide 卡不带关闭钮） */
                             item.remaining = Qt.binding(function () { return slot.remaining })
-                            item.closeRequested.connect(function () { slot.closed = true })
+                            /* 统一关闭路径（置 closed + 数据标记 + 展示模式生成缩小条目） */
+                            item.closeRequested.connect(function () { slot.requestClose() })
                         }
-                        /* 交互状态协议（编辑 API 重建 delegate 后状态找回） */
-                        item.stateKey = slot.stateKey
-                        item.stateMutated.connect(function (snapshot) {
-                            interactionLayer.persistState(slot.stateKey, snapshot)
-                        })
-                        var snap = interactionLayer.stateFor(slot.stateKey)
-                        if (snap !== undefined)
-                            item.restoreState(snap)
+                        if (slot.kind === "scoreSum") {
+                            /* 聚合注入（照 web renderScoreSumEntry —— 条目创建时
+                               一次性算好：全部评分卡题目 + 平均分 + 总参与人数） */
+                            var summary = interactionLayer.aggregateScoreSum()
+                            item.summaryItems = summary.items
+                            item.totalCount = summary.count
+                        } else {
+                            /* 交互状态协议（编辑 API 重建 delegate 后状态找回；
+                               scoreSum 无交互状态不参与） */
+                            item.stateKey = slot.stateKey
+                            item.stateMutated.connect(function (snapshot) {
+                                interactionLayer.persistState(slot.stateKey, snapshot)
+                            })
+                            var snap = interactionLayer.stateFor(slot.stateKey)
+                            if (snap !== undefined)
+                                item.restoreState(snap)
+                        }
                     }
                 }
 
@@ -700,7 +1057,7 @@ Item {
                     }
                 }
 
-                /* ---- 四类卡片的 Component（sourceComponent 按类型挑一个）---- */
+                /* ---- 五类卡片的 Component（sourceComponent 按类型挑一个）---- */
                 Component {
                     id: guideComponent
                     GuideCard {}
@@ -720,6 +1077,31 @@ Item {
                     id: scoreComponent
                     ScoreCard {}
                 }
+
+                Component {
+                    id: scoreSumComponent
+                    ScoreSumCard {}
+                }
+            }
+        }
+
+        /* -------------------------------------------------------------------
+         * 左下角缩小条目（照 web ShrinkBar / shrinkActive 的 For 流）：
+         * 展示模式下卡片被手动关闭时由 appendShrinkEntry 生成；进度环随播放
+         * 继续倒数（shrinkRemainingOf 每拍从源数据时间窗现算）；点击重开。
+         * 位置 left:23px / bottom:71px（照 scss 常量，相对整个播放区）。
+         * ------------------------------------------------------------------- */
+        Repeater {
+            model: interactionLayer.shrinkModel
+
+            delegate: ShrinkBar {
+                x: 23
+                anchors.bottom: parent.bottom
+                anchors.bottomMargin: 71
+                title: modelData.title
+                iconSource: modelData.icon
+                remaining: interactionLayer.shrinkRemainingOf(modelData)
+                onClicked: interactionLayer.reopenFromShrink(modelData)
             }
         }
 
