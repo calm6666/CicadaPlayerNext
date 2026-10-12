@@ -128,10 +128,13 @@ Item {
     // 左下角缩小条目（照 web 端 shrinkActive / ShrinkBar 的生命周期）
     //
     // 条目数据：{ id: "kind:listIndex", kind, listIndex, icon, title,
-    //            timeStart, timeEnd }
+    //            timeStart, timeEnd, closedAt, removed }
     // （id 与 web 端 "shrink:类型:下标" 同构，用作幂等替换的键；
-    //   timeStart/timeEnd 为关闭时刻从源卡片数据取的时间窗快照 ——
-    //   进度环与归零判定都用快照计算，不回读源数据）。
+    //   timeStart/timeEnd/closedAt 为关闭时刻的时间窗与播放位置快照 ——
+    //   条目的进度环与生死判定**只用快照 + 播放时钟**，绝不回读源卡片
+    //   数据：__isClose 读不到 / 数据被替换 / 下标位移都不会让条目
+    //   提前消失（用户实测两轮的根因即源回读路径的失效误判）；
+    //   removed 为点击重开的自我移除标记）。
     // ---------------------------------------------------------------------
 
     property var shrinkModel: []
@@ -160,9 +163,9 @@ Item {
     /*
      * 生成缩小条目（卡片关闭时调用）：同卡片同下标幂等替换（互斥时间窗下
      * 理论上不会共存，照 web appendShrinkEntry 的 filter-then-push）。
-     * 条目自带时间窗快照（ts/te 从源卡片数据取一份）—— 进度环与归零判定
-     * 用快照计算，不回读源数据：即便 interactionData 被整体替换（重新拉取
-     * 后 __isClose 标记丢失），进度环依然按原窗口倒数，绝无"无进度"。
+     * 条目自带全套快照：时间窗（ts/te）+ 关闭时刻播放位置（closedAt）。
+     * 进度环与生死判定都用快照计算，不回读源数据 —— 数据替换 / __isClose
+     * 读写异常 / 下标位移都不影响条目按原窗口倒数到归零。
      */
     function appendShrinkEntry(kind, listIndex) {
         var meta = interactionLayer.shrinkMetaOf(kind)
@@ -190,7 +193,8 @@ Item {
 
         next.push({ id: id, kind: kind, listIndex: listIndex,
                     icon: meta.icon, title: meta.title,
-                    timeStart: ts, timeEnd: te })
+                    timeStart: ts, timeEnd: te,
+                    closedAt: interactionLayer.clockSec, removed: false })
         interactionLayer.shrinkModel = next
     }
 
@@ -220,29 +224,31 @@ Item {
     }
 
     /*
-     * 条目是否该被移除的统一判定（归零 / 源失效 / 已被重开 —— 照 web
-     * syncShrinkEntries 的三条移除路径）：供 syncShrinkEntries 每拍扫描
-     * 与 commitShrinkRemoval 延迟提交共用同一口径。
-     * 归零判定用条目快照 te；源失效 / 重开判定仍回读源数据 __isClose
-     * （数据被整体替换 → 源不存在或标记丢失 → 条目淡出移除，进度环
-     * 在淡出的 0.35s 内仍按快照倒数，无视觉跳变）。
+     * 条目是否该被移除的判定（**完全自治** —— 只用条目快照 + 播放时钟，
+     * 不回读源卡片数据）：供 syncShrinkEntries 每拍扫描与 commitShrinkRemoval
+     * 延迟提交共用同一口径。三条移除路径：
+     *   1. removed：条目被点击重开（自我移除标记 —— 重开复位卡片后条目使命结束）；
+     *   2. 归零：播放越过快照 timeEnd（倒计时走完）；
+     *   3. seek 回退：播放位置退回关闭时刻之前（复位语义 —— 与 slot 的
+     *      rewindBeforeClose / beforeWindow 复位口径对齐，卡片下次进窗重现，
+     *      条目随之退场）。
+     * 【为什么删掉 __isClose 回读】源回读在两轮用户实测中都出现"读不到 /
+     * 误判失效"导致条目提前消失（读写对象引用在数据替换/重建路径下不再
+     * 可靠）；自治快照让条目生死只由时间决定，任何数据层扰动都侵扰不到。
      */
     function shrinkEntryDone(entry) {
+        /* 点击重开的自我移除标记 */
+        if (entry.removed === true)
+            return true
+
         /* 归零（播放越过快照 timeEnd）→ 移除 */
         var te = entry.timeEnd !== undefined ? entry.timeEnd : 0
         if (interactionLayer.clockSec >= te)
             return true
 
-        var d = interactionLayer.interactionData
-        if (d === null || d === undefined)
-            return true
-
-        var list = d[entry.kind + "List"]
-        var src = (list !== undefined && list !== null)
-                  ? list[entry.listIndex] : undefined
-
-        /* 源不存在 / 已被重新打开（__isClose 被清）→ 移除 */
-        return src === undefined || src.__isClose !== true
+        /* seek 回关闭时刻之前（复位语义）→ 移除 */
+        var closedAt = entry.closedAt !== undefined ? entry.closedAt : 0
+        return interactionLayer.clockSec < closedAt
     }
 
     /*
@@ -253,6 +259,9 @@ Item {
      *   * 淡出期间条目仍在数组中重复扫描 —— beginClose 幂等，无副作用。
      * 【为什么不再直接改数组】之前判定即删（shrinkModel = kept）导致
      * Repeater 立即销毁 delegate —— 条目无过渡"瞬间消失"（用户实测）。
+     * 【timer 只认"新淡出"】只有本轮新翻 closing 的条目才 restart 计时器：
+     * 已在淡出中的条目重复 restart 会把 350ms 到点时间无限推后
+     * （position 上报快于 350ms 时条目永不删除，成"透明僵尸"）。
      */
     function syncShrinkEntries() {
         var cur = interactionLayer.shrinkModel
@@ -263,11 +272,13 @@ Item {
 
         for (var i = 0; i < cur.length; i++) {
             if (interactionLayer.shrinkEntryDone(cur[i])) {
-                pending = true
-                /* 触发对应 delegate 淡出（Repeater 顺序 = model 顺序） */
+                /* 触发对应 delegate 淡出（Repeater 顺序 = model 顺序；
+                   已 closing 的条目不重复计时 —— timer 到点时间不被推后） */
                 var bar = shrinkRepeater.itemAt(i)
-                if (bar !== null && bar !== undefined)
+                if (bar !== null && bar !== undefined && !bar.closing) {
                     bar.beginClose()
+                    pending = true
+                }
             }
         }
 
@@ -303,17 +314,19 @@ Item {
 
     /*
      * 点击缩小条目重开原卡片（照 web reopenFromShrink + scheduleShrinkRemoval
-     * 的淡出协议）：条目先播 0.35s 淡出（beginClose），350ms 后由
-     * commitShrinkRemoval 统一从数组剔除；清源数据关闭标记 → 对应 slot
-     * 复位 closed → 卡片按当前时间立即重建显示（仍在时间窗内即刻恢复）。
+     * 的淡出协议）：条目先播 0.35s 淡出（beginClose + removed 自我移除标记），
+     * 350ms 后由 commitShrinkRemoval 统一从数组剔除；清源数据关闭标记 →
+     * 对应 slot 复位 closed → 卡片按当前时间立即重建显示（仍在时间窗内即刻恢复）。
      */
     function reopenFromShrink(entry) {
-        /* 条目淡出（点过的条目不再响应点击；数组移除交给 commitShrinkRemoval） */
+        /* 条目淡出（点过的条目不再响应点击；removed 标记供 commitShrinkRemoval
+           判定剔除 —— 自治协议不再回读 __isClose） */
         for (var i = 0; i < interactionLayer.shrinkModel.length; i++) {
             if (interactionLayer.shrinkModel[i].id === entry.id) {
                 var bar = shrinkRepeater.itemAt(i)
                 if (bar !== null && bar !== undefined)
                     bar.beginClose()
+                interactionLayer.shrinkModel[i].removed = true
                 break
             }
         }
@@ -331,8 +344,7 @@ Item {
         if (src === undefined)
             return
 
-        /* 清关闭标记：卡片回到「窗口内即显示」状态
-           （commitShrinkRemoval 判定 __isClose 已清 → 条目随之移除） */
+        /* 清关闭标记：卡片回到「窗口内即显示」状态 */
         src.__isClose = false
 
         /* 对应 slot 复位（卡片立即重建显示） */
@@ -379,7 +391,13 @@ Item {
        score → scoreSum，后声明的压在上面 —— Repeater 同 z 按序绘制，与 DOM 顺序一致） */
     property var masterModel: []
 
-    onInteractionDataChanged: interactionLayer.rebuildModel()
+    onInteractionDataChanged: {
+        /* 数据整体替换（换片重拉 / 编辑 API 的全量重赋）：旧条目引用的源
+           已不存在，统一清空（自治协议下条目不回读源数据，数据替换必须
+           显式清场；展示模式下走到这里的只有换片，编辑模式条目本来就空） */
+        interactionLayer.shrinkModel = []
+        interactionLayer.rebuildModel()
+    }
 
     function rebuildModel() {
         var arr = []
