@@ -74,40 +74,27 @@ Rectangle {
     }
 
     /* ------------------------------------------------------------------
-     * 弹幕文字的显示色（B 站列表排式：每条弹幕按**自身颜色**渲染文字）
-     *
-     * 【为什么之前深色下"颜色文字看不到"】列表所有文字统一用主题的 panelText
-     * （深色=纯白）—— 弹幕的白/红/蓝/绿各色信息完全丢失，一整列全是同一个白，
-     * 用户看起来就是"弹幕本色的文字看不到"。
-     *
-     * 合理设计（深浅两主题都成立）：
-     *   * 深色主题：直接用弹幕本色 —— 弹幕本来就是渲染在黑色画面上的，颜色
-     *     天生适配深底，红是红、蓝是蓝；
-     *   * 浅色主题：彩色弹幕保持本色，但**太亮的弹幕**（白色弹幕这类，
-     *     亮度 > 0.8）在白底上会消失 → 映射成 panelText 深字
-     *     （B 站浅色网页也是这么处理白弹幕的）；
-     *   * 自己发的：仍走 warnText 警示黄 + "我"徽标，和别条一眼区分。
-     *
-     * hex 形态是 "#rrggbbaa"（DanmakuController 的 danmakuColorToHex），
-     * 取前三位分量算感知亮度（0.299/0.587/0.114 加权）。
+     * 列表筛选（B 站弹幕列表顶部的类型筛选）：all / scroll / top / bottom。
+     * filteredItems = onscreenItems 按当前筛选取子集 —— allItems 带 type
+     * 字段（DanmakuController 补的），过滤在 QML 侧做（几百条弹幕的遍历
+     * 每 500ms 一次，代价可忽略）。
      * ------------------------------------------------------------------ */
-    function danmakuTextColor(entry) {
-        if (entry.isSelf === true)
-            return QtPlayerTheme.warnText
+    property string listFilter: "all"
 
-        var hex = entry.color !== undefined ? String(entry.color) : "#ffffffff"
+    readonly property var filteredItems: {
+        var src = danmakuPanel.onscreenItems
 
-        if (!QtPlayerTheme.dark) {
-            var r = parseInt(hex.substring(1, 3), 16) / 255
-            var g = parseInt(hex.substring(3, 5), 16) / 255
-            var b = parseInt(hex.substring(5, 7), 16) / 255
-            var lum = 0.299 * r + 0.587 * g + 0.114 * b
+        if (danmakuPanel.listFilter === "all")
+            return src
 
-            if (lum > 0.8)
-                return QtPlayerTheme.panelText
+        var arr = []
+
+        for (var i = 0; i < src.length; i++) {
+            if (src[i].type === danmakuPanel.listFilter)
+                arr.push(src[i])
         }
 
-        return hex
+        return arr
     }
 
     /* ------------------------------------------------------------------ */
@@ -250,6 +237,61 @@ Rectangle {
             }
         }
 
+        /* ---- 列表筛选行（B 站排式：全部 / 滚动 / 顶部 / 底部） ---- */
+        RowLayout {
+            Layout.fillWidth: true
+            spacing: 6
+
+            Text {
+                text: qsTr("筛选：")
+                color: QtPlayerTheme.panelHintText
+                font.pixelSize: 11
+            }
+
+            Repeater {
+                model: [
+                    { key: "all", name: qsTr("全部") },
+                    { key: "scroll", name: qsTr("滚动") },
+                    { key: "top", name: qsTr("顶部") },
+                    { key: "bottom", name: qsTr("底部") }
+                ]
+
+                delegate: Button {
+                    id: filterButton
+
+                    required property var modelData
+
+                    Layout.preferredHeight: 24
+                    Layout.preferredWidth: 52
+                    flat: true
+
+                    readonly property bool active: danmakuPanel.listFilter
+                                                    === filterButton.modelData.key
+
+                    background: Rectangle {
+                        radius: 4
+                        color: filterButton.active
+                               ? Qt.alpha(QtPlayerTheme.playerAccent, 0.45)
+                               : (filterButton.hovered
+                                  ? (QtPlayerTheme.dark ? "#33FFFFFF" : "#33000000")
+                                  : danmakuPanel.fieldWash)
+                    }
+
+                    contentItem: Text {
+                        text: filterButton.modelData.name
+                        font.pixelSize: 11
+                        color: filterButton.active ? "#ffffff" : QtPlayerTheme.panelText
+                        horizontalAlignment: Text.AlignHCenter
+                        verticalAlignment: Text.AlignVCenter
+                    }
+
+                    onClicked: danmakuPanel.listFilter = filterButton.modelData.key
+                }
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
         /* ---- 在屏列表（500ms 采样；GPU 渲染模式下也照常采样 ——
               ApiPanel 置了 danmakuView.apiListNeeded，引擎会建这张表） ---- */
         Rectangle {
@@ -266,17 +308,38 @@ Rectangle {
                 anchors.fill: parent
                 anchors.margins: 8
                 clip: true
-                model: danmakuPanel.onscreenItems
+                model: danmakuPanel.filteredItems
                 spacing: 4
 
                 /* 【桌面端滚动】禁掉内容拖拽（interactive: false）：这是桌面应用，
-                   列表滚动只走**滚轮 + 拖滚动条**（ScrollBar 在下面）—— 按住内容
-                   甩动是移动端触屏的手势，鼠标场景下"按住弹幕行拖一下整列跟着跑"
-                   反而误触（用户要求去掉）。Flickable 的滚轮滚动不依赖 interactive，
-                   照常可用。 */
+                   列表滚动只走**滚轮 + 拖滚动条**—— 按住内容甩动是移动端触屏的
+                   手势，鼠标场景下"按住弹幕行拖一下整列跟着跑"反而误触（用户要求
+                   去掉）。【interactive:false 连滚轮也一并禁掉】（用户实测"列表
+                   无法滚动"）：Qt 的 Flickable 把滚轮滚动也归在 interactive 门下
+                   —— 所以滚轮必须由下面的 WheelHandler 手动接管。 */
                 interactive: false
 
-                ScrollBar.vertical: ScrollBar {}
+                /* 手动滚轮：一格 120 单位 → 60px（约三行弹幕，Windows 主流
+                   "三行一档"量级），触摸板的连续小步进天然平滑。夹取 [0, 溢出量]。 */
+                WheelHandler {
+                    onWheel: (ev) => {
+                        var max = onscreenList.contentHeight - onscreenList.height
+
+                        if (max > 0) {
+                            onscreenList.contentY = Math.max(
+                                0, Math.min(max,
+                                            onscreenList.contentY
+                                            - ev.angleDelta.y * 0.5))
+                            onscreenScrollBar.kick()
+                        }
+                    }
+                }
+
+                /* 滚动条：滚动时才出现、停止 800ms 淡出、hover 常显；
+                   中性灰不抢视觉（组件见 controls/TransientScrollBar.qml） */
+                ScrollBar.vertical: TransientScrollBar {
+                    id: onscreenScrollBar
+                }
 
                 /* 行：文案 + 类型徽标 + （自己发的）撤回按钮 */
                 delegate: Rectangle {
@@ -340,9 +403,10 @@ Rectangle {
                         Text {
                             Layout.fillWidth: true
                             text: onscreenRow.modelData.text
-                            /* 弹幕本色（见 danmakuTextColor：深色直接本色、
-                               浅色下太亮的映射深字、自己发的警示黄） */
-                            color: danmakuPanel.danmakuTextColor(onscreenRow.modelData)
+                            /* 列表正文统一主题字色（用户要求：深色主题白色、
+                               浅色主题黑色，不要花哨的彩色渲染 —— "我"徽标和
+                               顶/底徽标已经提供了区分度） */
+                            color: QtPlayerTheme.panelText
                             font.pixelSize: 12
                             elide: Text.ElideRight
                         }
@@ -397,8 +461,10 @@ Rectangle {
 
                 Text {
                     anchors.centerIn: parent
-                    visible: danmakuPanel.onscreenItems.length === 0
-                    text: qsTr("弹幕列表为空（等 mock 拉取 / 文件载入，或发一条）")
+                    visible: danmakuPanel.filteredItems.length === 0
+                    text: danmakuPanel.listFilter !== "all"
+                          ? qsTr("该类型下没有弹幕")
+                          : qsTr("弹幕列表为空（等 mock 拉取 / 文件载入，或发一条）")
                     color: QtPlayerTheme.panelHintText
                     font.pixelSize: 12
                     horizontalAlignment: Text.AlignHCenter

@@ -1177,18 +1177,30 @@ Window {
         /* 【桌面端滚动】禁掉内容拖拽（interactive: false）：桌面应用里网格滚动
            只走**滚轮 + 拖滚动条**—— 按住卡片甩动是移动端触屏手势，鼠标场景下
            和"点卡片"互相打架（按下想点、稍一移动变成拖整个网格，用户要求去掉）。
-           Flickable 的滚轮滚动不依赖 interactive，照常可用。 */
+           【interactive:false 连滚轮也一并禁掉】（用户实测"首页无法滚动"）：
+           Qt 的 Flickable 把滚轮滚动也归在 interactive 门下 —— 所以滚轮必须
+           由下面的 WheelHandler 手动接管（Flickable 不再处理 wheel，事件
+           透传给被动 的 WheelHandler，与 delegate 的点击互不干扰）。 */
         interactive: false
 
-        /* 禁拖拽之后必须有滚动条可拖（原来只能靠手势滚）。细条 6px、半透明，
-           hover/按下加亮，不抢卡片的视觉。 */
-        ScrollBar.vertical: ScrollBar {
-            contentItem: Rectangle {
-                implicitWidth: 6
-                radius: 3
-                color: parent.pressed ? QtPlayerTheme.playerAccent
-                       : (parent.hovered ? "#aa8a9099" : "#668a9099")
+        /* 手动滚轮：一格 120 单位 → 72px（约一排卡片高度的 40%，Windows 主流
+           "三行一档"量级），触摸板的连续小步进天然平滑。夹取在 [0, 溢出量]。 */
+        WheelHandler {
+            onWheel: (ev) => {
+                var max = grid.contentHeight - grid.height
+
+                if (max > 0) {
+                    grid.contentY = Math.max(
+                        0, Math.min(max, grid.contentY - ev.angleDelta.y * 0.6))
+                    gridScrollBar.kick()
+                }
             }
+        }
+
+        /* 滚动条：滚动时才出现、停止 800ms 淡出、hover 常显；中性灰不抢视觉
+           （组件见 controls/TransientScrollBar.qml） */
+        ScrollBar.vertical: TransientScrollBar {
+            id: gridScrollBar
         }
 
         delegate: Item {
@@ -1441,21 +1453,21 @@ Window {
     /*
      * 把窗口显示出来并提到最前（所有点播入口都走这里）。
      *
-     * 【同一时刻只有一个窗口】用户要求"播放器不要独立在外边、左右侧在同一个窗口里"：
-     * 播放器窗口本身就是"左播放器 + 右交互面板"两栏，但首页窗口若留在原地，屏幕上
-     * 就是两个窗口并排 —— 观感上播放器"独立在外"。现在播放器一显示就把首页藏起来，
-     * 屏幕上自始至终只有一个窗口（用户视角：首页 → 播放页 → 关播放回首页，一个窗口
-     * 在换页面）。关掉播放器后由 reapPlayerWindow() 把首页带回来。
+     * 【首页与播放页是两个独立窗口】（用户要求，任务栏显示两项）：播放器窗口
+     * 本身是"左播放器 + 右交互面板"同一个窗口（这个"同窗"指播放器和它的编辑
+     * 面板，**不是**把首页合并进来）；首页窗口保持可见，两个窗口想看哪个切哪个。
+     * —— 曾误把"同窗"理解成"屏幕上只留一个窗口"而在这里 home.hide()，导致
+     * 任务栏永远只有一项、首页在播放中不可见（用户实测回归），已回退。
      *
-     * 顺序：**先 show/raise 播放器、最后才 hide 首页** —— 反过来的话，万一播放器
-     * show 因平台原因失败，首页已经收了，屏幕上一个窗口都不剩。
-     * （直播窗口不走这里：那套注释写明"点播 + 直播并排"是合理场景，保持两个窗口。）
+     * 【窗口复用】ensurePlayerWindow() 幂等：播放器开着时再选新视频，
+     * 这里只走 show/raise/requestActivate（对已可见窗口无害），换台由调用方
+     * 的 playFromLibrary/playUrl 更新片源 —— 窗口对象不销毁不重建。
+     * （直播窗口不走这里：那套注释写明"点播 + 直播并排"是合理场景。）
      */
     function showPlayerWindow() {
         playerWindow.show()
         playerWindow.raise()
         playerWindow.requestActivate()
-        home.hide()
     }
 
     function openPlayer(index) {
@@ -1739,13 +1751,13 @@ Window {
         w.destroy()
 
         /*
-         * 【把首页带回来】showPlayerWindow() 播放时把首页藏了；播放器走到这里
-         * （✕ 关闭 / 其它不可见路径）意味着"播放页结束" —— 首页必须重新出现，
-         * 否则整个应用就没有可见窗口了（进程还在、屏幕上什么都没有，只能任务管理器杀）。
-         * 这里是所有"播放器没了"路径的汇合点（closeCommitted + visibleChanged 兜底
-         * 都经 Qt.callLater 走到这里），在这一个地方恢复就够了。
-         * 时序：本函数本来就在 callLater 里（close 走完、场景图收完才进来），
-         * 再 show 首页不会撞上播放器的销毁。
+         * 【把首页带回前台】播放器走到这里（✕ 关闭 / 其它不可见路径）意味着
+         * "播放页结束"—— 用户下一步要回首页继续选片，把首页 raise 到最前
+         * 并激活。show() 是幂等的：首页现在一直可见（不再被藏），这行只是
+         * 顺手处理"首页被最小化了"的场景。这里是所有"播放器没了"路径的汇合点
+         * （closeCommitted + visibleChanged 兜底都经 Qt.callLater 走到这里），
+         * 在这一个地方处理就够。时序：本函数本来就在 callLater 里（close 走完、
+         * 场景图收完才进来），再动首页不会撞上播放器的销毁。
          */
         home.show()
         home.raise()

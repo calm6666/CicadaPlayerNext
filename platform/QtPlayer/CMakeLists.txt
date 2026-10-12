@@ -680,6 +680,8 @@ qt_add_qml_module(appQtPlayer
         controls/RightControls.qml
         # 控制栏按钮的 tooltip 层（参考 hili-player 的 Tooltips.ts/tooltip.scss）
         controls/ControlTipLayer.qml
+        # 桌面端列表滚动条（弹幕列表 / 首页卡片网格共用：滚动时出现、停止淡出）
+        controls/TransientScrollBar.qml
         PlayerTopBar.qml
         DanmakuView.qml
         DanmakuItem.qml
