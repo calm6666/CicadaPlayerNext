@@ -154,6 +154,9 @@ Rectangle {
         } else if (row.kind === "score") {
             draft.title = (d.title !== undefined ? d.title : "")
             draft.scoreType = (d.scoreType !== undefined ? d.scoreType : 1)
+        } else if (row.kind === "scoreSum") {
+            /* 标题可编辑（题目列表 / 平均分 / 总人数运行期聚合 —— 照 web 定稿） */
+            draft.title = (d.title !== undefined ? d.title : "")
         }
 
         editDraft = draft
@@ -184,8 +187,10 @@ Rectangle {
         } else if (d.kind === "score") {
             patch.title = d.title
             patch.scoreType = d.scoreType
+        } else if (d.kind === "scoreSum") {
+            /* 标题补丁（题目列表 / 平均分 / 总人数运行期聚合，不可编辑） */
+            patch.title = d.title
         }
-        /* scoreSum 无专属内容字段（汇总内容运行期聚合），通用字段即可 */
 
         if (!interactionLayer.updateCardContent(d.kind, d.listIndex, patch)) {
             showToast(qsTr("时间窗 %1-%2s 与其他卡片重叠，一次只能存在一张交互卡片")
@@ -225,8 +230,10 @@ Rectangle {
         } else if (kind === "score") {
             card.title = qsTr("新评分")
             card.scoreType = 1
+        } else if (kind === "scoreSum") {
+            /* 标题可设置（汇总内容运行期聚合全部评分卡 —— 照 web 定稿） */
+            card.title = qsTr("评分总结")
         }
-        /* scoreSum 无专属字段（汇总内容运行期聚合全部评分卡） */
 
         /* scoreSum 前置预检：必须已有至少一张评分卡（照 web addScoreSum） */
         if (kind === "scoreSum") {
@@ -257,7 +264,7 @@ Rectangle {
         if (row.kind === "score")
             return (d.title !== undefined) ? d.title : ""
         if (row.kind === "scoreSum")
-            return qsTr("评分总结")
+            return (d.title !== undefined && d.title !== "") ? d.title : qsTr("评分总结")
         return qsTr("三连 / 关注")
     }
 
@@ -703,11 +710,13 @@ Rectangle {
                     }
                 }
 
-                /* score：标题 + 图标类型（1 星 / 2 心 / 3 柠檬） */
+                /* score / scoreSum：标题（scoreSum 的题目列表 / 平均分 / 总人数
+                   运行期聚合，仅标题可编辑 —— 照 web 定稿） */
                 RowLayout {
                     Layout.fillWidth: true
                     visible: interactionPanel.editDraft !== null
-                             && interactionPanel.editDraft.kind === "score"
+                             && (interactionPanel.editDraft.kind === "score"
+                                 || interactionPanel.editDraft.kind === "scoreSum")
                     spacing: 8
 
                     Text { text: qsTr("标题："); color: QtPlayerTheme.panelHintText; font.pixelSize: 11 }
@@ -715,10 +724,12 @@ Rectangle {
                     StyledField {
                         Layout.fillWidth: true
                         text: (interactionPanel.editDraft !== null
-                               && interactionPanel.editDraft.kind === "score")
+                               && (interactionPanel.editDraft.kind === "score"
+                                   || interactionPanel.editDraft.kind === "scoreSum"))
                               ? interactionPanel.editDraft.title : ""
                         onTextChanged: if (interactionPanel.editDraft !== null
-                                           && interactionPanel.editDraft.kind === "score")
+                                           && (interactionPanel.editDraft.kind === "score"
+                                               || interactionPanel.editDraft.kind === "scoreSum"))
                                            interactionPanel.editDraft.title = text
                     }
                 }

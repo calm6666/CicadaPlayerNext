@@ -31,8 +31,9 @@ Rectangle {
     // 对外接口
     // ---------------------------------------------------------------------
 
-    /* 卡片数据：{ top, left, timeStart, timeEnd }（无专属内容字段，
-       汇总内容由 summaryItems / totalCount 运行期聚合注入） */
+    /* 卡片数据：{ top, left, title, timeStart, timeEnd }（题目列表 / 平均分 /
+       总人数由 summaryItems / totalCount 运行期聚合注入；title 可编辑 ——
+       照 web InteractionScoreSum.title，缺省空占位保持参考 DOM 结构） */
     property var cardData: ({})
 
     /* 大尺寸档（保持 1 缩放 —— scss 大档媒体查询没有 scoreSum 规则） */
@@ -77,14 +78,21 @@ Rectangle {
     }
 
     // ---------------------------------------------------------------------
-    // 标题（空占位，margin 14 0 0 14 高 14 —— 照参考 DOM 保持结构一致）
+    // 标题（可编辑文本，margin 14 0 0 14 高 14 —— 缺省空占位保持参考
+    // DOM 结构，标题区高度恒在；编辑走 updateCardContent 的 title 补丁）
     // ---------------------------------------------------------------------
 
-    Item {
+    Text {
         x: 14
         y: 14
-        width: 1
+        width: parent.width - 28 - 70      /* 右侧给"N人参与"留位 */
         height: 14
+        text: (scoreSum.cardData.title !== undefined)
+              ? scoreSum.cardData.title : ""
+        color: "#ffffff"
+        font.pixelSize: 14
+        elide: Text.ElideRight
+        verticalAlignment: Text.AlignVCenter
     }
 
     /* 总参与人数（absolute top 14 right 14，opacity 0.7，12px 白字） */

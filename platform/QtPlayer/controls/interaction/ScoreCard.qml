@@ -25,10 +25,20 @@
 //   数值气泡数字 / 结果平均分大字的颜色都随图标类型切换。
 //
 // 【已评后收拢（has-result）】项依次左移收拢（translateX 0/-20/-40/-60/-80px，
-//   延迟 0.2/0.3/0.4/0.5/0.6s，过渡 0.1s），数值气泡全部显示，结果区淡入。
+//   延迟 0.2/0.3/0.4/0.5/0.6s，过渡 0.1s），结果区淡入。
+//
+// 【数值气泡（照 web 定稿）】悬停某项 → 该项及之前的全部气泡显示
+// （hoverIndex >= value 显隐）；点击评分后 hoverIndex 清零 → 气泡即刻
+// 全部消失（不常显）；已评后评分区禁用指针，气泡不再出现。
+//
+// 【悬停热区】评分区单一 MouseArea + mouseX 位置换算（不用每项独立
+// MouseArea —— 相邻区域平行移动时 enter/exit 事件不可靠，用户实测
+// 平移到相邻项不触发，必须移出再进）。
 //
 // 交互状态（照 ScoreCardState）：selected（0 = 未评）、count、totalScore、hoverIndex；
-//   点击第 value 项 → selected = value、count+1、totalScore+value；
+//   点击第 value 项 → selected = value、count+1、totalScore+value*2
+//   （10 分制口径：图标数字 1-5，总分翻倍累计 —— 照 web onScoreSelect，
+//   与参考 DOM「评 3 分 → 平均 6.0」一致）；
 //   已评后不再响应（渲染层兜底）。
 //   平均分 = totalScore/count 保留一位小数（count 0 时显示 "0"）。
 // ===========================================================================
@@ -243,13 +253,17 @@ Rectangle {
                 }
 
                 /* 数值气泡（33x33、字 20px、背景 rgba(0,0,0,.6)、圆角 2、
-                   margin-left 5、bottom 68 = 浮在卡片上方；voted 前不显示；
+                   margin-left 5、bottom 68 = 浮在卡片上方；
+                   悬停联动显示：悬停该项及之前的全部气泡（照 web 定稿
+                   hoverIndex >= value 的显隐协议）；点击评分后 hoverIndex
+                   清零 → 气泡即刻全部消失（不再常显）；
                    数字颜色 = 主题色（继承评分区的 color，随图标类型切换） */
                 Rectangle {
                     x: 5
                     anchors.bottom: parent.bottom
                     anchors.bottomMargin: 68
-                    visible: score.selected > 0
+                    visible: score.hoverIndex > 0
+                             && score.hoverIndex >= scoreItem.value
                     width: 33
                     height: 33
                     radius: 2
@@ -262,26 +276,52 @@ Rectangle {
                         font.pixelSize: 20
                     }
                 }
+            }
+        }
 
-                /* 悬停 + 点击热区（已评分后禁用 —— 照 has-result 的
-                   pointer-events:none） */
-                MouseArea {
-                    anchors.fill: parent
-                    enabled: score.selected === 0
-                    hoverEnabled: true
-                    cursorShape: Qt.PointingHandCursor
-                    /* 悬停联动：进入该项 → 该项及之前全部填充（照 web 端
-                       hoverIndex 语义）；离开 → 归零恢复已选值的填充态 */
-                    onEntered: score.hoverIndex = scoreItem.value
-                    onExited: score.hoverIndex = 0
-                    onClicked: {
-                        if (score.selected > 0)
-                            return
-                        score.selected = scoreItem.value
-                        score.count = score.count + 1
-                        score.totalScore = score.totalScore + scoreItem.value
-                    }
-                }
+        /* -----------------------------------------------------------------
+         * 单一悬停/点击热区（覆盖整个评分区，按位置换算悬停值）：
+         * 【为什么不用每项独立 MouseArea】相邻 MouseArea 间平行移动时
+         * exited/entered 事件在共享边界不可靠 —— 用户实测"从卡片外移入
+         * 首项可触发，平移到相邻项不触发，必须移出再进"。单一热区 +
+         * mouseX 换算（floor(x/itemWidth)+1）与 web 端 CSS :hover 的
+         * 连续悬停语义一致，任何平行移动都即时响应。
+         * 已评分后禁用（照 has-result 的 pointer-events:none）。
+         * ----------------------------------------------------------------- */
+        MouseArea {
+            id: scoreHoverArea
+
+            anchors.fill: parent
+            enabled: score.selected === 0
+            hoverEnabled: true
+            cursorShape: Qt.PointingHandCursor
+
+            /* 位置 → 悬停值换算（1-5；越界/离开 0 = 无悬停） */
+            function hoverValueAt(x) {
+                if (x < 0 || x >= scoreArea.width)
+                    return 0
+                var idx = Math.floor(x / score.itemWidth)
+                return (idx < 0 || idx > 4) ? 0 : idx + 1
+            }
+
+            /* 移动（含进入）即时换算悬停值 —— 联动填充 + 气泡显示 */
+            onPositionChanged: function (mouse) {
+                score.hoverIndex = scoreHoverArea.hoverValueAt(mouse.x)
+            }
+
+            /* 离开评分区：悬停归零（恢复已选值的填充态 / 气泡全隐） */
+            onExited: score.hoverIndex = 0
+
+            /* 点击按位置算分值；总分按 10 分制累计（图标数字 1-5，
+               评分值 ×2 入账 —— 照 web onScoreSelect 的 totalScore + value*2，
+               平均分口径与参考 DOM「评 3 分 → 平均 6.0」一致） */
+            onClicked: function (mouse) {
+                var value = scoreHoverArea.hoverValueAt(mouse.x)
+                if (value === 0)
+                    return
+                score.selected = value
+                score.count = score.count + 1
+                score.totalScore = score.totalScore + value * 2
             }
         }
     }

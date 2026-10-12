@@ -127,10 +127,11 @@ Item {
     // ---------------------------------------------------------------------
     // 左下角缩小条目（照 web 端 shrinkActive / ShrinkBar 的生命周期）
     //
-    // 条目数据：{ id: "kind:listIndex", kind, listIndex, icon, title }
-    // （id 与 web 端 "shrink:类型:下标" 同构，用作幂等替换的键）。
-    // 进度 remaining 不存条目里 —— delegate 绑定 shrinkRemainingOf() 每拍
-    // 从源卡片数据的时间窗现算（照 web syncShrinkEntries 的公式）。
+    // 条目数据：{ id: "kind:listIndex", kind, listIndex, icon, title,
+    //            timeStart, timeEnd }
+    // （id 与 web 端 "shrink:类型:下标" 同构，用作幂等替换的键；
+    //   timeStart/timeEnd 为关闭时刻从源卡片数据取的时间窗快照 ——
+    //   进度环与归零判定都用快照计算，不回读源数据）。
     // ---------------------------------------------------------------------
 
     property var shrinkModel: []
@@ -159,10 +160,27 @@ Item {
     /*
      * 生成缩小条目（卡片关闭时调用）：同卡片同下标幂等替换（互斥时间窗下
      * 理论上不会共存，照 web appendShrinkEntry 的 filter-then-push）。
+     * 条目自带时间窗快照（ts/te 从源卡片数据取一份）—— 进度环与归零判定
+     * 用快照计算，不回读源数据：即便 interactionData 被整体替换（重新拉取
+     * 后 __isClose 标记丢失），进度环依然按原窗口倒数，绝无"无进度"。
      */
     function appendShrinkEntry(kind, listIndex) {
         var meta = interactionLayer.shrinkMetaOf(kind)
         var id = kind + ":" + listIndex
+
+        /* 时间窗快照（照 web 条目创建时从源数据取值的语义） */
+        var ts = 0
+        var te = 0
+        var d = interactionLayer.interactionData
+        if (d !== null && d !== undefined) {
+            var list = d[kind + "List"]
+            var src = (list !== undefined && list !== null) ? list[listIndex] : undefined
+            if (src !== undefined) {
+                ts = (src.timeStart !== undefined) ? src.timeStart : 0
+                te = (src.timeEnd !== undefined) ? src.timeEnd : 0
+            }
+        }
+
         var next = []
 
         for (var i = 0; i < interactionLayer.shrinkModel.length; i++) {
@@ -171,80 +189,111 @@ Item {
         }
 
         next.push({ id: id, kind: kind, listIndex: listIndex,
-                    icon: meta.icon, title: meta.title })
+                    icon: meta.icon, title: meta.title,
+                    timeStart: ts, timeEnd: te })
         interactionLayer.shrinkModel = next
     }
 
     /*
      * 缩小条目的进度环剩余比例（照 web syncShrinkEntries 的公式）：
-     * 从源卡片数据的时间窗现算（1 → 0，归零由 syncShrinkEntries 移除条目）。
-     * 绑定调用：函数内读取 clockSec / interactionData → 依赖变化自动重算。
+     * 用条目自带的时间窗快照 + 播放时钟现算（1 → 0）—— 不回读源卡片数据，
+     * 数据替换 / 下标位移都不影响进度环倒数。绑定调用：delegate 的绑定
+     * 显式引用 interactionLayer.clockSec 作第二参数（直接属性引用保证
+     * 每拍重算，进度环绝不失步）。
      */
-    function shrinkRemainingOf(entry) {
-        var d = interactionLayer.interactionData
-        if (d === null || d === undefined || entry === null || entry === undefined)
+    function shrinkRemainingOf(entry, nowSec) {
+        if (entry === null || entry === undefined)
             return 0
 
-        var list = d[entry.kind + "List"]
-        if (list === undefined || list === null)
+        var ts = entry.timeStart !== undefined ? entry.timeStart : 0
+        var te = entry.timeEnd !== undefined ? entry.timeEnd : 0
+        var now = (nowSec !== undefined && nowSec !== null)
+                   ? nowSec : interactionLayer.clockSec
+
+        if (te <= ts)
             return 0
-
-        var src = list[entry.listIndex]
-        if (src === undefined || src.__isClose !== true)
-            return 0
-
-        var ts = src.timeStart !== undefined ? src.timeStart : 0
-        var te = src.timeEnd !== undefined ? src.timeEnd : 0
-        var now = interactionLayer.clockSec
-
         if (now <= ts)
             return 1
         if (now >= te)
             return 0
-        return 1 - (now - ts) / Math.max(0.001, te - ts)
+        return 1 - (now - ts) / (te - ts)
     }
 
     /*
-     * 每拍同步缩小条目（照 web syncShrinkEntries）：
-     *   * 源卡片数据被删（下标越界）或关闭标记被清（点击重开 / seek 回退
-     *     复位）→ 条目移除；
-     *   * 进度归零（播放越过 timeEnd）→ 条目完成使命移除。
+     * 条目是否该被移除的统一判定（归零 / 源失效 / 已被重开 —— 照 web
+     * syncShrinkEntries 的三条移除路径）：供 syncShrinkEntries 每拍扫描
+     * 与 commitShrinkRemoval 延迟提交共用同一口径。
+     * 归零判定用条目快照 te；源失效 / 重开判定仍回读源数据 __isClose
+     * （数据被整体替换 → 源不存在或标记丢失 → 条目淡出移除，进度环
+     * 在淡出的 0.35s 内仍按快照倒数，无视觉跳变）。
+     */
+    function shrinkEntryDone(entry) {
+        /* 归零（播放越过快照 timeEnd）→ 移除 */
+        var te = entry.timeEnd !== undefined ? entry.timeEnd : 0
+        if (interactionLayer.clockSec >= te)
+            return true
+
+        var d = interactionLayer.interactionData
+        if (d === null || d === undefined)
+            return true
+
+        var list = d[entry.kind + "List"]
+        var src = (list !== undefined && list !== null)
+                  ? list[entry.listIndex] : undefined
+
+        /* 源不存在 / 已被重新打开（__isClose 被清）→ 移除 */
+        return src === undefined || src.__isClose !== true
+    }
+
+    /*
+     * 每拍同步缩小条目（照 web syncShrinkEntries + scheduleShrinkRemoval 的
+     * 两段式淡出协议）：
+     *   * 命中移除条件 → 对应 delegate 播 0.35s 淡出（beginClose 幂等），
+     *     350ms 后由 commitShrinkRemoval 真正从数组剔除（DOM 销毁）；
+     *   * 淡出期间条目仍在数组中重复扫描 —— beginClose 幂等，无副作用。
+     * 【为什么不再直接改数组】之前判定即删（shrinkModel = kept）导致
+     * Repeater 立即销毁 delegate —— 条目无过渡"瞬间消失"（用户实测）。
      */
     function syncShrinkEntries() {
         var cur = interactionLayer.shrinkModel
         if (cur.length === 0)
             return
 
-        var d = interactionLayer.interactionData
+        var pending = false
+
+        for (var i = 0; i < cur.length; i++) {
+            if (interactionLayer.shrinkEntryDone(cur[i])) {
+                pending = true
+                /* 触发对应 delegate 淡出（Repeater 顺序 = model 顺序） */
+                var bar = shrinkRepeater.itemAt(i)
+                if (bar !== null && bar !== undefined)
+                    bar.beginClose()
+            }
+        }
+
+        if (pending)
+            shrinkFadeTimer.restart()
+    }
+
+    /*
+     * 淡出完成后的真正移除（shrinkFadeTimer 触发）：按同一判定口径把已
+     * 完成使命的条目从数组剔除（delegate 随之销毁 —— 此时透明度已归 0，
+     * 销毁不产生视觉跳变）。重开路径中条目点击时也已 beginClose，由本
+     * 函数统一收尾（与 web 的 scheduleShrinkRemoval 延时 filter 对齐）。
+     */
+    function commitShrinkRemoval() {
+        var cur = interactionLayer.shrinkModel
+        if (cur.length === 0)
+            return
+
         var kept = []
         var changed = false
 
         for (var i = 0; i < cur.length; i++) {
-            var entry = cur[i]
-            var keep = true
-
-            if (d === null || d === undefined) {
-                keep = false
-            } else {
-                var list = d[entry.kind + "List"]
-                var src = (list !== undefined && list !== null)
-                          ? list[entry.listIndex] : undefined
-
-                /* 源不存在 / 已被重新打开（__isClose 被清）→ 移除 */
-                if (src === undefined || src.__isClose !== true) {
-                    keep = false
-                } else {
-                    /* 归零（播放越过 timeEnd）→ 移除 */
-                    var te = src.timeEnd !== undefined ? src.timeEnd : 0
-                    if (interactionLayer.clockSec >= te)
-                        keep = false
-                }
-            }
-
-            if (keep) {
-                kept.push(entry)
-            } else {
+            if (interactionLayer.shrinkEntryDone(cur[i])) {
                 changed = true
+            } else {
+                kept.push(cur[i])
             }
         }
 
@@ -253,18 +302,22 @@ Item {
     }
 
     /*
-     * 点击缩小条目重开原卡片（照 web reopenFromShrink）：
-     * 移除条目 → 清源数据关闭标记 → 对应 slot 复位 closed →
-     * 卡片按当前时间立即重建显示（仍在时间窗内即刻恢复）。
+     * 点击缩小条目重开原卡片（照 web reopenFromShrink + scheduleShrinkRemoval
+     * 的淡出协议）：条目先播 0.35s 淡出（beginClose），350ms 后由
+     * commitShrinkRemoval 统一从数组剔除；清源数据关闭标记 → 对应 slot
+     * 复位 closed → 卡片按当前时间立即重建显示（仍在时间窗内即刻恢复）。
      */
     function reopenFromShrink(entry) {
-        /* 先移除条目（无论源卡片是否仍可显示） */
-        var next = []
+        /* 条目淡出（点过的条目不再响应点击；数组移除交给 commitShrinkRemoval） */
         for (var i = 0; i < interactionLayer.shrinkModel.length; i++) {
-            if (interactionLayer.shrinkModel[i].id !== entry.id)
-                next.push(interactionLayer.shrinkModel[i])
+            if (interactionLayer.shrinkModel[i].id === entry.id) {
+                var bar = shrinkRepeater.itemAt(i)
+                if (bar !== null && bar !== undefined)
+                    bar.beginClose()
+                break
+            }
         }
-        interactionLayer.shrinkModel = next
+        shrinkFadeTimer.restart()
 
         var d = interactionLayer.interactionData
         if (d === null || d === undefined)
@@ -278,7 +331,8 @@ Item {
         if (src === undefined)
             return
 
-        /* 清关闭标记：卡片回到「窗口内即显示」状态 */
+        /* 清关闭标记：卡片回到「窗口内即显示」状态
+           （commitShrinkRemoval 判定 __isClose 已清 → 条目随之移除） */
         src.__isClose = false
 
         /* 对应 slot 复位（卡片立即重建显示） */
@@ -553,7 +607,8 @@ Item {
         if (patch.left !== undefined)
             item.left = patch.left
 
-        /* 各类型自己的内容字段（scoreSum 无专属字段 —— 内容运行期聚合） */
+        /* 各类型自己的内容字段（scoreSum 仅 title 可编辑 —— 题目列表 /
+           平均分 / 总人数运行期从 scoreList 聚合） */
         if (kind === "guide") {
             if (patch.guideType !== undefined)
                 item.type = patch.guideType
@@ -581,6 +636,9 @@ Item {
                 item.title = patch.title
             if (patch.scoreType !== undefined)
                 item.scoreType = patch.scoreType
+        } else if (kind === "scoreSum") {
+            if (patch.title !== undefined)
+                item.title = patch.title
         }
 
         interactionLayer.notifyDataChanged()
@@ -1092,6 +1150,8 @@ Item {
          * 位置 left:23px / bottom:71px（照 scss 常量，相对整个播放区）。
          * ------------------------------------------------------------------- */
         Repeater {
+            id: shrinkRepeater
+
             model: interactionLayer.shrinkModel
 
             delegate: ShrinkBar {
@@ -1100,9 +1160,22 @@ Item {
                 anchors.bottomMargin: 71
                 title: modelData.title
                 iconSource: modelData.icon
-                remaining: interactionLayer.shrinkRemainingOf(modelData)
+                /* 显式引用 interactionLayer.clockSec（表达式直接依赖，
+                   每拍必重算 —— 进度环绝不失步；nowSec 参数见函数注释） */
+                remaining: interactionLayer.shrinkRemainingOf(modelData,
+                                                              interactionLayer.clockSec)
                 onClicked: interactionLayer.reopenFromShrink(modelData)
             }
+        }
+
+        /* 淡出收尾定时器（照 web scheduleShrinkRemoval 的 CARD_FADE_MS）：
+           beginClose 播 0.35s 淡出 → 到点 commitShrinkRemoval 真正删条目 */
+        Timer {
+            id: shrinkFadeTimer
+
+            interval: 350
+            repeat: false
+            onTriggered: interactionLayer.commitShrinkRemoval()
         }
 
         /* ---- 贴边辅助线（z 100，照参考；拖拽贴边时才显示） ---- */

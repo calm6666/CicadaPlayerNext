@@ -36,8 +36,34 @@ Rectangle {
     /* 显示态（挂载后翻 true 播放 0.35s 淡入 —— 照显隐过渡协议） */
     property bool show: false
 
+    /*
+     * 淡出移除中标记（照 web ShrinkCardEntry.closing + scheduleShrinkRemoval）：
+     * beginClose() 置位 → opacity 淡出 0.35s → InteractionLayer 的
+     * shrinkFadeTimer 到点 commitShrinkRemoval 把条目从数组剔除（销毁）。
+     * 淡出期间进度环冻结在最后值（照 web「closing 后不再刷新进度」），
+     * 且点击不再响应（重开只认一次）。
+     */
+    property bool closing: false
+
+    /* 冻结的进度快照（closing 置位瞬间的 remaining —— 淡出期间环停在此值） */
+    property real lastRemaining: 1
+
     /* 点击条目（重开原卡片 —— 由 InteractionLayer 接线） */
     signal clicked()
+
+    /* 开始淡出移除（幂等 —— syncShrinkEntries 每拍扫描会重复调用） */
+    function beginClose() {
+        if (shrinkBar.closing)
+            return
+        shrinkBar.lastRemaining = shrinkBar.remaining
+        shrinkBar.closing = true
+    }
+
+    /* 非 closing 期间持续跟踪最新进度（供冻结快照取值） */
+    onRemainingChanged: {
+        if (!shrinkBar.closing)
+            shrinkBar.lastRemaining = shrinkBar.remaining
+    }
 
     /* rgba(24,25,28,0.8)（#18191C @ 80%） */
     color: "#CC18191C"
@@ -51,8 +77,9 @@ Rectangle {
     transformOrigin: Item.BottomLeft
     scale: 1
 
-    /* 显隐过渡：默认 opacity 0，show 翻转播放 0.35s 淡入（照 scss） */
-    opacity: shrinkBar.show ? 1 : 0
+    /* 显隐过渡：默认 opacity 0，show 翻转播放 0.35s 淡入；closing 翻转
+       播放 0.35s 淡出（同一条 opacity 通道，Behavior 复用 —— 照 web 协议） */
+    opacity: shrinkBar.show && !shrinkBar.closing ? 1 : 0
 
     Behavior on opacity {
         NumberAnimation { duration: 350; easing.type: Easing.Linear }
@@ -82,7 +109,9 @@ Rectangle {
         ringColor: "#ffffffb3"
         centerIcon: shrinkBar.iconSource
         interactive: false
-        remaining: shrinkBar.remaining
+        /* closing 期间冻结在最后值（淡出中环不跳变 —— 照 web 协议） */
+        remaining: shrinkBar.closing ? shrinkBar.lastRemaining
+                                     : shrinkBar.remaining
     }
 
     // ---------------------------------------------------------------------
@@ -107,6 +136,8 @@ Rectangle {
 
     MouseArea {
         anchors.fill: parent
+        /* closing（淡出中）不再响应 —— 重开只认一次（照 web 移除路径防重入） */
+        enabled: !shrinkBar.closing
         cursorShape: Qt.PointingHandCursor
         onClicked: shrinkBar.clicked()
     }
