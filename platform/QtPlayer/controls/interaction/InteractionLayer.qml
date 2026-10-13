@@ -344,15 +344,20 @@ Item {
         if (src === undefined)
             return
 
-        /* 清关闭标记：卡片回到「窗口内即显示」状态 */
+        /* 清关闭标记：卡片回到「窗口内即显示」状态（__closeTime 一并清，
+           delegate 重建后 closeTimeSec 初始绑定读到的是未关闭态） */
         src.__isClose = false
+        src.__closeTime = undefined
 
-        /* 对应 slot 复位（卡片立即重建显示） */
+        /* 对应 slot 复位（卡片立即重建显示；closeTimeSec 同步清零 ——
+           它是自有属性，不清的话 slot 的 rewindBeforeClose 仍按旧
+           关闭时刻判定） */
         for (var j = 0; j < repeater.count; j++) {
             var slotItem = repeater.itemAt(j)
             if (slotItem !== null && slotItem.kind === entry.kind
                     && slotItem.listIndex === entry.listIndex) {
                 slotItem.closed = false
+                slotItem.closeTimeSec = 0
                 break
             }
         }
@@ -921,11 +926,23 @@ Item {
                 property bool closed: (slot.cardData !== undefined
                                        && slot.cardData.__isClose === true)
 
-                /* 关闭时刻（秒，0 = 未关闭过） */
-                readonly property real closeTimeSec: (slot.cardData !== undefined
-                                                      && slot.cardData.__closeTime !== undefined
-                                                      && slot.cardData.__closeTime !== null)
-                                                     ? slot.cardData.__closeTime : 0
+                /*
+                 * 关闭时刻（秒，0 = 未关闭过）。
+                 * 【必须自有 property，不能 readonly 绑定】__closeTime 是运行期
+                 * 往数据对象（普通 JS 对象）上塞的属性，**JS 对象属性变更不发
+                 * QML 通知** —— readonly 绑定只在 delegate 创建时求值一次（此时
+                 * 还没关闭，读到 0），之后 requestClose 写入 __closeTime 绑定
+                 * 不重算 → closeTimeSec 恒 0 → rewindBeforeClose 恒 false →
+                 * seek 回退到「窗内但关闭时刻之前」时复位永不触发，卡片不重显
+                 * （用户实测"必须退到卡片窗口前才重显"的根因）。
+                 * 协议与 closed 一致：初始绑定求值一次（delegate 重建时从数据
+                 * 对象恢复关闭时刻），requestClose 命令式赋值（打断绑定，此后
+                 * 读写走自有属性，通知正常）。
+                 */
+                property real closeTimeSec: (slot.cardData !== undefined
+                                              && slot.cardData.__closeTime !== undefined
+                                              && slot.cardData.__closeTime !== null)
+                                             ? slot.cardData.__closeTime : 0
 
                 /* seek 回关闭时刻之前：关闭态复位（照 web syncCard 的
                    closeTime > currentTime 分支 —— 复位后缩小条目随之移除） */
@@ -936,6 +953,10 @@ Item {
                     if (slot.rewindBeforeClose && slot.closed) {
                         slot.closed = false
                         slot.cardData.__isClose = false
+                        /* 关闭时刻一并复位（置 0 后 rewindBeforeClose 翻 false
+                           会再触发一次本 handler，但 closed 已 false，空跑无害） */
+                        slot.closeTimeSec = 0
+                        slot.cardData.__closeTime = undefined
                     }
                 }
 
@@ -948,6 +969,9 @@ Item {
                     slot.closed = true
                     slot.cardData.__isClose = true
                     slot.cardData.__closeTime = interactionLayer.clockSec
+                    /* 自有属性同步赋值（通知 rewindBeforeClose 重算；
+                       数据对象上的 __closeTime 无通知，见上） */
+                    slot.closeTimeSec = interactionLayer.clockSec
 
                     if (!interactionLayer.editMode && slot.kind !== "guide")
                         interactionLayer.appendShrinkEntry(slot.kind, slot.listIndex)
@@ -999,10 +1023,13 @@ Item {
 
                 onBeforeWindowChanged: {
                     /* seek 回到窗口前：复位关闭标记（下次进窗重新显示）；
-                       数据标记同步清（缩小条目的源判定据此失效） */
+                       数据标记同步清（缩小条目的源判定据此失效）；
+                       关闭时刻一并清（与 rewindBeforeClose 复位同一口径） */
                     if (slot.beforeWindow) {
                         slot.closed = false
                         slot.cardData.__isClose = false
+                        slot.closeTimeSec = 0
+                        slot.cardData.__closeTime = undefined
                     }
                 }
 
