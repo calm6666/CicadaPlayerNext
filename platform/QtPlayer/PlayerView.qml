@@ -105,6 +105,17 @@ Item {
     property var interactionData: null
 
     /*
+     * 互动视频数据（mock 的 /interactive/data.json）：结构照 hili-player
+     * interactive-video 插件的 InteractiveVideoPluginConfig ——
+     * { startNodeId, autoPlay, nodes: { id: { title, cover, video, duration,
+     *   question: { timeStart, timeEnd, title, background, defaultOptionIndex,
+     *   options: [{label, text, targetNodeId}] } } } }，null = 接口没给，
+     * InteractiveVideoLayer 整层不出现。相对 URL（视频/封面/背景图）已在
+     * 应用层用 mock 基址解析成绝对地址。和 interactionData 一个路子。
+     */
+    property var interactiveVideoData: null
+
+    /*
      * mock 服务基址：外面（Main.qml）喂进来给设置面板显示，用户在面板里改完再由下面的信号转出去。
      * 播放器自己**不关心 mock 基址在哪**，它只做"转交"（和 episodes / hasPrevious 一个路子）。
      */
@@ -520,6 +531,46 @@ Item {
         player: player
         fullscreen: playerView.fullscreen
         interactionData: playerView.interactionData
+    }
+
+    /* -----------------------------------------------------------------------
+     * 互动视频层（分支剧情视频）—— 照 hili-player 的 interactive-video
+     * 插件完整复刻：剧情进度条 / 分支选择 / 倒计时 / 重播 / 播完末帧场景。
+     * -----------------------------------------------------------------------
+     *
+     * 与 InteractionLayer 同级同 z（0.5）：压在画面活动层上、控制栏下。
+     * 数据流同 interactionData 一条路：Main.qml 拉 /interactive/data.json
+     * （相对 URL 已解析成绝对地址）→ playerView.interactiveVideoData → 本层。
+     *
+     * 两个信号的接法：
+     *   * sourceSwitchRequested —— 节点切换 / 重播要换片源。只写 source：
+     *     CicadaPlayerItem::setSource 会销毁重建播放器（autoPlay 自动起播），
+     *     **不要**在这里补 player.play()（新播放器还没 Prepare，调了没用）。
+     *     也不走 playFile：那是"用户换片"的入口（会重置弹幕 / 重拉元数据），
+     *     互动会话的节点切换不该打断这些数据。
+     *   * hideControlsRequested —— 播完弹出问题 / 显示重播时收起控制栏
+     *     （照 web 端播完场景：控制栏与其它 UI 隐藏，只留问题 / 重播可点；
+     *     顶部栏 shown 跟随 controlBar.shown，一起收起）。
+     */
+    InteractiveVideoLayer {
+        id: interactiveVideoLayer
+
+        anchors.fill: player
+        z: 0.5
+        player: player
+        fullscreen: playerView.fullscreen
+        interactiveData: playerView.interactiveVideoData
+        /* 整层随控制栏显隐（层内有"问题 / 重播显示中"的激活例外） */
+        controlsShown: controlBar.shown
+
+        onSourceSwitchRequested: function (source) {
+            playerView.source = source
+        }
+
+        onHideControlsRequested: {
+            controlBar.shown = false
+            hideTimer.stop()
+        }
     }
 
     /* -----------------------------------------------------------------------

@@ -644,7 +644,8 @@ file(GLOB CICADA_QT_IMAGE_ASSETS
         RELATIVE ${CMAKE_CURRENT_SOURCE_DIR}
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/*
         ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/dm/*
-        ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/interaction/*)
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/interaction/*
+        ${CMAKE_CURRENT_SOURCE_DIR}/assets/images/interactive-video/*)
 list(SORT CICADA_LOTTIE_ICONS)
 list(SORT CICADA_QT_IMAGE_ASSETS)
 list(LENGTH CICADA_LOTTIE_ICONS _cicada_icon_count)
@@ -718,6 +719,15 @@ qt_add_qml_module(appQtPlayer
         controls/interaction/ScoreCard.qml
         controls/interaction/ScoreSumCard.qml
         controls/interaction/ShrinkBar.qml
+
+        # ---------------------------------------------------------------------------
+        # 互动视频层（分支剧情视频，照 hili-player 的 interactive-video 插件完整复刻）：
+        #   InteractiveVideoLayer —— 剧情进度条（双态圆点 + 悬停封面卡片）/ 分支选择
+        #                           按钮（悬停放大）/ 倒计时 / 重播 / 播完末帧定格场景
+        # 【必须列在这里】和 DanmakuLive.qml 同一个理由：qt_add_qml_module 只把
+        # QML_FILES 里的文件放进 qrc，漏一行 PlayerView 就解析不到这个类型。
+        # ---------------------------------------------------------------------------
+        controls/interactive-video/InteractiveVideoLayer.qml
 
         # ---------------------------------------------------------------------------
         # 右侧 API 操作面板（编辑模式下播放器窗口变左右两栏：左播放器 + 右 API 面板）：

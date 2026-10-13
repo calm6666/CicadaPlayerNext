@@ -585,6 +585,7 @@ Window {
         playerView.viewPoints = []
         playerView.pbpData = null
         playerView.interactionData = null
+        playerView.interactiveVideoData = null
 
         /*
          * 正常情况下"拉"交给 playing 的上升沿（见下面那个 Connections）；
@@ -760,6 +761,73 @@ Window {
         getProgressJson(base + "/x/player/interaction" + query, token, function (data) {
             playerView.interactionData = (data && typeof data === "object") ? data : null
         }, "interaction")
+
+        /*
+         * 互动视频（分支剧情）：GET /interactive/data.json（结构照 web 端
+         * interactive-video 插件的 InteractiveVideoPluginConfig ——
+         * startNodeId / nodes.{title, cover, video, question{...}}）。
+         * data.json 里的视频 / 封面 / 背景图都是**相对路径**（如
+         * /interactive/videos/n1.mp4），在这里用 mock 基址解析成绝对地址后
+         * 再喂给播放器视图（InteractiveVideoLayer 里直接拿来切源 / 显示）。
+         * 接口不通 / 结构不对 = 整层静默不出现（和 interactionData 一个口径）。
+         */
+        getProgressJson(base + "/interactive/data.json" + query, token, function (data) {
+            playerView.interactiveVideoData = root.resolveInteractiveData(data, base)
+        }, "interactive-video")
+    }
+
+    /*
+     * 互动视频数据里的相对 URL → 绝对地址（cover / video / question.background
+     * 三处；已是 http(s)/file 的原样保留）。深拷贝节点再改写，不碰接口返回的
+     * 原始对象。
+     */
+    function resolveInteractiveUrl(base, url) {
+        if (url === undefined || url === null || url.toString() === "")
+            return ""
+
+        var s = url.toString()
+
+        if (s.indexOf("http://") === 0 || s.indexOf("https://") === 0
+                || s.indexOf("file:") === 0)
+            return s
+
+        /* 相对路径：以 / 开头直接拼基址，否则补一个 /（web 端同口径） */
+        return base + (s.charAt(0) === "/" ? s : "/" + s)
+    }
+
+    /*
+     * 互动视频数据整体处理：结构校验（必须有 nodes 表）+ 三类相对 URL 解析。
+     * 返回 null = 不当互动视频处理（InteractiveVideoLayer 整层隐藏）。
+     */
+    function resolveInteractiveData(data, base) {
+        if (!data || typeof data !== "object" || !data.nodes
+                || data.startNodeId === undefined)
+            return null
+
+        var nodes = {}
+
+        for (var id in data.nodes) {
+            var n = data.nodes[id]
+            if (!n || typeof n !== "object")
+                continue
+
+            /* 深拷贝（question 里还有嵌套），再改写其中的 URL 字段 */
+            var copy = JSON.parse(JSON.stringify(n))
+            copy.video = resolveInteractiveUrl(base, copy.video)
+            if (copy.cover !== undefined)
+                copy.cover = resolveInteractiveUrl(base, copy.cover)
+            if (copy.question && copy.question.background !== undefined)
+                copy.question.background = resolveInteractiveUrl(base, copy.question.background)
+            nodes[id] = copy
+        }
+
+        return {
+            videoId: data.videoId,
+            title: data.title,
+            startNodeId: data.startNodeId,
+            autoPlay: data.autoPlay !== undefined ? data.autoPlay : true,
+            nodes: nodes
+        }
     }
 
     /*
