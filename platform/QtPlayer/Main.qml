@@ -578,6 +578,26 @@ Window {
     /* 在飞的 XHR（换片时统一 abort，别让旧请求的回调再落地） */
     property var progressMetaRequests: []
 
+    /*
+     * 互动视频会话（华强买瓜，首页「播放互动视频」建立；普通片为 null）：
+     * { interactiveId, protocol, format, story } —— story 是已组装好的剧情树
+     * （节点带 avid，起始节点动态补全 video，skipStartApply=true），非空时
+     * fetchProgressMetaFrom 直接把它喂给 playerView.interactiveVideoData，
+     * 不再拉旧的 /interactive/data.json（避免旧数据覆盖会话）。
+     * 换片（playFile / playManifestObject / playManifestJson / playManifestFile）
+     * 统一清空；playInteractiveVideo 内部起播起始源时传 keepInteractive=true
+     * 跳过清理，起播完成后再建立会话。
+     */
+    property var interactiveSession: null
+
+    /*
+     * 互动视频会话的请求代次：再点一次「播放互动视频」/ 换普通片都 +1，
+     * 在飞的 story / playurl 回调（getInteractiveJson）一看代次不对就丢弃
+     * —— 和 progressMetaToken 一个口径，但独立计数：playInteractiveVideo
+     * 内部的起播（playFile）会递增 progressMetaToken，不能借用它。
+     */
+    property int interactivePlayToken: 0
+
     /* 换片时调用：清掉旧数据 + 把这一部标成"等播放开始就拉" */
     function resetProgressMeta() {
         progressMetaToken += 1
@@ -763,17 +783,27 @@ Window {
         }, "interaction")
 
         /*
-         * 互动视频（分支剧情）：GET /interactive/data.json（结构照 web 端
-         * interactive-video 插件的 InteractiveVideoPluginConfig ——
-         * startNodeId / nodes.{title, cover, video, question{...}}）。
+         * 互动视频（分支剧情）：普通片走旧链路拉 /interactive/data.json
+         * （结构照 web 端 interactive-video 插件的
+         * InteractiveVideoPluginConfig —— startNodeId /
+         * nodes.{title, cover, video, question{...}}）。
          * data.json 里的视频 / 封面 / 背景图都是**相对路径**（如
          * /interactive/videos/n1.mp4），在这里用 mock 基址解析成绝对地址后
          * 再喂给播放器视图（InteractiveVideoLayer 里直接拿来切源 / 显示）。
          * 接口不通 / 结构不对 = 整层静默不出现（和 interactionData 一个口径）。
+         *
+         * 【华强买瓜会话例外】interactiveSession 非空（首页「播放互动视频」
+         * 打开，起始源已起播）时，剧情树已随会话携带（节点带 avid、起始
+         * 节点动态补全 video、skipStartApply=true），直接喂给互动层，
+         * 不再拉旧接口 —— 免得旧 data.json 把会话剧情树覆盖掉。
          */
-        getProgressJson(base + "/interactive/data.json" + query, token, function (data) {
-            playerView.interactiveVideoData = root.resolveInteractiveData(data, base)
-        }, "interactive-video")
+        if (interactiveSession !== null) {
+            playerView.interactiveVideoData = interactiveSession.story
+        } else {
+            getProgressJson(base + "/interactive/data.json" + query, token, function (data) {
+                playerView.interactiveVideoData = root.resolveInteractiveData(data, base)
+            }, "interactive-video")
+        }
     }
 
     /*
@@ -1024,7 +1054,7 @@ Window {
      * Prepare() 完成后自动 Start()。这里**不要**再补一句 player.play()：那一刻新
      * 播放器还没 Prepare，调了也没用。
      */
-    function playFile(fileUrl) {
+    function playFile(fileUrl, keepInteractive) {
         if (fileUrl === undefined || fileUrl === null || fileUrl.toString() === "")
             return
 
@@ -1036,6 +1066,16 @@ Window {
         playerView.source = fileUrl
 
         loadSidecarDanmaku(fileUrl)
+
+        /*
+         * 换片清互动会话（keepInteractive=true 是 playInteractiveVideo 内部
+         * 起播起始源，会话在起播完成后立刻建立，别在这里清掉）。
+         */
+        if (keepInteractive !== true) {
+            interactiveSession = null
+            playerView.interactiveVideoResolver = null
+            interactivePlayToken += 1
+        }
 
         /*
          * 换片必清：分段/高能进度条那份数据先清空并作废在飞的请求，
@@ -2110,6 +2150,234 @@ Window {
     }
 
     /* =======================================================================
+     * 互动视频（华强买瓜）：首页「播放互动视频」入口 —— 协议 / 格式由首页
+     * 的两颗循环按钮决定（和 web 端 demo 页同一套 mock 接口、同一套语义）：
+     *   1. GET /api/interactive/story?interactiveId= → 剧情树（88 节点，
+     *      节点只带 avid 引用，cover 服务端已补全为绝对地址）；
+     *   2. GET /api/interactive/playurl?avid=&protocol=&format= → 起始节点
+     *      播放源：format=url 拿 MinIO 的 index.m3u8 / index.mpd 地址走
+     *      playFile；format=json 拿 SegmentBase 清单对象走 playManifestObject
+     *      （内核原生支持清单对象，和 web 端"对象直接注入播放器"同语义）；
+     *   3. 起始源起播后建立会话（interactiveSession）：剧情树 + 按协议 /
+     *      格式闭包好的分支解析器（interactiveVideoResolver）。
+     *      fetchProgressMetaFrom 的 playing 上升沿看到会话非空，直接把
+     *      剧情树喂给互动层（不再拉旧 data.json）；分支切换由
+     *      InteractiveVideoLayer 按 avid 调解析器（层内自带缓存 + 过期守卫）。
+     *
+     * 会话作废口径：再点一次播放 / 换普通片 → interactivePlayToken 递增，
+     * 在飞的 story / playurl 回调一律丢弃（getInteractiveJson 校验代次）。
+     * ======================================================================= */
+    function playInteractiveVideo(interactiveId, protocol, format) {
+        var token = ++interactivePlayToken
+
+        /* 统一失败出口：代次已过 = 用户已经又点了一次 / 换了片，这次结果作废 */
+        function fail(msg) {
+            if (token !== interactivePlayToken)
+                return
+            console.warn("[interactive] 播放互动视频失败：" + msg)
+            playerView.toast.show("互动视频：" + msg)
+        }
+
+        /* 基址：已知直接用；否则探测（9101 → 9000，和 fetchProgressMeta 同款） */
+        function withBase(continueWith) {
+            if (baseUrl !== "") {
+                continueWith(baseUrl)
+                return
+            }
+            detectMockBase(function (found) {
+                if (found === "") {
+                    fail("mock 服务不可用（先启动 mock-server）")
+                    return
+                }
+                continueWith(found)
+            })
+        }
+
+        withBase(function (base) {
+            /* 1. 拉剧情树 */
+            getInteractiveJson(base + "/api/interactive/story?interactiveId="
+                               + encodeURIComponent(interactiveId), token,
+                function (data) {
+                    if (data === null) {
+                        fail("剧情树拉取失败")
+                        return
+                    }
+                    if (!data.nodes || data.startNodeId === undefined
+                            || !data.nodes[data.startNodeId]) {
+                        fail("剧情树结构不对")
+                        return
+                    }
+
+                    /* 2. 解析起始节点播放源 */
+                    var startNode = data.nodes[data.startNodeId]
+                    var avid = startNode.avid !== undefined ? ("" + startNode.avid) : ""
+                    if (avid === "") {
+                        fail("起始节点缺 avid")
+                        return
+                    }
+
+                    resolveInteractivePlayUrl(base, avid, protocol, format, token,
+                        function (source, ok, why) {
+                            if (!ok) {
+                                fail(why)
+                                return
+                            }
+
+                            /* 3. 组装剧情树：深拷贝节点（不碰接口原始对象），
+                               起始节点动态补 video（起始源已解析好，首次应用 /
+                               重播走同源短路，不再发 playurl 请求）；
+                               skipStartApply：起始源马上主动起播，互动层初始
+                               化时只记账不重切（对齐 web 端"业务已配置 src
+                               时插件不覆盖起播内容"的分支）。 */
+                            var nodes = {}
+                            for (var id in data.nodes)
+                                nodes[id] = JSON.parse(JSON.stringify(data.nodes[id]))
+                            nodes[data.startNodeId].video = source
+                            var story = {
+                                startNodeId: data.startNodeId,
+                                autoPlay: true,
+                                skipStartApply: true,
+                                nodes: nodes
+                            }
+
+                            /* 4. 起播起始源（keepInteractive=true：这是会话
+                               自己的起播，别把刚要建立的会话清掉；resetProgressMeta
+                               的上升沿晚于这一步，到时能看到会话并喂剧情树） */
+                            if (format === "json") {
+                                var title = data.title !== undefined ? ("" + data.title) : ("" + interactiveId)
+                                if (!playManifestObject(source, "互动视频 · " + title, true)) {
+                                    fail("清单对象被播放器拒绝（看日志）")
+                                    return
+                                }
+                            } else {
+                                playFile(source, true)
+                            }
+
+                            /* 5. 建立会话 + 注入分支解析器 */
+                            interactiveSession = {
+                                interactiveId: interactiveId,
+                                protocol: protocol,
+                                format: format,
+                                story: story
+                            }
+                            playerView.interactiveVideoResolver =
+                                    makeInteractiveResolver(base, protocol, format, token)
+
+                            console.log("[interactive] 互动视频会话已建立：" + interactiveId
+                                        + "（" + protocol + " × " + format + "，起始 "
+                                        + data.startNodeId + "）")
+                        })
+                })
+        })
+    }
+
+    /*
+     * 互动视频专用的 JSON GET（照 getProgressJson 的降级口径，但**不走**
+     * progressMetaToken / progressMetaRequests 体系：playInteractiveVideo
+     * 内部的 playFile 会递增 progressMetaToken，借用它会把自己作废）。
+     * 代次校验用 interactivePlayToken；失败统一回调 onDone(null)。
+     */
+    function getInteractiveJson(url, token, onDone) {
+        var xhr = new XMLHttpRequest()
+
+        xhr.onreadystatechange = function () {
+            if (xhr.readyState !== 4)        /* 4 = XMLHttpRequest.DONE */
+                return
+
+            /* 代次不对 = 会话已被更新的一次播放取代，结果作废（日志都不打） */
+            if (token !== interactivePlayToken)
+                return
+
+            if (xhr.status !== 200) {
+                console.warn("[interactive] HTTP " + xhr.status + "（" + url + "）")
+                onDone(null)
+                return
+            }
+
+            var root = null
+
+            try {
+                root = JSON.parse(xhr.responseText)
+            } catch (e) {
+                console.warn("[interactive] 返回的不是 JSON（" + url + "）")
+                onDone(null)
+                return
+            }
+
+            if (!root || root.code !== 0) {
+                console.warn("[interactive] 接口 code=" + (root ? root.code : "null")
+                             + "：" + (root && root.message ? root.message : url))
+                onDone(null)
+                return
+            }
+
+            onDone(root.data)
+        }
+
+        xhr.ontimeout = function () {
+            if (token === interactivePlayToken)
+                console.warn("[interactive] 超时（" + url + "）")
+        }
+        xhr.onerror = function () {
+            if (token === interactivePlayToken)
+                console.warn("[interactive] 连不上（" + url + "）")
+        }
+
+        xhr.open("GET", url)
+        xhr.timeout = 8000
+        xhr.send()
+    }
+
+    /*
+     * playurl 解析：按 avid + 协议 + 格式请求 /api/interactive/playurl。
+     *   format=url  → onDone(地址字符串, true, "")
+     *   format=json → onDone(SegmentBase 清单对象, true, "")
+     * 失败 → onDone(null, false, 原因)
+     */
+    function resolveInteractivePlayUrl(base, avid, protocol, format, token, onDone) {
+        var url = base + "/api/interactive/playurl?avid=" + encodeURIComponent(avid)
+                + "&protocol=" + encodeURIComponent(protocol)
+                + "&format=" + encodeURIComponent(format)
+
+        getInteractiveJson(url, token, function (data) {
+            if (data === null || data.playUrl === undefined) {
+                onDone(null, false, "avid=" + avid + " playurl 解析失败（看日志）")
+                return
+            }
+            if (format === "json") {
+                if (data.manifest === undefined || data.manifest === null) {
+                    onDone(null, false, "avid=" + avid + " playurl 未返回清单对象")
+                    return
+                }
+                onDone(data.manifest, true, "")
+            } else {
+                onDone(("" + data.playUrl), true, "")
+            }
+        })
+    }
+
+    /*
+     * 分支解析器工厂（发给 InteractiveVideoLayer 的 videoResolver）：
+     * 闭包携带会话的基址 / 协议 / 格式 / 代次 —— 会话内协议格式固定，
+     * 重选需回首页再点一次「播放互动视频」（对齐 web demo 的口径）。
+     * 层内按 avid 缓存 + 过期守卫，这里只做无状态的网络解析。
+     */
+    function makeInteractiveResolver(base, protocol, format, token) {
+        return function (node, onDone) {
+            var avid = node.avid !== undefined ? ("" + node.avid) : ""
+            if (avid === "") {
+                onDone(null)
+                return
+            }
+            resolveInteractivePlayUrl(base, avid, protocol, format, token,
+                function (source, ok) {
+                    onDone(ok ? source : null)
+                })
+        }
+    }
+
+
+    /* =======================================================================
      * 用**清单对象**播放（首页"清单对象"入口、命令行 .json、或集成方直接调用）
      *
      * 走的链路和"给个 URL"完全不同的只有**片源从哪来**这一步：
@@ -2128,7 +2396,7 @@ Window {
      * 分片管线由对象里的 mediaSourceType 决定（缺省 hls，见 MediaManifest.h）。
      * ======================================================================= */
 
-    function playManifestObject(manifest, name) {
+    function playManifestObject(manifest, name, keepInteractive) {
         if (manifest === null || manifest === undefined) {
             console.warn("[player] playManifestObject: 空对象，忽略")
             return false
@@ -2137,6 +2405,16 @@ Window {
         /* 网络/对象片源都不在播放列表里，清掉，免得"上一个/下一个"挂在上一条视频上
          * （和 playUrl 同一个理由）。 */
         library = null
+
+        /*
+         * 换片清互动会话（keepInteractive=true 是 playInteractiveVideo 内部
+         * 起播起始清单对象，会话在起播完成后立刻建立，别在这里清掉）。
+         */
+        if (keepInteractive !== true) {
+            interactiveSession = null
+            playerView.interactiveVideoResolver = null
+            interactivePlayToken += 1
+        }
 
         player.manifestHint = (name === undefined || name === null) ? "" : ("" + name)
 
@@ -2172,6 +2450,11 @@ Window {
 
         library = null
 
+        /* 换片清互动会话（清单文本是"用户换片"入口之一，口径同 playManifestObject） */
+        interactiveSession = null
+        playerView.interactiveVideoResolver = null
+        interactivePlayToken += 1
+
         player.manifestHint = (name === undefined || name === null) ? "" : ("" + name)
 
         var ok
@@ -2205,6 +2488,11 @@ Window {
         }
 
         library = null
+
+        /* 换片清互动会话（清单文件是"用户换片"入口之一，口径同 playManifestObject） */
+        interactiveSession = null
+        playerView.interactiveVideoResolver = null
+        interactivePlayToken += 1
 
         var ok
 

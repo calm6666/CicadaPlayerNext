@@ -72,14 +72,29 @@ Item {
        相对 URL 已在 Main.qml 解析成绝对地址） */
     property var interactiveData: null
 
+    /*
+     * 视频源解析器（经 PlayerView 注入）：
+     * function(node, onDone)，onDone(source) —— source 为播放地址字符串或
+     * SegmentBase 清单对象，解析失败回调 null。
+     * 节点带 avid 且未直接给 video 时（mock 剧情树场景），本层按 avid 调它
+     * 换取真实播放源（对齐 web 端插件 config.resolveVideo 的角色）；
+     * null = 旧 data.json 链路（节点必须自带 video 字段）。
+     */
+    property var videoResolver: null
+
     /* 是否全屏（剧情进度条上移到 98px，照 web 的 [data-screen="full"] 档） */
     property bool fullscreen: false
 
     /* 控制栏当前是否显示（PlayerView 喂 controlBar.shown）—— 驱动整层联动显隐 */
     property bool controlsShown: true
 
-    /* 请求切换片源（PlayerView 接到后写 playerView.source，销毁重建自动起播） */
-    signal sourceSwitchRequested(url source)
+    /*
+     * 请求切换片源（PlayerView 接到后分流：字符串地址写 playerView.source
+     * 销毁重建自动起播；清单对象走 player.setManifest —— 对齐 web 端
+     * "URL 注入 / 清单对象注入"两种模式）。name 为节点标题（对象源时
+     * 作为 manifestHint 显示用）。
+     */
+    signal sourceSwitchRequested(var source, string name)
 
     /*
      * 请求收起控制栏（播完弹出问题 / 显示重播时：控制栏与其它 UI 隐藏，
@@ -124,6 +139,56 @@ Item {
      */
     property int endFrameRevision: 0
 
+    /*
+     * 选项按钮横向流式布局（对齐 web 端 questionCanvas.layoutOptionRects）：
+     * 一行放不下自动换到下一行，每行按该行实际按钮数水平居中，
+     * 题目（36 高）+ 按钮组（300×52、间距 20 行内 / 行间一致）整体垂直居中。
+     * 绑定求值每次生成新对象引用，currentQuestion 变化（path /
+     * interactiveData 整体替换驱动）与层尺寸变化（窗口缩放 / 全屏切换）
+     * 都会重算 —— 等价 web 端 effect 重绘 + ResizeObserver 重排。
+     */
+    readonly property var optionLayout: {
+        var q = interactiveVideoLayer.currentQuestion
+        var opts = (q !== undefined && q !== null && q.options !== undefined)
+                   ? q.options : []
+        var n = opts.length
+        var rects = []
+        var titleY = 0
+        var titleVisible = false
+        if (n > 0) {
+            var buttonWidth = 300
+            var buttonHeight = 52
+            var gap = 20
+            var hasTitle = q.title !== undefined && q.title !== ""
+            var titleHeight = hasTitle ? 36 : 0
+            titleVisible = hasTitle
+
+            var W = interactiveVideoLayer.width
+            var H = interactiveVideoLayer.height
+
+            /* 每行可容纳的按钮数（层过窄时至少 1 个：单按钮独占一行） */
+            var cols = Math.max(1, Math.floor((W + gap) / (buttonWidth + gap)))
+            var rows = Math.ceil(n / cols)
+
+            var totalH = rows * buttonHeight + (rows - 1) * gap + titleHeight
+            var startY = Math.max(0, (H - totalH) / 2)
+            titleY = startY
+
+            for (var i = 0; i < n; i++) {
+                var row = Math.floor(i / cols)
+                var col = i % cols
+                /* 该行实际按钮数（末行可能不满 cols 个） */
+                var rowCount = Math.min(cols, n - row * cols)
+                var rowW = rowCount * buttonWidth + (rowCount - 1) * gap
+                rects.push({
+                    x: (W - rowW) / 2 + col * (buttonWidth + gap),
+                    y: startY + titleHeight + row * (buttonHeight + gap)
+                })
+            }
+        }
+        return { rects: rects, titleY: titleY, titleVisible: titleVisible }
+    }
+
     /* 播放时钟（秒）：position 每次变化都重算下方整棵绑定树 */
     readonly property real clockSec: interactiveVideoLayer.player !== null
                                      ? interactiveVideoLayer.player.position / 1000 : 0
@@ -164,6 +229,28 @@ Item {
      */
     property var storyEntries: []
 
+    /*
+     * avid → 已解析播放源的缓存（对齐 web 端 videoSourceCache）：
+     * 同一节点回看 / 重播直接命中，不重复请求 playurl。
+     * 会话结束（interactiveData 置空）/ 新会话到达时整体清空。
+     */
+    property var sourceCache: ({})
+
+    /*
+     * 正在异步解析视频源的节点 id（对齐 web 端 pendingVideoNodeId 过期守卫）：
+     * 进入解析前标记，回调到达先校验 —— 期间用户又选了新分支的话，
+     * 过期请求的结果直接丢弃，不覆盖新分支。
+     */
+    property string pendingNodeId: ""
+
+    /*
+     * 当前已加载源的记账 key（nodeKey：avid 优先，无 avid 用 "url:地址"）：
+     * 同 key 再应用 = 同源重播，走 seek(0)+play()（对象源没有地址可比，
+     * 清单对象的 source 在内核里是空的 —— 见 PlayerView L338 的注释，
+     * 所以对象源的同源判断只能靠这份记账）。
+     */
+    property string loadedSourceKey: ""
+
     // ---------------------------------------------------------------------
     // 数据到达：初始化会话（对齐 web initAfterMounted 的初始渲染 + 起播）
     // ---------------------------------------------------------------------
@@ -181,6 +268,10 @@ Item {
             countdownVisible = false
             replayVisible = false
             endFrameRevision = 0
+            /* 会话级状态一并清空（在飞解析结果作废 + 缓存丢弃 + 记账复位） */
+            pendingNodeId = ""
+            sourceCache = ({})
+            loadedSourceKey = ""
             return
         }
 
@@ -192,37 +283,135 @@ Item {
         countdownVisible = false
         replayVisible = false
         endFrameRevision = 0
+        /* 新会话 = 新缓存（对齐 web 端"插件实例级缓存，随实例销毁"的口径） */
+        sourceCache = ({})
+        pendingNodeId = ""
+        loadedSourceKey = ""
         rebuildStoryEntries()
 
         /*
-         * 起始节点起播：QtPlayer 的片源是用户打开的任意视频（对应 web 端
-         * "业务已配置 src"），但互动会话必须从起始节点开始 —— 当前源不是
-         * 起始节点视频时切过去（是的话保持播放，不重开）。
+         * 起始节点起播：
+         *   * 旧 data.json 链路：当前源不是起始节点视频时切过去（是的话
+         *     applyNodeSource 的同源短路会走 seek(0)+play()，不重开）；
+         *   * 华强买瓜会话（skipStartApply=true）：起始源已由 Main.qml 的
+         *     playInteractiveVideo 主动起播（URL 走 playFile / 清单对象走
+         *     playManifestObject），这里只记账不重切 —— 对齐 web 端
+         *     "业务已配置 src 时插件不覆盖起播内容"的分支。
          */
         var node = storyNodes[interactiveData.startNodeId]
-        if (node !== undefined && player !== null)
-            applyNodeSource(node.video)
+        if (node === undefined || player === null)
+            return
+        if (interactiveData.skipStartApply === true)
+            loadedSourceKey = nodeKey(interactiveData.startNodeId)
+        else
+            applyNodeSource(interactiveData.startNodeId)
     }
 
     /*
-     * 应用节点片源：地址与当前一致时 setSource 会短路（见
-     * CicadaPlayerItem::setSource 的同地址短路），改走 seek(0) + play()
-     * 实现同节点重播；地址不同则发信号由 PlayerView 换源
-     * （setSource 销毁重建 + autoPlay 自动起播，不要在这里补 play()）。
+     * 节点的源记账 key：avid 优先（华强买瓜节点都带），无 avid 的旧链路
+     * 用 "url:地址"，再兜底 "node:节点id"。空 = 拿不到 key。
      */
-    function applyNodeSource(videoUrl) {
-        if (player === null || videoUrl === undefined || videoUrl === null)
+    function nodeKey(nodeId) {
+        var node = storyNodes !== null ? storyNodes[nodeId] : undefined
+        if (node === undefined)
+            return ""
+        if (node.avid !== undefined && ("" + node.avid) !== "")
+            return "" + node.avid
+        if (node.video !== undefined && node.video !== null
+                && node.video.toString() !== "")
+            return "url:" + node.video.toString()
+        return "node:" + nodeId
+    }
+
+    /*
+     * 应用节点片源（对齐 web 端 loadNodeVideo 的三级顺序）：
+     *   A. 节点自带 video（旧 data.json 链路 / 起始节点动态补全）→ 同步应用；
+     *   B. 节点带 avid 且有解析器 → 查缓存，未命中异步请求 playurl
+     *      （协议 / 格式由解析器闭包携带），解析期间新切换请求到达则
+     *      过期丢弃（pendingNodeId 守卫）；
+     *   C. 都没有 → 警告并放弃（与 web 端 console.warn 同口径）。
+     */
+    function applyNodeSource(nodeId) {
+        if (player === null || storyNodes === null)
             return
 
-        var want = videoUrl.toString()
-        var current = player.source.toString()
+        var node = storyNodes[nodeId]
+        if (node === undefined)
+            return
 
-        if (want === current) {
+        /* A. 现成源：直接应用（起始节点动态补全 / 旧链路节点） */
+        if (node.video !== undefined && node.video !== null
+                && node.video.toString() !== "") {
+            applyResolvedSource(node.video, nodeId)
+            return
+        }
+
+        /* B. avid 异步解析 */
+        var resolver = videoResolver
+        var avid = node.avid !== undefined ? ("" + node.avid) : ""
+
+        if (avid === "" || resolver === null) {
+            console.warn("[interactiveVideo] 节点 " + nodeId
+                         + " 缺少视频源：需要 video 或（avid + 解析器）")
+            return
+        }
+
+        /* 缓存命中：回看 / 重播不重复请求（对齐 web 端 videoSourceCache） */
+        if (Object.prototype.hasOwnProperty.call(sourceCache, avid)) {
+            applyResolvedSource(sourceCache[avid], nodeId)
+            return
+        }
+
+        /* 异步解析：进入即标记最新请求（必须先于任何回调），回调先校验代次 */
+        pendingNodeId = nodeId
+        resolver(node, function (source) {
+            if (pendingNodeId !== nodeId || player === null)
+                return
+            pendingNodeId = ""
+            if (source === null || source === undefined) {
+                console.warn("[interactiveVideo] 节点 " + nodeId + "（avid="
+                             + avid + "）playurl 解析失败")
+                return
+            }
+            sourceCache[avid] = source
+            applyResolvedSource(source, nodeId)
+        })
+    }
+
+    /*
+     * 应用已解析的播放源（字符串地址或清单对象）：
+     *   * 字符串地址与播放器当前地址一致 = 同源重播（原 applyNodeSource
+     *     的比较口径：setSource 同地址会短路且不重播，必须显式 seek(0)+play()）；
+     *   * 记账 key 与当前一致（对象源 / 已缓存的地址源）= 同源重播同上；
+     *   * 不同源 → 发信号由 PlayerView 分流换源（字符串写 source /
+     *     对象走 setManifest），并更新记账。
+     */
+    function applyResolvedSource(source, nodeId) {
+        var key = nodeKey(nodeId)
+
+        /* 字符串地址与当前一致：同源重播（原语义保留） */
+        if (typeof source === "string" && player !== null
+                && source === player.source.toString()) {
             player.seek(0)
             player.play()
-        } else {
-            sourceSwitchRequested(videoUrl)
+            if (key !== "")
+                loadedSourceKey = key
+            return
         }
+
+        /* 记账一致（对象源重播 / 缓存命中的地址源）：seek(0)+play() */
+        if (key !== "" && key === loadedSourceKey && player !== null) {
+            player.seek(0)
+            player.play()
+            return
+        }
+
+        var node = storyNodes !== null ? storyNodes[nodeId] : undefined
+        var name = (node !== undefined && node.title !== undefined)
+                ? ("" + node.title) : ""
+        sourceSwitchRequested(source, name)
+        if (key !== "")
+            loadedSourceKey = key
     }
 
     // ---------------------------------------------------------------------
@@ -411,7 +600,7 @@ Item {
         endFrameRevision = 0
         storyVisible = true
 
-        applyNodeSource(node.video)
+        applyNodeSource(nodeId)
     }
 
     // ---------------------------------------------------------------------
@@ -691,14 +880,19 @@ Item {
             onClicked: function (mouse) { mouse.accepted = true }
         }
 
-        /* 题目 + 选项按钮组（垂直居中；按钮 300×52、纵距 20、题高 36） */
-        Column {
-            anchors.centerIn: parent
-            spacing: 20
+        /*
+         * 题目 + 选项按钮组（横向流式布局：坐标由 optionLayout 计算 ——
+         * 一行放不下自动换行、每行按实际按钮数水平居中、整体含题目
+         * 垂直居中，对齐 web 端 layoutOptionRects 的同一套算法）
+         */
+        Item {
+            anchors.fill: parent
 
             /* 题目文案（可选；白 18px 600，Raised 样式近似 canvas 阴影） */
             Text {
-                visible: text !== ""
+                visible: interactiveVideoLayer.optionLayout.titleVisible
+                y: interactiveVideoLayer.optionLayout.titleY
+                anchors.horizontalCenter: parent.horizontalCenter
                 height: 36
                 verticalAlignment: Text.AlignVCenter
                 text: (interactiveVideoLayer.currentQuestion !== undefined
@@ -721,10 +915,18 @@ Item {
                 delegate: Item {
                     id: optionButton
 
+                    /* 流式布局坐标（optionLayout 重算时整体刷新；
+                       过渡瞬间的越界下标以 null 兜底到 0） */
+                    readonly property var rect: index < interactiveVideoLayer.optionLayout.rects.length
+                                                ? interactiveVideoLayer.optionLayout.rects[index]
+                                                : null
+                    x: rect !== null ? rect.x : 0
+                    y: rect !== null ? rect.y : 0
+
                     width: 300
                     height: 52
 
-                    /* 悬停态（遮罩减淡 / 描边与文字转蓝 / 中心放大 1.07） */
+                    /* 悬停态（遮罩减淡 / 文字转蓝 / 中心放大 1.07；描边恒定白色） */
                     property bool hovered: optionArea.containsMouse
 
                     /*
@@ -777,14 +979,13 @@ Item {
                         opacity: optionButton.hovered ? 0.35 : 0.55
                     }
 
-                    /* 3. 描边（悬停高亮 #00A1D6 2px / 常态白 80% 1.5px） */
+                    /* 3. 描边（白色边框恒定不变色：悬停反馈只保留平滑放大，对齐 web 端） */
                     Rectangle {
                         anchors.fill: parent
                         radius: 8
                         color: "transparent"
                         border.width: optionButton.hovered ? 2 : 1.5
-                        border.color: optionButton.hovered
-                                       ? "#00A1D6" : Qt.rgba(1, 1, 1, 0.8)
+                        border.color: Qt.rgba(1, 1, 1, 0.8)
                     }
 
                     /* 4. 选项文字（前缀 + 文案居中；悬停转蓝） */

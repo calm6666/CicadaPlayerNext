@@ -531,6 +531,44 @@ Window {
                                ? "interactive" : "edit"
             }
 
+            /*
+             * 互动视频（华强买瓜）：协议 / 格式两颗循环切换按钮 + 一颗播放按钮，
+             * 对齐 web 端 demo 页的「协议 × playurl 格式」选择 —— 走同一套 mock
+             * 接口（/api/interactive/story 拿剧情树，节点带 avid；分支切换由播放
+             * 器窗口按 avid 请求 /api/interactive/playurl 换源）。
+             *   * 协议：HLS（index.m3u8）/ DASH（index.mpd），决定 playurl 的
+             *     protocol 参数；
+             *   * 格式：URL（MinIO 清单地址，走 setSource）/ JSON（SegmentBase
+             *     清单对象，直接喂内核 setManifest，零清单网络请求）。
+             * 起始节点源由播放器窗口解析起播，剧情树随会话喂给互动层；倒计时、
+             * 分支选择、重播全部是既有 InteractiveVideoLayer 的能力。
+             */
+            Button {
+                text: home.hqProtocol === "dash"
+                      ? qsTr("互动协议:DASH")
+                      : qsTr("互动协议:HLS")
+                onClicked: home.hqProtocol =
+                           (home.hqProtocol === "dash") ? "hls" : "dash"
+            }
+
+            Button {
+                text: home.hqFormat === "json"
+                      ? qsTr("互动格式:JSON")
+                      : qsTr("互动格式:URL")
+                onClicked: home.hqFormat =
+                           (home.hqFormat === "json") ? "url" : "json"
+            }
+
+            Button {
+                text: qsTr("播放互动视频")
+                onClicked: {
+                    if (home.ensurePlayerWindow() === null)
+                        return
+                    playerWindow.playInteractiveVideo("huaqiang", home.hqProtocol, home.hqFormat)
+                    home.showPlayerWindow()
+                }
+            }
+
             Text {
                 anchors.verticalCenter: parent.verticalCenter
                 text: library.scanning ? qsTr("扫描中…")
@@ -1374,6 +1412,18 @@ Window {
      * ===========================================================================
      */
     property var playerWindow: null
+
+    /*
+     * 互动视频（华强买瓜）的协议 / 格式选择 —— 和 web 端 demo 页同一套：
+     *   hqProtocol：播放走 HLS 还是 DASH（playurl 接口的 protocol 参数）；
+     *   hqFormat：playurl 返回 m3u8/mpd 地址（url）还是 SegmentBase 清单
+     *   对象（json，直接喂内核、不走清单网络请求）。
+     * 状态存在首页，点「播放互动视频」时一次性带给播放器窗口
+     * （playerWindow.playInteractiveVideo），会话内协议格式固定，
+     * 重选需回首页再点一次播放（对齐 web demo 的口径）。
+     */
+    property string hqProtocol: "hls"
+    property string hqFormat: "url"
 
     /*
      * Main.qml 的组件对象，**只建一次、进程内复用**。

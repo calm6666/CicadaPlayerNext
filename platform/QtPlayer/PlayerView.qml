@@ -116,6 +116,14 @@ Item {
     property var interactiveVideoData: null
 
     /*
+     * 互动视频源解析器（华强买瓜会话由 Main.qml 注入，普通片为 null）：
+     * function(node, onDone(source))。转发给 InteractiveVideoLayer 的
+     * videoResolver —— 层内按 avid 调它请求 playurl（协议 / 格式闭包在
+     * Main.qml 的 makeInteractiveResolver 里），并自带按 avid 缓存。
+     */
+    property var interactiveVideoResolver: null
+
+    /*
      * mock 服务基址：外面（Main.qml）喂进来给设置面板显示，用户在面板里改完再由下面的信号转出去。
      * 播放器自己**不关心 mock 基址在哪**，它只做"转交"（和 episodes / hasPrevious 一个路子）。
      */
@@ -212,6 +220,14 @@ Item {
      */
     property bool pointerOnCloseCircle: false
 
+    /*
+     * 互动视频播完锁定（对齐 web 端 data-interactive-ended 属性协议）：
+     * 播完弹出问题 / 显示重播时置 true —— kickAutoHide 直接返回（鼠标
+     * 移入不再唤起控制栏 / 顶栏）、指针不隐藏；起播（playing 变 true，
+     * 即选分支切源 / 重播）时解除，控制栏联动恢复。
+     */
+    property bool interactiveEnded: false
+
     /* -----------------------------------------------------------------------
      * 画面 + 提示文字
      * ----------------------------------------------------------------------- */
@@ -234,6 +250,15 @@ Item {
 
     Connections {
         target: player
+
+        /*
+         * 起播 = 解除互动播完锁定（选分支切源 / 重播都会重新起播，
+         * 对齐 web 端插件订阅 PLAY 事件清 data-interactive-ended）
+         */
+        function onPlayingChanged() {
+            if (player.playing)
+                playerView.interactiveEnded = false
+        }
 
         function onQualitySwitchStatusChanged(status, streamIndex, description) {
             var label = playerView.qualityLabelForStream(streamIndex)
@@ -560,16 +585,40 @@ Item {
         player: player
         fullscreen: playerView.fullscreen
         interactiveData: playerView.interactiveVideoData
+        /* 源解析器随会话由 Main.qml 注入（普通片为 null：节点必须自带 video） */
+        videoResolver: playerView.interactiveVideoResolver
         /* 整层随控制栏显隐（层内有"问题 / 重播显示中"的激活例外） */
         controlsShown: controlBar.shown
 
-        onSourceSwitchRequested: function (source) {
-            playerView.source = source
+        /*
+         * 节点切换 / 重播要换片源 —— 按源的形态分流（对齐 web 端
+         * "URL 注入 / 清单对象注入"两种模式）：
+         *   * 字符串地址（format=url 的 playUrl / 旧 data.json 的 video）
+         *     → 只写 source：setSource 销毁重建 + autoPlay 自动起播，
+         *     不要在这里补 player.play()（新播放器还没 Prepare）；
+         *   * 清单对象（format=json 的 SegmentBase manifest）→ 走
+         *     setManifest（内核原生支持，管线见 Main.qml playManifestObject
+         *     的注释）。name 作 manifestHint（日志 / 界面提示用）。
+         * 两条路都不走 playFile / playManifestObject：那是"用户换片"的
+         * 入口（会清互动会话 + 重置弹幕 / 重拉元数据），互动会话的节点
+         * 切换不该打断这些数据。
+         */
+        onSourceSwitchRequested: function (source, name) {
+            if (typeof source === "string") {
+                player.manifestHint = ""
+                playerView.source = source
+            } else {
+                player.manifestHint = (name !== undefined && name !== null)
+                        ? ("" + name) : ""
+                player.setManifest(source)
+            }
         }
 
         onHideControlsRequested: {
             controlBar.shown = false
             hideTimer.stop()
+            /* 播完锁定：起播前鼠标移入不再唤起控制栏 / 顶栏（见 kickAutoHide） */
+            playerView.interactiveEnded = true
         }
     }
 
@@ -721,6 +770,12 @@ Item {
 
     /* 显示控制栏并把 3 秒倒计时重新开始（外面也可以调） */
     function kickAutoHide() {
+        /*
+         * 互动视频播完锁定：控制栏 / 顶栏不再随鼠标移入唤起，
+         * 只留问题画布与重播可交互（起播时解除，见 onPlayingChanged）
+         */
+        if (interactiveEnded)
+            return
         controlBar.shown = true
         hideTimer.restart()
         playerView.activity()
@@ -776,6 +831,7 @@ Item {
          * 指针永远不藏（这就是"鼠标指针隐藏没实现"的原因）。
          *
          * 两种情况不能藏：外面有模态层开着；鼠标不在窗口里（lastMouseY 是 -1）。
+         * 第三种：互动视频播完锁定中（问题画布要指着点，指针不能消失）。
          *
          * 【第三态：小手】悬停在交互卡片的关闭环热区上时给 PointingHandCursor
          * （用户要求：展示模式鼠标移到关闭按钮上指针变小手）。环在卡身矩形外、
@@ -784,7 +840,8 @@ Item {
          * 指针都藏了（控制栏收起且没动鼠标）就没有"看得见的小手"这回事，
          * 鼠标一动控制栏回来、小手自然出现，两边不打架。
          */
-        cursorShape: (!controlBar.shown && !playerView.overlayOpen && playerView.lastMouseY >= 0)
+        cursorShape: (!controlBar.shown && !playerView.interactiveEnded
+                      && !playerView.overlayOpen && playerView.lastMouseY >= 0)
                      ? Qt.BlankCursor
                      : (playerView.pointerOnCloseCircle ? Qt.PointingHandCursor : Qt.ArrowCursor)
 
