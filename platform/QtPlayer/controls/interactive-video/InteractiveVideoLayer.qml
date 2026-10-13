@@ -142,7 +142,9 @@ Item {
     /*
      * 选项按钮横向流式布局（对齐 web 端 questionCanvas.layoutOptionRects）：
      * 一行放不下自动换到下一行，每行按该行实际按钮数水平居中，
-     * 题目（36 高）+ 按钮组（300×52、间距 20 行内 / 行间一致）整体垂直居中。
+     * 题目（36 高）+ 按钮组（宽度自适应、间距 20 行内 / 行间一致）整体垂直居中。
+     * 按钮宽度照 web 端 computeButtonWidth：min(300, max(200, 层宽 * 0.78))
+     * —— 播放器窄时收窄、宽时封顶 300（全屏 / 非全屏 / 窗口缩放都随之变换）。
      * 绑定求值每次生成新对象引用，currentQuestion 变化（path /
      * interactiveData 整体替换驱动）与层尺寸变化（窗口缩放 / 全屏切换）
      * 都会重算 —— 等价 web 端 effect 重绘 + ResizeObserver 重排。
@@ -155,9 +157,11 @@ Item {
         var rects = []
         var titleY = 0
         var titleVisible = false
+        var buttonWidth = 300
+        var buttonHeight = 52
         if (n > 0) {
-            var buttonWidth = 300
-            var buttonHeight = 52
+            buttonWidth = Math.min(300,
+                Math.max(200, interactiveVideoLayer.width * 0.78))
             var gap = 20
             var hasTitle = q.title !== undefined && q.title !== ""
             var titleHeight = hasTitle ? 36 : 0
@@ -186,7 +190,8 @@ Item {
                 })
             }
         }
-        return { rects: rects, titleY: titleY, titleVisible: titleVisible }
+        return { rects: rects, titleY: titleY, titleVisible: titleVisible,
+                 buttonWidth: buttonWidth, buttonHeight: buttonHeight }
     }
 
     /* 播放时钟（秒）：position 每次变化都重算下方整棵绑定树 */
@@ -228,6 +233,30 @@ Item {
      * { index: 视觉下标（悬停卡片定位用）, title, cover, isCurrent }
      */
     property var storyEntries: []
+
+    /*
+     * 剧情进度条动态布局（照 web 端 computeWrapLayout）：
+     * 圆点固定 40 不缩小、间距 10 —— 节点太多导致整行超过层宽 80%
+     * 时自动换行（每行内容居中），barWidth / barHeight 为胶囊条总
+     * 尺寸（左右各 5px 内边距 + 圆点 + 间距 / 行数 × 40 + 行间距）。
+     * 层宽 / 节点数变化自动重算，等价 web 端 layerWidth 信号驱动的
+     * flex-wrap 换行重排。
+     */
+    readonly property var storyLayout: {
+        var count = storyEntries.length
+        if (count <= 0)
+            return { cols: 1, barWidth: 10, barHeight: 40 }
+        /* 内容可用最大宽度（窄屏至少容纳 2 个圆点） */
+        var maxWidth = Math.max(90, width * 0.8)
+        /* 单行容纳数：n 个圆点占 n*40 + (n-1)*10 ≤ maxWidth */
+        var cols = Math.max(1, Math.floor((maxWidth + 10) / 50))
+        var usedCols = Math.min(count, cols)
+        var contentWidth = usedCols * 40 + (usedCols - 1) * 10
+        var rows = Math.ceil(count / cols)
+        return { cols: cols,
+                 barWidth: contentWidth + 10,
+                 barHeight: rows * 40 + (rows - 1) * 10 }
+    }
 
     /*
      * avid → 已解析播放源的缓存（对齐 web 端 videoSourceCache）：
@@ -428,8 +457,10 @@ Item {
                     continue
 
                 entries.push({
-                    /* 视觉下标（过滤后连续，悬停卡片 left 定位用） */
+                    /* 视觉下标（过滤后连续，悬停卡片定位 / 点击跳转用） */
                     index: entries.length,
+                    /* 节点 id（点击圆点跳回该节点用） */
+                    nodeId: path[i].nodeId,
                     title: node.title !== undefined ? node.title : "",
                     cover: node.cover !== undefined ? node.cover : "",
                     /* 最后一项 = 正在观看（位置图标），其余为已看完（打勾） */
@@ -663,10 +694,10 @@ Item {
     // ---------------------------------------------------------------------
 
     /*
-     * 胶囊条：底部居中悬浮（普通 70px / 全屏 98px），黑 30% 圆角 20，
-     * 高 40；宽度 = 圆点行宽（每节点 50px：40 圆点 + 左右各 5px 间距），
-     * 节点数变化时 600ms 平滑伸缩（照 .nova-player-interaction-oval 的
-     * transition: 0.6s ease-out）。
+     * 胶囊条：底部居中悬浮（普通 70px / 全屏 98px），黑 30% 圆角 20；
+     * 高度 / 宽度由 storyLayout 动态给出（圆点固定 40 不缩小，节点
+     * 太多时换行、每行内容居中），节点数变化时 600ms 平滑伸缩
+     * （照 .nova-player-interaction-oval 的 transition: 0.6s ease-out）。
      */
     Rectangle {
         id: storyBar
@@ -676,10 +707,10 @@ Item {
         anchors.bottom: parent.bottom
         /* 全屏档 98px（web 的 [data-screen="full"]/["web"] 段同款） */
         anchors.bottomMargin: interactiveVideoLayer.fullscreen ? 98 : 70
-        height: 40
+        height: interactiveVideoLayer.storyLayout.barHeight
         radius: 20
         color: Qt.rgba(0, 0, 0, 0.3)
-        width: 10 + interactiveVideoLayer.storyEntries.length * 50
+        width: interactiveVideoLayer.storyLayout.barWidth
 
         Behavior on width {
             NumberAnimation {
@@ -688,12 +719,14 @@ Item {
             }
         }
 
-        /* 圆点行（40px 圆点 + 10px 间距 = 每项 50px；左右各 5px 内边距） */
-        Row {
+        /* 圆点网格（固定 40px 圆点 + 10px 间距；每行数由 storyLayout
+           给出，放不下自动换行；左右各 5px 内边距） */
+        Grid {
             id: storyRow
 
             x: 5
-            height: 40
+            y: 0
+            columns: interactiveVideoLayer.storyLayout.cols
             spacing: 10
 
             Repeater {
@@ -711,7 +744,27 @@ Item {
                     /* 悬停态（驱动双图标切换 + 悬停卡片显隐） */
                     property bool dotHovered: false
 
-                    /* 圆点内圈 36×36（web 的 oval-round，居中偏 2px） */
+                    /*
+                     * 圆点中心在层坐标系中的 X（悬停卡片定位基准）：
+                     * 换行布局下按行列推算 —— 胶囊条水平居中 + 所在行
+                     * 内容居中 + 行内偏移（5px 内边距 + 10px 间距），
+                     * 层宽 / 节点数任一变化绑定自动重算。
+                     */
+                    readonly property real dotCenterXInLayer: {
+                        var count = interactiveVideoLayer.storyEntries.length
+                        var cols = interactiveVideoLayer.storyLayout.cols
+                        var row = Math.floor(index / cols)
+                        var col = index % cols
+                        /* 所在行的实际圆点数（末行可能不满） */
+                        var rowCount = Math.min(cols, count - row * cols)
+                        var rowWidth = rowCount * 40 + (rowCount - 1) * 10
+                        var contentWidth = storyBar.width - 10
+                        var contentLeft = interactiveVideoLayer.width / 2 - contentWidth / 2
+                        return contentLeft + (contentWidth - rowWidth) / 2
+                               + col * 50 + 20
+                    }
+
+                    /* 圆点内圈（web 的 oval-round：36×36 居中偏 2px） */
                     Item {
                         x: 2
                         y: 2
@@ -722,7 +775,7 @@ Item {
                            isCurrent 挑位置 / 打勾（照 renderOvalItem） */
                         Image {
                             anchors.fill: parent
-                            sourceSize: Qt.size(36, 36)
+                            sourceSize: Qt.size(width, height)
                             source: storyDot.entry.isCurrent
                                     ? "../../assets/images/interactive-video/story-position.svg"
                                     : "../../assets/images/interactive-video/story-check.svg"
@@ -731,7 +784,7 @@ Item {
 
                         Image {
                             anchors.fill: parent
-                            sourceSize: Qt.size(36, 36)
+                            sourceSize: Qt.size(width, height)
                             source: storyDot.entry.isCurrent
                                     ? "../../assets/images/interactive-video/story-position-hover.svg"
                                     : "../../assets/images/interactive-video/story-check-hover.svg"
@@ -739,7 +792,8 @@ Item {
                         }
                     }
 
-                    /* 悬停热区（web 的 oval-item cursor:pointer） */
+                    /* 悬停热区 + 点击跳转（web 的 oval-item：悬停换图标 /
+                       点击已看完的圆点跳回该节点重新观看） */
                     MouseArea {
                         id: dotHoverArea
 
@@ -747,20 +801,39 @@ Item {
                         hoverEnabled: true
                         cursorShape: Qt.PointingHandCursor
                         onContainsMouseChanged: storyDot.dotHovered = containsMouse
+                        onClicked: {
+                            /* 当前节点无需跳转（对齐 web handleStorySeek） */
+                            if (!storyDot.entry.isCurrent)
+                                interactiveVideoLayer.switchToNode(
+                                    storyDot.entry.nodeId)
+                        }
                     }
 
                     /*
                      * 悬停卡片（照 renderHoverItem / scss 的 hover-item）：
                      * 119×20 白底标题条 + 上方 117×73 封面 + 下指小三角。
-                     * 定位：卡片左缘 = 圆点中心 - 35（web 的 margin-left:-35px
-                     * 折算到圆点坐标系为 x = -15）、顶缘 = -27px（margin-top）。
+                     * 定位（照 web 端中心对齐 + 边缘 clamp）：卡片中心对准
+                     * 圆点中心；太靠边时夹在层内（左右各留 8px），不被遮挡。
+                     * 顶缘 = -27px（web 的 margin-top，折算到圆点坐标系）。
                      */
                     Item {
                         id: hoverCard
 
                         z: 10
                         visible: storyDot.dotHovered
-                        x: -15
+                        x: {
+                            /* 卡片中心（层坐标）= 圆点中心，向内夹取防遮挡 */
+                            var half = width / 2
+                            var pad = 8
+                            var layerW = interactiveVideoLayer.width
+                            var minX = half + pad
+                            var maxX = Math.max(minX, layerW - half - pad)
+                            var cardCenter = Math.min(
+                                Math.max(storyDot.dotCenterXInLayer, minX), maxX)
+                            /* 折算回圆点局部坐标（圆点左缘 = 中心 - 20） */
+                            return cardCenter - half
+                                   - (storyDot.dotCenterXInLayer - 20)
+                        }
                         y: -27
                         width: 119
                         height: 20
@@ -783,9 +856,9 @@ Item {
                             elide: Text.ElideRight
                         }
 
-                        /* 下指小三角（web 双层白三角在白底上无视觉差，单层等价） */
+                        /* 下指小三角（居中于卡片，指向下方圆点） */
                         Canvas {
-                            x: 30
+                            x: (parent.width - width) / 2
                             y: parent.height
                             width: 10
                             height: 5
@@ -900,7 +973,9 @@ Item {
                        && interactiveVideoLayer.currentQuestion.title !== undefined)
                       ? interactiveVideoLayer.currentQuestion.title : ""
                 color: "#ffffff"
-                font.pixelSize: 18
+                /* 题目字号随按钮宽度缩放（照 web 端：max(14, 18 * w / 300)） */
+                font.pixelSize: Math.max(14, Math.round(
+                    18 * interactiveVideoLayer.optionLayout.buttonWidth / 300))
                 font.weight: Font.DemiBold
                 style: Text.Raised
                 styleColor: "#99000000"
@@ -923,10 +998,12 @@ Item {
                     x: rect !== null ? rect.x : 0
                     y: rect !== null ? rect.y : 0
 
-                    width: 300
-                    height: 52
+                    /* 尺寸随层宽自适应（optionLayout 计算：min(300, max(200, w*0.78))） */
+                    width: interactiveVideoLayer.optionLayout.buttonWidth
+                    height: interactiveVideoLayer.optionLayout.buttonHeight
 
-                    /* 悬停态（遮罩减淡 / 文字转蓝 / 中心放大 1.07；描边恒定白色） */
+                    /* 悬停态（遮罩减淡 / 中心放大 1.07；无描边、文字恒白，
+                       对齐 web 端：去掉白色边框 + 悬停文字不变蓝） */
                     property bool hovered: optionArea.containsMouse
 
                     /*
@@ -979,22 +1056,15 @@ Item {
                         opacity: optionButton.hovered ? 0.35 : 0.55
                     }
 
-                    /* 3. 描边（白色边框恒定不变色：悬停反馈只保留平滑放大，对齐 web 端） */
-                    Rectangle {
-                        anchors.fill: parent
-                        radius: 8
-                        color: "transparent"
-                        border.width: optionButton.hovered ? 2 : 1.5
-                        border.color: Qt.rgba(1, 1, 1, 0.8)
-                    }
-
-                    /* 4. 选项文字（前缀 + 文案居中；悬停转蓝） */
+                    /* 3. 选项文字（前缀 + 文案居中；恒白不变蓝 —— 无描边、
+                       悬停反馈只保留平滑放大 + 遮罩减淡，对齐 web 端） */
                     Text {
                         anchors.centerIn: parent
                         text: (modelData.label !== undefined && modelData.label !== ""
                                ? modelData.label + "  " : "") + modelData.text
-                        color: optionButton.hovered ? "#00A1D6" : "#ffffff"
-                        font.pixelSize: 16
+                        color: "#ffffff"
+                        /* 字号随按钮宽度缩放（照 web 端：max(13, 16 * w / 300)） */
+                        font.pixelSize: Math.max(13, Math.round(16 * optionButton.width / 300))
                         font.weight: Font.Medium
                     }
 
