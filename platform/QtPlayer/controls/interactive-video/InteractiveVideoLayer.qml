@@ -204,10 +204,18 @@ Item {
                                        && interactiveData.nodes !== undefined)
                                       ? interactiveData.nodes : null
 
-    /* 当前所在节点 id（路径末项；路径为空回落起始节点） */
+    /*
+     * 当前所在节点在路径中的下标（游标）：点击剧情条上已看过的圆点
+     * 回看跳转只移动游标、不截断历史 —— 已看过的点全部保留在剧情条
+     * 上，之后仍可再次点击跳转；选择新分支时截断游标之后的旧分支
+     * 再追加，游标随之指向末项（照 web 端 PathTracker 的游标语义）。
+     */
+    property int seekCursor: 0
+
+    /* 当前所在节点 id（游标节点；路径为空回落起始节点） */
     readonly property string currentNodeId: {
-        if (path.length > 0)
-            return path[path.length - 1].nodeId
+        if (path.length > 0 && seekCursor < path.length)
+            return path[seekCursor].nodeId
         if (interactiveData !== null && interactiveData !== undefined
                 && interactiveData.startNodeId !== undefined)
             return interactiveData.startNodeId
@@ -224,9 +232,10 @@ Item {
                                             && currentNode.question !== undefined)
                                            ? currentNode.question : undefined
 
-    /* 当前节点是否已选择过分支（路径末项 selectedOptionIndex >= 0） */
+    /* 当前节点是否已选择过分支（游标项 selectedOptionIndex >= 0） */
     readonly property bool hasSelected: path.length > 0
-                                        && path[path.length - 1].selectedOptionIndex >= 0
+                                        && seekCursor < path.length
+                                        && path[seekCursor].selectedOptionIndex >= 0
 
     /*
      * 剧情进度条条目（rebuildStoryEntries 整组重建）：
@@ -463,8 +472,8 @@ Item {
                     nodeId: path[i].nodeId,
                     title: node.title !== undefined ? node.title : "",
                     cover: node.cover !== undefined ? node.cover : "",
-                    /* 最后一项 = 正在观看（位置图标），其余为已看完（打勾） */
-                    isCurrent: i === path.length - 1
+                    /* 游标项 = 正在观看（位置图标），其余为已看完（打勾） */
+                    isCurrent: i === seekCursor
                 })
             }
         }
@@ -572,11 +581,12 @@ Item {
         if (option === undefined)
             return
 
-        /* 记录选择（整体替换数组触发通知） */
-        if (path.length > 0) {
+        /* 记录选择到游标节点（回看状态下给旧节点重选分支时写入
+           游标项而非末项；整体替换数组触发通知） */
+        if (path.length > 0 && seekCursor < path.length) {
             var p = path.slice()
-            p[p.length - 1] = {
-                nodeId: p[p.length - 1].nodeId,
+            p[seekCursor] = {
+                nodeId: p[seekCursor].nodeId,
                 selectedOptionIndex: index
             }
             path = p
@@ -599,7 +609,14 @@ Item {
         if (node === undefined)
             return
 
-        /* jumpTo 语义：目标在历史中 → 截断到它并重置选择；全新 → 追加 */
+        /*
+         * jumpTo 游标语义（照 web 端 PathTracker）：
+         * 目标在历史中 → 仅移动游标并重置该节点的选择记录，
+         *   历史路径原样保留 —— 已看过的圆点全部保留在剧情条上，
+         *   之后仍可再次点击跳转（含分支指回已有节点的环路场景）；
+         * 全新节点 → 截断游标之后的旧分支（从游标处重走新分支），
+         *   追加到游标之后并将游标推进到末项
+         */
         var idx = -1
         for (var i = 0; i < path.length; i++) {
             if (path[i].nodeId === nodeId) {
@@ -608,17 +625,14 @@ Item {
             }
         }
 
-        var p = []
+        var p = path.slice()
         if (idx >= 0) {
-            for (var j = 0; j <= idx; j++) {
-                p.push(j === idx
-                       ? { nodeId: nodeId, selectedOptionIndex: -1 }
-                       : { nodeId: path[j].nodeId,
-                           selectedOptionIndex: path[j].selectedOptionIndex })
-            }
+            seekCursor = idx
+            p[idx] = { nodeId: nodeId, selectedOptionIndex: -1 }
         } else {
-            p = path.slice()
+            p = p.slice(0, seekCursor + 1)
             p.push({ nodeId: nodeId, selectedOptionIndex: -1 })
+            seekCursor = p.length - 1
         }
         path = p
         rebuildStoryEntries()
@@ -643,6 +657,7 @@ Item {
             return
 
         path = [{ nodeId: interactiveData.startNodeId, selectedOptionIndex: -1 }]
+        seekCursor = 0
         rebuildStoryEntries()
 
         replayVisible = false
